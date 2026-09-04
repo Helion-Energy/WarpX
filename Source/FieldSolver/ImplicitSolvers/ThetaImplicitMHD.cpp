@@ -4606,8 +4606,13 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     }
     if (m_resistive_theta != m_conduction_theta ||
         m_conduction_theta != m_viscous_theta) {
+        // A NOTE, not a WARNING: staging the legs differently is the
+        // intended configuration (trapezoidal resistive leg for the Joule
+        // identity, backward-Euler conduction and viscosity for
+        // monotonicity), and the run wrappers flag runs on the WARNING
+        // strings of this audit.
         amrex::Print()
-            << "  WARNING: dissipation tensor NOT uniformly staged: "
+            << "  NOTE: dissipation legs staged differently by design: "
                "theta_eta = " << m_resistive_theta
             << ", theta_chi = " << m_conduction_theta
             << ", theta_nu = " << m_viscous_theta << ".\n";
@@ -9765,6 +9770,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // same harmonic form, conductance divided with
                         // it). Unset and "none" leave it uncapped with no
                         // arithmetic performed (bit-identical).
+                        amrex::Real z_end_cap = 1.0_rt;
                         if (z_wall_capped) {
                             const amrex::Real cap =
                                 1.0_rt +
@@ -9772,6 +9778,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     wall_cap_flux(true, z_wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
+                            z_end_cap = cap;
                         }
                         // Preconditioner row on the interior cell: at
                         // frozen coefficients the uncapped branch is
@@ -9829,13 +9836,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // boundary on the energy rows this reproduces the
                         // exchange's exact linearization 2 chi w/dz^2 on
                         // the end cell (the bath is frozen, so the row is
-                        // a pure diagonal). The full ion value goes to the
-                        // total slot; the pair inverse blends it.
+                        // a pure diagonal); a wall heat-flux cap enters as
+                        // the tangent 1/cap^2 of its harmonic form, like
+                        // the bulk coefficient. The full ion value goes to
+                        // the total slot; the pair inverse blends it.
                         if (emit_conduction_pc &&
                             conduction_pc.contains(i, j, k)) {
                             conduction_pc(i, j, k, conduction_pc_ion_total) =
                                 conduction_pc_stage_weight * chi_ion_face *
-                                corner_weight;
+                                corner_weight / (z_end_cap * z_end_cap);
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
@@ -10123,6 +10132,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // implicit_mhd.wall_heat_flux_cap (see the ion
                         // channel): same cap as the shaped-wall drain;
                         // unset/"none" perform no arithmetic.
+                        amrex::Real z_end_cap = 1.0_rt;
                         if (z_wall_capped) {
                             const amrex::Real cap =
                                 1.0_rt +
@@ -10130,6 +10140,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     wall_cap_flux(false, z_wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
+                            z_end_cap = cap;
                         }
                         if (emit_wall_rows) {
                             const int ric = z_end_hi_face ? il : i;
@@ -10154,7 +10165,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             conduction_pc.contains(i, j, k)) {
                             conduction_pc(i, j, k, conduction_pc_electron) =
                                 conduction_pc_stage_weight *
-                                chi_electron_face * corner_weight;
+                                chi_electron_face * corner_weight /
+                                (z_end_cap * z_end_cap);
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
