@@ -371,6 +371,32 @@ namespace detail
                                           {openPMD::UnitDimension::I,  1},
                                           {openPMD::UnitDimension::T,  1},
                                   });
+        } else if (field_name.substr(0,2) == "Te"){ // electron temperature [K]
+            // Thermodynamic temperature: a 1 in openPMD's theta slot, the
+            // fifth of the [L, M, T, I, theta, N, J] base dimensions. Without
+            // this branch Te fell through to openPMD's defaults and shipped an
+            // ALL-ZERO unitDimension, which does not say "unknown", it says
+            // "dimensionless" -- the file actively asserted the wrong thing
+            // about an electron temperature. unitSI is 1 because the field is
+            // stored in kelvin already (the input knobs are in eV; the
+            // conversion happens once at field initialization).
+            //
+            // The per-species deposit T_<species> is DELIBERATELY NOT
+            // annotated here even though it is the same physical quantity,
+            // because it is stored in eV and would need unitSI = q_e/k_B --
+            // and unitSI is not inert in this repository. openPMD-viewer
+            // applies it on read, so the checksum framework and several
+            // ohm_solver analysis scripts would silently start receiving
+            // kelvin where they expect eV. Annotating that record correctly
+            // means regenerating its benchmarks and teaching those readers the
+            // unit, which is a change of a different size and belongs on its
+            // own. Annotating it as a temperature while leaving unitSI = 1
+            // would be worse than the status quo: it would replace "no
+            // information" with a claim that eV numbers are kelvin.
+            mesh.setUnitDimension({
+                                          {openPMD::UnitDimension::theta, 1},
+                                  });
+            mesh.setUnitSI(1.0);
         }
     }
 #endif // WARPX_USE_OPENPMD
