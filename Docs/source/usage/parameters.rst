@@ -6411,30 +6411,39 @@ Jacobian probes.
     with the legacy factor (``conduction_flux_limit_factor`` when set,
     else 1), ``z_wall_conduction`` uncapped. ``none`` forces both wall
     families uncapped. ``free_streaming`` caps both at
-    :math:`q_\mathrm{cap} = f\, n k_B T_s v_{\mathrm{th},s}`,
-    :math:`v_{\mathrm{th},s} = \sqrt{k_B T_s/m_s}` — the existing wall
-    cap. ``sonic`` caps both at the SHEATH-limited advective heat flux
+    :math:`q_\mathrm{cap} = f_s\, n k_B T_s v_{\mathrm{th},s}`,
+    :math:`v_{\mathrm{th},s} = \sqrt{k_B T_s/m_s}`, from the
+    reservoir-averaged face temperature :math:`(T_s + T_\mathrm{wall})/2`
+    — the existing wall cap, unchanged. ``sonic`` caps both at the
+    SHEATH-limited heat flux
 
     .. math::
 
-        q_\mathrm{cap} = f\, n k_B T_s c_s, \qquad
+        q_\mathrm{cap} = f_s\, n k_B T_s c_s, \qquad
         c_s^2 = \frac{\gamma_e k_B T_e + \gamma_i k_B T_i}{m_i}
 
-    (:math:`\gamma (k_B T_e + k_B T_i)/m_i` for a shared adiabatic
-    index), per species channel :math:`s`: the sheath potential drop is
-    small against the plasma temperature, so the heat the wall can take
-    is bounded by advection at the local sound speed and not by the
-    species' own thermal speed (:math:`60\times c_s` for electrons,
-    which is what the free-streaming cap allows). :math:`n`,
-    :math:`T_e`, :math:`T_i` are the face state the existing wall cap
-    already reads (the interior density and the reservoir-averaged
-    temperatures at the ``conduction_coefficient_state``; :math:`T_i`
-    enters as 0 where the ion channel carries no temperature). Every
-    capped form is the same smooth harmonic cap the interior limiter
-    uses, :math:`q \to q/(1 + |q|/q_\mathrm{cap})`, with the emitted
-    preconditioner conductance divided by the same factor, so the
-    residual stays smooth in the state and the wall rows keep factoring
-    the drain. The resolved cap of each wall family is printed in the
+    evaluated at the INTERIOR (sheath-edge, plasma-side) state of the
+    wall-adjacent cell — :math:`n`, :math:`T_e`, :math:`T_i` of the
+    interior side at the ``conduction_coefficient_state``; the wall
+    temperature does not enter a sheath flux — per species channel
+    :math:`s`, with the ADIABATIC two-fluid sound speed
+    (:math:`\gamma (k_B T_e + k_B T_i)/m_i` for a shared index; the Bohm
+    isothermal-electron form would be 11 percent lower at
+    :math:`T_e = T_i`). Physics: the sheath potential drop is small
+    against the plasma temperature, so the heat the wall can take is
+    bounded by advection at the local sound speed and not by the
+    species' own thermal speed (:math:`v_{te}/c_s = 23`–:math:`33` for
+    H–D at :math:`T_e = T_i`, which is what the free-streaming cap
+    allows). :math:`T_i` enters as 0 where the ion channel carries no
+    temperature. Every capped form is the same smooth harmonic cap the
+    interior limiter uses, :math:`q \to q/(1 + |q|/q_\mathrm{cap})`,
+    applied to the per-face exchange BEFORE the corner weight (a
+    saturated two-face corner drains :math:`\sqrt{2}\, q_\mathrm{cap}`,
+    one wall of the vector area; exact on flat walls), with the emitted
+    preconditioner conductance divided by the same factor — the SECANT of
+    the capped exchange, which where the cap binds overstates the row by
+    :math:`1 + |q|/q_\mathrm{cap}` and costs GMRES iterations only. The
+    resolved cap and factors of each wall family are printed in the
     solver banner (never silent). ``free_streaming`` and ``sonic``
     require a conduction channel and a conductive wall exchange to cap
     (a reservoir ``wall_thermal_bc`` or ``z_wall_conduction``); the
@@ -6442,14 +6451,33 @@ Jacobian probes.
 
 .. pp:param:: implicit_mhd.wall_heat_flux_cap_factor
     :type: ``float``
+    :default: unset
+
+    SHARED factor of :pp:param:`implicit_mhd.wall_heat_flux_cap`: when
+    given it sets BOTH species' factors (requires ``free_streaming`` or
+    ``sonic``; must be positive). The per-species knobs below win over it
+    where both are set.
+
+.. pp:param:: implicit_mhd.wall_heat_flux_cap_factor_electron
+    :type: ``float``
+    :default: ``5.0`` under ``sonic``; the legacy factor under ``free_streaming``
+
+    Electron factor :math:`f_e` of :pp:param:`implicit_mhd.wall_heat_flux_cap`
+    (requires a capping mode; must be positive). The ``sonic`` default
+    5.0 is the floating-wall sheath transmission
+    :math:`\gamma_e \simeq 2 + e|\phi_\mathrm{sh}|/(k_B T_e) \simeq 5`
+    for deuterium; the ``free_streaming`` default is the legacy wall
+    factor, ``conduction_flux_limit_factor`` when set, else 1.
+
+.. pp:param:: implicit_mhd.wall_heat_flux_cap_factor_ion
+    :type: ``float``
     :default: ``2.5`` under ``sonic``; the legacy factor under ``free_streaming``
 
-    The factor :math:`f` of :pp:param:`implicit_mhd.wall_heat_flux_cap`
-    (requires ``free_streaming`` or ``sonic``; must be positive). The
-    ``sonic`` default 2.5 is the enthalpy flux factor
-    :math:`\gamma/(\gamma - 1)` at :math:`\gamma = 5/3`; the
-    ``free_streaming`` default is the legacy wall factor,
-    ``conduction_flux_limit_factor`` when set, else 1.
+    Ion factor :math:`f_i` of :pp:param:`implicit_mhd.wall_heat_flux_cap`
+    (requires a capping mode; must be positive). The ``sonic`` default
+    2.5 is the ion enthalpy transmission :math:`\gamma/(\gamma - 1)` at
+    :math:`\gamma = 5/3`; the ``free_streaming`` default is the legacy
+    wall factor.
 
 .. pp:param:: implicit_mhd.wall_band_eta_override
     :type: ``float`` (Ohm m)
