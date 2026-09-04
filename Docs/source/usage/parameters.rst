@@ -6325,10 +6325,14 @@ Jacobian probes.
     the ``wall_temperature`` bath at the half-cell Dirichlet distance
     (the wall value sits ON the interface, not one cell in), so the
     bath restores sub-T_wall cells as well as draining hot ones. The
-    exchange is free-streaming capped in BOTH directions (the same
-    harmonic cap as the ``outflow_limited`` drain — the fatality above was
-    the two-sided exchange WITHOUT the cap), and the pin target is
-    anchored at the reachable set, the maximum of ``wall_temperature``
+    exchange is UNCAPPED — the HARD pin: the implicit solver converges on
+    whatever outflow the pinned temperature demands.
+    ``dirichlet_limited`` is the same two-sided exchange with the
+    free-streaming cap in both directions (the ``outflow_limited``
+    drain's harmonic cap), and :pp:param:`implicit_mhd.wall_heat_flux_cap`
+    overrides the cap of every reservoir mode (``sonic`` bounds the
+    exchange at the sheath-limited sound-speed heat flux). The pin target
+    is anchored at the reachable set, the maximum of ``wall_temperature``
     and the corresponding temperature-floor image, so the pin never
     fights the admissibility projection's floor ratchet. Like
     ``outflow_limited``, it requires ``wall_temperature`` and a conduction
@@ -6390,6 +6394,62 @@ Jacobian probes.
     exchange (:pp:param:`implicit_mhd.z_wall_conduction`) keeps its own
     one-sided nn scalar. The selector is a per-solve constant, so the
     Newton/JFNK residual stays exactly as smooth as before.
+
+.. pp:param:: implicit_mhd.wall_heat_flux_cap
+    :type: ``string``
+    :default: unset (per-mode defaults)
+
+    Cap on the WALL conductive exchanges: the shaped-wall interface drain
+    of every reservoir :pp:param:`implicit_mhd.wall_thermal_bc` mode
+    (``outflow_limited``, ``dirichlet``, ``dirichlet_limited``) and the
+    z-end exchange (:pp:param:`implicit_mhd.z_wall_conduction`), in both
+    species channels (under ``dual_energy`` the ion drain is one face
+    flux booked into both ion registers). The knob is an OVERRIDE of the
+    per-mode defaults, and leaving it unset keeps every existing mode
+    bit-identical: ``dirichlet`` uncapped (the hard pin),
+    ``dirichlet_limited`` / ``outflow_limited`` free-streaming capped
+    with the legacy factor (``conduction_flux_limit_factor`` when set,
+    else 1), ``z_wall_conduction`` uncapped. ``none`` forces both wall
+    families uncapped. ``free_streaming`` caps both at
+    :math:`q_\mathrm{cap} = f\, n k_B T_s v_{\mathrm{th},s}`,
+    :math:`v_{\mathrm{th},s} = \sqrt{k_B T_s/m_s}` — the existing wall
+    cap. ``sonic`` caps both at the SHEATH-limited advective heat flux
+
+    .. math::
+
+        q_\mathrm{cap} = f\, n k_B T_s c_s, \qquad
+        c_s^2 = \frac{\gamma_e k_B T_e + \gamma_i k_B T_i}{m_i}
+
+    (:math:`\gamma (k_B T_e + k_B T_i)/m_i` for a shared adiabatic
+    index), per species channel :math:`s`: the sheath potential drop is
+    small against the plasma temperature, so the heat the wall can take
+    is bounded by advection at the local sound speed and not by the
+    species' own thermal speed (:math:`60\times c_s` for electrons,
+    which is what the free-streaming cap allows). :math:`n`,
+    :math:`T_e`, :math:`T_i` are the face state the existing wall cap
+    already reads (the interior density and the reservoir-averaged
+    temperatures at the ``conduction_coefficient_state``; :math:`T_i`
+    enters as 0 where the ion channel carries no temperature). Every
+    capped form is the same smooth harmonic cap the interior limiter
+    uses, :math:`q \to q/(1 + |q|/q_\mathrm{cap})`, with the emitted
+    preconditioner conductance divided by the same factor, so the
+    residual stays smooth in the state and the wall rows keep factoring
+    the drain. The resolved cap of each wall family is printed in the
+    solver banner (never silent). ``free_streaming`` and ``sonic``
+    require a conduction channel and a conductive wall exchange to cap
+    (a reservoir ``wall_thermal_bc`` or ``z_wall_conduction``); the
+    shaped wall and the z ends require RZ geometry.
+
+.. pp:param:: implicit_mhd.wall_heat_flux_cap_factor
+    :type: ``float``
+    :default: ``2.5`` under ``sonic``; the legacy factor under ``free_streaming``
+
+    The factor :math:`f` of :pp:param:`implicit_mhd.wall_heat_flux_cap`
+    (requires ``free_streaming`` or ``sonic``; must be positive). The
+    ``sonic`` default 2.5 is the enthalpy flux factor
+    :math:`\gamma/(\gamma - 1)` at :math:`\gamma = 5/3`; the
+    ``free_streaming`` default is the legacy wall factor,
+    ``conduction_flux_limit_factor`` when set, else 1.
 
 .. pp:param:: implicit_mhd.wall_band_eta_override
     :type: ``float`` (Ohm m)
@@ -6577,9 +6637,11 @@ Jacobian probes.
     the only ones whose ion-energy register consumes conduction), at
     the half-cell Dirichlet distance (the wall value sits ON the face,
     flux :math:`\chi \rho_f (e - e_\mathrm{wall}) \, 2/\Delta z`) with
-    NO free-streaming cap — the implicit solver converges on the
-    demanded outflow, exactly like the r-wall ``wall_thermal_bc =
-    dirichlet`` pin (like that pin, the bath anchors at the
+    NO free-streaming cap by default — the implicit solver converges on
+    the demanded outflow, exactly like the r-wall ``wall_thermal_bc =
+    dirichlet`` pin; :pp:param:`implicit_mhd.wall_heat_flux_cap` =
+    ``free_streaming`` or ``sonic`` caps this exchange and the
+    shaped-wall drain alike (like that pin, the bath anchors at the
     temperature-floor images, identical for wall temperatures at/above
     the floors). Under Braginskii conduction the exchange coefficient
     is the full anisotropic tensor scalar
