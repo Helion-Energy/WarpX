@@ -1534,6 +1534,89 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_viscosity_shear  # dependency
 )
 
+# Viscous-heating energy ledger of the dual-energy closure. A decaying
+# CIRCULARLY POLARIZED transverse shear (v_x = A cos kz, v_y = A sin kz,
+# B = 0) has the same face dissipation on every face, so the flow stays
+# exactly incompressible and the ONLY energy exchange is transverse KE ->
+# ion internal energy through the viscous stress. With the step-end
+# re-sync off (dual_energy_sync = 0) the internal register's own booking
+# is observable: sum(dU_i) must equal -sum(dKE) to round-off, the
+# conservative E_i must not move, and both amplitudes must decay by the
+# analytic per-step factor of the staged viscous operator.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_dual  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_viscous_heating  # inputs
+    "analysis_mhd_viscous_heating.py stress_work_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The staged (backward-Euler) stress, viscous_theta = 1: the stress is
+# formed from u^{n+1} while the kinetic-energy identity pairs the momentum
+# increment with u^{n+1/2}; the stress_work booking is the exact mixed
+# product, so the identity still holds to round-off (and the per-step
+# decay factor is exactly 1/(1 + nu k_eff^2 dt)).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_dual_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py stress_work_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The conservative twins: under total_energy the stress work is a face
+# flux of E_i, so sum(E_i) is constant to round-off at either stage.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_total  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.ion_closure=total_energy"  # inputs
+    "analysis_mhd_viscous_heating.py total_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_total_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.ion_closure=total_energy implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py total_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The legacy pointwise booking (dual_energy_viscous_heating = legacy):
+# exact in the interior at viscous_theta = theta (the two bookings agree
+# where the old one was right) ...
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_legacy  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.dual_energy_viscous_heating=legacy"  # inputs
+    "analysis_mhd_viscous_heating.py legacy_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... and exactly (1 + nu k_eff^2 dt/2) x the kinetic energy removed at
+# viscous_theta = 1 (it heats with |grad u^{n+1/2}|^2 while the staged
+# stress removes grad u^{n+1} . grad u^{n+1/2}) -- the discriminating
+# case that pins what the knob reproduces.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_legacy_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.dual_energy_viscous_heating=legacy implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py legacy_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # ion thermal conduction on the central-flux face registers: a 1% sinusoidal
 # ion-temperature mode on a uniform static background, with chi_i stiff
 # against the acoustic response (chi k / c_s ~ 57), must decay at the

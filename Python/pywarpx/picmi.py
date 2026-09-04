@@ -2856,6 +2856,31 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         recovery is well conditioned); the mixmaster E_i rewrite runs
         unconditionally.
 
+    dual_energy_sync: bool, default=True
+        With ion_closure="dual_energy": switch for the end-of-step re-sync
+        as a whole. False disables both legs (the mixmaster E_i rewrite
+        and the Enzo U_i := E_i - KE overwrite), leaving E_i and U_i as
+        independent registers. A verification switch (the viscous-heating
+        tests use it to read the U_i budget directly); with the sync on a
+        thermal cell's U_i is overwritten from E_i at every step end. Not
+        for production.
+
+    dual_energy_viscous_heating: str, default="stress_work"
+        With ion_closure="dual_energy": how the internal register U_i
+        receives the viscous heating. "stress_work" books per face the
+        dissipation -Pi_f . (u_R - u_L)/dn formed from the very same face
+        stress the momentum equation carries (same coefficient including
+        the wall viscosity band, same no-slip image, same open-region
+        multiplier, same free-streaming cap, same viscous_theta stage),
+        half to each adjacent cell with the face's metric weight, so
+        sum(dU_i) = -sum(dKE) to round-off for any viscous_theta: U_i
+        receives exactly the kinetic energy the stress removes. "legacy"
+        keeps the pre-2026-09 pointwise rho_f nu |du/dn|^2 source, which
+        ignores the band (heat on faces with no stress when the band value
+        is 0), the no-slip image (a quarter of the removed KE), the cap and
+        the stage (1 + nu k^2 dt/2 too much heat at viscous_theta = 1);
+        kept only to reproduce runs that flew it.
+
     ion_pressure: float or str, optional
         Initial ion pressure in Pa, optionally as an expression of ``x``,
         ``y``, and ``z``. Required with ion_closure="total_energy",
@@ -3477,6 +3502,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         ion_closure=None,
         dual_energy_internal_cutoff=None,
         dual_energy_sync_threshold=None,
+        dual_energy_sync=None,
+        dual_energy_viscous_heating=None,
         ion_pressure=None,
         ion_pressure_anisotropy=None,
         cgl_relaxation_scale=None,
@@ -3608,6 +3635,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.ion_closure = ion_closure
         self.dual_energy_internal_cutoff = dual_energy_internal_cutoff
         self.dual_energy_sync_threshold = dual_energy_sync_threshold
+        self.dual_energy_sync = dual_energy_sync
+        self.dual_energy_viscous_heating = dual_energy_viscous_heating
         self.ion_pressure = ion_pressure
         self.ion_pressure_anisotropy = ion_pressure_anisotropy
         self.cgl_relaxation_scale = cgl_relaxation_scale
@@ -3793,6 +3822,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.ion_closure = self.ion_closure
         implicit_mhd.dual_energy_internal_cutoff = self.dual_energy_internal_cutoff
         implicit_mhd.dual_energy_sync_threshold = self.dual_energy_sync_threshold
+        implicit_mhd.dual_energy_sync = self.dual_energy_sync
+        implicit_mhd.dual_energy_viscous_heating = self.dual_energy_viscous_heating
         implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
         implicit_mhd.__setattr__(
             "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy
