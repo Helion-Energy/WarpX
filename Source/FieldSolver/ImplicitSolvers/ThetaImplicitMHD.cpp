@@ -591,6 +591,39 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "cap -- silently erasing the multiplicative dp boost. Arm "
         "exactly one halo-shorting mechanism (the reference-parity dp "
         "boost, or the quasi-shorting envelope term).");
+    // Density-keyed lift of the PARALLEL chi ceiling in the halo (see
+    // m_conduction_chi_par_max_halo). Same kappa/(n kB) convention as
+    // conduction_chi_par_max, both species, keyed on the same
+    // dp*(rho_ref/rho)^2 factor as the perp boost above.
+    utils::parser::queryWithParser(pp, "conduction_chi_par_max_halo",
+                                   m_conduction_chi_par_max_halo);
+    if (m_conduction_chi_par_max_halo >= 0.0_rt) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_braginskii,
+            "implicit_mhd.conduction_chi_par_max_halo lifts the "
+            "Braginskii parallel clamp and requires "
+            "implicit_mhd.thermal_conduction_model = braginskii");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_halo_boost > 0.0_rt,
+            "implicit_mhd.conduction_chi_par_max_halo reuses the density "
+            "key of the halo perp boost and requires "
+            "implicit_mhd.conduction_halo_boost > 0 (the reference code's "
+            "dp_mn = 1); without it there is no halo/core discriminator "
+            "and the lift would apply everywhere, which is the uniform "
+            "conduction_chi_par_max = 1e6 corner that never lifts off");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_chi_par_max >= 0.0_rt,
+            "implicit_mhd.conduction_chi_par_max_halo lifts "
+            "implicit_mhd.conduction_chi_par_max and requires it to be "
+            "set (the legacy shared conduction_chi_max carries a "
+            "different, operator-convention meaning and is not lifted)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_chi_par_max_halo >= m_conduction_chi_par_max,
+            "implicit_mhd.conduction_chi_par_max_halo is a LIFT of the "
+            "halo parallel ceiling and cannot sit below "
+            "implicit_mhd.conduction_chi_par_max (to lower the halo "
+            "instead, lower conduction_chi_par_max itself)");
+    }
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (see m_wall_conduction_scale): "perp" (default, the historical
     // behavior) or "parallel" (the reference code's measured wall conductance G,
@@ -3218,6 +3251,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Conduction halo boost dp (ion): "
                    << m_conduction_halo_boost << "\n"
+                   << "Halo parallel chi ceiling:     "
+                   << (m_conduction_chi_par_max_halo >= 0.0_rt
+                           ? std::to_string(m_conduction_chi_par_max_halo) +
+                                 " [kappa/(n kB)], both species, lifted "
+                                 "from " +
+                                 std::to_string(m_conduction_chi_par_max) +
+                                 " by the halo density key"
+                           : std::string("off (parallel ceiling uniform)"))
+                   << "\n"
                    << "Wall conduction scale:         "
                    << m_wall_conduction_scale
                    << (m_wall_conduction_parallel_scale
@@ -4042,6 +4084,27 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
                "implicit_mhd.conduction_chi_par_max <= "
             << (prandtl_bound * eta_m / gam)
             << " (kappa/(n kB) convention) to match.\n";
+    }
+    // Halo drain time. tau_par = L^2/chi over a 1 m reference path is the
+    // number that decides whether the halo can equilibrate inside the
+    // formation window at all, and it went unreported for an entire
+    // campaign while the halo ran 18x hot. Measured halo field-line paths
+    // to a cold boundary are ~1.5 m (ours) and ~1.8 m (reference), so a
+    // 1 m reference path is the optimistic end of the real range.
+    {
+        const amrex::Real tau_core = 1.0_rt / chi_cap;
+        amrex::Print() << "  halo drain: tau_par(1 m) = " << tau_core
+                       << " s at the core ceiling";
+        if (m_conduction_chi_par_max_halo >= 0.0_rt) {
+            const amrex::Real chi_halo = gam * m_conduction_chi_par_max_halo;
+            amrex::Print() << ", " << (1.0_rt / chi_halo)
+                           << " s at the halo ceiling (" << chi_halo
+                           << " m^2/s)";
+        } else {
+            amrex::Print()
+                << " EVERYWHERE (conduction_chi_par_max_halo is off)";
+        }
+        amrex::Print() << "\n";
     }
     if (m_resistive_theta != m_conduction_theta ||
         m_conduction_theta != m_viscous_theta) {
@@ -6730,6 +6793,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         m_ion_charge_to_mass * VacuumReferenceMassDensity();
     const amrex::Real halo_boost_guard =
         m_ion_charge_to_mass * m_mass_density_floor;
+    // Density-keyed lift of the PARALLEL ceiling in the halo (see
+    // m_conduction_chi_par_max_halo). Converted per species out of the
+    // kappa/(n kB) convention exactly like brag_par_hi_{e,i}.
+    const bool lift_halo_par =
+        add_halo_boost && m_conduction_chi_par_max_halo >= 0.0_rt;
+    const amrex::Real halo_par_hi_e =
+        brag_e_convention * m_conduction_chi_par_max_halo;
+    const amrex::Real halo_par_hi_i =
+        brag_i_convention * m_conduction_chi_par_max_halo;
     // Stair-step wall thermal boundary (implicit_mhd.wall_thermal_bc):
     // the conducting-wall mask is electromagnetic only, so without this
     // the conduction operator exchanges blindly across the stair-step
@@ -8539,8 +8611,32 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_i_denominator_1) *
                                  x +
                              1.0_rt);
+                        // Density-keyed halo factor, evaluated ONCE: the
+                        // perp boost below and the parallel-ceiling lift
+                        // both consume it, so they cannot drift apart.
+                        amrex::Real halo_factor = 1.0_rt;
+                        if (add_halo_boost) {
+                            const amrex::Real guarded_density =
+                                theta_implicit_mhd::smooth_positive_floor(
+                                    chi_charge_to_mass * face_density,
+                                    halo_boost_guard);
+                            const amrex::Real ratio =
+                                halo_boost_reference / guarded_density;
+                            halo_factor = halo_boost_dp * ratio * ratio;
+                        }
+                        // Halo lift of the PARALLEL ceiling (see the host
+                        // constants): the core keeps brag_par_hi_i, which
+                        // is what holds its pressure gradient, and the
+                        // ceiling opens toward halo_par_hi_i only where
+                        // the density key says halo. Continuous at
+                        // halo_factor = 1 and never below the base.
+                        amrex::Real par_hi_ion = brag_par_hi_i;
+                        if (lift_halo_par && halo_factor > 1.0_rt) {
+                            par_hi_ion = std::min(
+                                halo_par_hi_i, brag_par_hi_i * halo_factor);
+                        }
                         brag_chi_par_ion = clamp_with(
-                            chi_par_raw, brag_par_lo_i, brag_par_hi_i);
+                            chi_par_raw, brag_par_lo_i, par_hi_ion);
                         // Quasi-shorting boost of the ION channel: s is
                         // keyed on the ion temperature with the SAME
                         // envelope T0 -- the broken-surface shorting
@@ -8564,18 +8660,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // the coefficient state (Newton never
                         // differentiates them), so the MAX kink at
                         // boost = 1 is benign.
-                        if (add_halo_boost) {
-                            const amrex::Real guarded_density =
-                                theta_implicit_mhd::smooth_positive_floor(
-                                    chi_charge_to_mass * face_density,
-                                    halo_boost_guard);
-                            const amrex::Real ratio =
-                                halo_boost_reference / guarded_density;
-                            const amrex::Real boost =
-                                halo_boost_dp * ratio * ratio;
-                            if (boost > 1.0_rt) {
-                                chi_perp_ion_value *= boost;
-                            }
+                        if (add_halo_boost && halo_factor > 1.0_rt) {
+                            chi_perp_ion_value *= halo_factor;
                         }
                         brag_chi_perp_ion = clamp_with(
                             chi_perp_ion_value, brag_perp_lo_i,
@@ -8892,8 +8978,33 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_e_denominator_1) *
                                  x +
                              1.0_rt);
+                        // Halo lift of the PARALLEL ceiling, same density
+                        // key as the ion channel (recomputed: the ion
+                        // block's copy is out of scope here). This is the
+                        // CEILING, not the perp boost below -- the
+                        // reference clamps xile_mx = xili_mx = 1e6 for
+                        // BOTH species, and the electron parallel channel
+                        // is the faster of the two drains, so restricting
+                        // the lift to ions would leave the halo electrons
+                        // throttled at the core clamp.
+                        amrex::Real par_hi_electron = brag_par_hi_e;
+                        if (lift_halo_par) {
+                            const amrex::Real guarded_density =
+                                theta_implicit_mhd::smooth_positive_floor(
+                                    chi_charge_to_mass * face_density,
+                                    halo_boost_guard);
+                            const amrex::Real ratio =
+                                halo_boost_reference / guarded_density;
+                            const amrex::Real halo_factor =
+                                halo_boost_dp * ratio * ratio;
+                            if (halo_factor > 1.0_rt) {
+                                par_hi_electron = std::min(
+                                    halo_par_hi_e,
+                                    brag_par_hi_e * halo_factor);
+                            }
+                        }
                         brag_chi_par_electron = clamp_with(
-                            chi_par_raw, brag_par_lo_e, brag_par_hi_e);
+                            chi_par_raw, brag_par_lo_e, par_hi_electron);
                         // Quasi-shorting boost (see the ion channel and
                         // the qs_boost lambda): additive chi_perp, keyed
                         // on the electron temperature, clamped after.

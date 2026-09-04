@@ -3183,6 +3183,29 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    conduction_chi_par_max_halo: float, optional
+        Density-keyed lift of the Braginskii PARALLEL chi ceiling in the
+        halo, in the kappa/(n k_B) convention like the other
+        per-component clamps, applied to BOTH species. Default: unset,
+        leaving the parallel ceiling uniform and the run bit-identical.
+
+        The parallel ceiling -- not the perpendicular halo boost -- is
+        what sets the halo drain rate. Both this code and the reference
+        compute the Braginskii forms properly and then OVERTOP the clamp
+        almost everywhere, so the clamp is the effective coefficient:
+        measured 2026-09-03, the reference's halo raw chi_par medians
+        8.4e6 against its 1e6 clamp (91% of its cells at the clamp
+        domain-wide) and ours medians 2.1e10 against 969.6. The lift is
+        keyed to the same
+        dp*(rho_ref/rho)^2 factor as conduction_halo_boost, so the core
+        keeps the ceiling that holds its pressure gradient while the halo
+        opens the parallel channel to the wall.
+
+        Requires thermal_conduction_model="braginskii" and
+        conduction_halo_boost > 0 (it reuses that density key), and
+        cannot sit below conduction_chi_par_max -- it is a lift, never a
+        reduction.
+
     conduction_halo_boost: float, default=0 (off)
         Density-keyed halo boost of the Braginskii ION chi_perp
         (thermal_conduction_model="braginskii" only): the DIMENSIONLESS
@@ -3368,6 +3391,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_qs_onset=None,
         conduction_qs_reference_temperature=None,
         conduction_halo_boost=None,
+        conduction_chi_par_max_halo=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3495,6 +3519,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_qs_onset = conduction_qs_onset
         self.conduction_qs_reference_temperature = conduction_qs_reference_temperature
         self.conduction_halo_boost = conduction_halo_boost
+        self.conduction_chi_par_max_halo = conduction_chi_par_max_halo
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3670,6 +3695,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.conduction_qs_reference_temperature
         )
         implicit_mhd.conduction_halo_boost = self.conduction_halo_boost
+        implicit_mhd.conduction_chi_par_max_halo = (
+            self.conduction_chi_par_max_halo
+        )
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

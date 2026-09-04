@@ -1703,6 +1703,58 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // boost is evaluated at the coefficient-state face density, so
     // step_old keeps Newton-linear diffusion).
     amrex::Real m_conduction_halo_boost = 0.0;
+    // Density-keyed lift of the Braginskii PARALLEL chi ceiling in the
+    // halo (implicit_mhd.conduction_chi_par_max_halo, kappa/(n kB)
+    // convention like the other per-component clamps; negative = unset =
+    // bit-identical). BOTH species, unlike the perp boost above.
+    //
+    // WHY: the parallel ceiling, not the perp boost, is what sets the
+    // halo drain rate. Measured 2026-09-03 against the reference shot
+    // record, evaluating the reference's own ntb.f90 t_cond formula on
+    // both states: the Braginskii forms are computed properly in both
+    // codes and then OVERTOP the clamp almost everywhere, so the clamp
+    // is the effective coefficient. Reference halo: raw median
+    // 8.4e6 m^2/s against a 1e6 clamp (8.4x, 86.7% of halo cells at the
+    // clamp, 91% domain-wide). Ours: raw median 2.1e10 against 969.6
+    // (2.1e7x, 100% at the clamp). Its collision-time flux limiter is
+    // OFF in this deck (f_flm = -1), so those raw values are the
+    // uncapped Braginskii ones.
+    //
+    // The halo is on OPEN field lines by construction -- it is outside
+    // the separatrix -- so the parallel channel already reaches a cold
+    // wall in both codes (measured connection length 1.5 m ours, 1.8 m
+    // reference). The sink is available to us and simply throttled.
+    // With the reference's ceiling the halo
+    // equilibrates in tau_par = L^2/chi = 4.8 us, just inside the 8 us
+    // formation window, which is exactly why its halo plateaus at
+    // 40-50 eV from 1.5 us onward. With ours it is 3.3 ms = 418x the
+    // window, so our halo cannot equilibrate and runs to 2.4 keV.
+    //
+    // WHY DENSITY-KEYED, and why this is a DEVIATION not parity: the
+    // reference clamps xili_mx = xile_mx = 1e6 UNIFORMLY, with no
+    // density keying at all, and gets away with it because the FRC
+    // topology does the gating for free -- inside the separatrix the
+    // lines are CLOSED, so a large chi_par only redistributes heat along
+    // flux surfaces and loses nothing; outside, the open lines drain to
+    // the wall. That gating does not exist before the separatrix closes
+    // (~1.25 us in both codes, measured): in that window EVERY line is
+    // open, so a uniform 1e6 drains the core too. That is exactly our
+    // production corner -- it flattens the core pressure faster than the
+    // drive builds it and never goes diamagnetic (beta 0.218, no
+    // lift-off). Density is the only discriminator available in the
+    // pre-separatrix window, which is precisely when it is needed, and
+    // it keeps working after closure because the closed region is the
+    // dense one. Keying the LIFT to the same
+    // dp*(rho_ref/rho)^2 factor as the perp boost keeps the core at the
+    // clamp that earned its pressure gradient and opens the parallel
+    // channel only where the density says "halo". Continuous at
+    // factor = 1, monotone below it, and frozen at the coefficient state
+    // like every other Braginskii input.
+    //
+    // Requires braginskii and conduction_halo_boost > 0 (it reuses that
+    // density key), and must not sit below conduction_chi_par_max --
+    // this is a lift, never a reduction.
+    amrex::Real m_conduction_chi_par_max_halo = -1.0;
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (implicit_mhd.wall_conduction_scale, braginskii only):
     //   "perp"     (default) -- the wall-interface drain's scalar chi is
