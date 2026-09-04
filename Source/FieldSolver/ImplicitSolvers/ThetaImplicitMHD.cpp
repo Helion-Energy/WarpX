@@ -685,6 +685,53 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.thermal_conduction_model = braginskii (the "
         "constant/parser diffusivities carry a single scalar chi, which "
         "the wall drain already uses unchanged)");
+    // Cap on the wall conductive exchanges (see m_wall_heat_flux_cap): an
+    // OVERRIDE of the per-mode defaults; unset is bit-identical. The
+    // geometry-dependent checks (a conduction channel and a conductive
+    // wall term to cap) run in Define, once the wall mask exists.
+    pp.query("wall_heat_flux_cap", m_wall_heat_flux_cap);
+    if (m_wall_heat_flux_cap.empty()) {
+        m_wall_heat_flux_cap_mode = WallHeatFluxCap::unset;
+    } else if (m_wall_heat_flux_cap == "none") {
+        m_wall_heat_flux_cap_mode = WallHeatFluxCap::none;
+    } else if (m_wall_heat_flux_cap == "free_streaming") {
+        m_wall_heat_flux_cap_mode = WallHeatFluxCap::free_streaming;
+    } else if (m_wall_heat_flux_cap == "sonic") {
+        m_wall_heat_flux_cap_mode = WallHeatFluxCap::sonic;
+    } else {
+        WARPX_ABORT_WITH_MESSAGE(
+            "implicit_mhd.wall_heat_flux_cap must be 'none' (both wall "
+            "families uncapped), 'free_streaming' (the existing "
+            "f n kB T v_th cap) or 'sonic' (the sheath-limited "
+            "f n kB T c_s cap); unset keeps the per-mode defaults");
+    }
+    const bool has_wall_heat_flux_cap_factor = utils::parser::queryWithParser(
+        pp, "wall_heat_flux_cap_factor", m_wall_heat_flux_cap_factor);
+    const bool wall_heat_flux_cap_on =
+        (m_wall_heat_flux_cap_mode == WallHeatFluxCap::free_streaming ||
+         m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !has_wall_heat_flux_cap_factor || wall_heat_flux_cap_on,
+        "implicit_mhd.wall_heat_flux_cap_factor scales a wall heat-flux "
+        "cap and requires implicit_mhd.wall_heat_flux_cap = free_streaming "
+        "or sonic (unset and 'none' carry no factor)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !has_wall_heat_flux_cap_factor || m_wall_heat_flux_cap_factor > 0.0_rt,
+        "implicit_mhd.wall_heat_flux_cap_factor must be positive");
+    // The legacy wall cap factor of the limited modes, the exact expression
+    // the kernel's wall_conduction_limit host constant carried before the
+    // knob existed (conduction_flux_limit_factor is final at this point).
+    const amrex::Real legacy_wall_cap_factor =
+        (m_conduction_flux_limit_factor > 0.0_rt)
+            ? m_conduction_flux_limit_factor
+            : 1.0_rt;
+    if (has_wall_heat_flux_cap_factor) {
+        m_wall_heat_flux_cap_factor_effective = m_wall_heat_flux_cap_factor;
+    } else if (m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic) {
+        m_wall_heat_flux_cap_factor_effective = 2.5_rt;
+    } else {
+        m_wall_heat_flux_cap_factor_effective = legacy_wall_cap_factor;
+    }
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -1901,8 +1948,45 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                     ablastr::warn_manager::WarnPriority::medium);
             }
         }
+        // The wall heat-flux cap (implicit_mhd.wall_heat_flux_cap) acts on
+        // the conductive wall exchanges only: a capping mode with nothing
+        // to cap -- no conduction channel, or neither a reservoir
+        // wall_thermal_bc nor z_wall_conduction -- would be a silent
+        // no-op, so it aborts like the other wall-term knobs ("none" is
+        // the statement "uncapped" and is legal everywhere).
+        if (m_wall_heat_flux_cap_mode == WallHeatFluxCap::free_streaming ||
+            m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_conduction_braginskii || m_chi_ion_is_parser ||
+                    m_chi_electron_is_parser ||
+                    m_thermal_diffusivity_ion > 0.0_rt ||
+                    m_thermal_diffusivity_electron > 0.0_rt,
+                "implicit_mhd.wall_heat_flux_cap = free_streaming/sonic caps "
+                "the conductive wall exchanges and requires a conduction "
+                "channel (thermal_diffusivity_ion/electron, constant or "
+                "parser, or thermal_conduction_model = braginskii)");
+            const auto cap_thermal_mode = m_wall_mask.GetThermalBC();
+            const bool cap_wall_reservoir =
+                (cap_thermal_mode ==
+                     ImplicitMHDWallMask::ThermalBC::outflow_limited ||
+                 cap_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
+                 cap_thermal_mode ==
+                     ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                cap_wall_reservoir || m_z_wall_conduction,
+                "implicit_mhd.wall_heat_flux_cap = free_streaming/sonic "
+                "requires a conductive wall exchange to cap: a reservoir "
+                "implicit_mhd.wall_thermal_bc (outflow_limited, dirichlet "
+                "or dirichlet_limited) or implicit_mhd.z_wall_conduction");
+        }
     }
 #else
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_heat_flux_cap_mode == WallHeatFluxCap::unset ||
+            m_wall_heat_flux_cap_mode == WallHeatFluxCap::none,
+        "implicit_mhd.wall_heat_flux_cap = free_streaming/sonic caps the "
+        "shaped-wall and z-end conductive exchanges, which require "
+        "cylindrical RZ geometry");
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_WarpX->Geom(0).isPeriodic(direction),
@@ -3079,6 +3163,54 @@ ThetaImplicitMHD::GetMHDElectronInertiaCoefficientEdgeForPC () const
 #endif
 }
 
+std::string ThetaImplicitMHD::WallHeatFluxCapDescription () const
+{
+    // The RESOLVED cap of each wall family (see m_wall_heat_flux_cap):
+    // what the kernel will do, not what was typed.
+    const auto wall_thermal_mode = m_wall_mask.GetThermalBC();
+    const bool wall_reservoir =
+        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::outflow_limited ||
+         wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
+         wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
+    const std::string factor =
+        ", f = " + std::to_string(m_wall_heat_flux_cap_factor_effective);
+    const std::string free_streaming =
+        "free_streaming (f n kB T_s v_th,s)" + factor;
+    const std::string sonic =
+        "sonic (f n kB T_s c_s, c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i)" +
+        factor;
+    std::string shaped;
+    std::string z_end;
+    switch (m_wall_heat_flux_cap_mode) {
+    case WallHeatFluxCap::unset:
+        shaped = (wall_thermal_mode ==
+                  ImplicitMHDWallMask::ThermalBC::dirichlet)
+                     ? "uncapped (hard pin)"
+                     : free_streaming + " (legacy factor)";
+        z_end = "uncapped";
+        break;
+    case WallHeatFluxCap::none:
+        shaped = "uncapped (forced)";
+        z_end = "uncapped (forced)";
+        break;
+    case WallHeatFluxCap::free_streaming:
+        shaped = free_streaming;
+        z_end = free_streaming;
+        break;
+    case WallHeatFluxCap::sonic:
+        shaped = sonic;
+        z_end = sonic;
+        break;
+    }
+    return (m_wall_heat_flux_cap.empty() ? std::string("unset")
+                                         : m_wall_heat_flux_cap) +
+           " -> shaped wall: " +
+           (wall_reservoir ? shaped : std::string("no reservoir wall")) +
+           "; z-end: " +
+           (m_z_wall_conduction ? z_end
+                                : std::string("no z_wall_conduction"));
+}
+
 void ThetaImplicitMHD::PrintParameters () const
 {
     if (!m_WarpX->Verbose()) {
@@ -3320,6 +3452,8 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? " (chi_par clamp class, the reference code's G parity)"
                            : " (chi_perp clamp class)")
                    << "\n"
+                   << "Wall heat-flux cap:            "
+                   << WallHeatFluxCapDescription() << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
                    << "\n"
                    << "Halo pedestal drag rate [1/s]: " << m_halo_pedestal_drag_rate
@@ -7379,8 +7513,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // the capped exchange bottles the heat flux in). dirichlet_limited
     // keeps the capped two-sided variant; outflow_limited (the renamed
     // one-sided drain) stays capped.
-    const bool wall_uncapped =
+    //
+    // implicit_mhd.wall_heat_flux_cap (see the header) OVERRIDES that
+    // per-mode default for BOTH wall families: unset resolves to the
+    // per-mode default (bit-identical), "none" forces uncapped,
+    // "free_streaming" the existing thermal-speed cap, "sonic" the
+    // sheath-limited sound-speed cap. Per-solve constants, so the
+    // kernel branches stay static for the JFNK probes.
+    const bool wall_cap_override =
+        (m_wall_heat_flux_cap_mode != WallHeatFluxCap::unset);
+    const bool wall_cap_sonic_mode =
+        (m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic);
+    const bool wall_default_uncapped =
         (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
+    const bool wall_uncapped =
+        wall_cap_override
+            ? (m_wall_heat_flux_cap_mode == WallHeatFluxCap::none)
+            : wall_default_uncapped;
+    const bool wall_cap_sonic = !wall_uncapped && wall_cap_sonic_mode;
     const int* const AMREX_RESTRICT wall_first_masked_cc =
         wall_mechanics ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
     // ---- TVD reconstruction (implicit_mhd.fluid_reconstruction).
@@ -7481,10 +7631,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // flux at the 6 keV contact hot spots -- both are exactly the
     // conduction-type Newton hostility the TC arms die of, switched on
     // at every wall face at once.
+    //
+    // The factor f of whichever wall cap is live (see
+    // m_wall_heat_flux_cap_factor_effective): with wall_heat_flux_cap
+    // unset it is the legacy expression, conduction_flux_limit_factor
+    // when set else 1 -- the identical double, so the limited modes are
+    // bit-identical -- otherwise the resolved override (2.5 default under
+    // sonic).
     const amrex::Real wall_conduction_limit =
-        (m_conduction_flux_limit_factor > 0.0_rt)
-            ? m_conduction_flux_limit_factor
-            : 1.0_rt;
+        m_wall_heat_flux_cap_factor_effective;
     // Conductive z-end exchange (implicit_mhd.z_wall_conduction; see the
     // header): the z domain END boundary faces of the z-face family carry
     // a HARD half-cell Dirichlet exchange against the z_wall_temperature
@@ -7501,6 +7656,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool z_wall_conduction =
         m_z_wall_conduction && add_conduction && (normal == 2);
     const bool z_wall_conduction_lo = z_wall_conduction && !m_z_lo_pmc;
+    // implicit_mhd.wall_heat_flux_cap on the z-end exchange: uncapped
+    // when unset (today's contract) and under "none"; "free_streaming" /
+    // "sonic" cap it exactly like the shaped-wall drain, with the same
+    // factor and the same harmonic form.
+    const bool z_wall_capped =
+        wall_cap_override &&
+        (m_wall_heat_flux_cap_mode != WallHeatFluxCap::none);
+    const bool z_wall_cap_sonic = z_wall_capped && wall_cap_sonic_mode;
 #if defined(WARPX_DIM_RZ)
     const int z_axial_dim = 1;
 #else
@@ -8502,7 +8665,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // the interior side against the T_wall reservoir.
                 // Interface faces need the face state even when the
                 // parser/limiter path is globally off: the wall drain is
-                // always free-streaming limited.
+                // always free-streaming limited. A CAPPED z-end face
+                // (wall_heat_flux_cap) needs it for the same reason.
                 const bool wall_face =
                     wall_left_masked || wall_right_masked;
                 // Conductive z-end wall faces (see the z_wall_conduction
@@ -8607,7 +8771,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
                 amrex::Real face_jmag = 0.0_rt;
-                if (chi_needs_state || wall_face) {
+                if (chi_needs_state || wall_face ||
+                    (z_end_wall_face && z_wall_capped)) {
                     face_charge_density =
                         std::max(chi_charge_to_mass * face_density,
                                  chi_charge_floor);
@@ -8796,6 +8961,44 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         }
                     }
                 }
+                // Wall heat-flux cap magnitude q_cap of one species channel
+                // (implicit_mhd.wall_heat_flux_cap; see the host
+                // constants), shared by the shaped-wall drain and the
+                // z-end exchange of BOTH species so the four sites cannot
+                // drift apart:
+                //   free_streaming: f n kB T_s v_th,s, v_th,s = sqrt(kB
+                //                   T_s/m_s) -- the pre-knob wall cap in
+                //                   its identical floating-point
+                //                   association;
+                //   sonic:          f n kB T_s c_s, c_s^2 = (gamma_e kB Te
+                //                   + gamma_i kB Ti)/m_i -- the sheath-
+                //                   limited advective heat flux.
+                // The face state is the coefficient-state reservoir
+                // average (face_te/face_ti, NOT the conduction-stage
+                // cap_te/cap_ti), exactly as the existing wall cap reads
+                // it; Ti is 0 where the ion channel carries no
+                // temperature, which leaves c_s the electron-only value.
+                const auto wall_cap_flux =
+                    [=] (const amrex::Real species_temperature,
+                         const amrex::Real species_mass, const bool sonic)
+                {
+                    if (sonic) {
+                        const amrex::Real sound_speed = std::sqrt(
+                            (parameters.gamma_e * PhysConst::kb * face_te +
+                             parameters.gamma_i * PhysConst::kb * face_ti) /
+                            conduction_ion_mass);
+                        return wall_conduction_limit *
+                               (face_charge_density / PhysConst::q_e *
+                                PhysConst::kb * species_temperature) *
+                               sound_speed;
+                    }
+                    const amrex::Real thermal_speed = std::sqrt(
+                        PhysConst::kb * species_temperature / species_mass);
+                    const amrex::Real free_streaming_flux =
+                        face_charge_density / PhysConst::q_e *
+                        PhysConst::kb * species_temperature * thermal_speed;
+                    return wall_conduction_limit * free_streaming_flux;
+                };
                 // Braginskii face geometry (static branch on the host
                 // model flag): the face field takes the single-valued
                 // staggered B_n and the cell-averaged tangential TOTAL
@@ -9373,20 +9576,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                               corner_weight;
                             }
                         }
-                        // free-streaming cap on the wall exchange --
-                        // except under the HARD dirichlet pin, where the
-                        // solver converges on the demanded outflow.
+                        // Cap on the wall exchange -- free-streaming by
+                        // default, except under the HARD dirichlet pin,
+                        // where the solver converges on the demanded
+                        // outflow; implicit_mhd.wall_heat_flux_cap
+                        // overrides both (see the host constants and
+                        // wall_cap_flux). The harmonic form is shared:
+                        // drain /= 1 + |drain|/q_cap, the preconditioner
+                        // conductance divided with it.
                         if (!wall_uncapped) {
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_ti /
-                                conduction_ion_mass);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_ti * thermal_speed;
                             const amrex::Real cap =
                                 1.0_rt +
-                                std::abs(drain) / (wall_conduction_limit *
-                                                   free_streaming_flux);
+                                std::abs(drain) /
+                                    wall_cap_flux(face_ti, conduction_ion_mass,
+                                                  wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
@@ -9450,17 +9653,34 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             z_end_hi_face ? e_spec_ion_left
                                           : e_spec_ion_right;
-                        const amrex::Real drain =
+                        amrex::Real drain =
                             chi_ion_face * face_density *
                             (interior_e_spec - z_wall_bath_e_spec_ion) *
                             2.0_rt * inverse_normal_size * corner_weight;
-                        const amrex::Real conductance =
+                        amrex::Real conductance =
                             chi_ion_face * face_density * 2.0_rt *
                             inverse_normal_size * corner_weight;
-                        // Preconditioner row on the interior cell: this
-                        // branch is EXACTLY linear in it (no gate, no
-                        // cap), so the emitted diagonal is the exact
-                        // Jacobian entry at frozen coefficients.
+                        // implicit_mhd.wall_heat_flux_cap: the z-end
+                        // exchange takes the SAME cap as the shaped-wall
+                        // drain (free_streaming or sonic, same factor,
+                        // same harmonic form, conductance divided with
+                        // it). Unset and "none" leave it uncapped with no
+                        // arithmetic performed (bit-identical).
+                        if (z_wall_capped) {
+                            const amrex::Real cap =
+                                1.0_rt +
+                                std::abs(drain) /
+                                    wall_cap_flux(face_ti, conduction_ion_mass,
+                                                  z_wall_cap_sonic);
+                            drain /= cap;
+                            conductance /= cap;
+                        }
+                        // Preconditioner row on the interior cell: at
+                        // frozen coefficients the uncapped branch is
+                        // EXACTLY linear in it (no gate), so the emitted
+                        // diagonal is the exact Jacobian entry; capped,
+                        // it is the secant conductance the shaped-wall
+                        // capped modes emit.
                         if (emit_wall_rows) {
                             const int ric = z_end_hi_face ? il : i;
                             const int rjc = z_end_hi_face ? jl : j;
@@ -9761,16 +9981,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                               corner_weight;
                             }
                         }
+                        // Cap on the wall exchange (see the ion channel
+                        // and wall_cap_flux): free-streaming or sonic,
+                        // per implicit_mhd.wall_heat_flux_cap.
                         if (!wall_uncapped) {
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_te / PhysConst::m_e);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_te * thermal_speed;
                             const amrex::Real cap =
                                 1.0_rt +
-                                std::abs(drain) / (wall_conduction_limit *
-                                                   free_streaming_flux);
+                                std::abs(drain) /
+                                    wall_cap_flux(face_te, PhysConst::m_e,
+                                                  wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
@@ -9796,14 +10015,26 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             z_end_hi_face ? e_spec_electron_left
                                           : e_spec_electron_right;
-                        const amrex::Real drain =
+                        amrex::Real drain =
                             chi_electron_face * face_density *
                             (interior_e_spec -
                              z_wall_bath_e_spec_electron) *
                             2.0_rt * inverse_normal_size * corner_weight;
-                        const amrex::Real conductance =
+                        amrex::Real conductance =
                             chi_electron_face * face_density * 2.0_rt *
                             inverse_normal_size * corner_weight;
+                        // implicit_mhd.wall_heat_flux_cap (see the ion
+                        // channel): same cap as the shaped-wall drain;
+                        // unset/"none" perform no arithmetic.
+                        if (z_wall_capped) {
+                            const amrex::Real cap =
+                                1.0_rt +
+                                std::abs(drain) /
+                                    wall_cap_flux(face_te, PhysConst::m_e,
+                                                  z_wall_cap_sonic);
+                            drain /= cap;
+                            conductance /= cap;
+                        }
                         if (emit_wall_rows) {
                             const int ric = z_end_hi_face ? il : i;
                             const int rjc = z_end_hi_face ? jl : j;

@@ -75,6 +75,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     void Define (WarpX* a_WarpX, bool from_restart) override;
     void PrintParameters () const override;
+    /** Resolved wall heat-flux cap of each wall family, for the banner
+     * (see m_wall_heat_flux_cap). */
+    std::string WallHeatFluxCapDescription () const;
 
     int OneStep (amrex::Real start_time, amrex::Real dt, int step) override;
 
@@ -1916,6 +1919,60 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // one-sided nn scalar -- this knob is the shaped-wall interface only.
     std::string m_wall_conduction_scale = "perp";
     bool m_wall_conduction_parallel_scale = false;
+    // Cap on the WALL conductive exchanges (implicit_mhd.wall_heat_flux_cap):
+    // the shaped-wall interface drain of every reservoir wall_thermal_bc
+    // mode (outflow_limited / dirichlet / dirichlet_limited) and the z-end
+    // exchange (z_wall_conduction), in BOTH species channels (the ion
+    // drain is one flux booked into both ion registers under dual_energy).
+    // The knob OVERRIDES the per-mode defaults, and UNSET keeps every
+    // existing mode bit-identical:
+    //   unset            -- dirichlet: uncapped (the hard pin);
+    //                       dirichlet_limited / outflow_limited: the
+    //                       free-streaming cap with the legacy factor
+    //                       (conduction_flux_limit_factor when set, else 1);
+    //                       z_wall_conduction: uncapped.
+    //   "none"           -- both wall families uncapped.
+    //   "free_streaming" -- both capped at f n kB T_s v_th,s with
+    //                       v_th,s = sqrt(kB T_s/m_s), the existing wall
+    //                       cap; f = wall_heat_flux_cap_factor when set,
+    //                       else the legacy factor above.
+    //   "sonic"          -- both capped at the SHEATH-limited advective
+    //                       heat flux q_cap = f n kB T_s c_s with
+    //                       c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i
+    //                       (= gamma (kB Te + kB Ti)/m_i for a shared
+    //                       adiabatic index) from the face state's n, Te,
+    //                       Ti; f = wall_heat_flux_cap_factor when set,
+    //                       else 2.5 (the enthalpy flux gamma/(gamma - 1)
+    //                       at 5/3). Physics: the sheath potential drop
+    //                       is small against the plasma temperature, so
+    //                       the heat the wall can take is bounded by
+    //                       advection at the local sound speed -- per
+    //                       species, and NOT by the species' own thermal
+    //                       speed (60x c_s for electrons), which is what
+    //                       the free-streaming cap allows.
+    // Every capped form is the SAME smooth harmonic cap the existing wall
+    // and interior limiters use, drain /= 1 + |drain|/q_cap, with the
+    // emitted preconditioner conductance divided by the same factor, so
+    // the residual stays C-infinity in the state and the rows keep
+    // factoring the drain. The face state is the coefficient-state
+    // (conduction_coefficient_state) reservoir average the existing wall
+    // cap already reads: n from the interior side, T_s = (T_interior +
+    // T_wall)/2 at a shaped-wall face and the interior/ghost-image
+    // average at a z-end face; Ti enters as 0 where the ion channel
+    // carries no temperature (outside total_energy/dual_energy). NEVER
+    // silent: the resolved cap of each wall family is printed in the
+    // solver banner.
+    enum class WallHeatFluxCap { unset, none, free_streaming, sonic };
+    std::string m_wall_heat_flux_cap;
+    WallHeatFluxCap m_wall_heat_flux_cap_mode = WallHeatFluxCap::unset;
+    // implicit_mhd.wall_heat_flux_cap_factor: the f above; negative =
+    // unset (resolved per mode as documented). Requires a capping mode.
+    amrex::Real m_wall_heat_flux_cap_factor = -1.0;
+    // The resolved f the kernel multiplies: the factor when given; else
+    // 2.5 under sonic; else the legacy conduction_flux_limit_factor-or-1
+    // (the identical double the pre-knob wall_conduction_limit host
+    // constant carried, so the limited modes are bit-identical).
+    amrex::Real m_wall_heat_flux_cap_factor_effective = 1.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).
