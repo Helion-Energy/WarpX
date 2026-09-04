@@ -4033,12 +4033,36 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     // first step, because dt is not known before then.
     //
     // WHY IT IS HERE AND NOT IN A DECK: the deck version was correct and
-    // completely ineffective. Its Prandtl arm defaulted to disabled, no
-    // launcher ever enabled it, and it never fired once across ~50 arms
-    // while production ran chi/eta = 1031 -- three orders of magnitude of
-    // stiffness disparity between two legs of the same tensor. Any check
-    // a deck can omit or fork away is optional in practice. This one is
-    // not: it warns from the solver, so every deck inherits it.
+    // completely ineffective. Its stiffness-matching arm defaulted to
+    // disabled, no launcher ever enabled it, and it never fired once
+    // across ~50 arms while production ran chi/eta = 1031 -- three
+    // orders of magnitude of stiffness disparity between two legs of the
+    // same tensor. Any check a deck can omit or fork away is optional in
+    // practice. This one is not: it reports from the solver, so every
+    // deck inherits it.
+    //
+    // WHAT IT REPORTS, AND WHAT IT DOES NOT CLAIM (2026-09-04 audit):
+    //  * the diffusion numbers D = alpha dt/h^2 of the resistive and
+    //    conductive legs against the theta-scheme monotone bound
+    //    D <= 1/(1 - theta_chi), unconditional at theta_chi = 1;
+    //  * chi/eta against D_max/D_eta. That bound is a Crank-Nicolson
+    //    STIFFNESS-MATCHING (monotonicity) device -- both diffusive legs
+    //    under the bound whenever eta is -- not physics: the physical
+    //    ratio scales as T^4/n and has no reason to sit near it. It is
+    //    printed as INFO, never as advice to lower chi;
+    //  * the halo-ceiling gate with the LIVE corner geometry: two
+    //    half-cell exchanges each scaled by the corner weight
+    //    w = |S|/(S_r + S_z) = 1/sqrt(2) for two equal faces
+    //    (wall_corner_weight), so a corner cell carries
+    //    2 sqrt(2) = 2.83x the bulk diffusion number, not 4x;
+    //  * the free-streaming-limited drain rate per species,
+    //    lambda dt = (gamma_s - 1) 1.5 f v_th dt/h, the number that
+    //    decides whether theta_chi = 1/2 plus a limiter can be monotone;
+    //  * the theta staging of each leg. Conduction is a conservative face
+    //    flux booked identically into E_i, E_i^int and U_e, so its theta
+    //    carries NO conservation content. The theta = 1/2 energy identity
+    //    is load-bearing for the resistive leg (the Joule booking) and,
+    //    for the kinetic/internal split only, for the viscous leg.
     if (m_transport_audit_done) { return; }
     m_transport_audit_done = true;
     if (!m_use_recast || m_dt <= 0.0_rt) { return; }
@@ -4050,7 +4074,7 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
 
     const amrex::Real eta_ohm = GetMHDReferenceResistivityForPC(time);
     const amrex::Real eta_m = eta_ohm / PhysConst::mu0;      // m^2/s
-    if (!(eta_m > 0.0_rt) || !std::isfinite(eta_m)) { return; }
+    const bool have_eta = (eta_m > 0.0_rt) && std::isfinite(eta_m);
 
     // chi cap in the OPERATOR convention. The per-component knobs are the
     // physical kappa/(n kB) convention and are scaled by (gamma - 1) per
@@ -4064,47 +4088,143 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     } else if (m_conduction_chi_max > 0.0_rt) {
         chi_cap = m_conduction_chi_max;
     }
-    if (!(chi_cap > 0.0_rt)) { return; }
+    const bool have_chi_cap = (chi_cap > 0.0_rt);
+    const bool have_conduction =
+        m_conduction_braginskii || m_chi_ion_is_parser ||
+        m_chi_electron_is_parser || m_thermal_diffusivity_ion > 0.0_rt ||
+        m_thermal_diffusivity_electron > 0.0_rt;
+    if (!have_chi_cap && !have_conduction) { return; }
 
-    const amrex::Real d_eta = eta_m * m_dt / (h * h);
-    const amrex::Real d_chi = chi_cap * m_dt / (h * h);
-    const amrex::Real ratio = chi_cap / eta_m;
     // A >= 0 <=> D <= 1/(1-theta); unconditional at theta = 1.
     const bool chi_bounded = (m_conduction_theta >= 1.0_rt);
     const amrex::Real d_max_chi =
         chi_bounded ? std::numeric_limits<amrex::Real>::infinity()
                     : 1.0_rt / (1.0_rt - m_conduction_theta);
-    const amrex::Real prandtl_bound =
-        (d_eta > 0.0_rt && std::isfinite(d_max_chi)) ? d_max_chi / d_eta
-                                                     : -1.0_rt;
+    const amrex::Real d_eta = have_eta ? eta_m * m_dt / (h * h) : 0.0_rt;
+    const amrex::Real d_chi = have_chi_cap ? chi_cap * m_dt / (h * h) : 0.0_rt;
+    // Per-axis inverse cell sizes: the checkerboard (Nyquist) eigenvalue
+    // of the discrete Laplacian is -4 sum_d h_d^-2, and the wall corner
+    // weight below is built from the same sums.
+    amrex::Real sum_inverse_h = 0.0_rt;
+    amrex::Real sum_inverse_h2 = 0.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        sum_inverse_h += 1.0_rt / cell_size[d];
+        sum_inverse_h2 += 1.0_rt / (cell_size[d] * cell_size[d]);
+    }
+    // D <= 1/(1-theta) per face is the two-cell (one exchange) amplifier
+    // bound -- necessary for monotonicity. The grid-scale checkerboard
+    // mode sees k D with k D = 4 chi dt sum_d h_d^-2 (4 D in 1D, 8 D in
+    // RZ at dr = dz) and flips sign each step once k D > 1/(1-theta):
+    // the halo "temperature checkerboard" of the production arms.
+    const amrex::Real d_chi_checkerboard =
+        have_chi_cap ? 4.0_rt * chi_cap * m_dt * sum_inverse_h2 : 0.0_rt;
+    const amrex::Real g_checkerboard =
+        (1.0_rt - (1.0_rt - m_conduction_theta) * d_chi_checkerboard) /
+        (1.0_rt + m_conduction_theta * d_chi_checkerboard);
 
     amrex::Print() << "\n"
                    << "*** MHD TRANSPORT CONSISTENCY (solver-side audit) ***\n"
-                   << "  h = " << h << " m   dt = " << m_dt << " s\n"
-                   << "  eta = " << eta_m << " m^2/s   D_eta = " << d_eta << "\n"
-                   << "  chi cap = " << chi_cap << " m^2/s (operator convention"
-                   << (m_conduction_chi_par_max >= 0.0_rt
-                           ? ", = (gamma-1) x conduction_chi_par_max"
-                           : ", = conduction_chi_max")
-                   << ")   D_chi = " << d_chi << "\n"
-                   << "  chi/eta = " << ratio << "\n";
-    if (d_chi > d_max_chi) {
-        amrex::Print()
-            << "  WARNING: chi is NON-MONOTONE: D_chi = " << d_chi
-            << " exceeds the theta-scheme bound 1/(1-theta_chi) = "
-            << d_max_chi << ", so the update amplifier is negative and a "
-               "cell above its neighbour is driven NEGATIVE in one step.\n";
+                   << "  h = " << h << " m   dt = " << m_dt
+                   << " s   theta_chi = " << m_conduction_theta
+                   << "   monotone bound 1/(1-theta_chi) = " << d_max_chi
+                   << "\n";
+    if (have_eta) {
+        amrex::Print() << "  eta = " << eta_m << " m^2/s   D_eta = " << d_eta
+                       << "\n";
+    } else {
+        amrex::Print() << "  eta = 0 at the reference state (no resistive "
+                          "leg to compare against)\n";
     }
-    if (prandtl_bound > 0.0_rt && ratio > prandtl_bound) {
-        amrex::Print()
-            << "  WARNING: chi is NOT Prandtl-matched to eta: chi/eta = "
-            << ratio << " exceeds D_max/D_eta = " << prandtl_bound
-            << ".  The physical ratio scales as ~T^4/n, so an ABSOLUTE chi "
-               "clamp is unrelated to eta and pins in the hot core.  Set "
-               "implicit_mhd.conduction_chi_par_max <= "
-            << (prandtl_bound * eta_m / gam)
-            << " (kappa/(n kB) convention) to match.\n";
+    if (have_chi_cap) {
+        amrex::Print() << "  chi cap = " << chi_cap
+                       << " m^2/s (operator convention"
+                       << (m_conduction_chi_par_max >= 0.0_rt
+                               ? ", = (gamma-1) x conduction_chi_par_max"
+                               : ", = conduction_chi_max")
+                       << ")   D_chi = " << d_chi
+                       << " per face; checkerboard k D = 4 chi dt sum_d h_d^-2 = "
+                       << d_chi_checkerboard << ", amplifier g = "
+                       << g_checkerboard << "\n";
+        if (d_chi > d_max_chi) {
+            amrex::Print()
+                << "  WARNING: chi is NON-MONOTONE: D_chi = " << d_chi
+                << " per face exceeds the theta-scheme bound 1/(1-theta_chi) "
+                   "= " << d_max_chi << ", so the two-cell update amplifier "
+                   "(1 - (1-theta) D)/(1 + theta D) is negative and a cell "
+                   "above its neighbour is driven BELOW it in one step (below "
+                   "the bath at a wall pin).\n";
+        } else if (chi_bounded) {
+            amrex::Print() << "  PASS: conduction_theta = 1 -- every "
+                              "amplifier is in (0, 1) at any D.\n";
+        } else if (g_checkerboard < 0.0_rt) {
+            amrex::Print()
+                << "  NOTE: the per-face D is under the bound but the "
+                   "checkerboard amplifier is negative (g = " << g_checkerboard
+                << "): grid-scale thermal structure flips sign each step "
+                   "instead of decaying; smooth modes are damped.\n";
+        } else {
+            amrex::Print() << "  PASS: D_chi <= 1/(1-theta_chi) per face and "
+                              "the checkerboard amplifier is positive -- the "
+                              "conduction update is monotone at this dt/h.\n";
+        }
+    } else {
+        amrex::Print() << "  chi cap: none (conduction_chi_par_max and "
+                          "conduction_chi_max unset)"
+                       << (m_conduction_braginskii
+                               ? " -- the Braginskii chi is unbounded "
+                                 "(~T^{5/2}/n)"
+                               : "")
+                       << "\n";
     }
+    if (have_eta && have_chi_cap) {
+        // chi/eta against D_max/D_eta: the Crank-Nicolson STIFFNESS-
+        // MATCHING bound (both diffusive legs under the monotone bound
+        // whenever eta is). It was used to keep the conduction leg
+        // monotone; it is not a physical Prandtl number and never a
+        // reason to lower chi, so it is INFO with the numbers.
+        const amrex::Real ratio = chi_cap / eta_m;
+        amrex::Print() << "  INFO: chi/eta = " << ratio << ".";
+        if (chi_bounded) {
+            amrex::Print()
+                << "  The Crank-Nicolson stiffness-matching bound chi/eta <= "
+                   "D_max/D_eta is vacuous at conduction_theta = 1 (backward "
+                   "Euler is monotone at any D).\n";
+        } else {
+            const amrex::Real stiffness_bound = d_max_chi / d_eta;
+            amrex::Print()
+                << "  Crank-Nicolson stiffness matching (both diffusive legs "
+                   "under the monotone bound whenever eta is) needs chi/eta "
+                   "<= D_max/D_eta = " << stiffness_bound << ": "
+                << (ratio <= stiffness_bound
+                        ? "satisfied"
+                        : "exceeded -- by the conduction leg alone, see "
+                          "D_chi above")
+                << ".\n";
+        }
+        amrex::Print()
+            << "        This bound is a monotonicity device of the theta "
+               "scheme, not physics: the physical chi/eta scales as T^4/n "
+               "(Braginskii chi ~ T^{5/2}/n, Spitzer eta ~ T^{-3/2}) and is "
+               "not a target for the chi clamp.\n";
+    }
+    // Hard wall exchanges (the shaped-wall dirichlet pin and the z-end
+    // pin) act at the half-cell distance: 2x the bulk D per face. A cell
+    // owning wall faces on two axes takes the live corner weight
+    // w = |S|/(S_r + S_z), S_d = 1/h_d (wall_corner_weight), on EACH
+    // face, so the worst cell carries 2 w sum_d h_d^-2 = 2 sqrt(2)/h^2
+    // for dr = dz -- 2.83x bulk, not the 4x of the unweighted sum. (The
+    // RZ radial metric r_face/r_cell <= 1 + h/(2 r_wall) is neglected.)
+    // In 1D no corner exists and the worst cell owns one pin face: 2x.
+    const amrex::Real corner_weight = std::sqrt(sum_inverse_h2) / sum_inverse_h;
+    // D_worst / D_bulk with D_bulk = chi dt/h^2
+    const amrex::Real corner_factor =
+        2.0_rt * corner_weight * sum_inverse_h2 * h * h;
+    amrex::Print() << "  wall geometry: half-cell pin = 2x bulk D per face; "
+                      "worst cell ("
+                   << (AMREX_SPACEDIM > 1
+                           ? "two faces on different axes, corner weight w = "
+                           : "one pin face, w = ")
+                   << corner_weight << ") = " << corner_factor << "x bulk\n";
     // HARD GATE on the halo ceiling: a lift that pushes the conduction
     // diffusion number past the theta-scheme monotonicity bound turns the
     // update amplifier NEGATIVE, and a cell barely above the bath is then
@@ -4115,18 +4235,25 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     // projection absorbed every negative cell, 3923 of them with zero
     // aborts, while the Newton norm walked to 8.4e15. The silent mode is
     // the dangerous one, so this refuses to start rather than warn.
+    // Vacuous at conduction_theta = 1 (the bound is infinite).
     if (m_conduction_chi_par_max_halo >= 0.0_rt && !chi_bounded) {
         const amrex::Real chi_halo = gam * m_conduction_chi_par_max_halo;
-        // Worst case is the shaped-wall corner: two faces, 2/dn each.
-        const amrex::Real d_halo_corner = 4.0_rt * chi_halo * m_dt / (h * h);
+        // Worst case is a corner cell of the shaped wall: two half-cell
+        // faces carrying the live corner weight (corner_factor above).
+        const amrex::Real d_halo_corner =
+            corner_factor * chi_halo * m_dt / (h * h);
         if (d_halo_corner > d_max_chi) {
             const amrex::Real safe_alpha =
-                d_max_chi * h * h / (4.0_rt * m_dt);
+                d_max_chi * h * h / (corner_factor * m_dt);
             WARPX_ABORT_WITH_MESSAGE(
                 "implicit_mhd.conduction_chi_par_max_halo = " +
                 std::to_string(m_conduction_chi_par_max_halo) +
                 " gives a CORNER diffusion number D = " +
-                std::to_string(d_halo_corner) + " at conduction_theta = " +
+                std::to_string(d_halo_corner) + " (" +
+                std::to_string(corner_factor) +
+                "x the bulk chi dt/h^2: two half-cell faces with the corner "
+                "weight w = " + std::to_string(corner_weight) +
+                ") at conduction_theta = " +
                 std::to_string(m_conduction_theta) +
                 ", exceeding the monotonicity bound 1/(1-theta_chi) = " +
                 std::to_string(d_max_chi) +
@@ -4135,17 +4262,18 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
                 "step -- and the admissibility projection can absorb that "
                 "silently while the Newton residual diverges.  Either set "
                 "implicit_mhd.conduction_theta = 1 (backward Euler on the "
-                "conduction leg ONLY; the hyperbolic part keeps the "
-                "energy-conserving global theta, which is the whole point "
-                "of the separate staging knob, and it is how the reference "
-                "code gets away with an unconditionally-stable implicit "
-                "conduction solve), or lower the halo ceiling to <= " +
-                std::to_string(safe_alpha / gam) +
+                "conduction leg ONLY; conduction is a conservative face "
+                "flux at any theta, so this costs no energy conservation, "
+                "and it is how the reference code runs an unconditionally "
+                "monotone implicit conduction solve), or lower the halo "
+                "ceiling to <= " + std::to_string(safe_alpha / gam) +
                 " in the kappa/(n kB) convention.  NOTE the second option "
                 "may not buy a usable drain: at that ceiling tau_par over a "
                 "1 m path is " + std::to_string(1.0_rt / safe_alpha) +
                 " s, which must be compared against the formation window.");
         }
+        amrex::Print() << "  PASS: halo ceiling corner D = " << d_halo_corner
+                       << " <= " << d_max_chi << "\n";
     }
     // Halo drain time. tau_par = L^2/chi over a 1 m reference path is the
     // number that decides whether the halo can equilibrate inside the
@@ -4153,7 +4281,7 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     // campaign while the halo ran 18x hot. Measured halo field-line paths
     // to a cold boundary are ~1.5 m (ours) and ~1.8 m (reference), so a
     // 1 m reference path is the optimistic end of the real range.
-    {
+    if (have_chi_cap) {
         const amrex::Real tau_core = 1.0_rt / chi_cap;
         amrex::Print() << "  halo drain: tau_par(1 m) = " << tau_core
                        << " s at the core ceiling";
@@ -4168,6 +4296,97 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
         }
         amrex::Print() << "\n";
     }
+    // Free-streaming-limited regime. Where the cap q -> f n kB T v_th
+    // binds, the drain is proportional to T^{3/2} and the linearized
+    // per-face rate is lambda dt = (gamma_s - 1) 1.5 f v_th dt/h with
+    // v_th = sqrt(kB T/m_s). Crank-Nicolson keeps a cell positive only
+    // while the sum over its exchanging faces of lambda dt stays <=
+    // 1/(1 - theta_chi) (2 at theta_chi = 1/2); unconditional at 1. This
+    // is the quantity that decides whether theta_chi = 1/2 plus a
+    // limiter can be monotone at all -- D above only covers the
+    // unlimited (smooth) regime. Reported at the solver's reference
+    // temperatures (the hybrid electron seed temperature; the reference
+    // ion pressure over the reference density), 100 eV where none is
+    // set; lambda scales as sqrt(T). The hard dirichlet wall exchange is
+    // exempt from the cap and is bounded by the half-cell D above.
+    if (have_conduction) {
+        const amrex::Real f = m_conduction_flux_limit_factor;
+        const amrex::Real ev_to_kelvin = PhysConst::q_e / PhysConst::kb;
+        amrex::Real te_ref = 100.0_rt * ev_to_kelvin;
+        const char* te_source = "100 eV default";
+        if (m_hybrid_pic_model != nullptr &&
+            m_hybrid_pic_model->m_elec_temp > 0.0_rt) {
+            te_ref = m_hybrid_pic_model->m_elec_temp / PhysConst::kb;
+            te_source = "hybrid_pic_model.elec_temp";
+        }
+        amrex::Real ti_ref = 100.0_rt * ev_to_kelvin;
+        const char* ti_source = "100 eV default";
+        if (m_reference_ion_pressure > 0.0_rt &&
+            m_reference_mass_density > 0.0_rt &&
+            m_ion_charge_to_mass > 0.0_rt) {
+            ti_ref = m_reference_ion_pressure * PhysConst::q_e /
+                     (m_ion_charge_to_mass * m_reference_mass_density *
+                      PhysConst::kb);
+            ti_source = "reference_ion_pressure / (n_ref kB)";
+        }
+        const amrex::Real ion_mass = PhysConst::q_e / m_ion_charge_to_mass;
+        amrex::Print() << "  free-streaming-limited drain (q -> f n kB T "
+                          "v_th): lambda dt = (gamma_s - 1) 1.5 f v_th dt/h "
+                          "per face";
+        if (f > 0.0_rt) {
+            amrex::Print() << ", f = conduction_flux_limit_factor = " << f
+                           << "\n";
+        } else {
+            amrex::Print() << "; conduction_flux_limit_factor = 0 (no cap: "
+                              "the limited regime does not exist and the D "
+                              "bound above is the only one)\n";
+        }
+        struct SpeciesRow {
+            const char* name;
+            amrex::Real temperature;
+            const char* source;
+            amrex::Real mass;
+            amrex::Real gamma_minus_one;
+        };
+        const SpeciesRow rows[2] = {
+            {"electron", te_ref, te_source, PhysConst::m_e, m_gamma_e - 1.0_rt},
+            {"ion", ti_ref, ti_source, ion_mass, m_gamma_i - 1.0_rt}};
+        for (const auto& row : rows) {
+            const amrex::Real v_th =
+                std::sqrt(PhysConst::kb * row.temperature / row.mass);
+            const amrex::Real v_th_dt_h = v_th * m_dt / h;
+            const amrex::Real lambda_dt =
+                row.gamma_minus_one * 1.5_rt * f * v_th_dt_h;
+            amrex::Print() << "    " << row.name << ": T_ref = "
+                           << row.temperature / ev_to_kelvin << " eV ("
+                           << row.source << "), v_th dt/h = " << v_th_dt_h;
+            if (f > 0.0_rt) {
+                amrex::Print() << ", lambda dt = " << lambda_dt << " per face";
+                if (!chi_bounded && lambda_dt > d_max_chi) {
+                    amrex::Print()
+                        << "\n    WARNING: one limited " << row.name
+                        << " face already exceeds the CN positivity bound "
+                        << d_max_chi << " -- conduction_theta = "
+                        << m_conduction_theta << " with this limiter is not "
+                           "monotone for the " << row.name
+                        << " channel at this dt/h (scales as sqrt(T)).";
+                } else if (!chi_bounded && lambda_dt > 0.0_rt) {
+                    amrex::Print()
+                        << " (a cell stays positive with up to "
+                        << static_cast<int>(std::floor(
+                               std::min(d_max_chi / lambda_dt, 1.0e6_rt)))
+                        << " limited faces)";
+                }
+            }
+            amrex::Print() << "\n";
+        }
+        amrex::Print() << "    CN positivity: sum over a cell's exchanging "
+                          "faces of lambda dt <= 1/(1-theta_chi)"
+                       << (chi_bounded ? " -- unconditional at "
+                                         "conduction_theta = 1"
+                                       : "")
+                       << "\n";
+    }
     if (m_resistive_theta != m_conduction_theta ||
         m_conduction_theta != m_viscous_theta) {
         amrex::Print()
@@ -4176,13 +4395,42 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
             << ", theta_chi = " << m_conduction_theta
             << ", theta_nu = " << m_viscous_theta << ".\n";
     }
-    if (m_resistive_theta != 0.5_rt || m_conduction_theta != 0.5_rt ||
-        m_viscous_theta != 0.5_rt) {
+    // Theta staging and energy conservation, leg by leg -- facts, not
+    // recommendations. Conduction: a conservative face flux booked with
+    // opposite signs into the two cells sharing the face (identically
+    // into E_i, E_i^int and U_e), its domain sum telescopes to the
+    // boundary fluxes at ANY time centering and it exchanges no energy
+    // between forms, so conduction_theta carries no conservation
+    // content. Resistive: the field loses dt eta J^{n+1/2}.J^{n+theta_r}
+    // while the fluid receives dt eta |J_cc^{n+theta}|^2 -- equal only at
+    // resistive_theta = theta = 1/2. Viscous: under total_energy /
+    // dual_energy the stress work div(Pi.u) is a face flux, so total
+    // energy is conserved at any theta_nu; only the kinetic/internal
+    // split is sign-definite at 1/2.
+    amrex::Print()
+        << "  conduction_theta = " << m_conduction_theta
+        << ": conduction is a conservative face flux at any theta (booked "
+           "identically into E_i, E_i^int and U_e) -- this theta carries "
+           "no conservation content; it sets the monotone bound above and "
+           "the damping of grid-scale thermal modes (Nyquist amplifier "
+           "-> -1 at theta = 1/2 for D >> 1, -> 0 at theta = 1).\n";
+    if (m_resistive_theta != 0.5_rt) {
         amrex::Print()
-            << "  WARNING: EXACT ENERGY CONSERVATION FORFEITED -- theta = 0.5 "
-               "is the exactly energy-conserving point of this scheme; a "
-               "dissipative leg above it is backward-Euler-flavoured and "
-               "discards energy numerically.\n";
+            << "  NOTE: resistive_theta = " << m_resistive_theta
+            << ": the Joule booking is exact only at resistive_theta = "
+               "theta = 1/2 -- the field loses dt eta J^{n+1/2}.J^{n+theta_r} "
+               "while the fluid receives dt eta |J_cc^{n+theta}|^2; the two "
+               "differ by eta (theta_r - 1/2) J^{n+1/2}.(J^{n+1} - J^n) per "
+               "step.\n";
+    }
+    if (m_viscous_theta != 0.5_rt) {
+        amrex::Print()
+            << "  NOTE: viscous_theta = " << m_viscous_theta
+            << ": under the total_energy/dual_energy closures the total "
+               "energy is conserved at any theta_nu (the stress work "
+               "div(Pi.u) is a face flux); only the kinetic/internal split "
+               "-- the implied heating Pi^{n+theta_nu}:grad u^{n+1/2} -- is "
+               "sign-definite at 1/2.\n";
     }
     amrex::Print() << "*** end transport audit ***\n\n";
 }
