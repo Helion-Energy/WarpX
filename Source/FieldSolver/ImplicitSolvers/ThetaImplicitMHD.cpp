@@ -628,6 +628,9 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // (see m_wall_conduction_scale): "perp" (default, the historical
     // behavior) or "parallel" (the reference code's measured wall conductance G,
     // set by the PARALLEL clamp maximum xile_mx = xili_mx = 1e6 n kB).
+    // Taper the Joule source with the pedestal envelope (see
+    // m_joule_halo_taper). Default false: bit-identical.
+    pp.query("joule_halo_taper", m_joule_halo_taper);
     pp.query("wall_conduction_scale", m_wall_conduction_scale);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_wall_conduction_scale == "perp" ||
@@ -4085,6 +4088,48 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
             << (prandtl_bound * eta_m / gam)
             << " (kappa/(n kB) convention) to match.\n";
     }
+    // HARD GATE on the halo ceiling: a lift that pushes the conduction
+    // diffusion number past the theta-scheme monotonicity bound turns the
+    // update amplifier NEGATIVE, and a cell barely above the bath is then
+    // driven negative in a single step. That is not a tuning wart, it is
+    // the mechanism that killed three arms of the h-family on 2026-09-03
+    // (D = 343.9, A = -0.9884): one aborted on an inadmissible ion
+    // energy, one aborted later, and one went SILENT -- the admissibility
+    // projection absorbed every negative cell, 3923 of them with zero
+    // aborts, while the Newton norm walked to 8.4e15. The silent mode is
+    // the dangerous one, so this refuses to start rather than warn.
+    if (m_conduction_chi_par_max_halo >= 0.0_rt && !chi_bounded) {
+        const amrex::Real chi_halo = gam * m_conduction_chi_par_max_halo;
+        // Worst case is the shaped-wall corner: two faces, 2/dn each.
+        const amrex::Real d_halo_corner = 4.0_rt * chi_halo * m_dt / (h * h);
+        if (d_halo_corner > d_max_chi) {
+            const amrex::Real safe_alpha =
+                d_max_chi * h * h / (4.0_rt * m_dt);
+            WARPX_ABORT_WITH_MESSAGE(
+                "implicit_mhd.conduction_chi_par_max_halo = " +
+                std::to_string(m_conduction_chi_par_max_halo) +
+                " gives a CORNER diffusion number D = " +
+                std::to_string(d_halo_corner) + " at conduction_theta = " +
+                std::to_string(m_conduction_theta) +
+                ", exceeding the monotonicity bound 1/(1-theta_chi) = " +
+                std::to_string(d_max_chi) +
+                ".  The discrete update amplifier is negative there, so a "
+                "halo cell barely above the bath is driven NEGATIVE in one "
+                "step -- and the admissibility projection can absorb that "
+                "silently while the Newton residual diverges.  Either set "
+                "implicit_mhd.conduction_theta = 1 (backward Euler on the "
+                "conduction leg ONLY; the hyperbolic part keeps the "
+                "energy-conserving global theta, which is the whole point "
+                "of the separate staging knob, and it is how the reference "
+                "code gets away with an unconditionally-stable implicit "
+                "conduction solve), or lower the halo ceiling to <= " +
+                std::to_string(safe_alpha / gam) +
+                " in the kappa/(n kB) convention.  NOTE the second option "
+                "may not buy a usable drain: at that ceiling tau_par over a "
+                "1 m path is " + std::to_string(1.0_rt / safe_alpha) +
+                " s, which must be compared against the formation window.");
+        }
+    }
     // Halo drain time. tau_par = L^2/chi over a 1 m reference path is the
     // number that decides whether the halo can equilibrate inside the
     // formation window at all, and it went unreported for an entire
@@ -5774,6 +5819,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // work sources taper C^1-smoothly to zero below twice the pedestal;
     // identically 1 when the pedestal is off.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
+    const bool joule_halo_taper = m_joule_halo_taper;
     // Pedestal-band velocity relaxation (see m_halo_pedestal_drag_rate):
     // engages with the complement of the halo source taper, i.e. full
     // rate at the pedestal and exactly zero at/above twice it.
@@ -6129,6 +6175,27 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 theta_implicit_mhd::floor_outflow_limiter(
                     rho_old(i, j, k), halo_pedestal);
             pressure_work *= halo_source_taper;
+            // Joule heating is a plasma source too, and the taper's own
+            // rationale above applies to it verbatim: pedestal-band cells
+            // are numerical mass with no reactive response, so heating
+            // them is depositing energy into bookkeeping. Until now only
+            // pressure_work carried the envelope, so eta_joule*|J|^2 went
+            // in at FULL rate everywhere -- plasma_weight is identically
+            // 1 unless the Holmstrom vacuum gate is on, and that gate is
+            // off in production (it breaks the magnetoinductive
+            // coupling). The user eta cannot fall away on its own either:
+            // the deck's eta floor lives inside the (rho,Te,J,t)
+            // expression, so the heating coefficient has a hard floor in
+            // vacuum, unlike the reference code's eta_jh which is
+            // captured BEFORE its (en0/en)^2 floor is applied and so
+            // keeps the floor on the FIELD advance only.
+            //
+            // Off by default: this changes deposited energy in every
+            // halo cell, so it is opt-in rather than a silent physics
+            // change under existing decks.
+            if (joule_halo_taper) {
+                joule_heating *= halo_source_taper;
+            }
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);

@@ -3183,6 +3183,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    joule_halo_taper: bool, default=False
+        Taper the Joule heating source with the same pedestal envelope the
+        other fluid sources already carry. Default False (bit-identical).
+
+        Two resistivities, two jobs. The FIELD advance needs a LARGE
+        vacuum eta -- dB/dt = (eta/mu0) grad^2 B is a heat equation, and
+        the field has to diffuse through the halo -- while the HEATING
+        coefficient must fall toward zero there, or eta*|J|^2 is deposited
+        into cells that are numerical mass. The reference code separates
+        them by construction, storing eta_jh BEFORE applying
+        eta = MAX(eta, (en0/en)^2 dp_mn mu0), so the vacuum boost reaches
+        the field advance only.
+
+        Only half of that separation was present here: the field side is
+        boosted correctly, but the heating side ran untapered, because
+        plasma_weight is identically 1 unless the Holmstrom vacuum gate is
+        on (it is off in production) and the deck's eta floor lives inside
+        the (rho, Te, J, t) parser expression rather than being captured
+        pre-floor.
+
     conduction_chi_par_max_halo: float, optional
         Density-keyed lift of the Braginskii PARALLEL chi ceiling in the
         halo, in the kappa/(n k_B) convention like the other
@@ -3392,6 +3412,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_qs_reference_temperature=None,
         conduction_halo_boost=None,
         conduction_chi_par_max_halo=None,
+        joule_halo_taper=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3520,6 +3541,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_qs_reference_temperature = conduction_qs_reference_temperature
         self.conduction_halo_boost = conduction_halo_boost
         self.conduction_chi_par_max_halo = conduction_chi_par_max_halo
+        self.joule_halo_taper = joule_halo_taper
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3698,6 +3720,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_chi_par_max_halo = (
             self.conduction_chi_par_max_halo
         )
+        implicit_mhd.joule_halo_taper = self.joule_halo_taper
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

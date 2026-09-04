@@ -1755,6 +1755,26 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // density key), and must not sit below conduction_chi_par_max --
     // this is a lift, never a reduction.
     amrex::Real m_conduction_chi_par_max_halo = -1.0;
+    // Taper the JOULE HEATING source with the same pedestal envelope the
+    // other fluid sources already carry (implicit_mhd.joule_halo_taper,
+    // default false = bit-identical).
+    //
+    // Two etas, two jobs. The FIELD advance needs a LARGE resistivity in
+    // vacuum -- dB/dt = (eta/mu0) grad^2 B is a heat equation and the
+    // field has to diffuse/propagate through the halo -- while the
+    // HEATING coefficient must fall toward zero there, or the scheme
+    // deposits eta|J|^2 into cells that are numerical mass. The reference
+    // code separates them by construction: step.f90 stores eta_jh BEFORE
+    // applying eta = MAX(eta, (en0/en)^2 dp_mn mu0), so the vacuum boost
+    // reaches the field advance only.
+    //
+    // We had only half of that. vacuum_keyed_resistivity boosts the field
+    // side correctly, but the heating side ran untapered: plasma_weight
+    // is identically 1 unless the Holmstrom vacuum gate is on (it is off
+    // in production), and the deck's eta floor lives INSIDE the
+    // (rho,Te,J,t) parser expression, so the heating coefficient carries
+    // a hard floor into vacuum instead of decaying.
+    bool m_joule_halo_taper = false;
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (implicit_mhd.wall_conduction_scale, braginskii only):
     //   "perp"     (default) -- the wall-interface drain's scalar chi is
