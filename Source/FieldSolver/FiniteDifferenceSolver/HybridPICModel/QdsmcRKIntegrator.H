@@ -269,9 +269,37 @@ public:
             int s = 2;
             if (tau > m_safety*dt_expl) {
                 amrex::Real const nn = tau/(m_safety*dt_expl);
-                s = static_cast<int>(std::ceil(
-                        0.5_rt*(std::sqrt(9.0_rt + 16.0_rt*nn) - 1.0_rt)));
-                s = std::max(s, 2);
+                amrex::Real const s_real = std::ceil(
+                    0.5_rt*(std::sqrt(9.0_rt + 16.0_rt*nn) - 1.0_rt));
+                // GUARD THE NARROWING CAST. s_real is unbounded above: it
+                // grows as sqrt(tau/dt_expl), and dt_expl -> 0 whenever the
+                // diffusivity is unbounded -- qdsmc_conduction_chi_max = 0
+                // removes the kappa ceiling entirely, which the knob doc
+                // advertises as a supported setting. Converting an
+                // out-of-range double to int is undefined behaviour; on x86
+                // cvttsd2si yields the "integer indefinite" value INT_MIN,
+                // which the max(s, 2) below then launders into a perfectly
+                // plausible s = 2. The step is integrated with two stages
+                // where it needed ~1e12 -- violently unstable -- AND s = 2
+                // slips under the attempts-budget test immediately after,
+                // so the guard that exists to catch exactly this condition
+                // reports nothing at all. Measured on an unclamped-chi arm:
+                // rkl2_s_max = 2, "injected -nan J", Te = 3.4e5 eV one step
+                // after restart, abort on Te_abort_threshold.
+                //
+                // Clamping in floating point first keeps the failure
+                // VISIBLE: s saturates at the attempts budget, tau is cut
+                // to what that many stages actually cover, and the
+                // uncovered remainder leaves t_done < dt_c -- which is what
+                // raises the "attempts budget hit" warning downstream.
+                if (s_real >= amrex::Real(m_max_attempts)) {
+                    s = m_max_attempts;
+                    tau = amrex::min(tau, m_safety*dt_expl
+                        * 0.25_rt*(amrex::Real(s)*(amrex::Real(s) + 1.0_rt)
+                                   - 2.0_rt));
+                } else {
+                    s = std::max(2, static_cast<int>(s_real));
+                }
             }
             int const s_budget = m_max_attempts - st.n_attempts;
             if (s > s_budget) {
