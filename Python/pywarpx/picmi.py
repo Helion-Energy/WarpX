@@ -2748,24 +2748,37 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         "outflow_limited" free-streaming capped with the legacy factor
         (conduction_flux_limit_factor when set, else 1), z_wall_conduction
         uncapped. "none" forces both wall families uncapped;
-        "free_streaming" caps both at f n kB T_s v_th,s (the existing
-        wall cap, v_th,s = sqrt(kB T_s/m_s)); "sonic" caps both at the
-        SHEATH-limited advective heat flux q_cap = f n kB T_s c_s with
-        c_s = sqrt((gamma_e kB Te + gamma_i kB Ti)/m_i) from the face
-        state (the sheath potential drop is small against the plasma
-        temperature, so the wall takes heat at the local sound speed,
-        not at the species' own thermal speed -- 60x c_s for
-        electrons). Every cap is the same smooth harmonic form
-        q/(1 + |q|/q_cap), preconditioner conductance included, and the
-        resolved cap of each wall family is printed in the solver
+        "free_streaming" caps both at f_s n kB T_s v_th,s (the existing
+        wall cap, v_th,s = sqrt(kB T_s/m_s), reservoir-averaged face
+        temperature); "sonic" caps both at the SHEATH-limited heat flux
+        q_cap = f_s n kB T_s c_s evaluated at the INTERIOR (sheath-edge,
+        plasma-side) state of the wall-adjacent cell, with the adiabatic
+        two-fluid c_s = sqrt((gamma_e kB Te + gamma_i kB Ti)/m_i) (the
+        sheath potential drop is small against the plasma temperature,
+        so the wall takes heat at the local sound speed, not at the
+        species' own thermal speed -- v_te/c_s = 23-33 for H-D at Te =
+        Ti). Every cap is the same smooth harmonic form
+        q/(1 + |q|/q_cap) (applied per face before the corner weight;
+        preconditioner conductance divided with it), and the resolved
+        cap and factors of each wall family are printed in the solver
         banner. "free_streaming"/"sonic" require a conduction channel
         and a conductive wall exchange to cap.
 
     wall_heat_flux_cap_factor: float, optional
-        The f of wall_heat_flux_cap (requires "free_streaming" or
-        "sonic"; must be positive). Default 2.5 under "sonic" (the
-        enthalpy flux gamma/(gamma - 1) at gamma = 5/3) and the legacy
-        factor above under "free_streaming".
+        SHARED factor f of wall_heat_flux_cap: sets both species'
+        factors when given (requires "free_streaming" or "sonic"; must
+        be positive); the per-species knobs below win over it.
+
+    wall_heat_flux_cap_factor_electron: float, optional
+        Electron factor f_e of wall_heat_flux_cap. Default under "sonic"
+        5.0 (floating-wall sheath transmission gamma_e ~ 2 +
+        e|phi_sh|/(kB Te) ~ 5 for deuterium), under "free_streaming" the
+        legacy factor (conduction_flux_limit_factor when set, else 1).
+
+    wall_heat_flux_cap_factor_ion: float, optional
+        Ion factor f_i of wall_heat_flux_cap. Default under "sonic" 2.5
+        (ion enthalpy transmission gamma/(gamma - 1) at 5/3), under
+        "free_streaming" the legacy factor.
 
     wall_ledger_file: str, optional
         File for the shaped-wall deposition ledger (active with any
@@ -3524,6 +3537,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_conduction_scale=None,
         wall_heat_flux_cap=None,
         wall_heat_flux_cap_factor=None,
+        wall_heat_flux_cap_factor_electron=None,
+        wall_heat_flux_cap_factor_ion=None,
         wall_ledger_file=None,
         wall_band_eta_override=None,
         wall_field_freeze=None,
@@ -3658,6 +3673,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_conduction_scale = wall_conduction_scale
         self.wall_heat_flux_cap = wall_heat_flux_cap
         self.wall_heat_flux_cap_factor = wall_heat_flux_cap_factor
+        self.wall_heat_flux_cap_factor_electron = wall_heat_flux_cap_factor_electron
+        self.wall_heat_flux_cap_factor_ion = wall_heat_flux_cap_factor_ion
         self.wall_ledger_file = wall_ledger_file
         self.wall_band_eta_override = wall_band_eta_override
         self.wall_field_freeze = wall_field_freeze
@@ -3845,6 +3862,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_conduction_scale = self.wall_conduction_scale
         implicit_mhd.wall_heat_flux_cap = self.wall_heat_flux_cap
         implicit_mhd.wall_heat_flux_cap_factor = self.wall_heat_flux_cap_factor
+        implicit_mhd.wall_heat_flux_cap_factor_electron = (
+            self.wall_heat_flux_cap_factor_electron
+        )
+        implicit_mhd.wall_heat_flux_cap_factor_ion = (
+            self.wall_heat_flux_cap_factor_ion
+        )
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
         implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
         implicit_mhd.wall_field_freeze = self.wall_field_freeze
