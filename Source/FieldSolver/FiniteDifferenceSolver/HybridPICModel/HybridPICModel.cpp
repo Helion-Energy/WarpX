@@ -5158,8 +5158,18 @@ void HybridPICModel::QDSMCApplyFastIonHeating (int const lev) const
             // sits below it (only reachable for a negative deposit).
             amrex::Real const te_min_K = amrex::min(Te_K, te_floor_K);
             if (Te_new < te_min_K) {
+                // (te_min_K - Te_new) > 0 inside this branch: the tally books
+                // the energy the floor DECLINED to remove, positive-definite,
+                // matching m_energy_sink_declined_J's convention at the sink
+                // clamp above. This read (Te_new - te_min_K) and therefore
+                // accumulated the same physical quantity with the opposite
+                // sign, so stopping_floor would have reported declined energy
+                // as negative in the joule_dropped_J line -- readable as a
+                // gain, and silently cancelling against the other channels if
+                // summed. Physics was never affected: Te_new = te_min_K is
+                // applied identically either way.
                 decl_arr(i,j,k) += ne * PhysConst::kb
-                    * (Te_new - te_min_K) / gamma_minus_1;
+                    * (te_min_K - Te_new) / gamma_minus_1;
                 Te_new = te_min_K;
             }
             Te_arr(i,j,k) = Te_new;
