@@ -3748,7 +3748,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.fluid_reconstruction = self.fluid_reconstruction
         implicit_mhd.reconstruction_kappa = self.reconstruction_kappa
         implicit_mhd.central_dissipation = self.central_dissipation
-        implicit_mhd.viscosity = self.viscosity
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value
