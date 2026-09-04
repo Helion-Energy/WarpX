@@ -18,21 +18,24 @@
 # per channel, with no clamp bookkeeping, and every cap this deck's
 # ctests select is the smooth harmonic form q_unl/(1 + q_unl/q_cap):
 #
-#   sonic          (CLI wall_heat_flux_cap=sonic): q_cap = f n kB T_s c_s,
-#                  f = 2.5 by default (1.25 in the factor twin);
+#   sonic          (CLI wall_heat_flux_cap=sonic): q_cap = f_s n kB T_s c_s
+#                  at the INTERIOR (sheath-edge) state of the wall ring,
+#                  f_e = 5.0, f_i = 2.5 by default (1.25 both in the
+#                  shared-factor twin);
 #   free_streaming (dirichlet_limited with the knob UNSET, and the knob's
 #                  free_streaming override on the hard pin, which must be
-#                  bit-identical to it): q_cap = n kB T_s v_th,s.
+#                  bit-identical to it): q_cap = n kB T_s v_th,s at the
+#                  reservoir-averaged face temperature.
 #
-# chi is chosen so that the uncapped drain sits within ~20 percent of
-# the SONIC cap at the initial state (q_unl/q_cap = 1.1 ion, 1.2
-# electron), where the harmonic cap lands near q_cap/2 -- two-fold away
-# from both the uncapped value and a hard min(q_unl, q_cap), so the FORM
-# of the cap is gated, not only its magnitude. The face state the cap
-# reads is the end-of-step (theta = 1) reservoir average, so the analysis
-# solves the nonlinear backward-Euler first step of the capped column
-# (the two channels couple through c_s) and gates the measured ring and
-# column drains per channel at 1 percent.
+# chi is chosen so that the uncapped drain sits within a factor ~1.5 of
+# the SONIC cap at the initial state (q_unl/q_cap = 0.8 electron, 1.5
+# ion), where the harmonic cap lands near q_cap/2 -- well away from both
+# the uncapped value and a hard min(q_unl, q_cap), so the FORM of the cap
+# is gated, not only its magnitude. The state the cap reads is the
+# end-of-step (theta = 1) wall-ring state, so the analysis solves the
+# nonlinear backward-Euler first step of the capped column (the two
+# channels couple through c_s) and gates the measured ring and column
+# drains per channel at 1 percent.
 my_constants.n0 = 1.0e18
 my_constants.rho0 = n0 * m_p
 my_constants.Te0_ev = 100.0
@@ -47,16 +50,16 @@ my_constants.Lz = 0.1
 my_constants.nr = 8
 my_constants.nz = 8
 # constant isotropic operator diffusivity [m^2/s], both channels
-my_constants.chi = 700.0
-# chi dt/dr^2 = 0.018 (dr = Lr/nr = 0.0125 m): the uncapped half-cell wall
-# rate is 2 * 0.018 * (r_face/r_centre) = 0.04 per step, the capped one
-# about half of it, so the wall ring drops ~2 percent of (e0 - e_wall) on
+my_constants.chi = 2500.0
+# chi dt/dr^2 = 0.048 (dr = Lr/nr = 0.0125 m): the uncapped half-cell wall
+# rate is 2 * 0.048 * (r_face/r_centre) = 0.107 per step, the capped one
+# about half of it, so the wall ring drops ~5 percent of (e0 - e_wall) on
 # the first step -- resolved to 1e-12 by the Newton tolerances. The
-# acoustic response of the cooling ring (sound CFL 0.035 per step) does
+# acoustic response of the cooling ring (sound CFL 0.036 per step) does
 # p dV work on the interior that the conduction model does not carry;
-# its share of the first-step drain scales with dt and sits at ~0.5
+# its share of the first-step drain scales with dt and stays below 0.5
 # percent of the smallest (free-streaming ion) signal at this step.
-my_constants.dt = 4.0e-9
+my_constants.dt = 3.0e-9
 
 #################################
 ####### GENERAL PARAMETERS ######

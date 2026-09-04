@@ -26,20 +26,25 @@ Every cap the ctests select is the smooth harmonic form
 
     q = q_unl / (1 + q_unl / q_cap),
 
-  mode = "sonic":          q_cap = f n kB T_s c_s,
-                           c_s^2 = gamma (kB Te + kB Ti)/m_i,
-                           f = 2.5 unless given on the command line;
+  mode = "sonic":          q_cap = f_s n kB T_s c_s at the INTERIOR
+                           (sheath-edge) state of the wall-adjacent cell,
+                           c_s^2 = gamma (kB Te + kB Ti)/m_i; f_e = 5.0,
+                           f_i = 2.5 unless a shared factor is given on the
+                           command line (it sets both, like the solver's
+                           implicit_mhd.wall_heat_flux_cap_factor);
   mode = "free_streaming": q_cap = f n kB T_s v_th,s, v_th,s = sqrt(kB
-                           T_s/m_s), f = 1 (the legacy factor with
+                           T_s/m_s), from the RESERVOIR-AVERAGED face
+                           temperatures (T_interior + T_wall)/2, f = 1
+                           (the legacy factor with
                            conduction_flux_limit_factor unset) -- the
                            knob-unset dirichlet_limited pin, and the
                            knob's free_streaming override on the hard pin.
 
-n, Te and Ti are the face state the cap reads: the interior density and
-the reservoir-averaged temperatures (T_interior + T_wall)/2, at the
-END-of-step state (theta = 1, conduction_coefficient_state = theta). So
-the first implicit step of the capped column is a NONLINEAR backward-Euler
-step in which the two channels couple through c_s. This analysis solves
+n is the interior density in both forms (the face density of a wall face
+is the interior side's). Both read the END-of-step state (theta = 1,
+conduction_coefficient_state = theta), so the first implicit step of the
+capped column is a NONLINEAR backward-Euler step in which the two
+channels couple through c_s. This analysis solves
 it (a fixed-point iteration over the wall sinks around the exact linear
 interior column, contraction factor ~ the half-cell diffusion number)
 and gates, per channel, the measured first-step wall-ring and column
@@ -67,6 +72,13 @@ yt.set_log_level(50)
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 z_end = "--z-end" in sys.argv[1:]
+mode = args[1]
+assert mode in ("sonic", "free_streaming"), f"unknown mode {mode}"
+# per-species factors: the sonic defaults are the solver's literals; a
+# positional factor is the SHARED override and sets both
+factors = {"electron": 5.0, "ion": 2.5} if mode == "sonic" else {"electron": 1.0, "ion": 1.0}
+if len(args) > 2:
+    factors = {s: float(args[2]) for s in factors}
 # z-end only: the deck's conduction-paced dt = 0.5 dz^2/chi_op scaled by
 # this factor on the command line (my_constants.dt=<factor>*0.5*dz^2/chi_op)
 dt_factor = 1.0
@@ -74,9 +86,6 @@ for a in sys.argv[1:]:
     if a.startswith("--dt-factor="):
         dt_factor = float(a.split("=", 1)[1])
 diag_dir = args[0]
-mode = args[1]
-assert mode in ("sonic", "free_streaming"), f"unknown mode {mode}"
-factor = float(args[2]) if len(args) > 2 else (2.5 if mode == "sonic" else 1.0)
 
 # WarpX PhysConst / ablastr::constant values (the parser's m_p, q_e, ...)
 proton_mass = 1.67262192595e-27
@@ -90,8 +99,8 @@ if not z_end:
     Te0_ev, Ti0_ev, Twall_ev = 100.0, 40.0, 2.0
     Lr, Lz, nr, nz = 0.1, 0.1, 8, 8
     dn = Lr / nr  # face-normal cell size
-    chi_op = 700.0  # constant isotropic operator diffusivity, both channels
-    dt = 4.0e-9
+    chi_op = 2500.0  # constant isotropic operator diffusivity, both channels
+    dt = 3.0e-9
     nsteps = 4
     # the mask's conductor cells, exactly as ImplicitMHDWallMask builds it;
     # the interface is the grid face above the last interior cell
@@ -187,22 +196,27 @@ def temperature_ev(e_spec, s):
     return e_spec / e_per_ev[s]
 
 
-def cap_flux(s, t_face):
-    """q_cap of channel s at the face temperatures t_face[species] (eV)."""
-    n_kb_t = n0 * qe * t_face[s]
+def cap_flux(s, t_cell):
+    """q_cap of channel s for the wall-adjacent cell temperatures
+    t_cell[species] (eV): the sonic form reads them directly (the
+    interior, sheath-edge state); the free-streaming form reads the
+    reservoir average (T_cell + T_wall)/2 of its own species."""
     if mode == "sonic":
-        speed = np.sqrt(gamma * qe * (t_face["electron"] + t_face["ion"]) / proton_mass)
+        n_kb_t = n0 * qe * t_cell[s]
+        speed = np.sqrt(gamma * qe * (t_cell["electron"] + t_cell["ion"]) / proton_mass)
     else:
-        speed = np.sqrt(qe * t_face[s] / species_mass[s])
-    return factor * n_kb_t * speed
+        t_face = 0.5 * (t_cell[s] + Twall_ev)
+        n_kb_t = n0 * qe * t_face
+        speed = np.sqrt(qe * t_face / species_mass[s])
+    return factors[s] * n_kb_t * speed
 
 
-def wall_flux(s, e_cell, t_face, form):
+def wall_flux(s, e_cell, t_cell, form):
     """Wall exchange of channel s [W/m^2] for a cell energy e_cell."""
     q_unl = chi_op * rho0 * (e_cell - e_wall[s]) * 2.0 / dn
     if form == "uncapped":
         return q_unl
-    q_cap = cap_flux(s, t_face)
+    q_cap = cap_flux(s, t_cell)
     if form == "hard_min":
         return min(q_unl, q_cap) if q_unl >= 0.0 else max(q_unl, -q_cap)
     return q_unl / (1.0 + abs(q_unl) / q_cap)
@@ -222,11 +236,10 @@ def first_step(form):
         for s in channels:
             rhs = np.full(n_cells, e0[s])
             for cell, weight in wall_faces:
-                t_face = {
-                    sp: 0.5 * (temperature_ev(e_new[sp][cell], sp) + Twall_ev)
-                    for sp in channels
+                t_cell = {
+                    sp: temperature_ev(e_new[sp][cell], sp) for sp in channels
                 }
-                q = wall_flux(s, e_new[s][cell], t_face, form)
+                q = wall_flux(s, e_new[s][cell], t_cell, form)
                 rhs[cell] -= dt * weight / dn * q / rho0
             e_new[s] = solve(matrix, rhs)
         change = max(
@@ -247,7 +260,10 @@ for step, state in enumerate(states):
         assert np.isfinite(field).all(), f"{name} not finite at step {step}"
 measured = [profiles(s) for s in states]
 
-print(f"mode = {mode}, f = {factor}, geometry = {'z-end' if z_end else 'shaped wall'}")
+print(
+    f"mode = {mode}, f_e = {factors['electron']}, f_i = {factors['ion']}, "
+    f"geometry = {'z-end' if z_end else 'shaped wall'}"
+)
 
 # ---- the initial column is uniform ----------------------------------
 for s in channels:
@@ -258,14 +274,14 @@ for s in channels:
 # ---- the cap is BINDING but not saturating at the initial state -----
 # (so the harmonic value sits well away from both limits and the gate
 # below discriminates the form of the cap)
-t_face0 = {s: 0.5 * (T0[s] + Twall_ev) for s in channels}
+t_cell0 = {s: T0[s] for s in channels}
 for s in channels:
-    q_unl0 = wall_flux(s, e0[s], t_face0, "uncapped")
-    q_cap0 = cap_flux(s, t_face0)
+    q_unl0 = wall_flux(s, e0[s], t_cell0, "uncapped")
+    q_cap0 = cap_flux(s, t_cell0)
     print(
         f"  {s}: q_unl = {q_unl0:.4e} W/m^2, q_cap = {q_cap0:.4e} W/m^2, "
         f"q_unl/q_cap = {q_unl0 / q_cap0:.3f}, harmonic/q_cap = "
-        f"{wall_flux(s, e0[s], t_face0, 'harmonic') / q_cap0:.3f}"
+        f"{wall_flux(s, e0[s], t_cell0, 'harmonic') / q_cap0:.3f}"
     )
 
 # ---- FIRST-STEP drain per channel against the three column models ---
@@ -368,4 +384,7 @@ if not z_end:
 newton_history = np.atleast_2d(np.loadtxt(f"{diag_dir}/newton.txt"))
 assert 1 <= newton_history[-1][2] <= 20
 
-print(f"wall_heat_flux_cap ({mode}, f = {factor}): all gates passed")
+print(
+    f"wall_heat_flux_cap ({mode}, f_e = {factors['electron']}, "
+    f"f_i = {factors['ion']}): all gates passed"
+)

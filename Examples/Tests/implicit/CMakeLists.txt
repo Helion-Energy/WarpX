@@ -2059,14 +2059,15 @@ add_warpx_test(
 # Ti0 = 40 eV -- distinct, so a sound speed built from one species'
 # temperature alone cannot pass) inside a straight cylinder wall under
 # the hard dirichlet pin with a constant isotropic chi in both channels,
-# chi chosen so the uncapped half-cell drain sits within ~20 percent of
-# the sheath cap q_cap = 2.5 n kB T_s c_s, c_s^2 = gamma (kB Te + kB
-# Ti)/m_i: the harmonic cap then lands near q_cap/2, two-fold away from
-# both the uncapped value and a hard min. The analysis solves the
+# chi chosen so the uncapped half-cell drain sits within a factor ~1.5
+# of the sheath cap q_cap = f_s n kB T_s c_s (f_e = 5, f_i = 2.5, c_s^2
+# = gamma (kB Te + kB Ti)/m_i, all at the INTERIOR sheath-edge state of
+# the wall ring): the harmonic cap then lands near q_cap/2, well away
+# from both the uncapped value and a hard min. The analysis solves the
 # nonlinear backward-Euler first step of the capped column (the cap
-# reads the end-of-step face state, coupling the channels through c_s)
+# reads the end-of-step ring state, coupling the channels through c_s)
 # and gates the measured per-channel ring and column drains at 1
-# percent, plus the FORM (5 percent separation from uncapped/hard-min)
+# percent, plus the FORM (2.5 percent separation from uncapped/hard-min)
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_heat_flux_cap_sonic  # name
     RZ  # dims
@@ -2077,14 +2078,29 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# ...the factor plumbing: an explicit wall_heat_flux_cap_factor = 1.25
-# halves the sonic cap and the same gate follows it
+# ...the SHARED factor plumbing: wall_heat_flux_cap_factor = 1.25 sets
+# both species' factors (f_e 5 -> 1.25, f_i 2.5 -> 1.25) and the same
+# gate follows it
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_heat_flux_cap_sonic_factor  # name
     RZ  # dims
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_heat_flux_cap=sonic implicit_mhd.wall_heat_flux_cap_factor=1.25"  # inputs
     "analysis_mhd_wall_heat_flux_cap.py diags sonic 1.25"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ...and the PRODUCTION ion closure: the same sonic gate under
+# ion_closure = dual_energy, where the single capped conductive flux is
+# booked into both ion registers and the preconditioner splits one
+# capped conductance by the kinetic fraction
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_sonic_dual_energy  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_heat_flux_cap=sonic implicit_mhd.ion_closure=dual_energy"  # inputs
+    "analysis_mhd_wall_heat_flux_cap.py diags sonic"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -2816,8 +2832,8 @@ add_warpx_test(
 # ...and the z-end exchange OBEYS the cap: the same column under
 # wall_heat_flux_cap = sonic (diagnostics every step) must land on the
 # nonlinear capped backward-Euler column at both end faces -- the z-end
-# face state (interior/ghost-image average) feeds the sheath cap
-# exactly like the shaped-wall reservoir average does. dt is halved
+# interior (domain-side) cell state feeds the sheath cap exactly like
+# the shaped-wall interior state does. dt is halved
 # against the base deck so the acoustic p dV contamination of the ion
 # internal-energy recovery (which scales with dt) stays inside the gate
 add_warpx_test(
