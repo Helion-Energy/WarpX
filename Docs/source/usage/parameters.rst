@@ -4138,9 +4138,51 @@ Maxwell solver: kinetic-fluid hybrid
 
     Deposited-weight threshold, in :math:`m^{-3}`, for the QDSMC electron-energy-equation update: cells whose
     deposited marker weight is at or below this value are skipped and keep their previous electron temperature
-    (guarding the division by the deposited weight in cells no QDSMC marker reached). The density floor used in
-    the :math:`K_e \leftrightarrow T_e` conversion itself is :pp:param:`hybrid_pic_model.n_floor`.
+    (guarding the division by the deposited weight in cells no QDSMC marker reached). It also gates the
+    conduction open set. The density floor used in the :math:`K_e \leftrightarrow T_e` conversion itself is
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`.
     Defaults to :pp:param:`hybrid_pic_model.n_floor`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Density floor, in :math:`m^{-3}`, for the electron-energy *representation*, decoupled from
+    :pp:param:`hybrid_pic_model.n_floor`.
+
+    ``n_floor`` is a property of the **field** model: it keeps Ohm's law non-singular (:math:`J/en`) and
+    sets the resistive vacuum region. The :math:`T_e \rightarrow K_e` conversion, its recovery and the
+    adiabat seed need only numerical **positivity**, which is a property of the representation. Sharing one
+    knob means the electron-energy floor cannot be lowered without also moving the Ohm's-law floor.
+
+    Applied at three sites: the adiabat :math:`T_e` seed, the :math:`T_e \rightarrow K_e` forward conversion
+    and the :math:`K_e \rightarrow T_e` recovery. The forward conversion and the recovery necessarily share
+    this floor, so that the round trip is exact for a marker that did not move. The advection-velocity guard
+    is deliberately not included.
+
+    Defaults to :pp:param:`hybrid_pic_model.n_floor`, so a deck that does not set it is bit-for-bit
+    unchanged.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_flux_budget
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Bound the finite-difference conduction fluxes by the energy each node actually holds above
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor`, instead of repairing an undershoot afterwards.
+
+    The temperature floor is a post-hoc clamp: it lifts an undershot node back to the floor and books the
+    energy it had to manufacture. With this bound armed, each node's total outgoing flux is compared against
+    :math:`B_i = \tfrac{3}{2} n_e k_B (T_i - T_\mathrm{floor})/\Delta t_c` and every face flux is scaled by
+    the ratio :math:`R = \min(1, B/\mathrm{OUT})` of its **donor** node. A face is scaled once and both
+    neighbours read the identical value, so the telescoping sum is preserved exactly: nothing is created or
+    destroyed and the withheld heat stays in the donor.
+
+    The bound is taken over the whole conduction substep rather than per stage, so it removes the systematic
+    over-drain that makes the floor fire repeatedly; it is not a per-stage positivity proof. Requires
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` to be positive. Costs one extra pass and two
+    ghost exchanges per right-hand-side evaluation. With the bound inactive the result is unchanged.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
