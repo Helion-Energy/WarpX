@@ -1932,47 +1932,82 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //                       (conduction_flux_limit_factor when set, else 1);
     //                       z_wall_conduction: uncapped.
     //   "none"           -- both wall families uncapped.
-    //   "free_streaming" -- both capped at f n kB T_s v_th,s with
-    //                       v_th,s = sqrt(kB T_s/m_s), the existing wall
-    //                       cap; f = wall_heat_flux_cap_factor when set,
-    //                       else the legacy factor above.
-    //   "sonic"          -- both capped at the SHEATH-limited advective
-    //                       heat flux q_cap = f n kB T_s c_s with
-    //                       c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i
-    //                       (= gamma (kB Te + kB Ti)/m_i for a shared
-    //                       adiabatic index) from the face state's n, Te,
-    //                       Ti; f = wall_heat_flux_cap_factor when set,
-    //                       else 2.5 (the enthalpy flux gamma/(gamma - 1)
-    //                       at 5/3). Physics: the sheath potential drop
-    //                       is small against the plasma temperature, so
-    //                       the heat the wall can take is bounded by
-    //                       advection at the local sound speed -- per
-    //                       species, and NOT by the species' own thermal
-    //                       speed (60x c_s for electrons), which is what
-    //                       the free-streaming cap allows.
+    //   "free_streaming" -- both capped at f_s n kB T_s v_th,s with
+    //                       v_th,s = sqrt(kB T_s/m_s) from the coefficient-
+    //                       state RESERVOIR-AVERAGED face state the pre-knob
+    //                       wall cap read (bit-identity); f_s per species
+    //                       as below, legacy factor by default.
+    //   "sonic"          -- both capped at the SHEATH-limited heat flux
+    //                       q_cap = f_s n kB T_s c_s evaluated at the
+    //                       INTERIOR (sheath-edge, plasma-side) state of the
+    //                       wall-adjacent cell -- n, Te, Ti of the interior
+    //                       side at the coefficient state; the wall
+    //                       temperature does not enter a sheath flux -- with
+    //                       c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i, the
+    //                       ADIABATIC two-fluid sound speed (not the Bohm
+    //                       isothermal-electron form, 11 percent lower at
+    //                       Te = Ti). Physics: the sheath potential drop is
+    //                       small against the plasma temperature, so the
+    //                       heat the wall can take is bounded by advection
+    //                       at the local sound speed, per species -- not by
+    //                       the species' own thermal speed (v_te/c_s = 23-33
+    //                       for H-D at Te = Ti), which is what the
+    //                       free-streaming cap allows.
+    // Factors f_s (implicit_mhd.wall_heat_flux_cap_factor_{electron,ion}):
+    // per species; implicit_mhd.wall_heat_flux_cap_factor is a shared
+    // override that sets BOTH when given, and the per-species knobs win
+    // where both are set. All three require a capping mode. Defaults under
+    // sonic are literals: f_e = 5.0, the floating-wall sheath transmission
+    // gamma_e ~ 2 + e|phi_sh|/(kB Te) ~ 5 for deuterium; f_i = 2.5, the ion
+    // enthalpy transmission gamma/(gamma - 1) at 5/3. Under free_streaming
+    // the default is the legacy factor for both.
     // Every capped form is the SAME smooth harmonic cap the existing wall
     // and interior limiters use, drain /= 1 + |drain|/q_cap, with the
     // emitted preconditioner conductance divided by the same factor, so
     // the residual stays C-infinity in the state and the rows keep
-    // factoring the drain. The face state is the coefficient-state
-    // (conduction_coefficient_state) reservoir average the existing wall
-    // cap already reads: n from the interior side, T_s = (T_interior +
-    // T_wall)/2 at a shaped-wall face and the interior/ghost-image
-    // average at a z-end face; Ti enters as 0 where the ion channel
-    // carries no temperature (outside total_energy/dual_energy). NEVER
-    // silent: the resolved cap of each wall family is printed in the
-    // solver banner.
+    // factoring the drain.
+    // CORNER cells: the cap acts on the per-face exchange BEFORE the corner
+    // weight w (i.e. |drain|/(q_cap w) on the weighted drain), so a
+    // saturated two-face corner drains sqrt(2) q_cap -- one wall of the
+    // vector area, which is what the weight was introduced for -- not
+    // 2 q_cap. Exact on flat walls (w == 1), so every flat-wall path is
+    // bit-identical; legacy CAPPED corner cells (outflow_limited /
+    // dirichlet_limited on a stepped contour) change by this factor.
+    // Preconditioner row: the emitted conductance is the SECANT
+    // drain/(e - bath) of the capped exchange, not its tangent
+    // 1/(1 + |D|/Q)^2 -- the convention of the pre-existing capped wall
+    // modes; where the cap binds it overstates the row by (1 + |D|/Q),
+    // which costs GMRES iterations only (measured equal or fewer with the
+    // cap on), never the converged answer.
+    // Monotonicity: for a draining wall (interior hotter than the bath)
+    // the capped exchange is monotone in the interior energy for any
+    // state-dependent q_cap. For a heating wall (a sub-T_wall cell under a
+    // dirichlet pin) the inflow is bounded by q_cap of the cold interior
+    // state (sonic: it vanishes with T_interior, so the bath never heats a
+    // cell faster than that cell's own sheath flux) and is anti-diffusive
+    // when saturated with a LIVE coefficient state (conduction_
+    // coefficient_state = theta); under step_old q_cap is a per-solve
+    // constant and monotonicity is exact. Production anchors T_wall at the
+    // temperature floor, which leaves the heating branch dormant.
+    // Ti enters as 0 where the ion channel carries no temperature (outside
+    // total_energy / dual_energy), leaving c_s the electron-only value.
+    // NEVER silent: the resolved cap and factors of each wall family are
+    // printed in the solver banner.
     enum class WallHeatFluxCap { unset, none, free_streaming, sonic };
     std::string m_wall_heat_flux_cap;
     WallHeatFluxCap m_wall_heat_flux_cap_mode = WallHeatFluxCap::unset;
-    // implicit_mhd.wall_heat_flux_cap_factor: the f above; negative =
-    // unset (resolved per mode as documented). Requires a capping mode.
+    // implicit_mhd.wall_heat_flux_cap_factor{,_electron,_ion}: negative =
+    // unset (resolved per mode and species as documented above).
     amrex::Real m_wall_heat_flux_cap_factor = -1.0;
-    // The resolved f the kernel multiplies: the factor when given; else
-    // 2.5 under sonic; else the legacy conduction_flux_limit_factor-or-1
+    amrex::Real m_wall_heat_flux_cap_factor_electron = -1.0;
+    amrex::Real m_wall_heat_flux_cap_factor_ion = -1.0;
+    // The resolved per-species f the kernel multiplies: the per-species
+    // factor when given; else the shared factor when given; else 5.0 (e) /
+    // 2.5 (i) under sonic; else the legacy conduction_flux_limit_factor-or-1
     // (the identical double the pre-knob wall_conduction_limit host
     // constant carried, so the limited modes are bit-identical).
-    amrex::Real m_wall_heat_flux_cap_factor_effective = 1.0;
+    amrex::Real m_wall_heat_flux_cap_factor_effective_electron = 1.0;
+    amrex::Real m_wall_heat_flux_cap_factor_effective_ion = 1.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).

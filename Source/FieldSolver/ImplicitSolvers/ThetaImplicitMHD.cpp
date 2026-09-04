@@ -41,6 +41,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <iomanip>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -705,19 +706,37 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "f n kB T v_th cap) or 'sonic' (the sheath-limited "
             "f n kB T c_s cap); unset keeps the per-mode defaults");
     }
+    // Factors (see the header): a shared override that sets both species,
+    // and per-species knobs that win over it. All three require a capping
+    // mode; every given value must be positive.
     const bool has_wall_heat_flux_cap_factor = utils::parser::queryWithParser(
         pp, "wall_heat_flux_cap_factor", m_wall_heat_flux_cap_factor);
+    const bool has_wall_heat_flux_cap_factor_electron =
+        utils::parser::queryWithParser(pp, "wall_heat_flux_cap_factor_electron",
+                                       m_wall_heat_flux_cap_factor_electron);
+    const bool has_wall_heat_flux_cap_factor_ion =
+        utils::parser::queryWithParser(pp, "wall_heat_flux_cap_factor_ion",
+                                       m_wall_heat_flux_cap_factor_ion);
+    const bool has_any_wall_heat_flux_cap_factor =
+        has_wall_heat_flux_cap_factor || has_wall_heat_flux_cap_factor_electron ||
+        has_wall_heat_flux_cap_factor_ion;
     const bool wall_heat_flux_cap_on =
         (m_wall_heat_flux_cap_mode == WallHeatFluxCap::free_streaming ||
          m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !has_wall_heat_flux_cap_factor || wall_heat_flux_cap_on,
-        "implicit_mhd.wall_heat_flux_cap_factor scales a wall heat-flux "
-        "cap and requires implicit_mhd.wall_heat_flux_cap = free_streaming "
-        "or sonic (unset and 'none' carry no factor)");
+        !has_any_wall_heat_flux_cap_factor || wall_heat_flux_cap_on,
+        "implicit_mhd.wall_heat_flux_cap_factor{,_electron,_ion} scale a "
+        "wall heat-flux cap and require implicit_mhd.wall_heat_flux_cap = "
+        "free_streaming or sonic (unset and 'none' carry no factor)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !has_wall_heat_flux_cap_factor || m_wall_heat_flux_cap_factor > 0.0_rt,
-        "implicit_mhd.wall_heat_flux_cap_factor must be positive");
+        (!has_wall_heat_flux_cap_factor ||
+         m_wall_heat_flux_cap_factor > 0.0_rt) &&
+            (!has_wall_heat_flux_cap_factor_electron ||
+             m_wall_heat_flux_cap_factor_electron > 0.0_rt) &&
+            (!has_wall_heat_flux_cap_factor_ion ||
+             m_wall_heat_flux_cap_factor_ion > 0.0_rt),
+        "implicit_mhd.wall_heat_flux_cap_factor{,_electron,_ion} must be "
+        "positive");
     // The legacy wall cap factor of the limited modes, the exact expression
     // the kernel's wall_conduction_limit host constant carried before the
     // knob existed (conduction_flux_limit_factor is final at this point).
@@ -725,13 +744,24 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         (m_conduction_flux_limit_factor > 0.0_rt)
             ? m_conduction_flux_limit_factor
             : 1.0_rt;
-    if (has_wall_heat_flux_cap_factor) {
-        m_wall_heat_flux_cap_factor_effective = m_wall_heat_flux_cap_factor;
-    } else if (m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic) {
-        m_wall_heat_flux_cap_factor_effective = 2.5_rt;
-    } else {
-        m_wall_heat_flux_cap_factor_effective = legacy_wall_cap_factor;
-    }
+    const bool wall_heat_flux_cap_sonic =
+        (m_wall_heat_flux_cap_mode == WallHeatFluxCap::sonic);
+    // Per species: own knob > shared knob > mode default (sonic literals
+    // 5.0 electron / 2.5 ion, see the header; legacy otherwise).
+    m_wall_heat_flux_cap_factor_effective_electron =
+        has_wall_heat_flux_cap_factor_electron
+            ? m_wall_heat_flux_cap_factor_electron
+            : (has_wall_heat_flux_cap_factor
+                   ? m_wall_heat_flux_cap_factor
+                   : (wall_heat_flux_cap_sonic ? 5.0_rt
+                                               : legacy_wall_cap_factor));
+    m_wall_heat_flux_cap_factor_effective_ion =
+        has_wall_heat_flux_cap_factor_ion
+            ? m_wall_heat_flux_cap_factor_ion
+            : (has_wall_heat_flux_cap_factor
+                   ? m_wall_heat_flux_cap_factor
+                   : (wall_heat_flux_cap_sonic ? 2.5_rt
+                                               : legacy_wall_cap_factor));
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -3172,12 +3202,20 @@ std::string ThetaImplicitMHD::WallHeatFluxCapDescription () const
         (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::outflow_limited ||
          wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
          wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
+    const auto tidy = [] (const amrex::Real value) {
+        std::ostringstream stream;
+        stream << std::setprecision(6) << value;
+        return stream.str();
+    };
     const std::string factor =
-        ", f = " + std::to_string(m_wall_heat_flux_cap_factor_effective);
+        ", f_e = " + tidy(m_wall_heat_flux_cap_factor_effective_electron) +
+        ", f_i = " + tidy(m_wall_heat_flux_cap_factor_effective_ion);
     const std::string free_streaming =
-        "free_streaming (f n kB T_s v_th,s)" + factor;
+        "free_streaming (f_s n kB T_s v_th,s, reservoir-averaged face state)" +
+        factor;
     const std::string sonic =
-        "sonic (f n kB T_s c_s, c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i)" +
+        "sonic (f_s n kB T_s c_s at the interior sheath-edge state, "
+        "c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i)" +
         factor;
     std::string shaped;
     std::string z_end;
@@ -7632,14 +7670,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // conduction-type Newton hostility the TC arms die of, switched on
     // at every wall face at once.
     //
-    // The factor f of whichever wall cap is live (see
-    // m_wall_heat_flux_cap_factor_effective): with wall_heat_flux_cap
-    // unset it is the legacy expression, conduction_flux_limit_factor
-    // when set else 1 -- the identical double, so the limited modes are
-    // bit-identical -- otherwise the resolved override (2.5 default under
-    // sonic).
-    const amrex::Real wall_conduction_limit =
-        m_wall_heat_flux_cap_factor_effective;
+    // The per-species factors f_s of whichever wall cap is live (see
+    // m_wall_heat_flux_cap_factor_effective_{electron,ion}): with
+    // wall_heat_flux_cap unset both are the legacy expression,
+    // conduction_flux_limit_factor when set else 1 -- the identical
+    // double, so the limited modes are bit-identical -- otherwise the
+    // resolved overrides (5.0 / 2.5 defaults under sonic).
+    const amrex::Real wall_cap_factor_electron =
+        m_wall_heat_flux_cap_factor_effective_electron;
+    const amrex::Real wall_cap_factor_ion =
+        m_wall_heat_flux_cap_factor_effective_ion;
     // Conductive z-end exchange (implicit_mhd.z_wall_conduction; see the
     // header): the z domain END boundary faces of the z-face family carry
     // a HARD half-cell Dirichlet exchange against the z_wall_temperature
@@ -8771,6 +8811,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
                 amrex::Real face_jmag = 0.0_rt;
+                // INTERIOR (sheath-edge) state of a capped wall face for the
+                // sonic cap (implicit_mhd.wall_heat_flux_cap = sonic; see
+                // the header): the plasma-side cell's coefficient-state
+                // charge density and temperatures, NOT the reservoir
+                // average the free-streaming cap keeps. Zero and unused
+                // unless a sonic cap is live at this face.
+                amrex::Real interior_charge_density = 0.0_rt;
+                amrex::Real interior_te = 0.0_rt;
+                amrex::Real interior_ti = 0.0_rt;
                 if (chi_needs_state || wall_face ||
                     (z_end_wall_face && z_wall_capped)) {
                     face_charge_density =
@@ -8785,12 +8834,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                              : coeff_pe_left;
                         face_te = 0.5_rt * (interior_pe * inverse_nkb +
                                             wall_te_kelvin);
+                        amrex::Real interior_pi = 0.0_rt;
                         if (chi_total_energy) {
-                            const amrex::Real interior_pi =
+                            interior_pi =
                                 wall_left_masked ? coeff_pi_right
                                                  : coeff_pi_left;
                             face_ti = 0.5_rt * (interior_pi * inverse_nkb +
                                                 wall_te_kelvin);
+                        }
+                        if (wall_cap_sonic) {
+                            // at a shaped-wall face the face density IS the
+                            // interior side's (see face_density above)
+                            interior_charge_density = face_charge_density;
+                            interior_te = interior_pe * inverse_nkb;
+                            interior_ti = interior_pi * inverse_nkb;
                         }
                     } else {
                         face_te = 0.5_rt *
@@ -8801,6 +8858,30 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                 0.5_rt *
                                 (coeff_pi_left + coeff_pi_right) *
                                 inverse_nkb;
+                        }
+                        if (z_end_wall_face && z_wall_cap_sonic) {
+                            // z-end face: the interior side is the domain
+                            // cell (left of a z_hi face, right of a z_lo
+                            // face); the ghost carries the wall image.
+                            const amrex::Real interior_density =
+                                z_end_hi_face ? coeff_density_left
+                                              : coeff_density_right;
+                            interior_charge_density = std::max(
+                                chi_charge_to_mass * interior_density,
+                                chi_charge_floor);
+                            const amrex::Real interior_inverse_nkb =
+                                PhysConst::q_e /
+                                (interior_charge_density * PhysConst::kb);
+                            interior_te =
+                                (z_end_hi_face ? coeff_pe_left
+                                               : coeff_pe_right) *
+                                interior_inverse_nkb;
+                            if (chi_total_energy) {
+                                interior_ti =
+                                    (z_end_hi_face ? coeff_pi_left
+                                                   : coeff_pi_right) *
+                                    interior_inverse_nkb;
+                            }
                         }
                     }
                     if (chi_any_parser) {
@@ -8966,38 +9047,55 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // constants), shared by the shaped-wall drain and the
                 // z-end exchange of BOTH species so the four sites cannot
                 // drift apart:
-                //   free_streaming: f n kB T_s v_th,s, v_th,s = sqrt(kB
-                //                   T_s/m_s) -- the pre-knob wall cap in
-                //                   its identical floating-point
-                //                   association;
-                //   sonic:          f n kB T_s c_s, c_s^2 = (gamma_e kB Te
-                //                   + gamma_i kB Ti)/m_i -- the sheath-
-                //                   limited advective heat flux.
-                // The face state is the coefficient-state reservoir
-                // average (face_te/face_ti, NOT the conduction-stage
-                // cap_te/cap_ti), exactly as the existing wall cap reads
-                // it; Ti is 0 where the ion channel carries no
-                // temperature, which leaves c_s the electron-only value.
+                //   free_streaming: f_s n kB T_s v_th,s, v_th,s = sqrt(kB
+                //                   T_s/m_s) from the coefficient-state
+                //                   RESERVOIR-AVERAGED face state
+                //                   (face_te/face_ti, NOT the conduction-
+                //                   stage cap_te/cap_ti) -- the pre-knob
+                //                   wall cap in its identical floating-
+                //                   point association;
+                //   sonic:          f_s n kB T_s c_s, c_s^2 = (gamma_e kB Te
+                //                   + gamma_i kB Ti)/m_i, from the INTERIOR
+                //                   (sheath-edge) state of the wall-adjacent
+                //                   cell (interior_* above) -- the wall
+                //                   temperature does not enter a sheath
+                //                   flux. Ti is 0 where the ion channel
+                //                   carries no temperature, leaving c_s the
+                //                   electron-only value.
+                // The result carries the CORNER weight w of the cell this
+                // face drains, so that the cap acts on the per-face exchange
+                // before the weighting (the drains below already carry w):
+                // a saturated two-face corner drains sqrt(2) q_cap, one
+                // wall of the vector area, not 2 q_cap. Exact on flat walls
+                // (w == 1.0).
                 const auto wall_cap_flux =
-                    [=] (const amrex::Real species_temperature,
-                         const amrex::Real species_mass, const bool sonic)
+                    [=] (const bool ion_channel, const bool sonic)
                 {
+                    const amrex::Real factor =
+                        ion_channel ? wall_cap_factor_ion
+                                    : wall_cap_factor_electron;
                     if (sonic) {
                         const amrex::Real sound_speed = std::sqrt(
-                            (parameters.gamma_e * PhysConst::kb * face_te +
-                             parameters.gamma_i * PhysConst::kb * face_ti) /
+                            (parameters.gamma_e * PhysConst::kb * interior_te +
+                             parameters.gamma_i * PhysConst::kb * interior_ti) /
                             conduction_ion_mass);
-                        return wall_conduction_limit *
-                               (face_charge_density / PhysConst::q_e *
+                        const amrex::Real species_temperature =
+                            ion_channel ? interior_ti : interior_te;
+                        return factor *
+                               (interior_charge_density / PhysConst::q_e *
                                 PhysConst::kb * species_temperature) *
-                               sound_speed;
+                               sound_speed * corner_weight;
                     }
+                    const amrex::Real species_temperature =
+                        ion_channel ? face_ti : face_te;
+                    const amrex::Real species_mass =
+                        ion_channel ? conduction_ion_mass : PhysConst::m_e;
                     const amrex::Real thermal_speed = std::sqrt(
                         PhysConst::kb * species_temperature / species_mass);
                     const amrex::Real free_streaming_flux =
                         face_charge_density / PhysConst::q_e *
                         PhysConst::kb * species_temperature * thermal_speed;
-                    return wall_conduction_limit * free_streaming_flux;
+                    return factor * free_streaming_flux * corner_weight;
                 };
                 // Braginskii face geometry (static branch on the host
                 // model flag): the face field takes the single-valued
@@ -9582,14 +9680,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // outflow; implicit_mhd.wall_heat_flux_cap
                         // overrides both (see the host constants and
                         // wall_cap_flux). The harmonic form is shared:
-                        // drain /= 1 + |drain|/q_cap, the preconditioner
-                        // conductance divided with it.
+                        // drain /= 1 + |drain|/(q_cap w), the corner
+                        // weight w inside q_cap so the cap acts before the
+                        // weighting; the preconditioner conductance (the
+                        // secant of the capped exchange) divided with it.
                         if (!wall_uncapped) {
                             const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) /
-                                    wall_cap_flux(face_ti, conduction_ion_mass,
-                                                  wall_cap_sonic);
+                                    wall_cap_flux(true, wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
@@ -9670,8 +9769,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) /
-                                    wall_cap_flux(face_ti, conduction_ion_mass,
-                                                  z_wall_cap_sonic);
+                                    wall_cap_flux(true, z_wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
@@ -9988,8 +10086,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) /
-                                    wall_cap_flux(face_te, PhysConst::m_e,
-                                                  wall_cap_sonic);
+                                    wall_cap_flux(false, wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
@@ -10030,8 +10127,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) /
-                                    wall_cap_flux(face_te, PhysConst::m_e,
-                                                  z_wall_cap_sonic);
+                                    wall_cap_flux(false, z_wall_cap_sonic);
                             drain /= cap;
                             conductance /= cap;
                         }
