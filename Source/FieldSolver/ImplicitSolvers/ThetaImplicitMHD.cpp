@@ -4145,7 +4145,7 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
         sum_inverse_h += 1.0_rt / cell_size[d];
         sum_inverse_h2 += 1.0_rt / (cell_size[d] * cell_size[d]);
     }
-    // D <= 1/(1-theta) per face is the two-cell (one exchange) amplifier
+    // D <= 1/(1-theta) per face is the fixed-neighbour (one cell against a fixed bath) amplifier
     // bound -- necessary for monotonicity. The grid-scale checkerboard
     // mode sees k D with k D = 4 chi dt sum_d h_d^-2 (4 D in 1D, 8 D in
     // RZ at dr = dz) and flips sign each step once k D > 1/(1-theta):
@@ -4183,10 +4183,21 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
             amrex::Print()
                 << "  WARNING: chi is NON-MONOTONE: D_chi = " << d_chi
                 << " per face exceeds the theta-scheme bound 1/(1-theta_chi) "
-                   "= " << d_max_chi << ", so the two-cell update amplifier "
-                   "(1 - (1-theta) D)/(1 + theta D) is negative and a cell "
-                   "above its neighbour is driven BELOW it in one step (below "
-                   "the bath at a wall pin).\n";
+                   "= " << d_max_chi << ", so the fixed-neighbour amplifier "
+                   "(1 - (1-theta) D)/(1 + theta D) is negative: a cell "
+                   "against a fixed bath at the full cell distance is driven "
+                   "past it in one step. Two free cells exchanging through "
+                   "one face carry 2D and flip at D > 1/(2(1-theta)); the "
+                   "half-cell wall pin sees 2 D_bulk and flips there too.\n";
+        } else if (!chi_bounded && 2.0_rt * d_chi > d_max_chi) {
+            amrex::Print()
+                << "  WARNING: D_chi = " << d_chi
+                << " per face is under the fixed-neighbour bound 1/(1-theta_chi) "
+                   "= " << d_max_chi << " but above half of it: the two-free-cell "
+                   "amplifier (1 - 2(1-theta) D)/(1 + 2 theta D) and the "
+                   "half-cell wall pin (2 D_bulk) are already negative -- a "
+                   "cell above its neighbour is driven BELOW it in one step, "
+                   "and below the bath at a wall pin.\n";
         } else if (chi_bounded) {
             amrex::Print() << "  PASS: conduction_theta = 1 -- every "
                               "amplifier is in (0, 1) at any D.\n";
@@ -4436,8 +4447,10 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
     // boundary fluxes at ANY time centering and it exchanges no energy
     // between forms, so conduction_theta carries no conservation
     // content. Resistive: the field loses dt eta J^{n+1/2}.J^{n+theta_r}
-    // while the fluid receives dt eta |J_cc^{n+theta}|^2 -- equal only at
-    // resistive_theta = theta = 1/2. Viscous: under total_energy /
+    // while the fluid receives dt eta |J_cc^{n+theta}|^2 -- they can
+    // agree only at resistive_theta = theta = 1/2, and then only up to
+    // the cell-centred sampling of the staggered J and up to
+    // eta_field != eta_joule (vacuum boost, wall band). Viscous: under total_energy /
     // dual_energy the stress work div(Pi.u) is a face flux, so total
     // energy is conserved at any theta_nu; only the kinetic/internal
     // split is sign-definite at 1/2.
@@ -4448,14 +4461,21 @@ void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
            "no conservation content; it sets the monotone bound above and "
            "the damping of grid-scale thermal modes (Nyquist amplifier "
            "-> -1 at theta = 1/2 for D >> 1, -> 0 at theta = 1).\n";
-    if (m_resistive_theta != 0.5_rt) {
+    if (have_eta && (m_resistive_theta != 0.5_rt || m_theta != 0.5_rt)) {
         amrex::Print()
             << "  NOTE: resistive_theta = " << m_resistive_theta
-            << ": the Joule booking is exact only at resistive_theta = "
-               "theta = 1/2 -- the field loses dt eta J^{n+1/2}.J^{n+theta_r} "
-               "while the fluid receives dt eta |J_cc^{n+theta}|^2; the two "
-               "differ by eta (theta_r - 1/2) J^{n+1/2}.(J^{n+1} - J^n) per "
-               "step.\n";
+            << ", theta = " << m_theta
+            << ": per step the field loses dt eta J^{n+1/2}.J^{n+theta_r} "
+               "while the fluid receives dt eta |J_cc^{n+theta}|^2 "
+               "(cell-centred J; Ohm-current quench cells receive "
+               "eta_joule |E|^2/eta_field^2 instead), so the two bookings "
+               "differ by dt eta [J^{n+1/2}.J^{n+theta_r} - |J_cc^{n+theta}|^2]"
+            << (m_theta == 0.5_rt
+                    ? " = dt eta (theta_r - 1/2) J^{n+1/2}.(J^{n+1} - J^n)"
+                    : "")
+            << "; they can agree only at resistive_theta = theta = 1/2, and "
+               "then only up to the cell-centred sampling of the staggered J "
+               "and eta_field != eta_joule.\n";
     }
     if (m_viscous_theta != 0.5_rt) {
         amrex::Print()

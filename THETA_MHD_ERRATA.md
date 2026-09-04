@@ -92,12 +92,15 @@ commit messages are recorded here, per the 2026-08-29 adversarial audit
   number for dr = dz; the gate was over-strict by sqrt(2). Corrected 2026-09-04.
 
 ## a0aca46bd — "MHD: validate the per-component Braginskii chi clamps"
-- Broke eight existing ctests at boot: `test_rz_theta_implicit_mhd_wall_conduction_pc`
-  and `_off`, and the `test_rz_theta_implicit_mhd_z_wall_conduction` family (`_off`,
-  base, `_rows`). Both decks set only `conduction_chi_par_max` and
+- Broke eight existing ctests at boot, on three cap-only decks:
+  `test_rz_theta_implicit_mhd_wall_conduction_pc` and `_off`;
+  `test_rz_theta_implicit_mhd_wall_conduction_scale_perp`, `_scale_parallel` and
+  `test_rz_theta_implicit_mhd_wall_conduction_rows` (the `wall_conduction_scale`
+  deck); `test_rz_theta_implicit_mhd_z_wall_conduction`, `_off` and `_rows`.
+  All three decks set only `conduction_chi_par_max` and
   `conduction_chi_perp_max` (cap-only, with the shared `conduction_chi_min/max`
   unset), and the unconditional "must be set together" check aborted them
   ("Assertion has_chi_par_min == has_chi_par_max failed"). The "passes unchanged"
   claim excluded every cap-only test deck. A half-set pair mixes conventions only
   when the missing end is actually supplied by a set, positive shared fallback; the
-  check was narrowed to that case on 2026-09-04 and all ten tests pass again.
+  check was narrowed to that case on 2026-09-04 and all eight pass again.

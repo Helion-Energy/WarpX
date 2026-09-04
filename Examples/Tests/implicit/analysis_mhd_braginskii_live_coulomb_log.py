@@ -229,7 +229,10 @@ for label, initial_values, final_values, chi_live, chi_constant_raw, chi_constan
     print(f"{label}: measured rate            = {measured_rate:.6e} 1/s")
     print(f"{label}: analytic live-lnL rate   = {analytic_rate:.6e} 1/s")
     print(f"{label}: ratio                    = {measured_rate / analytic_rate:.6f}")
-    assert abs(measured_rate / analytic_rate - 1.0) < 0.05, (
+    # 1%: an 80x margin over the measured 1e-4 residual, and tight enough
+    # to catch a swapped electron branch or a 10 eV branch point (1.2%)
+    # and a dropped sqrt(2) in the ion form (2.4%)
+    assert abs(measured_rate / analytic_rate - 1.0) < 0.01, (
         f"{label} conductive decay rate off by "
         f"{measured_rate / analytic_rate - 1.0:+.3%}"
     )
@@ -237,7 +240,7 @@ for label, initial_values, final_values, chi_live, chi_constant_raw, chi_constan
     # Coulomb-logarithm ratio itself (no cap on either side)
     measured_ratio = measured_rate / (chi_constant_raw * wavenumber**2)
     print(f"{label}: measured/constant-lnL    = {measured_ratio:.6f} (predicted {ratio:.6f})")
-    assert abs(measured_ratio / ratio - 1.0) < 0.05, (
+    assert abs(measured_ratio / ratio - 1.0) < 0.01, (
         f"{label} live/constant rate ratio {measured_ratio:.4f} is not the "
         f"Coulomb-logarithm ratio {ratio:.4f}"
     )
