@@ -1540,6 +1540,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The diffusive legs must see the CELL-CENTRED states, not the
+# reconstructed face states: with a TVD reconstruction the two face
+# values of a smooth profile coincide and a stress built from them is a
+# limiter residual (5% of nominal nu was measured before the fix). Same
+# deck, median limiter, same analytic rate gate as the donor-cell anchor.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscosity_shear_median  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscosity_shear implicit_mhd.fluid_reconstruction=median"  # inputs
+    "analysis_mhd_viscosity_table.py scalar diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Bit-identity: the staged deck with the table collapsed to a single
 # value (nu_lo = nu_hi, so the tanh term is an exact algebraic zero) must
 # reproduce the scalar anchor EXACTLY (every field of every plotfile,
@@ -1568,6 +1583,20 @@ add_warpx_test(
     1  # dims
     1  # nprocs
     inputs_test_1d_theta_implicit_mhd_central_conduction  # inputs
+    "analysis_mhd_central_conduction.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Conduction twin of the viscosity_shear_median gate: the conductive
+# gradient is differenced from the cell-centred states, so the median
+# limiter must land on the same chi k^2 decay rate (5.8% of nominal chi
+# was measured before the fix).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_conduction_median  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_central_conduction implicit_mhd.fluid_reconstruction=median"  # inputs
     "analysis_mhd_central_conduction.py diags/diag000000 diags/diag000010"  # analysis
     OFF  # checksum
     OFF  # dependency

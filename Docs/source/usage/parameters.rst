@@ -5448,6 +5448,20 @@ Jacobian probes.
     no-slip pinned band (``implicit_mhd.wall_no_slip``), so it never
     reconstructs across the mask or across the pin.
 
+    The reconstruction acts on the ADVECTIVE fan only. The physical
+    diffusive legs on the same face registers -- the viscous stress
+    (:pp:param:`implicit_mhd.viscosity`), the thermal conduction fluxes
+    and their free-streaming caps, and the transport-coefficient states
+    they are evaluated from -- always difference the two cell-centred
+    states a cell width apart, whatever the limiter. A gradient built
+    from reconstructed face values is a limiter residual, not a
+    derivative: on a linear profile the two reconstructed values of a
+    face coincide and the flux vanishes (measured before the fix: 5% of
+    the nominal viscosity and conductivity under ``median`` on smooth
+    profiles, full strength only at extrema). The
+    ``viscosity_shear_median`` and ``central_conduction_median`` tests
+    hold the diffusive legs at their analytic rates under ``median``.
+
 .. pp:param:: implicit_mhd.central_dissipation
     :type: ``float``
     :default: ``0`` (off)

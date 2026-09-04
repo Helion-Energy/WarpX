@@ -7106,20 +7106,18 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // NoSlipWidth(); no cell's momentum is constrained any more, so that
     // premise is gone.
     //
-    // The guard SURVIVES, at width 1, for a different reason -- resolved
-    // 2026-09-02 by tracing the merged tree, and confirmed against the
-    // no-slip lane's own analysis. reconstruct_face_states() writes
-    // `left`/`right` IN PLACE, and the viscous block downstream reads
-    // those same states to build the no-slip antisymmetric image
-    // (right_velocity = -left_velocity). That image is only the
-    // half-cell wall gradient (0 - u_c)/(dn/2) if left/right are
-    // CELL-CENTRE values a distance dn apart, which is what
-    // inverse_normal_size = 1/dn assumes. Feeding it face-extrapolated
-    // states biases the wall friction tau_w by the limiter slope.
-    //
-    // So: donor cell at the wall-adjacent face only (width 1). Width 0
-    // would corrupt tau_w; width > 1 needlessly degrades the interior
-    // to first order where no boundary condition acts.
+    // The guard SURVIVED, at width 1, for a different reason (resolved
+    // 2026-09-02): reconstruct_face_states() writes `left`/`right` IN
+    // PLACE and the viscous block used to read those same states, so
+    // its no-slip antisymmetric image (right_velocity = -left_velocity)
+    // was only the half-cell wall gradient (0 - u_c)/(dn/2) when the
+    // reconstruction was suppressed at that face. The diffusive legs
+    // now difference the cell-centred `cell_left`/`cell_right` copies
+    // taken before the reconstruction (see the kernel), everywhere,
+    // so tau_w no longer depends on this guard. It is kept, unchanged,
+    // because it also selects the ADVECTIVE flux at the wall-adjacent
+    // face (donor cell there); removing it is a separate decision with
+    // its own wall-test consequences.
     const bool reconstruction_no_slip =
         reconstruct_faces && m_wall_mask.NoSlip();
     const int reconstruction_no_slip_width = 1;
@@ -7522,6 +7520,22 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             };
             auto left = load_state(il, jl, kl);
             auto right = load_state(i, j, k);
+            // Cell-centred donor states for the DIFFUSIVE legs. The
+            // reconstruction below rewrites left/right in place for the
+            // advective fan only. A viscous stress or a conductive flux
+            // differenced from reconstructed FACE states is a limiter
+            // residual, not a gradient: on a linear profile the two
+            // reconstructed values of a face coincide and the flux
+            // vanishes (measured on the 1D shear and conduction decks
+            // under the median limiter: 5% of the nominal nu and chi).
+            // The diffusive legs difference the cell values a distance
+            // dn apart, which is what inverse_normal_size assumes, and
+            // take their face densities, coefficient pressures, cap
+            // temperatures and field direction from the same cell
+            // values. Donor cell reconstruction leaves left/right
+            // untouched, so these copies are then bit-identical to them.
+            const auto cell_left = left;
+            const auto cell_right = right;
 
             if (reconstruct_faces) {
                 // Four-cell normal stencil (far_left, left | right,
@@ -7911,7 +7925,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
 #endif
             ) {
                 const amrex::Real face_density =
-                    0.5_rt * (left.density + right.density);
+                    0.5_rt * (cell_left.density + cell_right.density);
                 // Interior: rho_f nu (implicit_mhd.viscosity is the
                 // kinematic-style knob). Band: the absolute dynamic
                 // pedestal, density-independent by design. A no-slip
@@ -7965,8 +7979,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         rho_old(i, j, k), parameters.density_floor);
                 }
                 for (int component = 0; component < 3; ++component) {
-                    amrex::Real left_velocity = left.ion_velocity[component];
-                    amrex::Real right_velocity = right.ion_velocity[component];
+                    amrex::Real left_velocity =
+                        cell_left.ion_velocity[component];
+                    amrex::Real right_velocity =
+                        cell_right.ion_velocity[component];
                     if (viscous_stage) {
                         // u^n = (rho u)^n / rho^n. Applied BEFORE the
                         // no-slip image below, so the antisymmetric wall
@@ -8011,7 +8027,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     // haloD's Ti field).
                     if (viscous_limit > 0.0_rt) {
                         const amrex::Real free_streaming_stress =
-                            0.5_rt * (left.ion_pressure + right.ion_pressure);
+                            0.5_rt * (cell_left.ion_pressure +
+                                      cell_right.ion_pressure);
                         if (free_streaming_stress > 0.0_rt) {
                             viscous_stress /=
                                 1.0_rt + std::abs(viscous_stress) /
@@ -8076,12 +8093,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // frozen inputs are constants w.r.t. the Newton state,
                 // so residual smoothness is unaffected. Default theta
                 // is bit-identical.
-                amrex::Real coeff_density_left = left.density;
-                amrex::Real coeff_density_right = right.density;
-                amrex::Real coeff_pe_left = left.electron_pressure;
-                amrex::Real coeff_pe_right = right.electron_pressure;
-                amrex::Real coeff_pi_left = left.ion_pressure;
-                amrex::Real coeff_pi_right = right.ion_pressure;
+                amrex::Real coeff_density_left = cell_left.density;
+                amrex::Real coeff_density_right = cell_right.density;
+                amrex::Real coeff_pe_left = cell_left.electron_pressure;
+                amrex::Real coeff_pe_right = cell_right.electron_pressure;
+                amrex::Real coeff_pi_left = cell_left.ion_pressure;
+                amrex::Real coeff_pi_right = cell_right.ion_pressure;
                 if (chi_coeff_old) {
                     coeff_density_left = rho_old(il, jl, kl);
                     coeff_density_right = rho_old(i, j, k);
@@ -8332,15 +8349,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 const amrex::Real inverse_gamma_e_minus_one =
                     1.0_rt / (parameters.gamma_e - 1.0_rt);
                 amrex::Real e_spec_electron_left =
-                    left.electron_pressure * inverse_gamma_e_minus_one /
-                    left.safe_density;
+                    cell_left.electron_pressure * inverse_gamma_e_minus_one /
+                    cell_left.safe_density;
                 amrex::Real e_spec_electron_right =
-                    right.electron_pressure * inverse_gamma_e_minus_one /
-                    right.safe_density;
+                    cell_right.electron_pressure * inverse_gamma_e_minus_one /
+                    cell_right.safe_density;
                 amrex::Real e_spec_ion_left =
-                    left.ion_internal / left.safe_density;
+                    cell_left.ion_internal / cell_left.safe_density;
                 amrex::Real e_spec_ion_right =
-                    right.ion_internal / right.safe_density;
+                    cell_right.ion_internal / cell_right.safe_density;
                 // Free-streaming-cap temperatures: the coefficient-state
                 // face values by default; stage values (from the stage
                 // pressures over the SAME coefficient-state face charge
@@ -8434,8 +8451,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             (face_charge_density * PhysConst::kb);
                         cap_te =
                             std::max(0.5_rt * (stage_new_weight *
-                                                   (left.electron_pressure +
-                                                    right.electron_pressure) +
+                                                   (cell_left.electron_pressure +
+                                                    cell_right.electron_pressure) +
                                                stage_old_weight *
                                                    (pe_old_left +
                                                     pe_old_right)),
@@ -8445,8 +8462,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             cap_ti =
                                 std::max(0.5_rt *
                                              (stage_new_weight *
-                                                  (left.ion_pressure +
-                                                   right.ion_pressure) +
+                                                  (cell_left.ion_pressure +
+                                                   cell_right.ion_pressure) +
                                               stage_old_weight *
                                                   (pi_old_left +
                                                    pi_old_right)),
@@ -8481,11 +8498,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     const int tangent1 = (normal + 1) % 3;
                     const int tangent2 = (normal + 2) % 3;
                     amrex::Real bt1 =
-                        0.5_rt * (left.magnetic[tangent1] +
-                                  right.magnetic[tangent1]);
+                        0.5_rt * (cell_left.magnetic[tangent1] +
+                                  cell_right.magnetic[tangent1]);
                     amrex::Real bt2 =
-                        0.5_rt * (left.magnetic[tangent2] +
-                                  right.magnetic[tangent2]);
+                        0.5_rt * (cell_left.magnetic[tangent2] +
+                                  cell_right.magnetic[tangent2]);
                     if (z_end_wall_face) {
                         // Conductive z-end faces take the tangential B
                         // ONE-SIDED from the interior cell (the ghost
