@@ -2054,6 +2054,82 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # dependency
 )
 
+# WALL HEAT-FLUX CAP (implicit_mhd.wall_heat_flux_cap), the SONIC cap's
+# analytic gate: a hot uniform TWO-temperature column (Te0 = 100 eV,
+# Ti0 = 40 eV -- distinct, so a sound speed built from one species'
+# temperature alone cannot pass) inside a straight cylinder wall under
+# the hard dirichlet pin with a constant isotropic chi in both channels,
+# chi chosen so the uncapped half-cell drain sits within ~20 percent of
+# the sheath cap q_cap = 2.5 n kB T_s c_s, c_s^2 = gamma (kB Te + kB
+# Ti)/m_i: the harmonic cap then lands near q_cap/2, two-fold away from
+# both the uncapped value and a hard min. The analysis solves the
+# nonlinear backward-Euler first step of the capped column (the cap
+# reads the end-of-step face state, coupling the channels through c_s)
+# and gates the measured per-channel ring and column drains at 1
+# percent, plus the FORM (5 percent separation from uncapped/hard-min)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_sonic  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_heat_flux_cap=sonic"  # inputs
+    "analysis_mhd_wall_heat_flux_cap.py diags sonic"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ...the factor plumbing: an explicit wall_heat_flux_cap_factor = 1.25
+# halves the sonic cap and the same gate follows it
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_sonic_factor  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_heat_flux_cap=sonic implicit_mhd.wall_heat_flux_cap_factor=1.25"  # inputs
+    "analysis_mhd_wall_heat_flux_cap.py diags sonic 1.25"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# the LEGACY capped pin (wall_thermal_bc = dirichlet_limited, knob
+# UNSET): the existing free-streaming wall cap with the legacy factor
+# (conduction_flux_limit_factor unset -> f = 1), gated against the same
+# nonlinear column with q_cap = n kB T_s v_th,s -- the analytic
+# statement of what the unset default IS on the limited modes
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_limited_legacy  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_thermal_bc=dirichlet_limited"  # inputs
+    "analysis_mhd_wall_heat_flux_cap.py diags free_streaming"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# BIT-IDENTITY 1/3: wall_heat_flux_cap = free_streaming on the hard
+# dirichlet pin must reproduce dirichlet_limited with the knob unset
+# exactly -- newton.txt, every field of every plotfile, the wall ledger
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_free_streaming_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_heat_flux_cap implicit_mhd.wall_heat_flux_cap=free_streaming"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_wall_heat_flux_cap_limited_legacy/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_limited_legacy  # dependency
+)
+
+# BIT-IDENTITY 2/3: wall_heat_flux_cap = none on the hard dirichlet pin
+# (the wall_conduction_scale deck, Braginskii, parallel-scale twin's
+# baseline) is the unset default, bit for bit
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_none_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_conduction_scale implicit_mhd.wall_heat_flux_cap=none"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_wall_conduction_scale_perp/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # dependency
+)
+
 # CORNER contract of the hard half-cell Dirichlet wall pins. A static
 # uniform hot column inside a STEPPED wall under the uncapped dirichlet
 # pin, with the z-end exchange (z_wall_conduction) on against the same
@@ -2722,6 +2798,36 @@ add_warpx_test(
     "analysis_mhd_z_wall_conduction.py diags on ../test_rz_theta_implicit_mhd_z_wall_conduction_off/diags"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency
+)
+
+# BIT-IDENTITY 3/3 of the wall heat-flux cap: the z-end exchange
+# (z_wall_conduction) under wall_heat_flux_cap = none is the unset
+# default (uncapped), bit for bit
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_z_end_none_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction implicit_mhd.wall_heat_flux_cap=none"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_z_wall_conduction/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_z_wall_conduction  # dependency
+)
+
+# ...and the z-end exchange OBEYS the cap: the same column under
+# wall_heat_flux_cap = sonic (diagnostics every step) must land on the
+# nonlinear capped backward-Euler column at both end faces -- the z-end
+# face state (interior/ghost-image average) feeds the sheath cap
+# exactly like the shaped-wall reservoir average does. dt is halved
+# against the base deck so the acoustic p dV contamination of the ion
+# internal-energy recovery (which scales with dt) stays inside the gate
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_heat_flux_cap_z_end_sonic  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction implicit_mhd.wall_heat_flux_cap=sonic diag1.intervals=1 my_constants.dt=0.25*dz^2/chi_op"  # inputs
+    "analysis_mhd_wall_heat_flux_cap.py diags sonic --z-end --dt-factor=0.5"  # analysis
+    OFF  # checksum
+    OFF  # dependency
 )
 
 # staggering-aware Neumann z-ghost fill: nodal-in-z fields must mirror
