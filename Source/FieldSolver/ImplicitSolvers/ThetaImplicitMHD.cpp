@@ -498,20 +498,37 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             m_conduction_chi_perp_max > m_conduction_chi_perp_min,
         "implicit_mhd.conduction_chi_perp_max must exceed "
         "conduction_chi_perp_min");
+    // A half-set per-component pair straddles two conventions ONLY when
+    // the missing end is actually supplied by the shared fallback: the
+    // unset end falls back to conduction_chi_min / conduction_chi_max
+    // (operator convention), and those default to 0 = off. A cap-only or
+    // floor-only per-component knob with the corresponding shared bound
+    // unset is one bound in one convention, which is legitimate (and is
+    // what the wall-conduction regression decks set). The unconditional
+    // form of this check aborted those decks at boot.
+    const bool shared_floor_live = (m_conduction_chi_min > 0.0_rt);
+    const bool shared_cap_live = (m_conduction_chi_max > 0.0_rt);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        has_chi_par_min == has_chi_par_max,
+        has_chi_par_min == has_chi_par_max ||
+            (has_chi_par_max && !has_chi_par_min && !shared_floor_live) ||
+            (has_chi_par_min && !has_chi_par_max && !shared_cap_live),
         "implicit_mhd.conduction_chi_par_min and conduction_chi_par_max "
-        "must be set together: the per-component knobs are in the "
-        "kappa/(n kB) convention and are scaled by (gamma - 1), while the "
-        "shared conduction_chi_min/max fallback is in the operator "
-        "convention and is not, so a half-set pair clamps its two ends in "
-        "different units");
+        "must be set together when the missing end would fall back to "
+        "the shared conduction_chi_min/max: the per-component knobs are "
+        "in the kappa/(n kB) convention and are scaled by (gamma - 1), "
+        "while the shared fallback is in the operator convention and is "
+        "not, so such a half-set pair clamps its two ends in different "
+        "units (a cap-only or floor-only knob with the shared bound unset "
+        "is fine)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        has_chi_perp_min == has_chi_perp_max,
+        has_chi_perp_min == has_chi_perp_max ||
+            (has_chi_perp_max && !has_chi_perp_min && !shared_floor_live) ||
+            (has_chi_perp_min && !has_chi_perp_max && !shared_cap_live),
         "implicit_mhd.conduction_chi_perp_min and conduction_chi_perp_max "
-        "must be set together (see conduction_chi_par_min/max: a half-set "
-        "pair mixes the kappa/(n kB) and operator conventions within one "
-        "clamp)");
+        "must be set together when the missing end would fall back to "
+        "the shared conduction_chi_min/max (see conduction_chi_par_min/max: "
+        "such a half-set pair mixes the kappa/(n kB) and operator "
+        "conventions within one clamp)");
     // The clamps only enter the Braginskii coefficient evaluation: set
     // with the isotropic model they would be silent no-ops.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
