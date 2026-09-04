@@ -59,14 +59,45 @@
  * separate columns precisely so the numerical and the physical dissipation
  * can never be confused for one another.
  *
+ * Two dimensionless GYROVISCOSITY REQUIREMENT GATES are appended after the
+ * power channels. They are not dissipation and take no part in P_diss; they
+ * measure whether the run is anywhere near a regime in which a gyroviscous
+ * (finite-Larmor-radius) stress would matter, which is the measurement taken
+ * INSTEAD of implementing a Braginskii eta_3/eta_4 electron gyroviscosity:
+ * the electron gyroviscous term is suppressed in the generalized Ohm's law by
+ * at least the mass ratio relative to the other terms (King & Kruger,
+ * arXiv:1407.3864, Sec. II), so the ION gates below bound the electron
+ * requirement from above by m_e/m_i, and where a sheet narrows to the
+ * electron gyroradius the FLR ordering a Braginskii closure rests on has
+ * already failed anyway.
+ *
+ *   beta_i_over_4 = beta_i/4 = rho_i^2/(2 d_i^2) = mu0 <p_i> / (2 <|B|^2>)
+ *   F_gyro        = (beta_i/4) (omega_dyn / Omega_ci)
+ *
+ * the wavenumber-independent gyroviscous-to-Hall stress ratio (Ferraro,
+ * ApJ 662, 512 (2007), Sec. 3, stated there as A/H = beta_i/4) and the
+ * gyroviscous force measured against magnetic tension (same paper, Eq. (8b),
+ * whose omega_dyn is its disk rotation rate); see also Schnack et al., Phys.
+ * Plasmas 13, 058103 (2006), Eqs. (55ab)/(56ab).
+ * omega_dyn = |u_i|/L is the soft part of the criterion and the choices are
+ * declared: |u_i| is the ION BULK flow speed from the same NGP moment deposit
+ * that supplies T_i, and L = |B|/(mu0 |J_plasma|) is the resolved gradient
+ * scale of the magnetic field, i.e. the local current-sheet width. Each
+ * factor is a domain-volume average in its own right and the gates are
+ * assembled from those averages, NOT averaged pointwise -- the pointwise
+ * forms diverge at a field null and a volume average of them would report the
+ * null rather than the plasma. Read F_gyro in decades, not as a calibrated
+ * number.
+ *
  * Columns: P_eta [W], P_etaH [W], P_diss = P_eta + P_etaH + P_nu [W],
- *          P_nu [W].
+ *          P_nu [W], beta_i_over_4 [-], F_gyro [-].
  *
  * P_nu sits AFTER the total rather than beside the channels it belongs with,
  * deliberately: this file is read positionally across repositories, so columns
  * 0-4 keep their historical meaning and new channels are appended. Add future
  * channels the same way -- fold them into P_diss and append the column, never
- * insert one. Read by name from the header line, not by position.
+ * insert one. The two gates were appended under the same rule. Read by name
+ * from the header line, not by position.
  *
  * The hyper-resistive integrand needs one-cell neighbor stencils and is
  * skipped on the outermost cell ring of the domain (boundary-condition

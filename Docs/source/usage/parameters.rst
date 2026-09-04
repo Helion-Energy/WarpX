@@ -6343,9 +6343,55 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         precisely so that the numerical and the physical dissipation can
         never be confused for one another.
 
+        **Two dimensionless gyroviscosity requirement gates** are appended
+        after the power channels. They are not dissipation and take no part in
+        :math:`P_\mathrm{diss}`; they measure whether a run is anywhere near a
+        regime in which a gyroviscous (finite-Larmor-radius) stress would
+        matter,
+
+        .. math::
+
+            \frac{\beta_i}{4} = \frac{\rho_i^2}{2 d_i^2}
+                              = \frac{\mu_0 \langle p_i\rangle}{2\langle |B|^2\rangle},
+            \qquad
+            F = \frac{\beta_i}{4}\,\frac{\omega_\mathrm{dyn}}{\Omega_{ci}},
+
+        the wavenumber-independent ratio of the gyroviscous to the Hall stress
+        (Ferraro, ApJ **662**, 512 (2007), Sec. 3, stated there as
+        :math:`A/H = \beta_i/4`) and the gyroviscous force measured against the
+        magnetic tension force (same paper, Eq. (8b), whose
+        :math:`\omega_\mathrm{dyn}` is its accretion-disk rotation rate); see
+        also Schnack et al., Phys. Plasmas **13**, 058103 (2006),
+        Eqs. (55ab)/(56ab). Only the *ion* gates are reported: the electron
+        gyroviscous term is suppressed in the generalized Ohm's law by at
+        least the mass ratio relative to the other terms (King & Kruger,
+        arXiv:1407.3864, Sec. II), so these bound the electron requirement
+        from above by :math:`m_e/m_i`.
+
+        :math:`\omega_\mathrm{dyn} = |u_i|/L` is the soft part of the
+        criterion, so both choices are stated explicitly: :math:`|u_i|` is the
+        **ion bulk flow speed**, taken from the same nearest-grid-point moment
+        deposit that supplies :math:`T_i` (so the bulk subtracted out of
+        :math:`T_i` is exactly the bulk put into :math:`\omega_\mathrm{dyn}`),
+        and :math:`L = |B| / (\mu_0 |J_\mathrm{plasma}|)` is the **resolved
+        gradient scale of the magnetic field**, that is, the local
+        current-sheet width. A different but equally defensible pair moves
+        :math:`F` by the corresponding ratio; read it in decades rather than
+        as a calibrated number.
+
+        Every factor is a domain-volume average in its own right and the gates
+        are assembled from those averages, using the same control-volume
+        element as the power columns. They are deliberately *not* volume
+        averages of the pointwise expressions, which diverge at a field null
+        and would then report the null rather than the plasma. :math:`p_i`,
+        :math:`n_i` and :math:`u_i` are summed over all charged species, with
+        :math:`m_i/q_i` taken as the total ion mass over the total ion charge.
+        Both gates read zero if the domain carries no magnetic field or no
+        charged particles.
+
         Columns: :math:`P_\eta` [W], :math:`P_{\eta_H}` [W],
         :math:`P_\mathrm{diss} = P_\eta + P_{\eta_H} + P_\nu` [W],
-        :math:`P_\nu` [W].
+        :math:`P_\nu` [W], :math:`\beta_i/4` [–], :math:`F` [–].
 
         .. warning::
 
@@ -6370,7 +6416,8 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         new channels are added on the end. Follow the same rule for any future
         channel — fold it into :math:`P_\mathrm{diss}` and append its column,
         never insert one — and prefer reading these files by the column names
-        in the header line rather than by position.
+        in the header line rather than by position. The two gyroviscosity
+        gates were appended under the same rule.
 
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.

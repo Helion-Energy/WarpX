@@ -15,6 +15,8 @@
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "Fields.H"
+#include "Particles/MultiParticleContainer.H"
+#include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXConst.H"
 #include "WarpX.H"
@@ -25,6 +27,7 @@
 
 #include <AMReX_GpuContainers.H>
 #include <AMReX_iMultiFab.H>
+#include <AMReX_IndexType.H>
 #include <AMReX_MFIter.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParallelDescriptor.H>
@@ -33,9 +36,63 @@
 #include <array>
 #include <fstream>
 #include <memory>
+#include <string>
 
 using namespace amrex;
 using warpx::fields::FieldType;
+
+#if defined(WARPX_DIM_RZ)
+namespace
+{
+    /** Domain mean of f^2 at one Yee component's OWN staggering.
+     *
+     * The f^2 dV and dV sums are accumulated together and returned as a
+     * ratio, so the mean is exact at whatever centring the component carries.
+     * Normalising instead by an analytic domain volume would bias any
+     * radially nodal component at O(1/N_r), because the RZ element gives the
+     * on-axis ring only its half cell. An owner mask keeps nodal points
+     * shared between boxes from counting twice. \p mf_add, when given, is
+     * added pointwise to \p mf first -- the external-split path, where
+     * Bfield_fp carries only the plasma part of B.
+     */
+    amrex::Real
+    DomainMeanSquare (amrex::MultiFab const & mf,
+                      amrex::Geometry const & geom,
+                      amrex::MultiFab const * mf_add = nullptr)
+    {
+        const QdsmcVolumeElement vol = MakeQdsmcVolumeElement(geom, mf.ixType());
+        const auto mask = amrex::OwnerMask(mf, geom.periodicity());
+
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (amrex::MFIter mfi(mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box box = mfi.tilebox();
+            const auto f = mf.const_array(mfi);
+            const auto f_add = (mf_add != nullptr)
+                ? mf_add->const_array(mfi) : amrex::Array4<const Real>{};
+            const auto own = mask->const_array(mfi);
+
+            reduce_op.eval(box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
+                {
+                    if (own(i, j, 0) == 0) { return {0.0_rt, 0.0_rt}; }
+                    const Real dV = vol(i);
+                    Real fv = f(i, j, 0);
+                    if (f_add) { fv += f_add(i, j, 0); }
+                    return {fv*fv*dV, dV};
+                });
+        }
+
+        const auto rt = reduce_data.value(reduce_op);
+        amrex::Real rv[2] = {amrex::get<0>(rt), amrex::get<1>(rt)};
+        amrex::ParallelDescriptor::ReduceRealSum(rv, 2);
+        return (rv[1] > 0.0_rt) ? rv[0]/rv[1] : 0.0_rt;
+    }
+}
+#endif
 
 HybridDissipation::HybridDissipation (const std::string& rd_name)
     : ReducedDiags{rd_name}
@@ -46,7 +103,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         "geometry");
 #endif
 
-    m_data.resize(4, 0.0_rt);
+    m_data.resize(6, 0.0_rt);
 
     if (amrex::ParallelDescriptor::IOProcessor() && m_write_header) {
         std::ofstream ofs{m_path + m_rd_name + "." + m_extension,
@@ -64,6 +121,11 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         // new channels go on the end.
         ofs << m_sep << "[" << c++ << "]P_diss(W)";
         ofs << m_sep << "[" << c++ << "]P_nu(W)";
+        // The gyroviscosity requirement gates are dimensionless and are not
+        // power channels, so they take no part in P_diss; they are appended
+        // last for the same positional-reader reason as P_nu above.
+        ofs << m_sep << "[" << c++ << "]beta_i_over_4()";
+        ofs << m_sep << "[" << c++ << "]F_gyro()";
         ofs << "\n";
         ofs.close();
     }
@@ -366,6 +428,174 @@ HybridDissipation::ComputeDiags (const int step)
     m_data[1] = p_eta_h;
     m_data[2] = p_eta + p_eta_h + p_nu;
     m_data[3] = p_nu;
+
+    // ---------------------------------------------------------------------
+    // GYROVISCOSITY REQUIREMENT GATES. Diagnostics only: nothing below is
+    // read by a solve, and nothing below introduces a knob.
+    //
+    // These two dimensionless numbers are the measurement taken INSTEAD of
+    // implementing a Braginskii eta_3 / eta_4 ELECTRON gyroviscosity. Two
+    // literature results make that the right trade, and the gates are what
+    // keep the decision falsifiable rather than assumed:
+    //
+    //  - the electron gyroviscous term is suppressed in the generalized
+    //    Ohm's law by at least the mass ratio relative to the other terms
+    //    (King & Kruger, arXiv:1407.3864, Sec. II), so the ION gates below
+    //    bound the electron requirement from above by m_e/m_i;
+    //  - where a current sheet narrows to the electron gyroradius the FLR
+    //    ordering that a Braginskii closure rests on has already failed, so
+    //    such a closure would be outside its own validity exactly where it
+    //    would be needed.
+    //
+    // [4] beta_i/4 = rho_i^2 / (2 d_i^2) = mu0 <p_i> / (2 <|B|^2>), the
+    //     WAVENUMBER-INDEPENDENT ratio of the gyroviscous to the Hall stress.
+    //     Ferraro, ApJ 662, 512 (2007), Sec. 3 states it as A/H = beta_i/4:
+    //     both dimensionless groups carry the same wavenumber factor, so
+    //     their ratio does not. See also Schnack et al., Phys. Plasmas 13,
+    //     058103 (2006), Eqs. (55ab)/(56ab). It costs only beta_i, which is
+    //     what makes it the cleanest single "does it matter here" scalar.
+    //
+    // [5] F = (beta_i/4) (omega_dyn / Omega_ci), the gyroviscous force
+    //     measured against the magnetic tension force: Ferraro, ApJ 662, 512
+    //     (2007), Eq. (8b), where omega_dyn is the equilibrium rotation rate
+    //     of the accretion disk that paper analyses.
+    //
+    // AMBIGUITY DECLARED, because omega_dyn is where this criterion is soft
+    // and the choice is the main source of spread in applying it:
+    //   - the VELOCITY is |u_i|, the ION BULK flow speed, taken from the same
+    //     NGP moment deposit that supplies T_i, so the bulk subtracted out of
+    //     T_i is exactly the bulk put into omega_dyn;
+    //   - the LENGTH is the resolved gradient scale of the magnetic field,
+    //     L = |B| / (mu0 |J_plasma|) -- the local current-sheet width, i.e.
+    //     the shortest scale the field actually resolves and the one that
+    //     collapses in the reconnection layer this gate is asked about.
+    //   Another defensible pair (a mode frequency and a machine radius, say)
+    //   moves F by the corresponding ratio. F is a scaling gate, not a
+    //   calibrated number; read it in decades.
+    //
+    // REDUCTION: every factor is a domain-volume average in its own right and
+    // the gates are ASSEMBLED from those averages. They are deliberately not
+    // the volume average of the pointwise gate, which diverges at a field
+    // null (both expressions go as inverse powers of |B|) and would then
+    // report the null rather than the plasma. Volumes come from the shared
+    // control-volume element in QdsmcVolumeElement.H -- the same element the
+    // power columns above integrate against.
+    // ---------------------------------------------------------------------
+    amrex::Real beta_i_over_4 = 0.0_rt;
+    amrex::Real f_gyro = 0.0_rt;
+
+    // <|B|^2> [T^2] and <|J_plasma|^2> [A^2/m^4], each component averaged at
+    // its own staggering. The external B is added back in wherever the solver
+    // splits it out of Bfield_fp, so the gate always sees the total field.
+    amrex::Real b2_bar = 0.0_rt;
+    amrex::Real j2_bar = 0.0_rt;
+    for (int d = 0; d < 3; ++d) {
+        const amrex::MultiFab* b_ext = external_b_split
+            ? warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                                 ablastr::fields::Direction{d}, lev)
+            : nullptr;
+        b2_bar += DomainMeanSquare(*B[d], geom, b_ext);
+        j2_bar += DomainMeanSquare(*J[d], geom);
+    }
+
+    // Ion moments. n_i, T_i and the bulk u_i all come from the one NGP
+    // deposit the T_<species> field diagnostic already uses
+    // (WarpXParticleContainer::DepositTotalNGPTemperature), summed over the
+    // charged species: N_<s> holds the per-cell PARTICLE COUNT, so summing
+    // N k_B T_i over cells is already Int n_i k_B T_i dV with no volume
+    // factor at all; T_<s> is in eV; u_<s> is the weighted mean proper
+    // velocity gamma*v.
+    const amrex::Real inv_c2 = 1.0_rt/(PhysConst::c*PhysConst::c);
+    amrex::Real ion_sums[4] = {0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+    auto& mypc = warpx.GetPartContainer();
+    for (int is = 0; is < mypc.nSpecies(); ++is)
+    {
+        auto& pc = mypc.GetParticleContainer(is);
+        const auto q_s = static_cast<amrex::Real>(pc.getCharge());
+        const auto m_s = static_cast<amrex::Real>(pc.getMass());
+        if (q_s <= 0.0_rt || m_s <= 0.0_rt) { continue; }
+
+        pc.DepositTotalNGPTemperature(lev);
+        const std::string& s_name = pc.getName();
+        const amrex::MultiFab& Ns = *warpx.m_fields.get("N_" + s_name, lev);
+        const amrex::MultiFab& Ts = *warpx.m_fields.get("T_" + s_name, lev);
+        const amrex::MultiFab& uxs = *warpx.m_fields.get(
+            "u_" + s_name, ablastr::fields::Direction{0}, lev);
+        const amrex::MultiFab& uys = *warpx.m_fields.get(
+            "u_" + s_name, ablastr::fields::Direction{1}, lev);
+        const amrex::MultiFab& uzs = *warpx.m_fields.get(
+            "u_" + s_name, ablastr::fields::Direction{2}, lev);
+
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real,
+                          amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        // These moments are cell-centred, so every point has exactly one
+        // owner and no owner mask is needed (unlike the nodal fields above).
+        for (amrex::MFIter mfi(Ns, amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto n_arr = Ns.const_array(mfi);
+            const auto t_arr = Ts.const_array(mfi);
+            const auto ux = uxs.const_array(mfi);
+            const auto uy = uys.const_array(mfi);
+            const auto uz = uzs.const_array(mfi);
+
+            reduce_op.eval(box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
+                {
+                    const Real n_w = n_arr(i, j, 0);
+                    if (n_w <= 0.0_rt) {
+                        return {0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+                    }
+                    // proper velocity gamma*v back to v
+                    const Real u2 = ux(i, j, 0)*ux(i, j, 0)
+                                  + uy(i, j, 0)*uy(i, j, 0)
+                                  + uz(i, j, 0)*uz(i, j, 0);
+                    const Real v2 = u2/(1.0_rt + u2*inv_c2);
+                    return {n_w*PhysConst::q_e*t_arr(i, j, 0), // Int n k_B T dV
+                            m_s*n_w,                           // Int rho_m dV
+                            m_s*n_w*v2,                        // Int rho_m u^2 dV
+                            q_s*n_w};                          // Int q_i n_i dV
+                });
+        }
+
+        const auto rt = reduce_data.value(reduce_op);
+        ion_sums[0] += amrex::get<0>(rt);
+        ion_sums[1] += amrex::get<1>(rt);
+        ion_sums[2] += amrex::get<2>(rt);
+        ion_sums[3] += amrex::get<3>(rt);
+    }
+    amrex::ParallelDescriptor::ReduceRealSum(ion_sums, 4);
+
+    // Cell-centred control volume of the whole domain, from the shared
+    // element; its radial sum is exact at cell centring.
+    const QdsmcVolumeElement vol_cc =
+        MakeQdsmcVolumeElement(geom, amrex::IndexType::TheCellType());
+    amrex::Real dom_vol = 0.0_rt;
+    for (int i = dom_lo.x; i <= dom_hi.x; ++i) { dom_vol += vol_cc(i); }
+    dom_vol *= static_cast<amrex::Real>(dom_hi.y - dom_lo.y + 1);
+
+    if (b2_bar > 0.0_rt && dom_vol > 0.0_rt && ion_sums[1] > 0.0_rt) {
+        const amrex::Real p_i_bar = ion_sums[0]/dom_vol;    // <n_i k_B T_i> [Pa]
+        beta_i_over_4 = PhysConst::mu0*p_i_bar/(2.0_rt*b2_bar);
+
+        if (j2_bar > 0.0_rt && ion_sums[3] > 0.0_rt) {
+            const amrex::Real b_bar = std::sqrt(b2_bar);
+            const amrex::Real j_bar = std::sqrt(j2_bar);
+            const amrex::Real u_bar = std::sqrt(ion_sums[2]/ion_sums[1]);
+            // effective ion m_i/q_i [kg/C] of the whole ion population
+            const amrex::Real m_over_q = ion_sums[1]/ion_sums[3];
+            const amrex::Real omega_dyn = u_bar*PhysConst::mu0*j_bar/b_bar;
+            const amrex::Real omega_ci = b_bar/m_over_q;
+            f_gyro = beta_i_over_4*omega_dyn/omega_ci;
+        }
+    }
+
+    m_data[4] = beta_i_over_4;
+    m_data[5] = f_gyro;
 #else
     amrex::ignore_unused(step);
 #endif
