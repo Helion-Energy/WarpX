@@ -366,6 +366,13 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.qdsmc_conduction_Te_floor must be >= 0");
         pp_hybrid.query("qdsmc_conduction_Te_floor_mask_err",
                         m_cond_te_floor_mask);
+        pp_hybrid.query("qdsmc_conduction_flux_budget", m_cond_flux_budget);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_cond_flux_budget && m_cond_te_floor <= 0.0_rt),
+            "hybrid_pic_model.qdsmc_conduction_flux_budget needs "
+            "qdsmc_conduction_Te_floor > 0: the budget is measured "
+            "against the energy held ABOVE that floor, so with no floor "
+            "there is no bound to enforce");
         std::string fdlim = "smart";
         pp_hybrid.query("qdsmc_conduction_fd_limiter", fdlim);
         if (fdlim == "none") { m_cond_fd_limiter = 0; }
@@ -7111,6 +7118,29 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     // once per neighbor, from identical inputs -> bitwise identical
     // values, so Sigma(u) telescopes to round-off with no face storage
     // and no seam sync).
+    //
+    // --- Donor-cell energy-budget bound (qdsmc_conduction_flux_budget).
+    // Off by default and bit-identical when off. When on, a second pass
+    // rescales each face flux by the ratio R of its DONOR node, so a node
+    // cannot conduct away more than it holds above the Te floor over dt_c.
+    // A face is scaled ONCE (both neighbours read the same donor R), so
+    // the telescoping sum survives: the throttled heat stays in the donor
+    // rather than being conjured back afterwards by the floor clamp.
+    // Face values are CACHED here rather than recomputed -- the flux
+    // evaluation is the expensive part, and the cache also lets the second
+    // pass read the neighbour's face without re-deriving it.
+    bool const flux_budget = m_cond_flux_budget && (m_cond_te_floor > 0.0_rt);
+    amrex::Real const budget_floor_K = m_cond_te_floor * qe / kb;
+    amrex::Real const budget_dt = (dt_c > 0.0_rt) ? dt_c : 1.0_rt;
+    amrex::MultiFab fcache, rbud;
+    if (flux_budget) {
+        // SPACEDIM face components (F at the node's HI face in each
+        // direction) + 1 ghost so a tile can read its lo-side neighbour.
+        fcache.define(Te.boxArray(), Te.DistributionMap(), AMREX_SPACEDIM, 1);
+        rbud.define(Te.boxArray(), Te.DistributionMap(), 1, 1);
+        fcache.setVal(0.0_rt);
+        rbud.setVal(1.0_rt);
+    }
     auto eval_rhs = [&] (amrex::MultiFab & Tin, amrex::MultiFab & Kout)
     {
         ablastr::utils::communication::FillBoundary(
@@ -7126,11 +7156,25 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             amrex::Array4<amrex::Real const> const & tc    = Tin.const_array(mfi);
             amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
             amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+            // Null (falsy) Array4s when the budget bound is off, so the
+            // kernel below compiles to the unbounded path exactly.
+            amrex::Array4<amrex::Real> const fc_arr = flux_budget
+                ? fcache.array(mfi) : amrex::Array4<amrex::Real>{};
+            amrex::Array4<amrex::Real> const rb_arr = flux_budget
+                ? rbud.array(mfi) : amrex::Array4<amrex::Real>{};
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
                     tn(i,j,k) = 0.0_rt;   // floored nodes keep their T_e
+                    // A closed node is held fixed, so it has no budget to
+                    // exceed: R = 1 leaves its faces unthrottled.
+                    if (rb_arr) { rb_arr(i,j,k) = 1.0_rt; }
+                    if (fc_arr) {
+                        for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                            fc_arr(i,j,k,g) = 0.0_rt;
+                        }
+                    }
                     return;
                 }
 
@@ -7330,9 +7374,18 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
 
                 int const node[3] = {i, j, k};
                 amrex::Real div = 0.0_rt;
+                // Energy density per unit time LEAVING this node, summed
+                // over its faces (budget path only). The hi face enters
+                // div as +F and the lo face as -F, so a negative hi
+                // contribution and a positive lo contribution are both
+                // outflow.
+                amrex::Real out_rate = 0.0_rt;
                 for (int g = 0; g < AMREX_SPACEDIM; ++g) {
                     int lo[3] = {i, j, k};
                     lo[g] -= 1;
+                    amrex::Real const f_hi = face_flux(node, g);
+                    amrex::Real const f_lo = face_flux(lo, g);
+                    if (fc_arr) { fc_arr(i,j,k,g) = f_hi; }
 #ifdef WARPX_DIM_RZ
                     if (g == 0) {
                         // radial: J-folded face fluxes over the dual-
@@ -7342,17 +7395,86 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                             r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
                         amrex::Real const Vr = (r_i > 0.0_rt)
                             ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
-                        div += (face_flux(node, g) - face_flux(lo, g))
-                               / Vr;
+                        div += (f_hi - f_lo) / Vr;
+                        out_rate += (amrex::max(-f_hi, 0.0_rt)
+                                   + amrex::max( f_lo, 0.0_rt)) / Vr;
                         continue;
                     }
 #endif
-                    div += (face_flux(node, g) - face_flux(lo, g))
-                           * dxi_g[g];
+                    div += (f_hi - f_lo) * dxi_g[g];
+                    out_rate += (amrex::max(-f_hi, 0.0_rt)
+                               + amrex::max( f_lo, 0.0_rt)) * dxi_g[g];
                 }
                 amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
                 tn(i,j,k) = div/(1.5_rt*kb*ne0);
+
+                if (rb_arr) {
+                    // Energy density this node holds ABOVE the floor,
+                    // spread over the substep: the most it may shed.
+                    amrex::Real const avail = 1.5_rt*kb*ne0
+                        * amrex::max(tc(i,j,k) - budget_floor_K, 0.0_rt)
+                        / budget_dt;
+                    rb_arr(i,j,k) = (out_rate > avail && out_rate > 0.0_rt)
+                        ? avail/out_rate : 1.0_rt;
+                }
             });
+        }
+
+        // ---- budget pass: rescale each face by its DONOR's ratio -------
+        // Face F(m,g) enters node m as +F and node m+e_g as -F. So the
+        // donor -- the node energy leaves -- is m when F < 0 and m+e_g
+        // when F > 0. Scaling the face ONCE by that node's R keeps both
+        // neighbours reading the identical value, which is what preserves
+        // the telescoping sum. Nothing is injected; the heat the bound
+        // withholds simply stays in the donor.
+        if (flux_budget) {
+            ablastr::utils::communication::FillBoundary(
+                fcache, WarpX::do_single_precision_comms, period, true);
+            ablastr::utils::communication::FillBoundary(
+                rbud, WarpX::do_single_precision_comms, period, true);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(Kout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                amrex::Array4<amrex::Real>       const & tn = Kout.array(mfi);
+                amrex::Array4<amrex::Real const> const & fc = fcache.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & rb = rbud.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return; }
+                    amrex::Real div = 0.0_rt;
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        int hi[3] = {i, j, k}; hi[g] += 1;
+                        int lo[3] = {i, j, k}; lo[g] -= 1;
+                        amrex::Real const f_hi = fc(i,j,k,g);
+                        amrex::Real const f_lo = fc(lo[0],lo[1],lo[2],g);
+                        // donor of the hi face: this node if F<0, else hi
+                        amrex::Real const r_hi = (f_hi < 0.0_rt)
+                            ? rb(i,j,k) : rb(hi[0],hi[1],hi[2]);
+                        // donor of the lo face: lo node if F<0, else this
+                        amrex::Real const r_lo = (f_lo < 0.0_rt)
+                            ? rb(lo[0],lo[1],lo[2]) : rb(i,j,k);
+                        amrex::Real const fh = f_hi*r_hi;
+                        amrex::Real const fl = f_lo*r_lo;
+#ifdef WARPX_DIM_RZ
+                        if (g == 0) {
+                            amrex::Real const r_i =
+                                r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                            amrex::Real const Vr = (r_i > 0.0_rt)
+                                ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                            div += (fh - fl) / Vr;
+                            continue;
+                        }
+#endif
+                        div += (fh - fl) * dxi_g[g];
+                    }
+                    amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
+                    tn(i,j,k) = div/(1.5_rt*kb*ne0);
+                });
+            }
         }
     };
 

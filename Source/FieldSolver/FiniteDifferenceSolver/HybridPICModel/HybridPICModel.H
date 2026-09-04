@@ -2194,6 +2194,40 @@ public:
      *  Input: qdsmc_conduction_Te_floor. */
     amrex::Real m_cond_te_floor = 0.0;
 
+    /** Donor-cell energy-budget bound on the conduction fluxes: throttle
+     *  the flux instead of repairing the state afterwards.
+     *
+     *  The Te floor above is a POST-HOC repair -- it lifts an undershot
+     *  node back to the floor and books the manufactured energy. That is
+     *  visible rather than silent, but it is still an energy SOURCE, and
+     *  for a campaign whose deliverable is a heat-flux ledger a booked
+     *  injection is a hole in the ledger rather than a measurement.
+     *
+     *  With this armed, each node's total OUTGOING conduction flux is
+     *  compared against the energy it actually holds above the floor,
+     *      B_i = (3/2) n_e k_B (T_i - T_floor) / dt_c,
+     *  and every face flux is scaled by the ratio R of its DONOR node
+     *  (the node the energy leaves), R = min(1, B/OUT). Because a face
+     *  is scaled once and both neighbours see the identical scaled
+     *  value, the telescoping sum is preserved exactly: nothing is
+     *  created or destroyed, the heat simply stays in the donor. What
+     *  the tally then books is a DEFICIT -- heat that could not be
+     *  conducted this substep -- which is a physical statement.
+     *
+     *  Scope, stated honestly: the bound is taken over the whole
+     *  conduction substep dt_c, not per RKL2 stage (the integrator calls
+     *  the RHS before it evaluates its stability cap, so the stage dt is
+     *  not visible here). It therefore bounds the SUBSTEP-INTEGRATED
+     *  removal, which removes the systematic over-drain that makes the
+     *  floor fire repeatedly; it is not a per-stage strict-positivity
+     *  proof, and RKL2's intermediate stages are not monotone.
+     *
+     *  R = 1 everywhere the floor would not have fired, so an arm that
+     *  never floors is bit-identical to the unbounded path. Costs one
+     *  extra flux pass and one FillBoundary per RHS evaluation when on.
+     *  0 (default) = off. Input: qdsmc_conduction_flux_budget. */
+    bool m_cond_flux_budget = false;
+
     /** Exclude floor-clamped nodes from the conduction error norm
      *  (meaningful only with the floor armed; silently inert
      *  otherwise). A projection inside an error-controlled loop pins
