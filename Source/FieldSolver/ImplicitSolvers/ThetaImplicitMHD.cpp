@@ -394,6 +394,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     }
     utils::parser::queryWithParser(pp, "conduction_flux_limit_factor",
                                    m_conduction_flux_limit_factor);
+    // Free-streaming cap on the VISCOUS momentum flux (see
+    // m_viscous_flux_limit_factor). Same functional form and normally
+    // the same factor as conduction, so energy and momentum are limited
+    // identically. 0 = off = bit-identical.
+    utils::parser::queryWithParser(pp, "viscous_flux_limit_factor",
+                                   m_viscous_flux_limit_factor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscous_flux_limit_factor >= 0.0_rt,
+        "implicit_mhd.viscous_flux_limit_factor cannot be negative "
+        "(0 disables the viscous free-streaming cap)");
     {
         std::string conduction_coefficient_state = "theta";
         pp.query("conduction_coefficient_state",
@@ -6745,6 +6755,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const auto chi_electron_parser = m_chi_electron;
     const bool chi_any_parser = chi_ion_is_parser || chi_electron_is_parser;
     const amrex::Real conduction_limit = m_conduction_flux_limit_factor;
+    const amrex::Real viscous_limit = m_viscous_flux_limit_factor;
     const bool braginskii = m_conduction_braginskii;
     const bool brag_tangential_minmod =
         braginskii && m_braginskii_tangential_limiter == "minmod";
@@ -7885,10 +7896,35 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             left_velocity = -right_velocity;
                         }
                     }
-                    const amrex::Real viscous_stress =
+                    amrex::Real viscous_stress =
                         -viscous_coefficient *
                         (right_velocity - left_velocity) *
                         inverse_normal_size;
+                    // FREE-STREAMING CAP on the viscous momentum flux,
+                    // the exact analogue of the conduction cap
+                    // q/(1 + |q|/(f q_fs)) with q_fs = n kB Ti v_ti.
+                    // A viscous stress IS a momentum flux, and the
+                    // free-streaming bound a thermal ion population can
+                    // carry is tau_fs = rho v_ti^2 = n kB Ti, i.e. the
+                    // ION PRESSURE. Same harmonic form, same branchless
+                    // smoothness for the JFNK probes, and deliberately
+                    // the SAME factor f as conduction so the energy and
+                    // momentum equations are limited identically --
+                    // until now conduction was flux-limited and
+                    // viscosity was not limited at all, which is a
+                    // transport mismatch between the two legs of the
+                    // same tensor (Eric 2026-09-04, from the ripples in
+                    // haloD's Ti field).
+                    if (viscous_limit > 0.0_rt) {
+                        const amrex::Real free_streaming_stress =
+                            0.5_rt * (left.ion_pressure + right.ion_pressure);
+                        if (free_streaming_stress > 0.0_rt) {
+                            viscous_stress /=
+                                1.0_rt + std::abs(viscous_stress) /
+                                             (viscous_limit *
+                                              free_streaming_stress);
+                        }
+                    }
                     flux.momentum[component] += viscous_stress;
                     viscous_work += 0.5_rt *
                                     (left_velocity + right_velocity) *

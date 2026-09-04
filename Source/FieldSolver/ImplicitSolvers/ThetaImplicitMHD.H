@@ -1796,6 +1796,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // (adding an internal-energy source to a total-energy row is still
     // heat) and stays Newton-friendly.
     amrex::Real m_wall_corner_temperature_pin_rate = 0.0;
+    // Free-streaming cap on the VISCOUS momentum flux
+    // (implicit_mhd.viscous_flux_limit_factor; 0 = off = bit-identical).
+    // The exact analogue of conduction_flux_limit_factor: a viscous
+    // stress is a momentum flux, and the free-streaming bound a thermal
+    // ion population can carry is tau_fs = rho v_ti^2 = n kB Ti = the
+    // ion pressure, so the cap is tau/(1 + |tau|/(f tau_fs)) -- the same
+    // harmonic, branchless form the conduction cap uses.
+    //
+    // WHY: conduction was flux-limited and viscosity was not limited at
+    // all, so the two legs of the dissipation tensor were limited
+    // differently while being integrated identically. Set this equal to
+    // conduction_flux_limit_factor to limit the ENERGY and MOMENTUM
+    // equations the same way.
+    amrex::Real m_viscous_flux_limit_factor = 0.0;
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (implicit_mhd.wall_conduction_scale, braginskii only):
     //   "perp"     (default) -- the wall-interface drain's scalar chi is

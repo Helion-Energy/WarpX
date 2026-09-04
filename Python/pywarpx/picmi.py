@@ -3183,6 +3183,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    viscous_flux_limit_factor: float, default=0 (off)
+        Free-streaming cap on the VISCOUS momentum flux, the exact
+        analogue of conduction_flux_limit_factor. A viscous stress is a
+        momentum flux, and the free-streaming bound a thermal ion
+        population can carry is tau_fs = rho v_ti^2 = n k_B T_i, i.e. the
+        ion pressure -- so the cap is tau/(1 + |tau|/(f tau_fs)), the same
+        harmonic branchless form the conduction cap uses.
+
+        Set this equal to conduction_flux_limit_factor to limit the ENERGY
+        and MOMENTUM equations identically. Until this existed, conduction
+        was flux-limited and viscosity was not limited at all, so the two
+        legs of the dissipation tensor were limited differently while
+        being integrated together.
+
     wall_corner_temperature_pin_rate: float, default=0 (off)
         Relaxation rate [1/s] pinning shaped-wall CORNER cells to the wall
         temperature. 0 disables it and the run is bit-identical.
@@ -3433,6 +3447,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_chi_par_max_halo=None,
         joule_halo_taper=None,
         wall_corner_temperature_pin_rate=None,
+        viscous_flux_limit_factor=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3563,6 +3578,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_chi_par_max_halo = conduction_chi_par_max_halo
         self.joule_halo_taper = joule_halo_taper
         self.wall_corner_temperature_pin_rate = wall_corner_temperature_pin_rate
+        self.viscous_flux_limit_factor = viscous_flux_limit_factor
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3745,6 +3761,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_corner_temperature_pin_rate = (
             self.wall_corner_temperature_pin_rate
         )
+        implicit_mhd.viscous_flux_limit_factor = self.viscous_flux_limit_factor
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )
