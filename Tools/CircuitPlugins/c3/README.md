@@ -176,6 +176,23 @@ Measured (2026-08-26, this tree): (a) 3.7e-12 / (b) 3.7e-12 /
 B +249.7787 mWb on both sides, post-swap lock-flux drift 3.1e-12 /
 (d) bitwise / (e) max 1.5e-9, median 1.5e-12.
 
+### Pre-roll pin (the plugin's own s(0))
+
+The plugin pre-rolls the machine inside `Define`; the host (deck) side runs
+its own pre-roll to seed the field registers' `initial_scale`. The two are
+independent computations of the same trajectory and must be PINNED against
+each other rather than assumed equal (they agree to the stepper's
+1e-12-class parity only if nothing upstream drifted):
+
+- in situ: with `verbose=1` the plugin logs `pre-roll s(0) per port:
+  <name>=<value> ...` (17 significant digits) right after the pre-roll;
+  compare against `external_vector_potential.<name>.initial_scale` in
+  `warpx_used_inputs`.
+- offline: `c3_harness ... --dump-initial s0.txt` writes the post-Define
+  scales per port (hexfloat) through the ABI alone -- a zero-length,
+  non-accepted `AdvanceInterval(0, 0, eps = 0)` returns the pre-rolled
+  state and disturbs nothing -- before the trajectory run.
+
 ## Remaining WarpX-side integration TODOs
 
 Driver status (the in-tree `Source/Circuit` engine +

@@ -26,6 +26,13 @@
  *          fresh engine (--config2), ReadCheckpoint, [ckpt_t, t_end];
  *          end-state checkpoints of both legs for byte comparison
  *
+ * --dump-initial FILE writes the engine's scales right after Define (its
+ * own pre-rolled s(0) per port, hexfloat) through the ABI alone: a
+ * zero-length AdvanceInterval(0, 0, eps = 0, accept = false) restores the
+ * entry snapshot and advances no substep, so the returned scales are the
+ * pre-rolled state and nothing is disturbed. Pins the plugin's pre-roll
+ * against a host-side reference (e.g. the field registers' initial_scale).
+ *
  * With --plugin the engine is created through dlopen/dlsym (the real ABI
  * path, RTLD_LOCAL); without it the concrete class is instantiated
  * directly, which also enables --lock-out introspection (per-step lock
@@ -72,6 +79,7 @@ struct Args
     std::string out, out2;
     std::string lock_out;
     std::string ckpt_dir;
+    std::string dump_initial;       // post-Define s(0) per port ("" = off)
     double t_end = 0.0, dt = 0.0, ckpt_t = 0.0;
     int evals = 2;
 };
@@ -98,6 +106,7 @@ ParseArgs (int argc, char** argv)
         else if (opt == "--out2") { a.out2 = need(i); }
         else if (opt == "--lock-out") { a.lock_out = need(i); }
         else if (opt == "--ckpt-dir") { a.ckpt_dir = need(i); }
+        else if (opt == "--dump-initial") { a.dump_initial = need(i); }
         else if (opt == "--t-end") { a.t_end = std::atof(need(i).c_str()); }
         else if (opt == "--dt") { a.dt = std::atof(need(i).c_str()); }
         else if (opt == "--ckpt-t") { a.ckpt_t = std::atof(need(i).c_str()); }
@@ -330,6 +339,23 @@ main (int argc, char** argv)
 
         Engine eng(a.plugin);
         eng.Ec().Define(c.names, c.i_ref, a.config);
+        if (!a.dump_initial.empty()) {
+            // zero-length, non-accepted evaluation: the pre-rolled scales
+            std::vector<amrex::Real> s0;
+            std::vector<amrex::Real> const zero_eps(c.names.size(), 0.0);
+            eng.Ec().BeginStep(0.0, a.dt);
+            eng.Ec().AdvanceInterval(0.0, 0.0, zero_eps, false, s0);
+            std::ofstream ini(a.dump_initial);
+            if (!ini) {
+                throw std::runtime_error("cannot write '" + a.dump_initial + "'");
+            }
+            ini << "# name s0\n";
+            for (std::size_t k = 0; k < c.names.size(); ++k) {
+                ini << c.names[k] << ' ' << Hex(s0[k]) << '\n';
+            }
+            std::cerr << "[harness] pre-rolled s(0) of " << c.names.size()
+                      << " ports -> " << a.dump_initial << "\n";
+        }
         std::ofstream csv = OpenCsv(a.out, c);
         std::ofstream lock_csv;
         std::ofstream* lock_ptr = nullptr;

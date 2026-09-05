@@ -111,6 +111,20 @@ C3ExternalCircuit::Define (std::vector<std::string> const& coil_names,
         Log("pre-roll skipped (restart: ReadCheckpoint supersedes it)");
     }
     m_entry = m_net->Live().TakeSnapshot();
+    if (m_cfg.verbose) {
+        // The plugin's OWN s(0) = I(0)/I_ref per Define port, in full
+        // precision, so an in-situ log can be pinned against the field
+        // registers' initial_scale (the host-side pre-roll) instead of
+        // trusting that the two pre-rolls agree.
+        std::ostringstream os;
+        os.precision(17);
+        os << "pre-roll s(0) per port:";
+        for (long j = 0; j < m_n_port; ++j) {
+            os << ' ' << coil_names[static_cast<std::size_t>(j)] << '='
+               << m_net->ChannelCurrent(j) / m_i_ref[static_cast<std::size_t>(j)];
+        }
+        Log(os.str());
+    }
 }
 
 void
