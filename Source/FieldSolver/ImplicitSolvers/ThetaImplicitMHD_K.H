@@ -244,6 +244,11 @@ struct FaceFlux {
     // registers so the stress and its heat are one assembly. Zero under
     // every other closure/mode.
     amrex::Real viscous_dissipation = 0.0;
+    // implicit_mhd.wall_friction_heating = drop: the tangential no-slip
+    // friction work exported INTO the wall through this interface face
+    // (energy per area per time, >= 0 for dissipative friction), for the
+    // shaped-wall ledger; zero otherwise.
+    amrex::Real wall_friction_work = 0.0;
     // --- HLLD additions (populated by hlld_flux only; default-zero so
     // the existing hllc/rusanov paths are undisturbed). ---
     // Maxwell-stress part of the momentum flux; momentum[] holds the

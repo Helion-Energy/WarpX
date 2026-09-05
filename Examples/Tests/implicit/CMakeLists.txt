@@ -1746,6 +1746,49 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# wall_friction_heating = drop on the same deck: the no-slip friction work
+# leaves E_i into the wall instead of heating the wall row, the register
+# skips it (dU_i = d(E_i - KE) still holds, both without the friction),
+# the momentum fields -- i.e. the kinetic energy the wall shear removes --
+# are unchanged against the book twin above, and the shaped-wall ledger's
+# friction column closes the budget (it equals the row-14 friction
+# deposit integral and the E_i the run lost relative to the twin).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_friction_drop  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip implicit_mhd.wall_friction_heating=drop implicit_mhd.wall_ledger_file=diags/wall_ledger.txt diag1.intervals=1 implicit_mhd.ion_closure=dual_energy implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1 implicit_evolve.theta=0.5 my_constants.dt=1.0e-8 diag1.fields_to_plot=implicit_mhd_mass_density implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z"  # inputs
+    "analysis_mhd_wall_friction_drop.py diags ../test_rz_theta_implicit_mhd_viscous_heating_no_slip/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_viscous_heating_no_slip  # dependency
+)
+
+# The same pair at the PRODUCTION viscous centering (viscous_theta = 1,
+# implicit_evolve.theta still 0.5): the stress is formed from u^{n+1}
+# while the export and the register pair with the theta-stage midpoint,
+# so the friction deposit is the mixed product and check A is absolute
+# (see the analysis docstring). The book twin needs no analysis of its
+# own (the RZ row-wise ledger gate does not apply at this centering).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_friction_book_be  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip implicit_mhd.ion_closure=dual_energy implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1 implicit_evolve.theta=0.5 my_constants.dt=1.0e-8 implicit_mhd.viscous_theta=1.0 diag1.intervals=1 diag1.fields_to_plot=implicit_mhd_mass_density implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_friction_drop_be  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip implicit_mhd.wall_friction_heating=drop implicit_mhd.wall_ledger_file=diags/wall_ledger.txt diag1.intervals=1 implicit_mhd.ion_closure=dual_energy implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1 implicit_evolve.theta=0.5 my_constants.dt=1.0e-8 implicit_mhd.viscous_theta=1.0 diag1.fields_to_plot=implicit_mhd_mass_density implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z"  # inputs
+    "analysis_mhd_wall_friction_drop.py diags ../test_rz_theta_implicit_mhd_wall_friction_book_be/diags be"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_friction_book_be  # dependency
+)
+
 # ion thermal conduction on the central-flux face registers: a 1% sinusoidal
 # ion-temperature mode on a uniform static background, with chi_i stiff
 # against the acoustic response (chi k / c_s ~ 57), must decay at the
