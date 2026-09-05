@@ -622,6 +622,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
             // stage); the RHS deposits half of it into each adjacent
             // cell's U_i with the face's own metric weight.
             viscous_dissipation,
+            // wall_friction_heating = drop: tangential no-slip friction
+            // work exported into the wall (>= 0), for the wall ledger.
+            wall_friction_work,
             count
         };
     };
@@ -1519,9 +1522,33 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // advective capture, r-weighted accepted theta-state face fluxes,
     // both r- and z-normal interfaces), printed on the absorb ledger's
     // cadence and optionally appended to wall_ledger_file as
-    // "step mass energy" rows. Counters restart at zero on restart.
+    // "step mass energy" rows (with wall_friction_heating = drop a fourth
+    // column follows: the cumulative wall-friction energy dropped [J],
+    // which is also part of the energy column since it leaves as an E_i
+    // face flux). Counters restart at zero on restart.
     amrex::Real m_shaped_wall_mass = 0.0;
     amrex::Real m_shaped_wall_energy = 0.0;
+    // Where the tangential no-slip friction work goes
+    // (implicit_mhd.wall_friction_heating; requires wall_no_slip):
+    //   "book" (default, bit-identical) -- the wall does no work: the face
+    //     work flux of the tangential components is zero (u_face = 0), so
+    //     the kinetic energy the wall shear removes from the adjacent live
+    //     cell stays in E_i as heat, and the dual-energy register books
+    //     the same heat into U_i.
+    //   "drop" -- the friction removes kinetic energy WITHOUT heating: the
+    //     face work flux of the tangential components is u_live . Pi_f (the
+    //     live cell's theta-stage velocity times the stress), which carries
+    //     exactly the removed kinetic energy out of E_i into the wall, and
+    //     the dissipation register skips those components, so neither ion
+    //     register is heated. An ENERGY SINK by construction -- the
+    //     reference code's wall-energy parity (its wall row is pinned at
+    //     T_wall and its pinned momentum rows carry no heat entry). The
+    //     dropped energy is tallied per step (m_wall_friction_energy_dropped)
+    //     and printed/written with the shaped-wall ledger. The normal
+    //     viscous component at an interface (the absorb image) is not
+    //     friction and is left as it is.
+    std::string m_wall_friction_heating = "book";
+    amrex::Real m_wall_friction_energy_dropped = 0.0;
     std::string m_wall_ledger_file;
     bool m_wall_ledger_started = false;
     amrex::Real m_positivity_safety = 0.99;

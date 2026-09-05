@@ -1903,6 +1903,21 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             m_WarpX->Geom(0),
             m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0)
                 ->nGrowVect());
+        // Where the no-slip friction work goes (see m_wall_friction_heating).
+        // Queried UNCONDITIONALLY (not only with an active wall), so that
+        // `drop` on a deck without a no-slip wall is an input error rather
+        // than an unread, silently inert key.
+        const amrex::ParmParse pp_friction("implicit_mhd");
+        pp_friction.query("wall_friction_heating", m_wall_friction_heating);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_wall_friction_heating == "book" ||
+                m_wall_friction_heating == "drop",
+            "implicit_mhd.wall_friction_heating must be 'book' or 'drop'");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_wall_friction_heating == "book" || m_wall_mask.NoSlip(),
+            "implicit_mhd.wall_friction_heating = drop acts on the no-slip "
+            "wall faces and requires implicit_mhd.wall_no_slip = 1 "
+            "(otherwise it would be a silent no-op)");
         if (m_wall_mask.IsActive()) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_use_recast,
                 "implicit_mhd.wall_model = pec/pec_response/dielectric "
@@ -3401,6 +3416,14 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? std::string("ON (u_t = 0 at the contour; "
                                          "normal component free)")
                            : std::string("off"))
+                   << "\n"
+                   << "Wall friction heating:         "
+                   << m_wall_friction_heating
+                   << (m_wall_friction_heating == "drop"
+                           ? " (no-slip friction work exported into the "
+                             "wall, not heat -- an energy sink)"
+                           : " (no-slip friction work heats the adjacent "
+                             "live cell)")
                    << "\n"
                    << "Thermal diffusivity i/e [m2/s]: "
                    << (m_chi_ion_is_parser
@@ -7581,6 +7604,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // far side, so ImplicitMHDWallMask rejects wall_no_slip without a
     // wall_thermal_bc), hence wall_mechanics is already true here.
     const bool wall_no_slip = m_wall_mask.NoSlip();
+    // implicit_mhd.wall_friction_heating = drop (see the header): the
+    // tangential friction work of the no-slip faces leaves E_i through the
+    // face (u_live . Pi_f) and is skipped by the dissipation register, so
+    // the wall shear removes kinetic energy without heating either ion
+    // register. false = today's booking, bit-identical.
+    const bool wall_friction_drop =
+        wall_no_slip && (m_wall_friction_heating == "drop");
     // Interface faces exchange against a T_wall reservoir in BOTH the
     // one-sided drain mode (temperature) and the two-sided pin mode
     // (dirichlet); zero_flux insulates them.
@@ -7944,6 +7974,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         FaceFluxComponent::ion_internal_energy;
     constexpr int flux_viscous_dissipation =
         FaceFluxComponent::viscous_dissipation;
+    constexpr int flux_wall_friction_work =
+        FaceFluxComponent::wall_friction_work;
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
@@ -8550,6 +8582,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 }
                 amrex::Real viscous_work = 0.0_rt;
                 amrex::Real viscous_dissipation = 0.0_rt;
+                amrex::Real wall_friction_work = 0.0_rt;
                 // Staged old-state velocities for viscous_theta. Hoisted
                 // out of the component loop: both sides' densities are
                 // component-independent, and the floor must match the one
@@ -8619,7 +8652,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     // copied ghost, z_lo mirror) the stress used.
                     amrex::Real pair_left_velocity = 0.0_rt;
                     amrex::Real pair_right_velocity = 0.0_rt;
-                    if (viscous_dissipation_register) {
+                    // The live cell's theta-stage velocity at a wall
+                    // interface, before the antisymmetric pairing below:
+                    // under wall_friction_heating = drop it multiplies the
+                    // tangential stress into the E_i work flux, so the
+                    // energy leaving E_i is exactly the kinetic energy the
+                    // stress removes (the same pairing the register uses).
+                    amrex::Real live_pair_velocity = 0.0_rt;
+                    if (viscous_dissipation_register || wall_friction_drop) {
                         pair_left_velocity =
                             mom(il, jl, kl, component) /
                             std::max(rho(il, jl, kl),
@@ -8627,6 +8667,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         pair_right_velocity =
                             mom(i, j, k, component) /
                             std::max(rho(i, j, k), parameters.density_floor);
+                        live_pair_velocity = wall_right_masked
+                                                 ? pair_left_velocity
+                                                 : pair_right_velocity;
                         bool far_right = wall_interface && wall_right_masked;
                         bool far_left = wall_interface && !wall_right_masked;
                         if (normal == 2 && !viscous_z_periodic) {
@@ -8685,7 +8728,28 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     viscous_work += 0.5_rt *
                                     (left_velocity + right_velocity) *
                                     viscous_stress;
-                    if (viscous_dissipation_register) {
+                    const bool friction_component =
+                        no_slip_face && component != normal;
+                    if (wall_friction_drop && friction_component) {
+                        // wall_friction_heating = drop: the tangential
+                        // face velocity is zero (image), so the term above
+                        // is exactly zero here; export the friction work
+                        // u_live . Pi_f instead. The live cell's E_i then
+                        // loses exactly the kinetic energy the stress
+                        // removes (E_i - KE unchanged: no heat), and the
+                        // energy crosses into the wall -- tallied by the
+                        // shaped-wall ledger through wall_friction_work
+                        // (into-wall sign: positive for dissipative
+                        // friction).
+                        const amrex::Real friction_flux =
+                            live_pair_velocity * viscous_stress;
+                        viscous_work += friction_flux;
+                        wall_friction_work +=
+                            (wall_right_masked ? 1.0_rt : -1.0_rt) *
+                            friction_flux;
+                    }
+                    if (viscous_dissipation_register &&
+                        !(wall_friction_drop && friction_component)) {
                         // The FINAL stress (staged, banded, imaged,
                         // region-scaled, capped) times the pairing
                         // difference: -Pi_f . (u_R - u_L)/dn is the rate at
@@ -8704,6 +8768,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_energy += viscous_work;
                 // Zero unless viscous_dissipation_register (struct default).
                 flux.viscous_dissipation = viscous_dissipation;
+                // Zero unless wall_friction_heating = drop at a no-slip face.
+                flux.wall_friction_work = wall_friction_work;
             }
 
             // Thermal conduction (implicit_mhd.thermal_diffusivity_* or
@@ -10390,6 +10456,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_perp_energy = 0.0_rt;
                 flux.ion_internal_energy = 0.0_rt;
                 flux.viscous_dissipation = 0.0_rt;
+                flux.wall_friction_work = 0.0_rt;
                 flux.electron_velocity = 0.0_rt;
             }
 #endif
@@ -10415,6 +10482,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // stress_work (the viscous block leaves the default otherwise).
             flux_arr(i, j, k, flux_viscous_dissipation) =
                 flux.viscous_dissipation;
+            // Zero unless wall_friction_heating = drop at a no-slip face.
+            flux_arr(i, j, k, flux_wall_friction_work) =
+                flux.wall_friction_work;
             flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
             flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
             flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
@@ -10491,6 +10561,13 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
     const bool book_absorb = m_r_open && (m_r_open_fluid == "absorb");
     const bool book_wall = m_wall_mask.GetThermalBC() !=
                            ImplicitMHDWallMask::ThermalBC::none;
+    // wall_friction_heating = drop: the tangential no-slip friction work
+    // exported into the wall rides its own face register (also part of
+    // the E_i energy column) and gets its own cumulative line.
+    constexpr int flux_wall_friction_work =
+        FaceFluxComponent::wall_friction_work;
+    const bool book_friction =
+        book_wall && (m_wall_friction_heating == "drop");
 
     if (book_absorb) {
         amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
@@ -10559,8 +10636,14 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
         const amrex::Real dz = m_WarpX->Geom(0).CellSize(1);
         const amrex::Real two_pi = 2.0_rt * MathConst::pi;
 
-        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        // Third sum: the wall-friction energy exported through the
+        // interface faces under wall_friction_heating = drop (a part of the
+        // energy column too, since it leaves as an E_i face flux).
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum>
+            reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real> reduce_data(
+            reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
         // Face-type validboxes SHARE their boundary faces between
         // adjacent boxes: without unique ownership a stair interface
@@ -10585,7 +10668,7 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                     const bool left_masked = (i - 1 >= fm[jc]);
                     const bool right_masked = (i >= fm[jc]);
                     if (left_masked == right_masked || !own(i, j, k)) {
-                        return {0.0_rt, 0.0_rt};
+                        return {0.0_rt, 0.0_rt, 0.0_rt};
                     }
                     // +n flux enters a right-side wall; -n a left-side.
                     const amrex::Real sign =
@@ -10602,7 +10685,8 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                             flux_arr(i, j, k, flux_ion_perp_energy);
                     }
                     return {sign * area * flux_arr(i, j, k, flux_mass),
-                            sign * area * energy_flux};
+                            sign * area * energy_flux,
+                            area * flux_arr(i, j, k, flux_wall_friction_work)};
                 });
         }
         const amrex::Box z_face_domain = amrex::convert(
@@ -10626,7 +10710,7 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                     const bool left_masked = (i >= fm[jl]);
                     const bool right_masked = (i >= fm[jr]);
                     if (left_masked == right_masked || !own(i, j, k)) {
-                        return {0.0_rt, 0.0_rt};
+                        return {0.0_rt, 0.0_rt, 0.0_rt};
                     }
                     const amrex::Real sign =
                         right_masked ? 1.0_rt : -1.0_rt;
@@ -10642,16 +10726,19 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                             flux_arr(i, j, k, flux_ion_perp_energy);
                     }
                     return {sign * area * flux_arr(i, j, k, flux_mass),
-                            sign * area * energy_flux};
+                            sign * area * energy_flux,
+                            area * flux_arr(i, j, k, flux_wall_friction_work)};
                 });
         }
         auto sums = reduce_data.value(reduce_op);
-        amrex::Real step_totals[2] = {dt * amrex::get<0>(sums),
-                                      dt * amrex::get<1>(sums)};
+        amrex::Real step_totals[3] = {dt * amrex::get<0>(sums),
+                                      dt * amrex::get<1>(sums),
+                                      dt * amrex::get<2>(sums)};
         amrex::ParallelAllReduce::Sum(
-            step_totals, 2, amrex::ParallelContext::CommunicatorSub());
+            step_totals, 3, amrex::ParallelContext::CommunicatorSub());
         m_shaped_wall_mass += step_totals[0];
         m_shaped_wall_energy += step_totals[1];
+        m_wall_friction_energy_dropped += step_totals[2];
     }
 
     if (m_absorb_ledger_interval > 0 &&
@@ -10669,6 +10756,14 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                 << " deposited mass [kg] = " << m_shaped_wall_mass
                 << " deposited energy [J] = " << m_shaped_wall_energy
                 << "\n";
+        }
+        if (book_friction) {
+            amrex::Print().SetPrecision(17)
+                << "MHD wall friction ledger: step " << step + 1
+                << " friction energy dropped [J] = "
+                << m_wall_friction_energy_dropped
+                << " (no-slip friction work exported into the wall, not "
+                   "booked as heat)\n";
         }
         if (amrex::ParallelDescriptor::IOProcessor()) {
             // Truncate at the first write of the run (a stale file from a
@@ -10692,7 +10787,11 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                 m_wall_ledger_started = true;
                 ledger.precision(17);
                 ledger << step + 1 << " " << m_shaped_wall_mass << " "
-                       << m_shaped_wall_energy << "\n";
+                       << m_shaped_wall_energy;
+                if (book_friction) {
+                    ledger << " " << m_wall_friction_energy_dropped;
+                }
+                ledger << "\n";
             }
         }
     }

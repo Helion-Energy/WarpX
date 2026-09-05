@@ -3291,6 +3291,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the Jacobian carries. Off restores the identity energy blocks for
         A/B measurement; the converged state never depends on it.
 
+    wall_friction_heating: str, default="book"
+        Where the tangential friction work of the no-slip wall faces goes
+        (requires wall_no_slip=True). "book": the wall does no work, so
+        the kinetic energy the wall shear removes from the adjacent live
+        cell stays in E_i as heat (and in U_i under dual_energy) -- with
+        the production wall band this converts the wall-adjacent halo
+        cell's tangential kinetic energy into heat every step. "drop": the
+        friction removes kinetic energy WITHOUT heating -- the face work
+        flux u_live . Pi_f carries exactly the removed kinetic energy out
+        of E_i into the wall and the dissipation register skips the
+        no-slip components; an energy sink by construction (the reference
+        code's wall-energy parity), tallied per step as a "MHD wall
+        friction ledger" line and a fourth column of wall_ledger_file.
+
     viscous_flux_limit_factor: float, default=0 (off)
         Free-streaming cap on the VISCOUS momentum flux, the exact
         analogue of conduction_flux_limit_factor. A viscous stress is a
@@ -3541,6 +3555,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_viscosity_mask_width=None,
         wall_viscosity_band_value=None,
         wall_no_slip=None,
+        wall_friction_heating=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
         conduction_flux_limit_factor=None,
@@ -3680,6 +3695,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
         self.wall_viscosity_band_value = wall_viscosity_band_value
         self.wall_no_slip = wall_no_slip
+        self.wall_friction_heating = wall_friction_heating
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
         self.conduction_flux_limit_factor = conduction_flux_limit_factor
@@ -3848,6 +3864,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value
         implicit_mhd.wall_no_slip = self.wall_no_slip
+        implicit_mhd.wall_friction_heating = self.wall_friction_heating
         # strings route to the parser signature; numbers keep the
         # bit-identical constant fast path
         if isinstance(self.thermal_diffusivity_ion, str):

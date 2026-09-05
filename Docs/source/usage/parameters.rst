@@ -5806,7 +5806,9 @@ Jacobian probes.
     Because the imposed face velocity is zero the paired viscous WORK
     vanishes on the tangential components: the wall does no work, so the
     tangential kinetic energy the stress removes becomes internal energy
-    in the adjacent cell instead of being exported. It is a plain face
+    in the adjacent cell instead of being exported (the default; see
+    :pp:param:`implicit_mhd.wall_friction_heating` to export it into the
+    wall instead, the reference code's behaviour). It is a plain face
     flux — static geometry, :math:`C^\infty` in the state — so the JFNK
     Jacobian and ``pc_mhd_block`` see it exactly as they see the interior
     viscous stress. No identity rows are involved anywhere.
@@ -5852,6 +5854,44 @@ Jacobian probes.
     outermost live cell's density then stays bit-frozen for the whole
     run and its ion energy has the wall sink as its only channel — a
     monotone collapse with nothing to replenish it.
+
+.. pp:param:: implicit_mhd.wall_friction_heating
+    :type: ``string``
+    :default: ``book``
+
+    Where the tangential friction work of the no-slip wall faces goes
+    (requires :pp:param:`implicit_mhd.wall_no_slip`; ``drop`` without it
+    is an input error).
+
+    ``book`` (default, bit-identical): the wall does no work, so the
+    kinetic energy the wall shear :math:`\tau_w = \mu\,u_t/(\Delta n/2)`
+    removes from the adjacent live cell stays in :math:`E_i` as heat, and
+    under ``ion_closure = dual_energy`` the dissipation register books the
+    same heat into :math:`U_i` (see
+    :pp:param:`implicit_mhd.dual_energy_viscous_heating`). With the
+    production wall band (:pp:param:`implicit_mhd.wall_viscosity_band_value`,
+    an absolute dynamic viscosity that is tens of times the halo's
+    :math:`\rho\nu`) this converts essentially the whole tangential
+    kinetic energy of the wall-adjacent halo cell into heat every step.
+
+    ``drop``: the friction removes kinetic energy WITHOUT heating. The
+    face work flux of the tangential components becomes
+    :math:`\boldsymbol{u}_\mathrm{live}\cdot\Pi_f` (the live cell's
+    theta-stage velocity times the wall stress), which carries exactly the
+    kinetic energy the stress removes out of :math:`E_i` and into the wall
+    (so :math:`E_i - K` is unchanged by the friction), and the dual-energy
+    dissipation register skips those components, so neither ion register
+    is heated. This is an ENERGY SINK by construction -- the reference
+    code's wall-energy parity: its wall row is pinned at the wall
+    temperature and its pinned momentum rows carry no heat entry. The
+    dropped energy is tallied every step and reported with the shaped-wall
+    ledger (a ``MHD wall friction ledger`` line on the absorb-ledger
+    cadence, and a fourth column, the cumulative friction energy dropped
+    [J], in ``wall_ledger_file``; it is also part of the ledger's energy
+    column, since it leaves as an :math:`E_i` face flux). The normal
+    viscous component at an interface face (the absorbing image) is not
+    friction and is left as it is; the z-end walls carry no tangential
+    (no-slip) stress in this solver, so nothing is dropped there.
 
 .. pp:param:: implicit_mhd.thermal_diffusivity_ion
     :type: ``float``
