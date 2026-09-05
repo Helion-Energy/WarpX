@@ -26,7 +26,8 @@ namespace warpx::circuit
     {
         none,        //!< coil is not measured (drive-only)
         disk,        //!< plasma-frame disk flux through the coil circle
-        reciprocity  //!< free-space reciprocity dot with the plasma current
+        reciprocity, //!< free-space reciprocity dot with the plasma current
+        loop         //!< reciprocity against the analytic loop A of the declared filament (LoopLinkage)
     };
 
     /** Plasma flux linkage of a coil by the DISK rule: the plasma-frame
@@ -70,6 +71,36 @@ namespace warpx::circuit
      */
     amrex::Real ReciprocityLinkage (const amrex::MultiFab& A_theta,
                                     const amrex::MultiFab& J_theta);
+
+    /** Plasma flux linkage of a coil by free-space reciprocity against the
+     * ANALYTIC loop vector potential of the coil's declared filament,
+     *     lambda = 2 pi Sum_{j < nz} w_r r A_theta(r, z) J_theta dr dz,
+     *     A_theta = I_ref n_turns * YeeLoopATheta(r, z, coil.r, coil.z),
+     * i.e. the discrete-convention loop kernel (Legendre-parameter clip
+     * [1e-15, 1 - 1e-12], f(m)/m form, exactly 0 on the axis) of a
+     * filament at the coil's (r, z) AS GIVEN -- no quarter-cell offset is
+     * added here: a caller placing the filament in the discrete
+     * convention declares the offset position -- with no image and no
+     * softening, over the nodal (node r, node z) J_theta with trapezoid
+     * end-weights in r, EXCLUDING the nodes within exclusion_radius of
+     * the filament (their unresolved near-field response would register
+     * as an in-phase spurious linkage with maximal weight) and EXCLUDING
+     * the upper axial node plane j = nz. This is, term for term, the
+     * integrand of the python coupling reference's loop probe (its
+     * analytic A with the scipy elliptic integrals, its exclusion mask,
+     * and its node range that drops the last axial plane), so a native
+     * driver measuring with it sees the reference's linkage to
+     * elliptic-integral roundoff. Free-space functional: pair it with the
+     * Green's-function open boundary. Returns lambda_phys * I_ref *
+     * n_turns. Collective; RZ (m = 0), level 0.
+     *
+     * \param[in] coil              the measured coil
+     * \param[in] J_theta           plasma-frame J_theta (node r, node z)
+     * \param[in] exclusion_radius  mask radius [m] around the filament
+     *                              (0 = no mask)
+     */
+    amrex::Real LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
+                             double exclusion_radius);
 
     /** The coupling power Int J . E dV over the RZ (m = 0) domain, summed
      * component-wise on matched (E/J) staggerings with owner-masked nodal
@@ -125,6 +156,8 @@ namespace warpx::circuit
          * \param[in]  coils    the coil set (rows of the batch)
          * \param[in]  probes   per-coil probe kind (ProbeKind::none rows
          *                      report lambda = 0)
+         * \param[in]  exclusion_radius  per-coil mask radius [m] of the
+         *                      loop probe (ignored by the other kinds)
          * \param[in]  a_theta  per-coil unit vector potential
          *                      <field_name>_Aext theta component (node r,
          *                      node z) at I_ref * n_turns; may be null
@@ -138,6 +171,7 @@ namespace warpx::circuit
          */
         void Measure (const CoilSet& coils,
                       const std::vector<ProbeKind>& probes,
+                      const std::vector<double>& exclusion_radius,
                       const std::vector<const amrex::MultiFab*>& a_theta,
                       const amrex::MultiFab* bz,
                       const amrex::MultiFab* j_theta,
@@ -159,6 +193,7 @@ namespace warpx::circuit
          * a key miss. Public for the CUDA extended-lambda rule; not API. */
         void BuildPack (const CoilSet& coils,
                         const std::vector<ProbeKind>& probes,
+                        const std::vector<double>& exclusion_radius,
                         const std::vector<const amrex::MultiFab*>& a_theta,
                         const amrex::MultiFab* bz,
                         const amrex::MultiFab* j_theta);

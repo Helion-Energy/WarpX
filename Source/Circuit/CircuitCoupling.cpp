@@ -112,6 +112,45 @@ CircuitCoupling::CircuitCoupling ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_coupler_params.corrector_iterations >= 0,
         "circuit.coupling.corrector_iterations must be >= 0");
+    // Optional EMF low-pass handed to a compiled engine (see
+    // CircuitCoupler::Params::eps_lowpass_tau). The Python-callback engine
+    // computes its own EMF from the linkage registers, so the knob would be
+    // a silent no-op there: refuse the pairing.
+    utils::parser::queryWithParser(pp_circuit,
+        "eps_lowpass_tau", m_coupler_params.eps_lowpass_tau);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupler_params.eps_lowpass_tau >= 0.0,
+        "circuit.eps_lowpass_tau must be >= 0 (seconds; 0 = off)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupler_params.eps_lowpass_tau == 0.0 || m_engine == "external",
+        "circuit.eps_lowpass_tau filters the EMF the coupler hands a "
+        "compiled engine and requires circuit.engine = external (the "
+        "Python-callback engine computes its own EMF)");
+    // Newton-scope coupling model knobs (see CircuitCoupler::Params):
+    // which linkage the step's EMF is differenced against, and how far
+    // the in-residual advance reaches. Both default to the previous
+    // behaviour; the alternatives are the python coupling reference's
+    // conventions, for driver parity.
+    {
+        std::string ref = "first_iterate";
+        pp_circuit.query("linkage_reference", ref);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            ref == "first_iterate" || ref == "accepted",
+            "circuit.linkage_reference must be 'first_iterate' or 'accepted'");
+        m_coupler_params.linkage_reference_accepted = (ref == "accepted");
+        std::string adv = "theta_stage";
+        pp_circuit.query("residual_advance", adv);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            adv == "theta_stage" || adv == "full_step",
+            "circuit.residual_advance must be 'theta_stage' or 'full_step'");
+        m_coupler_params.residual_advance_full_step = (adv == "full_step");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (ref == "first_iterate" && adv == "theta_stage") ||
+                m_engine == "external",
+            "circuit.linkage_reference / circuit.residual_advance shape the "
+            "EMF the coupler hands a compiled engine and require "
+            "circuit.engine = external");
+    }
 }
 
 void
@@ -231,11 +270,26 @@ CircuitCoupling::InitData ()
     // (a conducting wall's image response is not in the unit A).
     const bool open_bc = GreensFunctionOpenBC::IsActive();
     const amrex::ParmParse pp_circuit("circuit");
+    // The analytic-loop probe's mask radius [m]: a global default with a
+    // per-coil override; 0 = no mask. Read for every coil (the other
+    // probe kinds ignore it).
+    double exclusion_default = 0.0;
+    utils::parser::queryWithParser(pp_circuit, "probe_exclusion_radius",
+                                   exclusion_default);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(exclusion_default >= 0.0,
+        "circuit.probe_exclusion_radius must be >= 0 (meters)");
     m_probes.assign(m_coils.size(), ProbeKind::none);
+    m_probe_exclusion.assign(m_coils.size(), exclusion_default);
     for (int ic = 0; ic < m_coils.size(); ++ic) {
         const Coil& c = m_coils.coil(ic);
         std::string probe = "default";
         pp_circuit.query((c.name + ".probe").c_str(), probe);
+        utils::parser::queryWithParser(pp_circuit,
+            (c.name + ".probe_exclusion_radius").c_str(),
+            m_probe_exclusion[ic]);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_probe_exclusion[ic] >= 0.0,
+            "circuit." + c.name + ".probe_exclusion_radius must be >= 0 "
+            "(meters)");
         if (probe == "default") {
             probe = open_bc ? "reciprocity" : "disk";
         }
@@ -250,10 +304,20 @@ CircuitCoupling::InitData ()
                 "reciprocity is invalid against a conducting wall); use "
                 "the disk probe instead");
             m_probes[ic] = ProbeKind::reciprocity;
+        } else if (probe == "loop") {
+            // Free-space reciprocity against the analytic loop A of the
+            // declared filament (the python coupling reference's probe
+            // integrand): the same open-boundary requirement.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(open_bc,
+                "circuit." + c.name + ".probe = loop is a free-space "
+                "reciprocity functional and requires the Green's-function "
+                "open field boundary; use the disk probe against a "
+                "conducting wall");
+            m_probes[ic] = ProbeKind::loop;
         } else {
             WARPX_ABORT_WITH_MESSAGE(
                 "circuit." + c.name + ".probe must be one of: default, "
-                "disk, reciprocity, none");
+                "disk, reciprocity, loop, none");
         }
     }
 
@@ -311,12 +375,34 @@ CircuitCoupling::InitData ()
             }
         }
         m_coupler = std::make_unique<CircuitCoupler>(
-            m_coils, m_probes, m_coupler_params, std::move(plugin));
+            m_coils, m_probes, m_probe_exclusion, m_coupler_params,
+            std::move(plugin));
+        // The coupler's own per-step memory (EMF low-pass state) is part
+        // of the checkpoint; restore it with the engine state.
+        if (!m_restart_dir.empty()) {
+            m_coupler->ReadMemoryCheckpoint(m_restart_dir);
+        }
         amrex::Print() << "Circuit coupling engine: " << m_engine
                        << " (corrector_iterations = "
                        << m_coupler_params.corrector_iterations
                        << ", corrector_rtol = "
-                       << m_coupler_params.corrector_rtol << ")\n";
+                       << m_coupler_params.corrector_rtol
+                       << ", eps_lowpass_tau = "
+                       << m_coupler_params.eps_lowpass_tau << " s"
+                       << (m_coupler_params.eps_lowpass_tau > 0.0
+                               ? " [one-pole EMA on the port EMF, memory "
+                                 "committed on accept]"
+                               : " [off: raw interval EMF]")
+                       << ", linkage_reference = "
+                       << (m_coupler_params.linkage_reference_accepted
+                               ? "accepted [previous accepting evaluation; "
+                                 "first step open loop]"
+                               : "first_iterate")
+                       << ", residual_advance = "
+                       << (m_coupler_params.residual_advance_full_step
+                               ? "full_step [EMF over the theta interval]"
+                               : "theta_stage")
+                       << ")\n";
 #endif
     }
 }
@@ -344,9 +430,11 @@ CircuitCoupling::WriteCheckpointData (std::string const& dir) const
     ofs.close();
 
     // A compiled engine checkpoints its own state (I/O rank only, like the
-    // segments above); the Python engine re-seeds itself on restart.
+    // segments above); the Python engine re-seeds itself on restart. The
+    // coupler's per-step memory (EMF low-pass state) goes with it.
     if (m_coupler && m_coupler->Plugin() != nullptr) {
         m_coupler->Plugin()->WriteCheckpoint(dir);
+        m_coupler->WriteMemoryCheckpoint(dir);
     }
 }
 

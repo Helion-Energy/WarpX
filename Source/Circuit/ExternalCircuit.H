@@ -59,8 +59,12 @@
  * evaluation of an interval the coupler has no fresh measurement and
  * passes its best available difference (zero at the very first call):
  * engines wanting a hold or extrapolated predictor keep their own held
- * EMF internally, exactly like the Python reference engines. Smoothing
- * (EMA etc.) of the raw per-interval EMF is engine-side policy.
+ * EMF internally, exactly like the Python reference engines. The eps
+ * handed over is the raw interval-averaged EMF unless the coupler's
+ * optional low-pass is enabled (circuit.eps_lowpass_tau: a one-pole EMA
+ * whose memory commits on the accepting evaluation only, the python
+ * coupling reference's filter); any further smoothing is engine-side
+ * policy.
  */
 class ExternalCircuit
 {

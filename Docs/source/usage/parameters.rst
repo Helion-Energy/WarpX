@@ -7832,8 +7832,16 @@ Jacobian probes.
       coupling engine — ``disk`` (plasma-frame :math:`B_z` through the coil circle, the same
       staircase rules as the discrete self-inductance; valid with conducting walls),
       ``reciprocity`` (:math:`\int A^\mathrm{unit} \cdot J_p\, dV`; exact in free space,
-      requires the Green's-function open boundary), or ``none`` (drive-only).
-      ``default`` selects reciprocity when the open boundary is active, disk otherwise.
+      requires the Green's-function open boundary), ``loop`` (free-space reciprocity against
+      the ANALYTIC loop vector potential of the declared filament -- the discrete Yee-clipped
+      loop kernel at the coil's ``r``, ``z`` as given, no image, no softening -- over the nodal
+      plasma current with the nodes within ``probe_exclusion_radius`` of the filament masked
+      out and the upper axial node plane excluded: term for term the integrand of the python
+      coupling reference's loop probe, for driver parity; requires the open boundary like
+      ``reciprocity``), or ``none`` (drive-only). ``default`` selects reciprocity when the
+      open boundary is active, disk otherwise.
+    * ``probe_exclusion_radius`` (default :pp:param:`circuit.probe_exclusion_radius`): the
+      ``loop`` probe's mask radius [m] around this coil's filament.
 
 .. pp:param:: circuit.engine
     :type: ``str``
@@ -7925,6 +7933,70 @@ Jacobian probes.
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. pp:param:: circuit.probe_exclusion_radius
+    :type: ``float``
+    :default: ``0.``
+    :optional:
+
+    Circuit-wide default of the ``loop`` probe's mask radius [m] (see ``probe`` under
+    :pp:param:`circuit.coils`): nodes of the plasma current within this distance of a coil's
+    filament are excluded from its linkage integral (``0`` = no mask). The python coupling
+    reference masks two radial cells: the discrete double-curl of the singular loop A leaves an
+    O(1) truncation residue in the plasma-response field there, which would otherwise register
+    as an in-phase spurious linkage with maximal weight. Overridden per coil by
+    ``circuit.<name>.probe_exclusion_radius``.
+
+.. pp:param:: circuit.eps_lowpass_tau
+    :type: ``float``
+    :default: ``0.``
+    :optional:
+
+    Time constant [s] of a one-pole low-pass (exponential moving average) applied by the
+    coupler to every measured coil's port EMF before it is handed to a compiled engine
+    (:pp:param:`circuit.engine` = ``external``; the Python-callback engine computes its own
+    EMF and refuses the knob). ``0`` disables the filter (the raw interval-averaged
+    :math:`\varepsilon = \Delta\lambda_p/\Delta t` of today). With :math:`\tau > 0`,
+    :math:`\varepsilon = \sigma\,\varepsilon_\mathrm{raw} + (1-\sigma)\,\varepsilon_\mathrm{mem}`
+    with :math:`\sigma = \Delta t_\mathrm{step}/(\Delta t_\mathrm{step} + \tau)` (the coupling
+    STEP dt, so sub-interval evaluations use the same weight as the accepting one), and the
+    memory :math:`\varepsilon_\mathrm{mem}` is committed only by the accepting evaluation of
+    a step: all non-accepted (residual, corrector) evaluations of that step see the same
+    frozen memory, keeping the EMF-to-scales map a smooth function of the iterate. This is the
+    per-step-frozen filter contract of the python coupling reference. The memory is part of the
+    checkpoint (``circuit_coupler_memory.dat``).
+
+.. pp:param:: circuit.linkage_reference
+    :type: ``str``
+    :default: ``first_iterate``
+    :optional:
+
+    Newton-scope driving (:pp:param:`implicit_mhd.circuit_driver` = ``native``): which linkage
+    the step's EMF :math:`\varepsilon = (\lambda - \lambda^n)/\Delta t` is differenced against.
+    ``first_iterate``: the linkage measured at the first residual evaluation of the step (the
+    Newton initial iterate is the committed :math:`t^n` state). ``accepted``: the linkage the
+    previous step's accepting evaluation measured on its accepted state; before the first
+    accepted step there is none and the step runs open loop (:math:`\varepsilon = 0` for every
+    evaluation, the accepting one included) -- the convention of the python coupling reference,
+    whose :math:`\lambda^n` cache is empty before its first finish hook. The accepted linkage is
+    part of the checkpoint (``circuit_coupler_memory.dat``), so a restart continues closed
+    loop. Requires :pp:param:`circuit.engine` = ``external``.
+
+.. pp:param:: circuit.residual_advance
+    :type: ``str``
+    :default: ``theta_stage``
+    :optional:
+
+    Newton-scope driving (:pp:param:`implicit_mhd.circuit_driver` = ``native``): how far the
+    in-residual (non-accepting) engine advance reaches. ``theta_stage``: to the theta-stage time,
+    pushing the segment :math:`[t^n, t^n + \theta\Delta t]` so the residual's
+    :math:`B_\mathrm{ext}(\theta)` is :math:`s(\theta)` exactly and its :math:`E_\mathrm{ext}`
+    the half-interval slope. ``full_step``: over the whole step :math:`[t^n, t^{n+1}]` with the
+    EMF still differenced over the theta interval the iterate's linkage lives on, so the
+    segment's linear interpolation supplies :math:`B_\mathrm{ext}(\theta) = (1-\theta) s^n +
+    \theta s^{n+1}` and :math:`E_\mathrm{ext} = -(s^{n+1} - s^n)/\Delta t` -- the python hook's
+    semantics (the accepting advance is over the full step in both cases). The two coincide at
+    :math:`\theta = 1`. Requires :pp:param:`circuit.engine` = ``external``.
 
 .. pp:param:: warpx.grid_type
     :type: ``string``, ``collocated``, ``staggered`` or ``hybrid``

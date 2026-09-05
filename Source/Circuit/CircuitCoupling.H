@@ -79,6 +79,10 @@ private:
      * InitData ("default" -> reciprocity with the Green's-function open
      * boundary active, disk otherwise). */
     std::vector<warpx::circuit::ProbeKind> m_probes;
+    /** Per-coil mask radius [m] of the analytic-loop probe (parallel to
+     * the coil set; circuit.probe_exclusion_radius with a per-coil
+     * override). */
+    std::vector<double> m_probe_exclusion;
 
     std::string m_engine = "none";          //!< none | callbacks | external
     std::string m_plugin_library;           //!< engine = external only

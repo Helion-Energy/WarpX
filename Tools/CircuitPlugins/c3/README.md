@@ -104,9 +104,13 @@ file from the deck; the WarpX-side driver must generate it the same way
    zero current, the clock is continuous, and the locked fluxes +
    station sums are logged.
 4. **eps hold** -- overwritten each `AdvanceInterval` from the argument
-   (the coupler holds the predictor value); no plugin-side EMA, matching
-   the hetools reference (`eps_elec = eps_sign * d * dPhi/dt`, west rows
-   mirrored from east, extra/ring channels 0).
+   (the coupler holds the predictor value); no plugin-side EMA. The
+   production reference COUPLER low-passes the measured EMF before the
+   circuit sees it (a one-pole EMA, memory committed by the finish hook);
+   its WarpX twin is the coupler-side knob `circuit.eps_lowpass_tau`, so
+   the plugin applies the eps it is handed as-is (`eps_elec = eps_sign * d
+   * dPhi/dt`, west rows mirror the east) whether the coupler filtered it
+   or not.
 5. **checkpoint** -- `WriteCheckpoint` serializes the accepted entry
    snapshot (x, m, the six SwdBank arrays) + `lock_phase` + the live
    stepper clock `t0` in hexfloat: `ReadCheckpoint` restores bit-exactly
@@ -171,6 +175,23 @@ Measured (2026-08-26, this tree): (a) 3.7e-12 / (b) 3.7e-12 /
 (c) traj 3.4e-12, arming 5.2e-13, station sums A +68.9749 mWb and
 B +249.7787 mWb on both sides, post-swap lock-flux drift 3.1e-12 /
 (d) bitwise / (e) max 1.5e-9, median 1.5e-12.
+
+### Pre-roll pin (the plugin's own s(0))
+
+The plugin pre-rolls the machine inside `Define`; the host (deck) side runs
+its own pre-roll to seed the field registers' `initial_scale`. The two are
+independent computations of the same trajectory and must be PINNED against
+each other rather than assumed equal (they agree to the stepper's
+1e-12-class parity only if nothing upstream drifted):
+
+- in situ: with `verbose=1` the plugin logs `pre-roll s(0) per port:
+  <name>=<value> ...` (17 significant digits) right after the pre-roll;
+  compare against `external_vector_potential.<name>.initial_scale` in
+  `warpx_used_inputs`.
+- offline: `c3_harness ... --dump-initial s0.txt` writes the post-Define
+  scales per port (hexfloat) through the ABI alone -- a zero-length,
+  non-accepted `AdvanceInterval(0, 0, eps = 0)` returns the pre-rolled
+  state and disturbs nothing -- before the trajectory run.
 
 ## Remaining WarpX-side integration TODOs
 

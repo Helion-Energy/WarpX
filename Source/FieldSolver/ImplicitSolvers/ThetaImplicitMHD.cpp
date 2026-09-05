@@ -5599,8 +5599,20 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
                 coupler.BeginStepMeasured(start_time, m_dt);
                 m_circuit_step_open = true;
             }
-            coupler.EvaluateInterval(start_time, start_time + m_theta * m_dt,
-                                     false);
+            // Advance target: the theta-stage time (default: the pushed
+            // segment [t0, t0 + theta dt] realizes s(theta) exactly and
+            // E_ext from the half-interval slope), or with
+            // circuit.residual_advance = full_step the whole step
+            // [t0, t0 + dt] -- the EMF still differenced over the theta
+            // interval the iterate's linkage lives on -- so the segment's
+            // interpolation supplies B_ext(theta) = (1 - theta) s0 +
+            // theta s1 and E_ext = -(s1 - s0)/dt like the python hook.
+            const amrex::Real theta_dt = m_theta * m_dt;
+            coupler.EvaluateInterval(
+                start_time,
+                start_time + (coupler.ResidualAdvanceFullStep() ? m_dt
+                                                                : theta_dt),
+                false, theta_dt);
         } else {
             ExecutePythonCallback("externalcoiltheta");
         }
