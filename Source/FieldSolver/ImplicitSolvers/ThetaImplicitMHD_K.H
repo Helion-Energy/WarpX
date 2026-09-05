@@ -155,7 +155,9 @@ struct FluxParameters {
     // per-solve constant, so the branch below is not a state branch.
     int fluid_reconstruction = 0;
     // Smoothing width fraction of the median limiter (see limited_slope):
-    // w = sqrt(kappa^2 (d_up^2 + d_down^2) + guard^2).
+    // w = sqrt(kappa^2 (d_up^2 + d_down^2) + guard^2); for smart_smooth
+    // the dimensionless width of the rounded Sweby function in ratio
+    // space (smart_slope_smooth).
     amrex::Real reconstruction_kappa = 0.01;
     // Limited Rusanov dissipation of the CENTRAL flux
     // (implicit_mhd.central_dissipation; 0 = off, the bit-identical
@@ -337,6 +339,177 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 smooth_max (const amrex::Real a, const amrex::Real b,
             const amrex::Real width) noexcept {
     return 0.5 * (a + b + std::sqrt((a - b) * (a - b) + width * width));
+}
+
+// ---- SMART limiter family (Gaskell & Lau, Int. J. Numer. Methods Fluids
+// 8 (1988) 617). Sweby form, with r = d_down/d_up the ratio of the
+// downwind to the upwind one-sided difference of the DONOR cell:
+//     psi(r) = max(0, min(2 r, 1/4 + 3/4 r, 4)).
+// Equivalently, in normalized variables phi_C = (q_C - q_U)/(q_D - q_U)
+// of the donor cell C between its upwind (U) and downwind (D)
+// neighbours, the face value is
+//     phi_f = 3 phi_C          on (0, 1/6)       (psi = 4),
+//           = 3/8 + 3/4 phi_C  on [1/6, 5/6]     (QUICK; psi = 1/4 + 3/4 r),
+//           = 1                on (5/6, 1)       (psi = 2 r),
+//           = phi_C            otherwise         (donor cell; psi = 0),
+// i.e. the third-order QUICK interpolant clipped to the convection-
+// boundedness criterion (CBC): the face value never leaves [q_C, q_D].
+// psi(1) = 1 and r = 1 lies in the INTERIOR of the linear QUICK branch,
+// so smooth flow is exactly second order and C-infinity -- the kinks sit
+// at r = 0 (an extremum), r = 1/5 and r = 5, far from the smooth-flow
+// point where minmod's selection kink (d_up = d_down) lives. That is
+// the property the matrix-free Newton solve wants: in smooth regions
+// the residual sits on one analytic branch instead of straddling a
+// derivative jump on every face. psi reaches 4, beyond Sweby's explicit
+// TVD region psi <= 2: SMART is NOT TVD for an explicit update (a
+// downwind-face extrapolation can overshoot the upwind neighbour), but
+// its face value is bounded by the donor and downwind cells (psi <= 2 r
+// on every branch), which is the boundedness statement that applies to
+// the implicit solve here -- each face value is the CBC-bounded value
+// of the cell that is the DONOR for that face, so no face state leaves
+// the interval of the two cells adjacent to the face (see
+// reconstruct_face_pair: the two one-sided states are built with
+// opposite donor roles).
+//
+// The slope form below is division-free and exact: for d_up d_down > 0
+// and s = sign(d_up),
+//     d_up psi(d_down/d_up) = s min(2 |d_down|, |d_up|/4 + 3 |d_down|/4,
+//                                   4 |d_up|),
+// zero otherwise (an extremum, or d_up = 0). C^0, odd under the joint
+// sign flip (mirror covariance), homogeneous of degree one, and
+// exactly the centered slope d for d_up = d_down = d to round-off.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_slope (const amrex::Real difference_up,
+             const amrex::Real difference_down) noexcept {
+    if (difference_up * difference_down <= 0.0) {
+        return 0.0;
+    }
+    const amrex::Real sign = (difference_up > 0.0) ? 1.0 : -1.0;
+    const amrex::Real up = sign * difference_up;
+    const amrex::Real down = sign * difference_down;
+    return sign * std::min(std::min(2.0 * down, 0.25 * up + 0.75 * down),
+                           4.0 * up);
+}
+
+// SMART with its three kinks rounded by the file's smooth_min/smooth_max
+// idiom, applied in RATIO space: r = d_up d_down/(d_up^2 + guard^2) (the
+// guard keeps r finite and C-infinity through d_up = 0, where the slope
+// vanishes anyway because it is multiplied back by d_up), and
+//     psi_w(r) = smooth_max(smooth_min(smooth_min(2 r, 1/4 + 3/4 r, w),
+//                                      4, w), 0, w).
+// The width w is dimensionless, so unlike the median's slope-keyed width
+// it costs no first-order slope defect: psi_w(1) = 1 - w^2/12 + O(w^4)
+// (8e-6 at the default w = 0.01, against the median's kappa/sqrt(2) =
+// 7e-3), and the only O(w) residue is at an exact extremum, where the
+// clip smooth_max(., 0, w) of an argument that is itself ~0 leaves
+// psi_w(0) = w/2 (0.495 w at w = 0.01), i.e. a slope of w |d_up|/2 and a
+// new-extremum excursion of w/4 of the local difference -- the same
+// kappa/4 the median leaves at the same kappa, measured 0.2471 w against
+// the median's 0.2480 w. Odd under the joint sign flip because r is even
+// and the result is d_up psi_w(r). The all-zero stencil (guard = 0 with
+// d_up = 0) returns exactly zero, like van Albada's guarded denominator.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_slope_smooth (const amrex::Real difference_up,
+                    const amrex::Real difference_down,
+                    const amrex::Real guard, const amrex::Real width) noexcept {
+    const amrex::Real denominator =
+        difference_up * difference_up + guard * guard;
+    if (denominator <= 0.0) {
+        return 0.0;
+    }
+    const amrex::Real ratio = difference_up * difference_down / denominator;
+    const amrex::Real psi = smooth_max(
+        smooth_min(smooth_min(2.0 * ratio, 0.25 + 0.75 * ratio, width), 4.0,
+                   width),
+        0.0, width);
+    return difference_up * psi;
+}
+
+// SMART face value of the donor cell C in normalized-variable form: the
+// upwind-biased reconstruction of q at the face between C and its
+// downwind neighbour D, q_f = q_C + (1/2) d_up psi(d_down/d_up).
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_face_value (const amrex::Real q_upwind, const amrex::Real q_donor,
+                  const amrex::Real q_downwind) noexcept {
+    return q_donor + 0.5 * smart_slope(q_donor - q_upwind,
+                                       q_downwind - q_donor);
+}
+
+/**
+ * rief Symmetric SMART of the two one-sided tangential differences of
+ * one cell, the drop-in replacement of minmod_pair for the Braginskii
+ * cross-term stencil (implicit_mhd.braginskii_tangential_limiter =
+ * smart):
+ *     L(a, b) = (1/2) [a psi(b/a) + b psi(a/b)],
+ * zero whenever the differences disagree in sign (a tangential
+ * extremum), exactly like minmod_pair. The symmetrization has a closed
+ * form: for a b > 0,
+ *     L(a, b) = sign(a) min(3 min(|a|, |b|), (|a| + |b|)/2),
+ * i.e. the CENTERED slope wherever the two differences are within a
+ * factor 5 of each other, and three times the smaller one beyond that
+ * (the generalized-minmod/MC family with parameter 3 in place of MC's
+ * 2). On a smooth profile (a ~ b) it is therefore the plain centered
+ * tangential slope with NO kink -- minmod's selection kink at a = b is
+ * gone -- and its magnitude never exceeds the centered corner value the
+ * "none" mode uses, so it is at most as anti-diffusive as the legacy
+ * stencil while still vanishing at extrema. C^0 (kinks at |b| = |a|/5,
+ * |b| = 5 |a| and a b = 0).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_pair (const amrex::Real up_difference,
+            const amrex::Real down_difference) noexcept {
+    if (up_difference * down_difference <= 0.0) {
+        return 0.0;
+    }
+    const amrex::Real sign = (up_difference > 0.0) ? 1.0 : -1.0;
+    const amrex::Real up = sign * up_difference;
+    const amrex::Real down = sign * down_difference;
+    return sign * std::min(3.0 * std::min(up, down), 0.5 * (up + down));
+}
+
+/**
+ * rief Upwind-biased SMART tangential difference of one cell for the
+ * ADVECTIONALIZED Braginskii cross term
+ * (implicit_mhd.braginskii_tangential_limiter = smart_upwind).
+ *
+ * The cross flux through a normal face, -rho (chi_par - chi_perp) b_n b_t
+ * de/dt, differenced as [e(t + 1/2) - e(t - 1/2)]/h_t, contributes to the
+ * cell on either side of the face exactly like the divergence of an
+ * advective flux of e along the tangential direction, with an effective
+ * velocity whose sign is set by sign(b_n b_t) and by which side of the
+ * face the cell sits on (the same face flux enters the two cells with
+ * opposite signs). Each cell's own half of the face gradient is
+ * therefore built from the two tangential half-face values reconstructed
+ * with SMART in normalized-variable form from ITS upwind side, so the
+ * cross term is limited exactly like an upwinded advective flux: the
+ * face values are CBC-bounded by their neighbours, a linear profile
+ * gives the exact slope (the QUICK branch is exact for quadratics, so
+ * the difference is a second-order derivative estimate), and a cell that
+ * is a tangential extremum can only be pulled back toward its
+ * neighbours by its own half.
+ *
+ * The five samples are the cell's row along the tangential direction,
+ * e(t - 2) .. e(t + 2); upwind_side = -1 means the upwind cell lies on
+ * the -t side (effective transport toward +t), +1 the opposite. Only
+ * four of the five samples are read for a given side.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_upwind_tangential_difference (const amrex::Real e_minus2,
+                                    const amrex::Real e_minus1,
+                                    const amrex::Real e_center,
+                                    const amrex::Real e_plus1,
+                                    const amrex::Real e_plus2,
+                                    const int upwind_side) noexcept {
+    if (upwind_side < 0) {
+        // Transport toward +t: the donor of the t + 1/2 face is the cell
+        // itself, the donor of the t - 1/2 face is its -t neighbour.
+        return smart_face_value(e_minus1, e_center, e_plus1) -
+               smart_face_value(e_minus2, e_minus1, e_center);
+    }
+    // Transport toward -t: the donor of the t + 1/2 face is the +t
+    // neighbour, the donor of the t - 1/2 face is the cell itself.
+    return smart_face_value(e_plus2, e_plus1, e_center) -
+           smart_face_value(e_plus1, e_center, e_minus1);
 }
 
 // C^2 soft upper clip: EXACT identity for value <= cap - width, exact
@@ -1281,6 +1454,22 @@ load_cell_state_hlld_dual (const amrex::Array4<const amrex::Real>& density,
 //  * unlimited: the plain centered slope. Second order and OSCILLATORY;
 //    a diagnostic reference for the TVD gate (it is the twin that must
 //    show new extrema), never a production mode.
+//  * smart: Gaskell & Lau's SMART, hard form (smart_slope). The QUICK
+//    third-order face value clipped to the convection-boundedness
+//    criterion. Exactly second order in smooth flow with NO kink there
+//    (its kinks are at d_down/d_up = 0, 1/5 and 5), and every face
+//    state stays inside the interval of the two adjacent cells (a
+//    new-extremum bound of exactly ZERO at the reconstruction level).
+//    Not TVD in the explicit sense (psi reaches 4 > 2); CBC-bounded,
+//    which is the statement that applies to the implicit solve.
+//  * smart_smooth: the same with its three kinks rounded in RATIO space
+//    by smooth_min/smooth_max of dimensionless width reconstruction_kappa
+//    (smart_slope_smooth). Costs no first-order slope defect (the
+//    smooth-flow defect is w^2/12) and leaves w/4 of the local
+//    difference as a new-extremum excursion at an exact extremum (the
+//    median's kappa/4 at the same kappa).
+//    Both SMART modes are upwind-biased, so reconstruct_face_pair feeds
+//    them the donor's differences in donor order (see below).
 //
 // WHY THE MEDIAN NEEDS A SLOPE-KEYED WIDTH, AND WHAT IT COSTS. minmod
 // has TWO kinds of kink: the extremum kink (d_up d_down < 0), where the
@@ -1386,6 +1575,13 @@ constexpr int reconstruction_none = 0;
 constexpr int reconstruction_median = 1;
 constexpr int reconstruction_vanalbada = 2;
 constexpr int reconstruction_unlimited = 3;
+// SMART (Gaskell & Lau 1988), hard and kink-smoothed (see smart_slope
+// and smart_slope_smooth above). Unlike the modes above these are
+// UPWIND-BIASED: the slope depends on which of the two one-sided
+// differences is the donor's upwind one, so reconstruct_face_pair builds
+// the two face states with opposite donor roles.
+constexpr int reconstruction_smart = 4;
+constexpr int reconstruction_smart_smooth = 5;
 
 // Relative guard of the limiter widths: guard = this times the RMS of
 // the three stencil values entering one slope. Its only job is to keep
@@ -1435,6 +1631,17 @@ limited_slope (const amrex::Real difference_up,
                const FluxParameters& parameters) noexcept {
     if (parameters.fluid_reconstruction == reconstruction_unlimited) {
         return 0.5 * (difference_up + difference_down);
+    }
+    if (parameters.fluid_reconstruction == reconstruction_smart) {
+        // SMART, hard: difference_up must be the DONOR's upwind-side
+        // difference (see reconstruct_face_pair).
+        return smart_slope(difference_up, difference_down);
+    }
+    if (parameters.fluid_reconstruction == reconstruction_smart_smooth) {
+        // SMART, kinks rounded in ratio space at dimensionless width
+        // reconstruction_kappa.
+        return smart_slope_smooth(difference_up, difference_down, guard,
+                                  parameters.reconstruction_kappa);
     }
     const amrex::Real up_squared = difference_up * difference_up;
     const amrex::Real down_squared = difference_down * difference_down;
@@ -1487,9 +1694,28 @@ reconstruct_face_pair (const amrex::Real far_left, const amrex::Real left,
     face_left = left + 0.5 * limited_slope(difference_left,
                                            difference_middle, guard_left,
                                            parameters);
-    face_right = right - 0.5 * limited_slope(difference_middle,
-                                             difference_right, guard_right,
-                                             parameters);
+    // The symmetric modes (median, vanalbada, unlimited) are even in
+    // their two differences, so the argument order is immaterial and the
+    // legacy call below is kept verbatim (bit-identical). The SMART
+    // modes are upwind-biased: for the RIGHT cell's left-face state the
+    // right cell is the donor of a leftward flow, its upwind-side
+    // difference is (right - far_right) and its downwind-side difference
+    // is (left - right); with the slope odd under the joint sign flip,
+    //     right + (1/2) L(right - far_right, left - right)
+    //   = right - (1/2) L(difference_right, difference_middle).
+    // This is also what makes the reconstruction mirror-covariant
+    // (reversing the stencil swaps the two face states), the property
+    // the RZ mirror-parity test holds the limiter to.
+    const bool upwind_biased =
+        (parameters.fluid_reconstruction == reconstruction_smart ||
+         parameters.fluid_reconstruction == reconstruction_smart_smooth);
+    face_right = upwind_biased
+                     ? right - 0.5 * limited_slope(difference_right,
+                                                   difference_middle,
+                                                   guard_right, parameters)
+                     : right - 0.5 * limited_slope(difference_middle,
+                                                   difference_right,
+                                                   guard_right, parameters);
 }
 
 /**

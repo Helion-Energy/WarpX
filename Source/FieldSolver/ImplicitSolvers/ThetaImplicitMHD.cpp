@@ -79,6 +79,68 @@ shift_index (int& i, int& j, int& k, const int physical_direction, const int off
 #endif
 }
 
+// Tangential gradient of one specific internal energy at a normal face
+// for the SMART variants of the Braginskii cross-term stencil
+// (implicit_mhd.braginskii_tangential_limiter = smart | smart_upwind):
+// the mean of the two adjacent cells' limited tangential slopes, i.e.
+// exactly the structure of the minmod branch of the face kernel with the
+// limiter swapped. mode 1 is the symmetric pair (smart_pair, three
+// samples per row); mode 2 is the advectionalized upwind form
+// (smart_upwind_tangential_difference, four of the five samples per
+// row), with the upwind side of the LEFT cell's row given and the right
+// cell's row taking the opposite side -- the same face flux enters the
+// two cells with opposite signs, so their effective tangential transport
+// directions are opposite. The sampler is one of the kernel's
+// specific-energy lambdas (electron/ion, new/old), so the stage
+// extrapolation and the floor recipes are untouched.
+template <class Sampler>
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+braginskii_tangential_gradient_smart (const Sampler& sample, const int il,
+                                      const int jl, const int kl,
+                                      const int i, const int j, const int k,
+                                      const int tangential, const int mode,
+                                      const int upwind_side_left,
+                                      const amrex::Real inverse_tangential_size)
+    noexcept
+{
+    int ipl = il, jpl = jl, kpl = kl;
+    int iml = il, jml = jl, kml = kl;
+    int ipr = i, jpr = j, kpr = k;
+    int imr = i, jmr = j, kmr = k;
+    shift_index(ipl, jpl, kpl, tangential, 1);
+    shift_index(iml, jml, kml, tangential, -1);
+    shift_index(ipr, jpr, kpr, tangential, 1);
+    shift_index(imr, jmr, kmr, tangential, -1);
+    const amrex::Real center_left = sample(il, jl, kl);
+    const amrex::Real center_right = sample(i, j, k);
+    const amrex::Real plus_left = sample(ipl, jpl, kpl);
+    const amrex::Real minus_left = sample(iml, jml, kml);
+    const amrex::Real plus_right = sample(ipr, jpr, kpr);
+    const amrex::Real minus_right = sample(imr, jmr, kmr);
+    if (mode == 1) {
+        return 0.5_rt * inverse_tangential_size *
+               (theta_implicit_mhd::smart_pair(plus_left - center_left,
+                                               center_left - minus_left) +
+                theta_implicit_mhd::smart_pair(plus_right - center_right,
+                                               center_right - minus_right));
+    }
+    int ippl = il, jppl = jl, kppl = kl;
+    int imml = il, jmml = jl, kmml = kl;
+    int ippr = i, jppr = j, kppr = k;
+    int immr = i, jmmr = j, kmmr = k;
+    shift_index(ippl, jppl, kppl, tangential, 2);
+    shift_index(imml, jmml, kmml, tangential, -2);
+    shift_index(ippr, jppr, kppr, tangential, 2);
+    shift_index(immr, jmmr, kmmr, tangential, -2);
+    return 0.5_rt * inverse_tangential_size *
+           (theta_implicit_mhd::smart_upwind_tangential_difference(
+                sample(imml, jmml, kmml), minus_left, center_left, plus_left,
+                sample(ippl, jppl, kppl), upwind_side_left) +
+            theta_implicit_mhd::smart_upwind_tangential_difference(
+                sample(immr, jmmr, kmmr), minus_right, center_right,
+                plus_right, sample(ippr, jppr, kppr), -upwind_side_left));
+}
+
 amrex::GpuArray<int, 3> field_staggering (const amrex::MultiFab& field)
 {
     amrex::GpuArray<int, 3> staggering = {1, 1, 1};
@@ -838,9 +900,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("braginskii_tangential_limiter", m_braginskii_tangential_limiter);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_braginskii_tangential_limiter == "none" ||
-            m_braginskii_tangential_limiter == "minmod",
-        "implicit_mhd.braginskii_tangential_limiter must be 'none' or "
-        "'minmod'");
+            m_braginskii_tangential_limiter == "minmod" ||
+            m_braginskii_tangential_limiter == "smart" ||
+            m_braginskii_tangential_limiter == "smart_upwind",
+        "implicit_mhd.braginskii_tangential_limiter must be 'none', "
+        "'minmod', 'smart', or 'smart_upwind'");
     utils::parser::queryWithParser(pp, "dual_energy_internal_cutoff",
                                    m_dual_energy_internal_cutoff);
     utils::parser::queryWithParser(pp, "dual_energy_sync_threshold",
@@ -1110,17 +1174,27 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_fluid_reconstruction == "none" ||
             m_fluid_reconstruction == "median" ||
             m_fluid_reconstruction == "vanalbada" ||
-            m_fluid_reconstruction == "unlimited",
+            m_fluid_reconstruction == "unlimited" ||
+            m_fluid_reconstruction == "smart" ||
+            m_fluid_reconstruction == "smart_smooth",
         "implicit_mhd.fluid_reconstruction must be none, median, "
-        "vanalbada, or unlimited");
-    m_fluid_reconstruction_mode =
-        (m_fluid_reconstruction == "median")
-            ? theta_implicit_mhd::reconstruction_median
-            : ((m_fluid_reconstruction == "vanalbada")
-                   ? theta_implicit_mhd::reconstruction_vanalbada
-                   : ((m_fluid_reconstruction == "unlimited")
-                          ? theta_implicit_mhd::reconstruction_unlimited
-                          : theta_implicit_mhd::reconstruction_none));
+        "vanalbada, unlimited, smart, or smart_smooth");
+    if (m_fluid_reconstruction == "median") {
+        m_fluid_reconstruction_mode = theta_implicit_mhd::reconstruction_median;
+    } else if (m_fluid_reconstruction == "vanalbada") {
+        m_fluid_reconstruction_mode =
+            theta_implicit_mhd::reconstruction_vanalbada;
+    } else if (m_fluid_reconstruction == "unlimited") {
+        m_fluid_reconstruction_mode =
+            theta_implicit_mhd::reconstruction_unlimited;
+    } else if (m_fluid_reconstruction == "smart") {
+        m_fluid_reconstruction_mode = theta_implicit_mhd::reconstruction_smart;
+    } else if (m_fluid_reconstruction == "smart_smooth") {
+        m_fluid_reconstruction_mode =
+            theta_implicit_mhd::reconstruction_smart_smooth;
+    } else {
+        m_fluid_reconstruction_mode = theta_implicit_mhd::reconstruction_none;
+    }
     const bool reconstruction_active =
         (m_fluid_reconstruction_mode !=
          theta_implicit_mhd::reconstruction_none);
@@ -3317,8 +3391,10 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
                    << "Fluid reconstruction:          "
                    << m_fluid_reconstruction
-                   << (m_fluid_reconstruction_mode ==
-                               theta_implicit_mhd::reconstruction_median
+                   << ((m_fluid_reconstruction_mode ==
+                            theta_implicit_mhd::reconstruction_median ||
+                        m_fluid_reconstruction_mode ==
+                            theta_implicit_mhd::reconstruction_smart_smooth)
                            ? " (kappa = " +
                                  std::to_string(m_reconstruction_kappa) + ")"
                            : std::string{})
@@ -7330,6 +7406,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool braginskii = m_conduction_braginskii;
     const bool brag_tangential_minmod =
         braginskii && m_braginskii_tangential_limiter == "minmod";
+    // SMART variants of the cross-term tangential stencil (0 = off, so
+    // the none/minmod branches below are entered exactly as before):
+    // 1 = the symmetric pair (smart_pair), 2 = the advectionalized
+    // upwind form (smart_upwind_tangential_difference); see
+    // braginskii_tangential_gradient_smart.
+    const int brag_tangential_smart =
+        !braginskii ? 0
+        : (m_braginskii_tangential_limiter == "smart")        ? 1
+        : (m_braginskii_tangential_limiter == "smart_upwind") ? 2
+                                                              : 0;
+#if !defined(WARPX_DIM_RZ)
+    // The tangential corner stencil exists only in RZ.
+    amrex::ignore_unused(brag_tangential_minmod, brag_tangential_smart);
+#endif
     const bool chi_needs_state =
         chi_any_parser || conduction_limit > 0.0_rt || braginskii;
     const amrex::Real chi_charge_to_mass = m_ion_charge_to_mass;
@@ -9299,6 +9389,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         shift_index(ipr, jpr, kpr, tangential, 1);
                         shift_index(iml, jml, kml, tangential, -1);
                         shift_index(imr, jmr, kmr, tangential, -1);
+                        // Upwind side of the LEFT cell's tangential row for
+                        // the advectionalized SMART cross term
+                        // (smart_upwind): the cross flux through this face
+                        // enters the left cell as -F/h_n, i.e. as the
+                        // tangential advection of e with an effective
+                        // velocity of sign -sign(b_n b_t) (chi_par >=
+                        // chi_perp always), so for b_n b_t > 0 its upwind
+                        // side is +t. The right cell takes the opposite
+                        // side. A per-face constant of the face field
+                        // direction; the flux is continuous through
+                        // b_n b_t = 0 because the cross term vanishes
+                        // there.
+                        const int brag_smart_upwind_left =
+                            (brag_bn * brag_bt > 0.0_rt) ? 1 : -1;
                         // Neighbor specific internal energies mirror the
                         // CellState recipes exactly (floored electron
                         // pressure; smooth-floored p_i(E_i) recovery).
@@ -9313,7 +9417,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                         std::max(rho(ic, jc, kc),
                                                  parameters.density_floor));
                             };
-                        if (brag_tangential_minmod) {
+                        if (brag_tangential_smart != 0) {
+                            brag_grad_t_electron =
+                                braginskii_tangential_gradient_smart(
+                                    electron_e_spec, il, jl, kl, i, j, k, tangential,
+                                    brag_tangential_smart, brag_smart_upwind_left,
+                                    inverse_tangential_size);
+                        } else if (brag_tangential_minmod) {
                             // Sharma-Hammett monotone cross term: the
                             // face tangential slope is the mean of the
                             // two cells' minmod-limited one-sided
@@ -9368,7 +9478,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                     .density_floor));
                                 };
                             amrex::Real grad_t_electron_old;
-                            if (brag_tangential_minmod) {
+                            if (brag_tangential_smart != 0) {
+                                grad_t_electron_old =
+                                    braginskii_tangential_gradient_smart(
+                                        electron_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                        brag_tangential_smart, brag_smart_upwind_left,
+                                        inverse_tangential_size);
+                            } else if (brag_tangential_minmod) {
                                 const amrex::Real center_left =
                                     electron_e_spec_old(il, jl, kl);
                                 const amrex::Real center_right =
@@ -9454,7 +9570,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                      corner_width));
                                     return internal / safe_density;
                                 };
-                            if (brag_tangential_minmod) {
+                            if (brag_tangential_smart != 0) {
+                                brag_grad_t_ion =
+                                    braginskii_tangential_gradient_smart(
+                                        ion_e_spec, il, jl, kl, i, j, k, tangential,
+                                        brag_tangential_smart, brag_smart_upwind_left,
+                                        inverse_tangential_size);
+                            } else if (brag_tangential_minmod) {
                                 // Same monotone form as the electron
                                 // stencil above.
                                 const amrex::Real center_left =
@@ -9527,7 +9649,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                safe_density_old;
                                     };
                                 amrex::Real grad_t_ion_old;
-                                if (brag_tangential_minmod) {
+                                if (brag_tangential_smart != 0) {
+                                    grad_t_ion_old =
+                                        braginskii_tangential_gradient_smart(
+                                            ion_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                            brag_tangential_smart, brag_smart_upwind_left,
+                                            inverse_tangential_size);
+                                } else if (brag_tangential_minmod) {
                                     const amrex::Real center_left =
                                         ion_e_spec_old(il, jl, kl);
                                     const amrex::Real center_right =

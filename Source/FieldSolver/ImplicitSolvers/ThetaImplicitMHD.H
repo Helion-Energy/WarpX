@@ -1559,6 +1559,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //   median     the reference code's fmed, C-infinity smoothed
     //   vanalbada  the C-infinity rational sibling (exactly 2nd order)
     //   unlimited  plain centered slope; OSCILLATORY diagnostic twin
+    //   smart      Gaskell & Lau (1988) SMART, hard: the QUICK face value
+    //              clipped to the convection-boundedness criterion.
+    //              Exactly 2nd order with no kink in smooth flow (its
+    //              kinks sit at slope ratios 0, 1/5 and 5), every face
+    //              state inside the adjacent-cell interval; psi reaches
+    //              4 (CBC-bounded, not explicit-TVD)
+    //   smart_smooth  the same with the kinks rounded in ratio space at
+    //              dimensionless width reconstruction_kappa
     // Meaningful only with an UPWIND flux: a limiter needs an upwind
     // selection to enforce monotonicity, so with fluid_flux = central
     // (which has no Riemann dissipation at all) the reconstruction
@@ -1571,7 +1579,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // to the curvature (that width vanishes at the minmod SELECTION
     // kink d_up = d_down), so it is keyed to the slope itself and costs
     // a numerical diffusivity 0.354 kappa |u| dx -- 0.7% of the
-    // donor-cell dissipation it replaces at the default 0.01.
+    // donor-cell dissipation it replaces at the default 0.01. For
+    // smart_smooth it is the dimensionless width of the rounded Sweby
+    // function in ratio space, whose smooth-flow defect is kappa^2/12.
     amrex::Real m_reconstruction_kappa = 0.01;
     // ---- Limited Rusanov dissipation of the CENTRAL flux
     // (implicit_mhd.central_dissipation; 0 = off, bit-identical). The
@@ -1752,7 +1762,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the legacy centered corner average (bit-identical); "minmod" is
     // the Sharma-Hammett monotone form (see minmod_pair in _K.H) that
     // kills the cross-term flux at tangential extrema -- the fix for
-    // the plasma-edge electron_energy direction pinning.
+    // the plasma-edge electron_energy direction pinning. "smart" is the
+    // symmetric SMART pair (smart_pair in _K.H): the centered slope
+    // wherever the two one-sided differences are within a factor 5,
+    // three times the smaller one beyond, zero at extrema -- no kink in
+    // smooth flow, where minmod's selection kink sits. "smart_upwind"
+    // is the ADVECTIONALIZED form (smart_upwind_tangential_difference):
+    // each cell's half of the face tangential gradient is the difference
+    // of two SMART normalized-variable face values reconstructed from
+    // that cell's effective upwind side (sign of b_n b_t and of its side
+    // of the face), i.e. the cross term is limited like an upwinded
+    // advective flux.
     // Default minmod (2026-08-29 parity audit): the centered corner
     // stencil of the Braginskii cross term is non-monotone where
     // The reference code's FEM form is SPD; at clamp-forced anisotropy it carried a
