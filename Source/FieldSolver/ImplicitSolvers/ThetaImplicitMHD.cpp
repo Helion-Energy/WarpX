@@ -745,6 +745,14 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // Verification switch for the dual-energy re-sync and the booking
     // mode of the U_i viscous heating (see the header).
     pp.query("dual_energy_sync", m_dual_energy_sync);
+    // Same pattern as allow_hlld: the unsynchronized closure is a
+    // verification mode and must be opted into explicitly.
+    pp.query("allow_dual_energy_sync_off", m_allow_dual_energy_sync_off);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_dual_energy_sync || m_allow_dual_energy_sync_off,
+        "implicit_mhd.dual_energy_sync = 0 leaves E_i and U_i unsynchronized "
+        "and is a verification switch only -- set "
+        "implicit_mhd.allow_dual_energy_sync_off = 1 to opt in");
     pp.query("dual_energy_viscous_heating", m_dual_energy_viscous_heating);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_dual_energy_viscous_heating == "stress_work" ||
@@ -6826,6 +6834,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool viscous_dissipation_register =
         (m_ion_closure == "dual_energy") &&
         (m_dual_energy_viscous_heating == "stress_work");
+    // The register's kinetic-energy pairing treats the far side of a
+    // z-domain END face as a boundary ghost (paired antisymmetrically,
+    // like a rigid-wall interface) unless z is periodic, in which case
+    // the far side is a live cell of the periodic image.
+#if defined(WARPX_DIM_RZ)
+    const bool viscous_z_periodic = m_WarpX->Geom(0).isPeriodic(1);
+#else
+    const bool viscous_z_periodic = m_WarpX->Geom(0).isPeriodic(0);
+#endif
     const bool add_conduction =
         braginskii ||
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
@@ -7938,18 +7955,26 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     // velocities of the two cells this face moves momentum
                     // between. Those are what the discrete kinetic-energy
                     // identity KE^{n+1} - KE^n = u^{n+theta} . dm (exact at
-                    // theta = 1/2, uniform density) pairs with the momentum
-                    // increment -- NOT the reconstructed face states the
-                    // stress may difference, and NOT the viscous-stage
-                    // velocities: the heat booked must be the kinetic energy
-                    // the stress ACTUALLY removes, whatever velocity the
-                    // stress itself was formed from. At a rigid-wall
-                    // interface the masked cell is frozen (its half of the
-                    // deposit is discarded with wall_live), so pairing it
-                    // antisymmetrically, -u_live, makes the live half of the
-                    // face dissipation exactly the live cell's own loss
-                    // u_live . Pi_f/dn for EVERY component, whichever image
-                    // (no-slip antisymmetric, absorb) the stress used.
+                    // theta = 1/2, uniform density; at theta = 1 it misses
+                    // |dm|^2/(2 rho) per cell and step) pairs with the
+                    // momentum increment -- the same cell-centred states the
+                    // stress itself differences (cell_left/cell_right; the
+                    // reconstruction rewrites only the advective fan), and
+                    // NOT the viscous-stage velocities: the heat booked must
+                    // be the kinetic energy the stress ACTUALLY removes,
+                    // whatever velocity level the stress was formed from.
+                    // When the far side of the face is not a live cell --
+                    // the masked cell of a rigid-wall interface (frozen
+                    // under wall_thermal_bc != none, which is what makes
+                    // wall_interface true; its half of the deposit is
+                    // discarded with wall_live), or the boundary ghost of a
+                    // non-periodic z-domain end face or of the r_max face
+                    // (never deposited: outside the valid box) -- it is
+                    // paired antisymmetrically, -u_live, so the live half of
+                    // the face dissipation is exactly the live cell's own
+                    // loss u_live . Pi_f/dn for EVERY component, whichever
+                    // image (no-slip antisymmetric, absorb, rectified or
+                    // copied ghost, z_lo mirror) the stress used.
                     amrex::Real pair_left_velocity = 0.0_rt;
                     amrex::Real pair_right_velocity = 0.0_rt;
                     if (viscous_dissipation_register) {
@@ -7960,12 +7985,28 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         pair_right_velocity =
                             mom(i, j, k, component) /
                             std::max(rho(i, j, k), parameters.density_floor);
-                        if (wall_interface) {
-                            if (wall_right_masked) {
-                                pair_right_velocity = -pair_left_velocity;
-                            } else {
-                                pair_left_velocity = -pair_right_velocity;
-                            }
+                        bool far_right = wall_interface && wall_right_masked;
+                        bool far_left = wall_interface && !wall_right_masked;
+                        if (normal == 2 && !viscous_z_periodic) {
+#if defined(WARPX_DIM_RZ)
+                            const int face_axial_index = j;
+#else
+                            const int face_axial_index = i;
+#endif
+                            far_left = far_left ||
+                                       (face_axial_index == z_end_face_lo);
+                            far_right = far_right ||
+                                        (face_axial_index == z_end_face_hi);
+                        }
+#if defined(WARPX_DIM_RZ)
+                        if (normal == 0 && i == radial_wall_face) {
+                            far_right = true;
+                        }
+#endif
+                        if (far_right) {
+                            pair_right_velocity = -pair_left_velocity;
+                        } else if (far_left) {
+                            pair_left_velocity = -pair_right_velocity;
                         }
                     }
                     amrex::Real viscous_stress =

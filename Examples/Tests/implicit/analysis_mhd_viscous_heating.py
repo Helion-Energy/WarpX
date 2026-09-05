@@ -30,6 +30,13 @@ Modes (<booking>_<stage>):
                   bookings agree where the old one was right
   legacy_be       the same at viscous_theta = 1.0: the old booking heats
                   by exactly (1 + nu k_eff^2 dt/2) x the KE removed
+  stress_work_cap dual_energy, stress_work, viscous_theta = 0.5, with the
+                  free-streaming viscous cap binding
+                  (viscous_flux_limit_factor = 0.3, decay 3.4 % slower):
+                  the analytic decay-factor check is skipped (the cap
+                  changes the operator) and the ledger identity must still
+                  hold -- a register built from the pre-cap stress is off
+                  by 3.3 %
   total_cn/be     ion_closure = total_energy: E_i is a conservative
                   register, sum(E_i) is constant to round-off (for either
                   stage) and its implied internal part gains the KE loss
@@ -84,9 +91,10 @@ FIELDS = [
 mode = sys.argv[1]
 booking, stage = mode.rsplit("_", 1)
 assert booking in ("stress_work", "legacy", "total"), f"unknown booking {booking}"
-assert stage in ("cn", "be"), f"unknown stage {stage}"
+assert stage in ("cn", "be", "cap"), f"unknown stage {stage}"
 dual = booking != "total"
-viscous_theta = 0.5 if stage == "cn" else 1.0
+viscous_theta = 1.0 if stage == "be" else 0.5
+capped = stage == "cap"
 
 initial_directory = sys.argv[2]
 prefix = initial_directory[: -len("000000")]
@@ -127,19 +135,29 @@ def kinetic_energy(fields):
 # (relative_tolerance 1e-11 on the normalized solver vector, i.e. up to
 # ~1e-11 rho0 c_s in m_z = 1e-10 rho0 shear), nine orders below the
 # signal; a genuine acoustic response would be O(dU/U) = 5e-3.
+# With the free-streaming cap binding the two components are capped
+# SEPARATELY (the harmonic cap acts per component of the stress), so the
+# capped dissipation is no longer the same on every face: a weak, O(1e-5)
+# acoustic response develops. The at-rest guards are loosened to that
+# level in the cap mode; the ledger identity below stays at 1e-8 (the PdV
+# exchange it introduces is second order in the acoustic amplitude).
 density_drift = max(
     np.max(np.abs(f["implicit_mhd_mass_density"] / rho0 - 1.0)) for f in snapshots
 )
 axial_momentum = max(
     np.max(np.abs(f["implicit_mhd_momentum_z"])) for f in snapshots
 ) / (rho0 * shear)
-assert density_drift < 1.0e-11, f"density moved: {density_drift:.3e}"
-assert axial_momentum < 1.0e-9, (
+density_tolerance = 1.0e-4 if capped else 1.0e-11
+momentum_tolerance = 1.0e-3 if capped else 1.0e-9
+assert density_drift < density_tolerance, f"density moved: {density_drift:.3e}"
+assert axial_momentum < momentum_tolerance, (
     f"axial momentum appeared: max |m_z| = {axial_momentum:.3e} rho0 shear"
 )
 print(
     f"[all] density uniform to {density_drift:.1e}, max |m_z| = "
-    f"{axial_momentum:.1e} rho0 shear over the run (solver-tolerance noise)"
+    f"{axial_momentum:.1e} rho0 shear over the run "
+    + ("(the per-component cap's weak acoustic response)" if capped
+       else "(solver-tolerance noise)")
 )
 
 # 2. Both transverse amplitudes decay by the analytic per-step factor of
@@ -157,15 +175,40 @@ assert np.isclose(amplitudes_y[0], shear, rtol=1.0e-10, atol=0.0)
 for name, amplitudes in (("x", amplitudes_x), ("y", amplitudes_y)):
     factors = amplitudes[1:] / amplitudes[:-1]
     worst = np.max(np.abs(factors / expected_factor - 1.0))
+    if capped:
+        # The cap divides the stress by 1 + |Pi|/(f p_i): the decay is no
+        # longer the linear operator's, and it must be measurably slower
+        # (the cap binding is what makes this twin discriminating): every
+        # step strictly slower, and the run's total decay slower by more
+        # than 1 % (measured 3.4 % at f = 0.3: the per-step factor moves
+        # by only x times the rate reduction, 2.7e-4 here).
+        assert np.all(factors > expected_factor), (
+            f"the viscous cap is not binding on v_{name}: per-step factor "
+            f"{factors.min():.9f} vs uncapped {expected_factor:.9f}"
+        )
+        cumulative = amplitudes[-1] / amplitudes[0]
+        assert cumulative > expected_factor**n_steps * 1.01, (
+            f"the viscous cap barely binds on v_{name}: total decay "
+            f"{cumulative:.6f} vs uncapped {expected_factor**n_steps:.6f}"
+        )
+        continue
     assert worst < 1.0e-7, (
         f"v_{name} per-step decay factor off the analytic {expected_factor:.9f} "
         f"by {worst:.3e} (viscous_theta = {viscous_theta})"
     )
-print(
-    f"[{mode}] per-step decay factor {expected_factor:.9f} "
-    f"(viscous_theta = {viscous_theta}, x = nu k_eff^2 dt = {x_step:.5f}) "
-    f"reproduced to {worst:.2e} on both components"
-)
+if capped:
+    print(
+        f"[{mode}] cap binding: total decay {amplitudes_x[-1] / amplitudes_x[0]:.6f} "
+        f"vs uncapped {expected_factor**n_steps:.6f}; mean per-step factor "
+        f"{(amplitudes_x[1:] / amplitudes_x[:-1]).mean():.9f} vs "
+        f"{expected_factor:.9f} (x = nu k_eff^2 dt = {x_step:.5f})"
+    )
+else:
+    print(
+        f"[{mode}] per-step decay factor {expected_factor:.9f} "
+        f"(viscous_theta = {viscous_theta}, x = nu k_eff^2 dt = {x_step:.5f}) "
+        f"reproduced to {worst:.2e} on both components"
+    )
 
 # 3. Energy ledger per plotfile.
 ke_total = np.array([np.sum(kinetic_energy(f)) for f in snapshots])
@@ -208,15 +251,19 @@ if dual:
     )
     # The deposit is uniform (the seeded dissipation is the same on every
     # face and half of each face goes to each neighbour) and non-negative.
+    # Under the per-component cap the dissipation is no longer uniform
+    # along z (see above), so only positivity is asserted there.
     increments = np.diff(ui, axis=0)
     assert np.all(increments > 0.0), "a cell's U_i decreased in a viscous decay"
     nonuniformity = np.max(np.abs(increments / increments.mean(axis=1, keepdims=True) - 1.0))
-    assert nonuniformity < 1.0e-8, (
-        f"the viscous deposit is not uniform across cells: {nonuniformity:.3e}"
-    )
+    if not capped:
+        assert nonuniformity < 1.0e-8, (
+            f"the viscous deposit is not uniform across cells: {nonuniformity:.3e}"
+        )
     print(
-        f"[{mode}] U_i deposit positive in every cell every step, uniform to "
-        f"{nonuniformity:.2e}"
+        f"[{mode}] U_i deposit positive in every cell every step, "
+        + (f"non-uniform by {nonuniformity:.2e} (per-component cap)" if capped
+           else f"uniform to {nonuniformity:.2e}")
     )
 else:
     # total_energy: the internal part is the recovery E_i - KE, so with

@@ -724,8 +724,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // what U_i's own sources booked; the viscous-heating ctests turn it
     // off to read the U_i budget directly. Not for production (the
     // KE-dominated cancellation drift then accumulates in E_i, see the
-    // comment above).
+    // comment above). Guarded like allow_hlld: turning it off requires
+    // implicit_mhd.allow_dual_energy_sync_off = 1, so no production deck
+    // can reach the unsynchronized closure by a one-token slip.
     bool m_dual_energy_sync = true;
+    bool m_allow_dual_energy_sync_off = false;
     // How the dual-energy internal register U_i receives the viscous
     // heating (implicit_mhd.dual_energy_viscous_heating):
     //   "stress_work" (default) -- the per-face dissipation
@@ -736,17 +739,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //     free-streaming cap, the same viscous_theta stage), with
     //     u_R - u_L the theta-stage velocity difference the discrete
     //     kinetic-energy identity pairs with the momentum increment (the
-    //     image applied to it too). Deposited half to each adjacent cell
-    //     through the FaceFluxComponent::viscous_dissipation register with
-    //     the face's metric weight, so sum(dU_i) = -sum(dKE) to round-off
-    //     for any viscous_theta (the exact kinetic energy the stress
-    //     removes). Positive semi-definite wherever the stress is
-    //     dissipative; at viscous_theta = theta with donor-cell face
-    //     states (fluid_reconstruction = none) it is exactly
-    //     mu_f |du/dn|^2/(1 + |Pi|/(f p)) >= 0 (with a reconstruction the
-    //     stress differences the reconstructed face states while the
-    //     pairing stays cell-centred, so it is the exact KE loss but no
-    //     longer a manifest square).
+    //     image applied to it too, and likewise at a domain-boundary face
+    //     whose far side is a boundary ghost). Deposited half to each
+    //     adjacent cell through the FaceFluxComponent::viscous_dissipation
+    //     register with the face's metric weight, so sum(dU_i) = -sum(dKE)
+    //     to round-off for any viscous_theta WHEN implicit_evolve.theta =
+    //     0.5 -- the theta-stage velocity is the midpoint (u^n + u^{n+1})/2
+    //     the discrete kinetic-energy identity needs only at theta = 1/2;
+    //     at theta = 1 the register under-books the loss by |dm|^2/(2 rho)
+    //     per cell and step (0.2 % domain-wide and ~3 % in the
+    //     fastest-relaxing rows of the RZ band ctest deck). Positive
+    //     semi-definite wherever the stress is dissipative; at
+    //     viscous_theta = theta it is exactly
+    //     mu_f |du/dn|^2/(1 + |Pi|/(f p)) >= 0 for any fluid_reconstruction
+    //     (the viscous stress differences the cell-centred states).
     //   "legacy" -- the pre-2026-09-04 pointwise source: rho_f nu |du/dn|^2
     //     from cell-centred theta-stage velocities and the bare user
     //     viscosity, half to each cell, ignoring the wall viscosity band

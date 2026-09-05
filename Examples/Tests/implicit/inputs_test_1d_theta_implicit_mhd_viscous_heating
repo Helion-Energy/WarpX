@@ -116,13 +116,19 @@ implicit_mhd.fluid_flux = central
 #                                             exact at theta_v = 0.5 and
 #                                             (1 + nu k_eff^2 dt/2) high
 #                                             at theta_v = 1.0
+#   viscous_flux_limit_factor = 0.3        -- the free-streaming cap
+#                                             binding (decay 3.4 % slower):
+#                                             the register must carry the
+#                                             CAPPED stress
 implicit_mhd.mass_density(x,y,z) = rho0
 implicit_mhd.ion_pressure(x,y,z) = P0
 implicit_mhd.electron_pressure(x,y,z) = n0 * Te * q_e
 implicit_mhd.velocity_x(x,y,z) = shear * cos(2*pi*z/Lz)
 implicit_mhd.velocity_y(x,y,z) = shear * sin(2*pi*z/Lz)
 implicit_mhd.viscosity = nu
+# Verification mode: the unsynchronized closure needs the explicit opt-in.
 implicit_mhd.dual_energy_sync = 0
+implicit_mhd.allow_dual_energy_sync_off = 1
 implicit_mhd.dual_energy_viscous_heating = stress_work
 
 warpx.B_ext_grid_init_style = constant

@@ -4575,7 +4575,16 @@ Jacobian probes.
     booked; the viscous-heating tests turn it off to read the
     :math:`U_i` budget directly. Not intended for production (the
     kinetic-dominated cancellation drift then accumulates in
-    :math:`E_i`, see ``ion_closure``).
+    :math:`E_i`, see ``ion_closure``), so ``0`` is refused unless
+    :pp:param:`implicit_mhd.allow_dual_energy_sync_off` is set.
+
+.. pp:param:: implicit_mhd.allow_dual_energy_sync_off
+    :type: ``bool``
+    :default: ``0``
+
+    Opt-in that allows ``implicit_mhd.dual_energy_sync = 0`` (the same
+    pattern as :pp:param:`implicit_mhd.allow_hlld`): a production deck
+    cannot reach the unsynchronized closure by a one-token slip.
 
 .. pp:param:: implicit_mhd.dual_energy_viscous_heating
     :type: ``string``
@@ -4596,14 +4605,24 @@ Jacobian probes.
     kinetic-energy identity pairs with the momentum increment, and
     deposits half of it into each adjacent cell with the face's metric
     weight. So :math:`\sum \Delta U_i = -\sum \Delta K` to round-off
-    for any ``viscous_theta``: the internal register receives exactly
+    for any ``viscous_theta`` when ``implicit_evolve.theta = 0.5`` (the
+    theta-stage velocity is the midpoint the discrete identity needs
+    only at :math:`\theta = 1/2`; at :math:`\theta = 1` the register
+    under-books the loss by :math:`|\Delta m|^2/(2\rho)` per cell and
+    step, 0.2 % domain-wide and about 3 % in the fastest-relaxing rows
+    of the RZ band test deck): the internal register receives exactly
     the kinetic energy the stress removes, positive wherever the stress
-    is dissipative (at ``viscous_theta = theta`` with donor-cell face
-    states, ``fluid_reconstruction = none``, it is exactly
-    :math:`\mu_f |\partial u/\partial n|^2/(1 + |\Pi|/(f p_i)) \ge 0`).
-    At a no-slip wall face the wall does no work, so the removed
-    tangential kinetic energy is booked as heat in the adjacent live cell
-    under both closures alike.
+    is dissipative (at ``viscous_theta = theta`` it is exactly
+    :math:`\mu_f |\partial u/\partial n|^2/(1 + |\Pi|/(f p_i)) \ge 0`
+    for any ``fluid_reconstruction``, since the viscous stress
+    differences the cell-centred states). At a no-slip wall face the
+    wall does no work, so the removed tangential kinetic energy is
+    booked as heat in the adjacent live cell under both closures alike;
+    a domain-boundary face (non-periodic z end, the r_max face) books
+    the live cell's loss the same way. Like every reactive source the
+    deposit is multiplied by the halo pedestal taper (zero at/below the
+    pedestal density, one above twice it), so the viscous kinetic-energy
+    loss of pedestal-band cells is dropped rather than booked.
 
     ``legacy`` keeps the pre-2026-09 pointwise source
     :math:`\tfrac12\sum_\mathrm{faces}\rho_f\nu\,|\Delta\boldsymbol{u}/\Delta n|^2`
