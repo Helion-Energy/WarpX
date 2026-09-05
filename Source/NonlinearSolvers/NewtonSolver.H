@@ -339,6 +339,12 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
         diagnostic_file << "[" << c++ << "]gmres_total_iters";
         diagnostic_file << " ";
         diagnostic_file << "[" << c++ << "]gmres_last_res";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]free_norm_abs";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]pinned_defect";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]num_pinned";
         diagnostic_file << "\n";
         diagnostic_file.close();
     }
@@ -695,9 +701,23 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                         WARPX_ABORT_WITH_MESSAGE(freeze_msg.str());
                     }
                 } else {
+                    // Grade the accepted fiction: how much of the residual
+                    // lives on components the projection clamped (the
+                    // pinned defect, which the free subspace cannot
+                    // reduce) versus on free components (genuinely
+                    // unconverged dynamics).
+                    amrex::Real stagnation_defect = 0.0_rt;
+                    amrex::Long stagnation_pinned = 0;
+                    const amrex::Real stagnation_free_norm =
+                        m_ops->FreeResidualNorm(m_F, stagnation_defect,
+                                                stagnation_pinned);
                     amrex::Print()
                         << "WARNING: Newton line search stagnated at iter = "
                         << iter << " (rel. norm " << norm_rel
+                        << "; free-subspace norm " << stagnation_free_norm
+                        << ", pinned defect " << stagnation_defect
+                        << " over " << stagnation_pinned
+                        << " clamped components"
                         << "); accepting the current iterate (projected "
                            "onto the admissible set) and continuing\n";
                     // Stagnation-accept insurance: the accepted iterate
@@ -740,13 +760,34 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     m_total_iters += iter;
     m_total_linsol_iters += linear_solver_iters;
 
+    // Free-subspace split of the exit residual: the norm over the
+    // components the last admissibility projection did NOT clamp, the
+    // pinned defect (norm over the clamped components) and their count,
+    // with free^2 + pinned^2 = norm_abs^2. A non-converged exit whose
+    // residual is all pinned defect is a bound-resident population the
+    // solve cannot act on (book-keeping for the floor ledger); one whose
+    // free norm is above tolerance is genuinely unconverged dynamics. The
+    // masks belong to this solve's last Newton direction; a solve that
+    // exits at iteration 0 computed none, so it is reported as all-free.
+    amrex::Real exit_free_norm = norm_abs;
+    amrex::Real exit_pinned_defect = 0.0_rt;
+    amrex::Long exit_num_pinned = 0;
+    if (iter > 0) {
+        exit_free_norm =
+            m_ops->FreeResidualNorm(m_F, exit_pinned_defect, exit_num_pinned);
+    }
+
     if (m_rtol > 0. && iter == m_maxits) {
         std::stringstream convergenceMsg;
         convergenceMsg << "Newton solver failed to converge after " << iter <<
                           " iterations. Relative norm is " << norm_rel <<
                           " and the relative tolerance is " << m_rtol <<
                           ". Absolute norm is " << norm_abs <<
-                          " and the absolute tolerance is " << m_atol;
+                          " and the absolute tolerance is " << m_atol <<
+                          ". Free-subspace norm is " << exit_free_norm <<
+                          ", pinned defect " << exit_pinned_defect <<
+                          " over " << exit_num_pinned <<
+                          " clamped components";
         if (this->m_verbose) { amrex::Print() << convergenceMsg.str() << "\n"; }
         ablastr::warn_manager::WMRecordWarning("NewtonSolver", convergenceMsg.str());
 
@@ -775,6 +816,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         diagnostic_file << m_total_linsol_iters;
         diagnostic_file << " ";
         diagnostic_file << m_linear_solver->getResidualNorm();
+        diagnostic_file << " ";
+        diagnostic_file << exit_free_norm;
+        diagnostic_file << " ";
+        diagnostic_file << exit_pinned_defect;
+        diagnostic_file << " ";
+        diagnostic_file << exit_num_pinned;
         diagnostic_file << "\n";
         diagnostic_file.close();
     }

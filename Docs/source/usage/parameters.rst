@@ -318,7 +318,8 @@ Overall simulation parameters
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
-          - ``newton.diagnostic_file`` (``string``, default: None)
+          - ``newton.diagnostic_file`` (``string``, default: None).
+            One row per recorded step: step, time, Newton iterations, cumulative Newton iterations, exit residual norm (absolute, relative), linear iterations (per step, cumulative), last linear residual, then the free-subspace split of the exit residual -- the norm over the components the admissibility projection did not clamp, the pinned defect (norm over the clamped components; free² + pinned² = norm²) and the number of clamped components. A non-converged exit whose residual is all pinned defect is a bound-resident population the solve cannot act on; one whose free norm exceeds the tolerance is genuinely unconverged dynamics.
           - ``newton.diagnostic_interval`` (``int``, default: 1)
           - ``newton.adaptive_forcing`` (``bool``, default: false).
             When ``true``, the linear-solve relative tolerance of each Newton iteration is set adaptively by the inexact-Newton forcing prescription of Chacón & Knoll, JCP 188 (2003) 577: :math:`\zeta_A = \gamma\,(\|F_k\|/\|F_{k-1}\|)^\alpha`, safeguarded from volatile decreases by :math:`\gamma \zeta_{k-1}^\alpha`, capped at ``newton.forcing_max``, and floored at :math:`\gamma\,\epsilon_t/\|F_k\|` so the final iteration is not oversolved. Loose tolerances far from the solution cut linear iterations while preserving superlinear Newton convergence.

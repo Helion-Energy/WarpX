@@ -6032,10 +6032,12 @@ ThetaImplicitMHD::FreeResidualNorm (const WarpXSolverVec& residual,
         return residual.norm2();
     }
 
-    // This method runs only on the line-search failure path, so the
-    // active set here is the one blocking progress: list its cells,
-    // rate-limited (first call, then every 25th) so a max_frozen_steps
-    // plateau reports a handful of coordinate blocks, not thousands.
+    // This method runs on the line-search failure path (the active set
+    // here is the one blocking progress) and at every Newton exit that
+    // records the free/pinned split of the residual: list the clamped
+    // cells, rate-limited (first call, then every 25th) so a
+    // max_frozen_steps plateau or a long run reports a handful of
+    // coordinate blocks, not thousands.
     if (m_free_residual_norm_calls++ % 25 == 0) {
         PrintPinnedCells();
     }

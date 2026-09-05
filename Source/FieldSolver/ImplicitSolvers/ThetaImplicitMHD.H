@@ -127,9 +127,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * index, and physical cell-center coordinates -- one line per cell
      * via amrex::AllPrint() (rank-local scan: each rank prints its own
      * cells; the counts in PinnedComponentReport remain global). Called
-     * from FreeResidualNorm, i.e. only on the line-search failure path,
-     * rate-limited there so a long frozen plateau does not flood the
-     * log. Public for the NVCC extended-lambda requirement. */
+     * from FreeResidualNorm -- on the line-search failure path and at
+     * every solve exit that records the free/pinned residual split --
+     * rate-limited so a long frozen plateau or a long run does not
+     * flood the log. Public for the NVCC extended-lambda requirement. */
     void PrintPinnedCells () const;
 
     /** Localize a non-converged Newton residual: per-block L2 norms
