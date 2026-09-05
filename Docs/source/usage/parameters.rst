@@ -5823,6 +5823,42 @@ Jacobian probes.
     kinematic :math:`\nu` at a reference density, pass
     :math:`\rho_{\rm ref}\nu`.
 
+.. pp:param:: implicit_mhd.wall_viscosity_band_mode
+    :type: ``string``
+    :default: ``absolute``
+
+    How a positive :pp:param:`implicit_mhd.wall_viscosity_band_value` is
+    applied on a band face.
+
+    ``absolute`` (default, bit-identical to the code before this knob):
+    a hard SET to the band value — the reference code's contract
+    verbatim. The band ignores the open-region viscosity multiplier
+    (:pp:param:`implicit_mhd.viscosity_open_multiplier`), as the
+    reference operator does: its region ``WHERE`` runs before the wall
+    assignment that overwrites it.
+
+    ``capped``: :math:`\min(\text{band value},\ \text{interior coefficient})`,
+    where the interior coefficient is the SAME :math:`\rho_f \nu` — times
+    the open-region multiplier when it is active — that the face would
+    carry without the band. The band then never EXCEEDS the local
+    physical dynamic viscosity. Where :math:`\rho_f\nu` is above the
+    band value (compressed plasma touching the wall) the band is
+    unchanged: the reduced viscosity it is meant to be. Where
+    :math:`\rho_f\nu` is below it (the near-vacuum halo: on the
+    production formation deck, :math:`10^{18}` m⁻³ at
+    :math:`\nu = 2000` m²/s gives :math:`\rho\nu \approx 3\times10^{-6}`
+    Pa s, 30x below the :math:`10^{-4}` Pa s pedestal) the face keeps
+    its physical :math:`\rho_f\nu` instead of a floor that dissipates
+    the wall-inflow shear as ion heat in the wall-adjacent halo rows.
+    The same capped coefficient feeds the momentum stress, its work and
+    the dual-energy dissipation register (one assembly), so the
+    conservative pair never splits. The coefficient is :math:`C^0` in
+    the state with a derivative jump where the cap switches (a hard
+    ``min``, so the binding branch is EXACTLY :math:`\rho_f\nu`), like
+    the flux limiters' switch points. Requires a positive band value
+    (with ``0`` the band is the legacy exact-zero skip and there is
+    nothing to cap).
+
 .. pp:param:: implicit_mhd.wall_no_slip
     :type: ``bool``
     :default: ``false``

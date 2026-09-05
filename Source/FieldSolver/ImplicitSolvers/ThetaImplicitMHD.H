@@ -1694,9 +1694,37 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //     FLOORS it in the near-vacuum halo (45x above). To match a
     //     kinematic nu at a reference density rho_ref, pass
     //     rho_ref * nu. ----
+    //
+    // wall_viscosity_band_mode selects HOW a positive band value is applied
+    // on a band face (both modes feed the one coefficient the stress, its
+    // work and the dissipation register share, so the conservative pair
+    // never splits):
+    //   absolute (default) -- a hard SET to wall_viscosity_band_value, the
+    //     reference code's contract verbatim and bit-identical to the code
+    //     before this knob existed. Ignores the nu_op region multiplier,
+    //     as the reference operator does (its WHERE runs before the wall
+    //     assignment that overwrites it).
+    //   capped -- min(wall_viscosity_band_value, interior coefficient),
+    //     where the interior coefficient is the SAME rho_f nu -- times the
+    //     nu_op region multiplier when it is active -- that the face
+    //     would carry without the band. The band then never EXCEEDS the
+    //     local physical dynamic viscosity: where rho_f nu > band value
+    //     (compressed plasma at the wall) the band is unchanged, the
+    //     reduced viscosity it is meant to be; where rho_f nu < band
+    //     value (the near-vacuum halo: 30x below on the production
+    //     formation deck at 1e18 m^-3) the face keeps its physical
+    //     rho_f nu instead of a floor that dissipates the wall-inflow
+    //     shear as ion heat. The coefficient is C^0 in the state with a
+    //     derivative jump where the cap switches (a hard min, so the
+    //     binding branch is EXACTLY rho_f nu), like the flux limiters'
+    //     switch points. ----
+    enum class WallViscosityBandMode { absolute, capped };
     bool m_wall_viscosity_mask = false;
     int m_wall_viscosity_mask_width = 2;
     amrex::Real m_wall_viscosity_band_value = 0.0;
+    std::string m_wall_viscosity_band_mode_name = "absolute";
+    WallViscosityBandMode m_wall_viscosity_band_mode =
+        WallViscosityBandMode::absolute;
     // Thermal diffusivities chi_i/chi_e [m^2/s] of the recast face fluxes
     // (0 = off): conservative internal-energy diffusion
     // -chi rho_f d(e_spec)/dn (q = -kappa grad T, Chacon JCP 526 (2025))

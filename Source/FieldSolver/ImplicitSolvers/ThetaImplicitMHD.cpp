@@ -417,6 +417,40 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.wall_viscosity_band_value requires "
         "implicit_mhd.wall_viscosity_mask = 1 (it is the coefficient the "
         "band substitutes)");
+    // Band mode (see the header): 'absolute' is the reference contract
+    // and the bit-identical default; 'capped' never lets the pedestal
+    // exceed the interior's own rho_f nu. It needs a positive band value,
+    // else the band is the legacy exact-zero skip and there is nothing
+    // to cap -- a silent no-op.
+    pp.query("wall_viscosity_band_mode", m_wall_viscosity_band_mode_name);
+    if (m_wall_viscosity_band_mode_name == "absolute") {
+        m_wall_viscosity_band_mode = WallViscosityBandMode::absolute;
+    } else if (m_wall_viscosity_band_mode_name == "capped") {
+        m_wall_viscosity_band_mode = WallViscosityBandMode::capped;
+    } else {
+        WARPX_ABORT_WITH_MESSAGE(
+            "implicit_mhd.wall_viscosity_band_mode must be 'absolute' (the "
+            "band value is a hard set, the reference code's contract) or "
+            "'capped' (min(band value, rho_f nu): the band never exceeds "
+            "the interior's physical dynamic viscosity)");
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_viscosity_band_mode == WallViscosityBandMode::absolute ||
+            m_wall_viscosity_band_value > 0.0,
+        "implicit_mhd.wall_viscosity_band_mode = capped requires a positive "
+        "implicit_mhd.wall_viscosity_band_value (with 0 the band is the "
+        "legacy exact-zero skip and there is nothing to cap)");
+    // The band lives inside the interior viscous block (skipped entirely
+    // when implicit_mhd.viscosity is 0), so a cap with no interior
+    // viscosity would be a silent no-op too.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_viscosity_band_mode == WallViscosityBandMode::absolute ||
+            m_viscosity > 0.0_rt || m_viscosity_is_parser,
+        "implicit_mhd.wall_viscosity_band_mode = capped requires an "
+        "interior viscous channel (implicit_mhd.viscosity > 0 or a "
+        "viscosity(t) expression): the band is bounded by rho_f nu, and "
+        "with no interior viscosity the viscous block is skipped on every "
+        "face, band included");
     // Thermal diffusivities: legacy numeric key (bit-identical constant
     // fast path) or the parser signature (rho,Te,Ti,J,t), not both. Same
     // symbol conventions as plasma_resistivity(rho,Te,J,t) plus Ti [K]
@@ -3469,7 +3503,11 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Wall viscosity band [Pa s]:    "
                    << m_wall_viscosity_band_value
                    << (m_wall_viscosity_band_value > 0.0_rt
-                           ? " (dynamic pedestal)"
+                           ? (m_wall_viscosity_band_mode ==
+                                      WallViscosityBandMode::capped
+                                  ? " (dynamic pedestal, capped at the "
+                                    "interior rho_f nu)"
+                                  : " (dynamic pedestal, absolute)")
                            : " (band faces carry no viscosity)")
                    << "\n"
                    << "Wall no-slip face condition:   "
@@ -7373,6 +7411,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool wall_viscosity_pedestal =
         (wall_viscosity_first_masked != nullptr) &&
         (wall_viscosity_band_value > 0.0_rt);
+    // Band mode (implicit_mhd.wall_viscosity_band_mode, see the header):
+    // capped makes the pedestal an UPPER BOUND on the interior
+    // coefficient instead of a hard set. Static, so the branch is a
+    // constant for the JFNK probes.
+    const bool wall_viscosity_band_capped =
+        (m_wall_viscosity_band_mode == WallViscosityBandMode::capped);
     // The reference code's nu_op open-region viscosity multiplier (see the header):
     // a per-cell table over the whole domain, rebuilt once per step from
     // the step-old poloidal flux, so the branch structure is constant
@@ -8601,26 +8645,33 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 const amrex::Real face_density =
                     0.5_rt * (cell_left.density + cell_right.density);
                 // Interior: rho_f nu (implicit_mhd.viscosity is the
-                // kinematic-style knob). Band: the absolute dynamic
-                // pedestal, density-independent by design. A no-slip
-                // contour face keeps whichever of the two the deck asked
-                // for -- the pedestal when the band covers it (the reference code's
-                // small_vis on the 'bndy' row), else the physical
-                // rho_f nu -- but never the legacy exact-zero skip,
-                // which would silently make the wall free-slip again.
+                // kinematic-style knob). Band: the dynamic pedestal --
+                // a hard, density-independent set (absolute), or an
+                // upper bound on the interior coefficient (capped). A
+                // no-slip contour face keeps whichever of the two the
+                // deck asked for -- the pedestal when the band covers it
+                // (the reference code's small_vis on the 'bndy' row),
+                // else the physical rho_f nu -- but never the legacy
+                // exact-zero skip, which would silently make the wall
+                // free-slip again. Assembled interior-first so the
+                // capped band bounds the SAME coefficient the face would
+                // carry without the band; on an absolute band face the
+                // product is discarded below (bit-identical result).
                 // NOT const: the reference code's nu_op region multiplier below
                 // scales this in place (segment-staging lane).
-                amrex::Real viscous_coefficient =
-                    viscosity_band_face ? wall_viscosity_band_value
-                                        : face_density * viscosity;
+                amrex::Real viscous_coefficient = face_density * viscosity;
                 // The reference code's nu_op (step.f90:199-201): the region multiplier
                 // scales the INTERIOR coefficient only -- their WHERE
                 // runs BEFORE the small_vis wall assignment, which
-                // overwrites it. The face takes the mean of its two
-                // adjacent cell multipliers (our coefficient lives on
-                // faces; theirs on the nodes their operator differences).
+                // overwrites it, so an ABSOLUTE band face skips it. A
+                // CAPPED band face bounds the interior coefficient the
+                // face would otherwise carry, region scale included, so
+                // the scale is applied there first. The face takes the
+                // mean of its two adjacent cell multipliers (our
+                // coefficient lives on faces; theirs on the nodes their
+                // operator differences).
                 if (viscosity_region_scale != nullptr &&
-                    !viscosity_band_face) {
+                    (!viscosity_band_face || wall_viscosity_band_capped)) {
                     const auto region_scale_at =
                         [=] (const int ic, const int jc) {
                             const int ir = std::min(
@@ -8637,6 +8688,18 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     viscous_coefficient *=
                         0.5_rt * (region_scale_at(il, jl) +
                                   region_scale_at(i, j));
+                }
+                if (viscosity_band_face) {
+                    // absolute: the hard set (the pre-knob path, bit for
+                    // bit). capped: the pedestal never exceeds the
+                    // interior coefficient -- where rho_f nu is the
+                    // smaller of the two, the face keeps EXACTLY the
+                    // value it would carry without the band.
+                    viscous_coefficient =
+                        wall_viscosity_band_capped
+                            ? std::min(wall_viscosity_band_value,
+                                       viscous_coefficient)
+                            : wall_viscosity_band_value;
                 }
                 amrex::Real viscous_work = 0.0_rt;
                 amrex::Real viscous_dissipation = 0.0_rt;
