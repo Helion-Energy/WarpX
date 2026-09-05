@@ -5850,6 +5850,12 @@ Jacobian probes.
     Pa s, 30x below the :math:`10^{-4}` Pa s pedestal) the face keeps
     its physical :math:`\rho_f\nu` instead of a floor that dissipates
     the wall-inflow shear as ion heat in the wall-adjacent halo rows.
+    :math:`\rho_f` is the interior stress's own face density, the mean
+    of the two adjacent theta-stage cell densities; on a contour face
+    one of them is the frozen wall image (the floor under the exterior
+    clamp), so a no-slip wall face is bounded by the same
+    :math:`\tfrac{1}{2}(\rho_{\rm live} + \rho_{\rm image})\nu` the
+    unmasked no-slip path carries.
     The same capped coefficient feeds the momentum stress, its work and
     the dual-energy dissipation register (one assembly), so the
     conservative pair never splits. The coefficient is :math:`C^0` in
