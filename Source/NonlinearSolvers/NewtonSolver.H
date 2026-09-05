@@ -93,6 +93,7 @@ public:
         amrex::Print()     << "Newton absolute tolerance:  " << m_atol << "\n";
         amrex::Print()     << "Newton require convergence: " << (m_require_convergence?"true":"false") << "\n";
         amrex::Print()     << "Newton max frozen steps:    " << m_max_frozen_steps << "\n";
+        amrex::Print()     << "JFNK probe epsilon:         " << m_jfnk_epsilon << "\n";
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -138,6 +139,20 @@ private:
      * steps.
      */
     int m_max_frozen_steps = 10;
+
+    /**
+     * \brief Relative size of the matrix-free Jacobian probe: the state is
+     * perturbed by eps*dU with eps = jfnk_epsilon * ||U|| / ||dU||, i.e. a
+     * perturbation of jfnk_epsilon times the GLOBAL state norm along the
+     * Krylov direction (Pernice-Walker form). The global norm is set by the
+     * large blocks (fields, core density and energy), so at cells whose
+     * state is orders of magnitude smaller (a plasma-vacuum edge) the same
+     * probe is a large relative perturbation and the difference quotient
+     * is a secant across strongly nonlinear terms rather than a derivative.
+     * The default reproduces the historical hard-coded value; the classic
+     * choice is the square root of machine epsilon (~1.5e-8).
+     */
+    amrex::Real m_jfnk_epsilon = 1.0e-6;
 
     /**
      * \brief Consecutive zero-progress (frozen) solve counter.
@@ -288,6 +303,7 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
 
     m_linear_function = std::make_unique<JacobianFunctionMF<Vec,Ops>>();
     m_linear_function->define(m_F, m_ops, m_pc_type);
+    m_linear_function->setJFNKEps(m_jfnk_epsilon);
     this->m_usePC = m_linear_function->usePreconditioner();
 
     if (m_linear_solver_type == LinearSolverType::amrex_gmres) {
@@ -361,6 +377,10 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("max_iterations",      m_maxits);
     pp_newton.query("require_convergence", m_require_convergence);
     pp_newton.query("max_frozen_steps",    m_max_frozen_steps);
+    utils::parser::queryWithParser(pp_newton, "jfnk_epsilon", m_jfnk_epsilon);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_jfnk_epsilon > 0.0,
+        "newton.jfnk_epsilon must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_max_frozen_steps > 0,
         "newton.max_frozen_steps must be positive");

@@ -326,6 +326,8 @@ Overall simulation parameters
           - ``newton.forcing_alpha`` (``float``, default: 1.5)
           - ``newton.forcing_gamma`` (``float``, default: 0.9)
           - ``newton.forcing_max`` (``float``, default: 0.5)
+          - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6).
+            Relative size of the matrix-free Jacobian probe: the state is perturbed by :math:`\epsilon\,\delta U` with :math:`\epsilon = \texttt{jfnk\_epsilon}\,\|U\|/\|\delta U\|` (Pernice-Walker). Because the global state norm is set by the large blocks, the same probe is a large relative perturbation at cells whose state is orders of magnitude smaller (a plasma-vacuum edge), where the difference quotient then averages strongly nonlinear terms instead of differentiating them; the classic choice is the square root of machine epsilon, about 1.5e-8. The default reproduces the historical hard-coded value.
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
