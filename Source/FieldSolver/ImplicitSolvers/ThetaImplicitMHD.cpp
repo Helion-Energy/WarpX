@@ -3463,6 +3463,39 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
+    // Circuit driver pairings that cost either the Jacobian or the wall
+    // clock, said out loud at boot. The newton-scope + python pairing was
+    // adopted as a cost workaround (fewer python round trips) and then flew
+    // for weeks with the coil currents frozen inside every GMRES probe: a
+    // silent regression of the plasma-circuit coupling in the Jacobian.
+    if (m_external_field_iteration && !m_circuit_native) {
+        const std::string pairing_message =
+            m_circuit_hook_newton_scope
+                ? "circuit_driver = python with circuit_hook_scope = newton: "
+                  "the coil currents are advanced only at ACCEPTED Newton "
+                  "iterates and are FROZEN inside every GMRES finite-"
+                  "difference probe and line-search trial, so the Jacobian "
+                  "carries no plasma-circuit coupling and Newton converges "
+                  "only linearly on circuit-coupled steps. Use "
+                  "implicit_mhd.circuit_driver = native with "
+                  "implicit_mhd.circuit_hook_scope = residual (exact "
+                  "coupling at compiled cost)."
+                : "circuit_driver = python with circuit_hook_scope = residual: "
+                  "EVERY residual evaluation -- each GMRES finite-difference "
+                  "probe and each line-search trial -- round-trips through "
+                  "the python trampoline (of order 8x the hook calls of the "
+                  "newton scope). Use implicit_mhd.circuit_driver = native "
+                  "(same residual-scope coupling at compiled cost).";
+        amrex::Print()
+            << "\n**** WARNING (circuit driver) *****************************"
+               "*********************\n"
+            << pairing_message << "\n"
+            << "**********************************************************"
+               "*********************\n\n";
+        ablastr::warn_manager::WMRecordWarning(
+            "ThetaImplicitMHD", pairing_message,
+            ablastr::warn_manager::WarnPriority::high);
+    }
     if (m_use_hlld) {
         amrex::Print() << "HLLD fan closure:              " << m_hlld_fan_closure << "\n"
                        << "HLLD ion-energy flux:          " << m_hlld_ion_energy_flux << "\n"
