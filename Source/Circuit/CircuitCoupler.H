@@ -88,6 +88,40 @@ public:
          * value is committed by the finish hook), reproduced here so
          * both drivers apply the same model. */
         amrex::Real eps_lowpass_tau = 0.0;
+        /** Which linkage the step's EMF differences are taken against
+         * (circuit.linkage_reference; Newton-scope driving via
+         * EvaluateInterval only):
+         *   false = "first_iterate": the linkage measured at the first
+         *           residual evaluation of the step (the Newton initial
+         *           iterate = the committed t^n state; a full-grid curl
+         *           is saved because the residual just computed J);
+         *   true  = "accepted": the linkage the previous step's ACCEPTING
+         *           evaluation measured on its accepted state. Before the
+         *           first accepted step there is none, and the step runs
+         *           OPEN LOOP (eps = 0 for every evaluation, including the
+         *           accepting one) -- the python coupling reference's
+         *           convention (its lambda^n cache is None before the
+         *           first finish hook; zero-seeding would misread a
+         *           pre-existing plasma's whole equilibrium linkage as a
+         *           one-step change). The accepted linkage is
+         *           checkpointed so a restart continues closed-loop. */
+        bool linkage_reference_accepted = false;
+        /** In-residual advance target for Newton-scope consumers
+         * (circuit.residual_advance):
+         *   false = "theta_stage": advance the engine to the theta-stage
+         *           time and push the segment [t0, t0 + theta dt], so the
+         *           residual's B_ext(theta) is s(theta) exactly and its
+         *           E_ext the half-interval slope;
+         *   true  = "full_step": advance over the whole step [t0, t0 + dt]
+         *           with the EMF still differenced over the theta interval
+         *           the iterate's linkage lives on, and let the segment's
+         *           linear interpolation supply B_ext(theta) = (1 - theta)
+         *           s0 + theta s1 and E_ext = -(s1 - s0)/dt -- the python
+         *           coupling reference's hook semantics (its theta hook
+         *           sets eps from (lambda_theta - lambda^n)/(theta dt),
+         *           sub-cycles the full step and pushes [t^n, t^{n+1}]).
+         *           Identical to theta_stage at theta = 1. */
+        bool residual_advance_full_step = false;
     };
 
     /** \param probes           per-coil probe kind
@@ -154,8 +188,21 @@ public:
      * linear segments over [t0, t1] but does NOT refresh the external
      * fields -- the caller owns its refresh points. Exactly one
      * accept = true call per step, on the accepted final state, followed
-     * by FinishStep(). */
-    void EvaluateInterval (amrex::Real t0, amrex::Real t1, bool accept);
+     * by FinishStep().
+     *
+     * eps_interval (optional): the time span the EMF is differenced over,
+     * when it differs from t1 - t0 -- the theta-stage interval the
+     * iterate's linkage lives on while the engine advances the full step
+     * (Params::residual_advance_full_step); <= 0 means t1 - t0. */
+    void EvaluateInterval (amrex::Real t0, amrex::Real t1, bool accept,
+                           amrex::Real eps_interval = -1.0);
+
+    /** Whether Newton-scope consumers advance the engine over the full
+     * step inside the residual (Params::residual_advance_full_step). */
+    [[nodiscard]] bool ResidualAdvanceFullStep () const
+    {
+        return m_params.residual_advance_full_step;
+    }
 
     /** The current coupling interval, for the Python engine. */
     struct Interval
@@ -183,10 +230,12 @@ public:
     [[nodiscard]] ExternalCircuit* Plugin () const { return m_plugin.get(); }
 
     /** Persist / restore the coupler's per-step measurement memory (the
-     * committed EMF low-pass state per coil) into / from
+     * committed EMF low-pass state per coil and the accepted-state
+     * linkage reference of the last accepted step) into / from
      * `<dir>/circuit_coupler_memory.dat`. Without it a restart re-seeds
      * the memory from zero and the drive carries a filter warm-up
-     * transient the uninterrupted run never had. Write on the I/O rank
+     * transient (and, with linkage_reference = accepted, an open-loop
+     * first step) the uninterrupted run never had. Write on the I/O rank
      * only; read on every rank (rank-replicated state); tolerant of
      * checkpoints written before the file existed. */
     void WriteMemoryCheckpoint (std::string const& dir) const;
@@ -211,6 +260,18 @@ private:
     /** Committed EMF low-pass memory [V] per coil (Params::eps_lowpass_tau);
      * moves only on accept = true. */
     std::map<std::string, amrex::Real> m_eps_filt;
+    /** The linkages measured for the last ACCEPTING evaluation (the
+     * accepted state); the step's EMF reference under
+     * Params::linkage_reference_accepted. */
+    std::map<std::string, amrex::Real> m_lambda_accepted;
+    bool m_have_lambda_accepted = false;
+    /** The current step has no linkage reference (accepted mode before
+     * the first accepted step): every evaluation hands eps = 0. */
+    bool m_open_loop_step = false;
+    /** EMF differencing span of the current evaluation when it differs
+     * from the interval length (EvaluateInterval's eps_interval); <= 0 =
+     * the interval length. */
+    amrex::Real m_eps_interval = -1.0;
 
     warpx::circuit::LinkageBatch m_batch;               //!< batched probes
     std::vector<amrex::Real> m_lambda_scratch;

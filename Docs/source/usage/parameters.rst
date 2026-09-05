@@ -7964,6 +7964,38 @@ Grid types (collocated, staggered, hybrid)
     per-step-frozen filter contract of the python coupling reference. The memory is part of the
     checkpoint (``circuit_coupler_memory.dat``).
 
+.. pp:param:: circuit.linkage_reference
+    :type: ``str``
+    :default: ``first_iterate``
+    :optional:
+
+    Newton-scope driving (:pp:param:`implicit_mhd.circuit_driver` = ``native``): which linkage
+    the step's EMF :math:`\varepsilon = (\lambda - \lambda^n)/\Delta t` is differenced against.
+    ``first_iterate``: the linkage measured at the first residual evaluation of the step (the
+    Newton initial iterate is the committed :math:`t^n` state). ``accepted``: the linkage the
+    previous step's accepting evaluation measured on its accepted state; before the first
+    accepted step there is none and the step runs open loop (:math:`\varepsilon = 0` for every
+    evaluation, the accepting one included) -- the convention of the python coupling reference,
+    whose :math:`\lambda^n` cache is empty before its first finish hook. The accepted linkage is
+    part of the checkpoint (``circuit_coupler_memory.dat``), so a restart continues closed
+    loop. Requires :pp:param:`circuit.engine` = ``external``.
+
+.. pp:param:: circuit.residual_advance
+    :type: ``str``
+    :default: ``theta_stage``
+    :optional:
+
+    Newton-scope driving (:pp:param:`implicit_mhd.circuit_driver` = ``native``): how far the
+    in-residual (non-accepting) engine advance reaches. ``theta_stage``: to the theta-stage time,
+    pushing the segment :math:`[t^n, t^n + \theta\Delta t]` so the residual's
+    :math:`B_\mathrm{ext}(\theta)` is :math:`s(\theta)` exactly and its :math:`E_\mathrm{ext}`
+    the half-interval slope. ``full_step``: over the whole step :math:`[t^n, t^{n+1}]` with the
+    EMF still differenced over the theta interval the iterate's linkage lives on, so the
+    segment's linear interpolation supplies :math:`B_\mathrm{ext}(\theta) = (1-\theta) s^n +
+    \theta s^{n+1}` and :math:`E_\mathrm{ext} = -(s^{n+1} - s^n)/\Delta t` -- the python hook's
+    semantics (the accepting advance is over the full step in both cases). The two coincide at
+    :math:`\theta = 1`. Requires :pp:param:`circuit.engine` = ``external``.
+
 .. pp:param:: warpx.grid_type
     :type: ``string``, ``collocated``, ``staggered`` or ``hybrid``
 

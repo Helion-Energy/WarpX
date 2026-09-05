@@ -3773,14 +3773,19 @@ add_warpx_test(
     OFF  # dependency
 )
 # coupling-model parity arms: the python-hook reference with the
-# production coupler's EMF low-pass (one-pole EMA, memory committed by
-# the finish hook) and its native twin through circuit.eps_lowpass_tau;
-# the analysis asserts the committed per-step scales and linkages agree
+# production coupler's conventions -- EMF low-pass (one-pole EMA, memory
+# committed by the finish hook), no lambda^n before the first finish hook
+# (step 1 open loop), eps over the theta interval with the full step
+# advanced (theta = 0.5 so the theta-stage and full-step advances
+# differ) -- and its native twin through circuit.eps_lowpass_tau,
+# circuit.linkage_reference = accepted and circuit.residual_advance =
+# full_step; the analysis asserts the committed per-step scales and
+# linkages agree
 add_warpx_test(
     test_rz_theta_implicit_mhd_circuit_parity_reference  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --eps-tau-steps 3"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --theta 0.5 --eps-tau-steps 3 --open-loop-first-step"  # inputs
     OFF  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -3789,7 +3794,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_circuit_parity_native  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --eps-tau-steps 3"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --theta 0.5 --eps-tau-steps 3 --open-loop-first-step --full-step-advance"  # inputs
     "analysis_mhd_circuit_native_parity.py ../test_rz_theta_implicit_mhd_circuit_parity_reference"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_circuit_parity_reference  # dependency

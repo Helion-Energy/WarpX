@@ -187,7 +187,11 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
         // the reference's filter on the linkage rate before its division
         // by the reference current up to roundoff.
         std::vector<amrex::Real> eps;
-        const amrex::Real dt_sub = m_interval.t1 - m_interval.t0;
+        // The EMF differencing span: the interval length, or the caller's
+        // eps_interval (the theta-stage span while the engine advances
+        // the full step, Params::residual_advance_full_step).
+        const amrex::Real dt_sub = (m_eps_interval > 0.0_rt)
+            ? m_eps_interval : (m_interval.t1 - m_interval.t0);
         const bool lowpass =
             (m_params.eps_lowpass_tau > 0.0_rt && m_step_dt > 0.0_rt);
         const amrex::Real sigma = lowpass
@@ -197,7 +201,11 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
             const bool measured =
                 (m_probes[ic] != warpx::circuit::ProbeKind::none);
             amrex::Real e = 0.0_rt;
-            if (measured && dt_sub > 0.0_rt && m_lambda.count(c.name) > 0) {
+            // An open-loop step (no linkage reference yet, accepted mode)
+            // hands eps = 0 raw; the low-pass still runs on it so the
+            // memory evolves exactly as the reference's does.
+            if (measured && !m_open_loop_step && dt_sub > 0.0_rt &&
+                m_lambda.count(c.name) > 0) {
                 const amrex::Real lam0 = m_lambda_start.count(c.name)
                     ? m_lambda_start.at(c.name) : m_lambda.at(c.name);
                 e = (m_lambda.at(c.name) - lam0) / dt_sub
@@ -221,6 +229,15 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
             "ExternalCircuit::AdvanceInterval returned " +
             std::to_string(scales.size()) + " scales for " +
             std::to_string(m_coils.size()) + " coils");
+        if (accept) {
+            // The accepting evaluation's linkages ARE the accepted state's:
+            // the next step's EMF reference under linkage_reference =
+            // accepted (the reference coupler caches lambda^n here, in its
+            // finish hook, because between steps the field registers hold
+            // totals and cannot be measured).
+            m_lambda_accepted = m_lambda;
+            m_have_lambda_accepted = true;
+        }
 
         // Realize the engine's scales on the field registers as linear
         // segments over the interval (the plugin ABI is self-contained:
@@ -244,6 +261,10 @@ CircuitCoupler::BeginStep (const amrex::Real t0, const amrex::Real dt)
     m_interval = Interval{t0, t0 + dt, -1, 0};
     m_substep_count = 0;
     m_step_dt = dt;
+    // The substep protocol measures its own interval-entry linkages
+    // (PredictSubstep) and differences over the substep.
+    m_open_loop_step = false;
+    m_eps_interval = -1.0_rt;
     // The evolved fields hold the plasma response here (called after the
     // split-field subtraction): seed the linkage registers at t^n.
     MeasureLinkages(true);
@@ -319,21 +340,39 @@ CircuitCoupler::BeginStepMeasured (const amrex::Real t0, const amrex::Real dt)
     m_interval = Interval{t0, t0 + dt, -1, 0};
     m_substep_count = 0;
     m_step_dt = dt;
-    // The caller measured the committed t^n state (MeasureLinkages):
-    // seed the interval-entry linkage registers from it. The engine
-    // snapshots its accepted state; the first EvaluateInterval of the
-    // step then sees eps = 0 exactly (the ABI's predictor convention).
-    m_lambda_start = m_lambda;
+    m_eps_interval = -1.0_rt;
+    if (m_params.linkage_reference_accepted) {
+        // The step's EMF reference is the previous accepting evaluation's
+        // linkage (the accepted t^n state as the finish hook saw it).
+        // None yet -> the step runs open loop, eps = 0 throughout (the
+        // reference coupler's first-step convention). A step replayed
+        // after a failed solve re-enters here with the same reference.
+        m_open_loop_step = !m_have_lambda_accepted;
+        if (m_have_lambda_accepted) {
+            m_lambda_start = m_lambda_accepted;
+        } else {
+            m_lambda_start.clear();
+        }
+    } else {
+        // The caller measured the committed t^n state (MeasureLinkages):
+        // seed the interval-entry linkage registers from it. The engine
+        // snapshots its accepted state; the first EvaluateInterval of the
+        // step then sees eps = 0 exactly (the ABI's predictor convention).
+        m_open_loop_step = false;
+        m_lambda_start = m_lambda;
+    }
     FireEngine("circuitbeginstep", false);
 }
 
 void
 CircuitCoupler::EvaluateInterval (const amrex::Real t0, const amrex::Real t1,
-                                  const bool accept)
+                                  const bool accept,
+                                  const amrex::Real eps_interval)
 {
     m_interval.t0 = t0;
     m_interval.t1 = t1;
     m_interval.substep = 0;
+    m_eps_interval = eps_interval;
     if (!accept) { m_interval.iteration += 1; }
     // accept = false: restore-and-re-advance from the interval entry (a
     // pure function of the caller's latest measurement). accept = true:
@@ -393,6 +432,9 @@ CircuitCoupler::WriteMemoryCheckpoint (std::string const& dir) const
     // format can only grow by adding blocks.
     ofs << "version 1\n";
     WriteMemoryBlock(ofs, "eps_filt", m_eps_filt);
+    if (m_have_lambda_accepted) {
+        WriteMemoryBlock(ofs, "lambda_accepted", m_lambda_accepted);
+    }
 }
 
 void
@@ -402,10 +444,12 @@ CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
     std::ifstream ifs{path, std::ifstream::in};
     if (!ifs.good()) {
         // Checkpoints from before the memory file existed: the memory
-        // restarts from zero (a filter warm-up transient, disclosed).
+        // restarts from zero (a filter warm-up transient, disclosed) and
+        // an accepted-linkage reference is absent (open-loop first step).
         amrex::Print() << "Circuit coupler memory: no " << path
                        << " in the checkpoint; the EMF low-pass memory "
-                       << "restarts from zero\n";
+                       << "restarts from zero and no accepted linkage "
+                       << "reference is available\n";
         return;
     }
     std::string token;
@@ -418,6 +462,10 @@ CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
     while (ifs >> key >> count) {
         std::map<std::string, amrex::Real>* block = nullptr;
         if (key == "eps_filt") { block = &m_eps_filt; }
+        if (key == "lambda_accepted") {
+            block = &m_lambda_accepted;
+            m_have_lambda_accepted = true;
+        }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(block != nullptr,
             "circuit_coupler_memory.dat: unknown block '" + key + "'");
         block->clear();
@@ -430,5 +478,10 @@ CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
         }
     }
     amrex::Print() << "Circuit coupler memory: restored from " << path
-                   << " (" << m_eps_filt.size() << " EMF low-pass entries)\n";
+                   << " (" << m_eps_filt.size() << " EMF low-pass entries, "
+                   << (m_have_lambda_accepted
+                           ? std::to_string(m_lambda_accepted.size())
+                                 + " accepted-linkage entries"
+                           : std::string("no accepted-linkage block"))
+                   << ")\n";
 }

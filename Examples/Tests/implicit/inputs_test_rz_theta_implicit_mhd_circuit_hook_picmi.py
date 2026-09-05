@@ -56,6 +56,18 @@ Three axes, selected by CLI flags (combined into the CTest arms):
     memory is committed only by the finish hook (python) /
     circuit.eps_lowpass_tau (native). 0 = off.
 
+--theta T                 implicit_evolve.theta (default 1). The python
+    reference differences eps over theta*dt and advances the FULL step
+    (the production hook's semantics); the native driver matches that
+    only with circuit.residual_advance = full_step (--full-step-advance),
+    its default advancing to the theta-stage time.
+
+--open-loop-first-step    python: no lambda^n before the first finish
+    hook (eps = 0 throughout step 1, the production coupler's
+    convention); native: circuit.linkage_reference = accepted.
+
+--full-step-advance       native: circuit.residual_advance = full_step.
+
 The deck writes circuit_hook_history.csv (per step: hook calls, the
 committed scale, lambda, eps).
 """
@@ -109,6 +121,22 @@ parser.add_argument(
     default=0.0,
     help="EMF low-pass time constant in units of dt (0 = off)",
 )
+parser.add_argument(
+    "--theta",
+    type=float,
+    default=1.0,
+    help="implicit_evolve.theta (the python reference advances the full step)",
+)
+parser.add_argument(
+    "--open-loop-first-step",
+    action="store_true",
+    help="python: lambda^n undefined before the first finish hook; native: linkage_reference = accepted",
+)
+parser.add_argument(
+    "--full-step-advance",
+    action="store_true",
+    help="native: circuit.residual_advance = full_step",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -132,7 +160,7 @@ sound_speed = np.sqrt(gamma * (Pe0 + Pi0) / rho0)
 alfven_speed = B0 / np.sqrt(constants.mu0 * rho0)
 dt = 0.5 * (2.0 * zmax / nz) / np.sqrt(sound_speed**2 + alfven_speed**2)
 max_steps = 5
-theta = 1.0
+theta = args.theta
 eps_tau = args.eps_tau_steps * dt
 
 # --- toy driven RL circuit --------------------------------------------
@@ -251,6 +279,8 @@ if args.driver == "native":
         plugin_config=f"R={float(R_C)},L={float(L_C)},V0={float(V0)}",
         probe_crosscheck=args.crosscheck,
         eps_lowpass_tau=(eps_tau if eps_tau > 0.0 else None),
+        linkage_reference=("accepted" if args.open_loop_first_step else None),
+        residual_advance=("full_step" if args.full_step_advance else None),
     )
 
 solver = picmi.HybridPICSolver(
@@ -359,9 +389,18 @@ def measure_lambda():
     return 2.0 * np.pi * dr * lam  # I_ref = n_turns = 1
 
 
-def advance_circuit(lam):
-    """Backward-Euler RL advance from the committed snapshot."""
-    eps = (lam - state["lam_n"]) / (theta * dt)
+def advance_circuit(lam, fraction):
+    """Backward-Euler RL advance from the committed snapshot.
+
+    eps is differenced over fraction*dt -- the THETA interval the
+    iterate's linkage lives on in the theta hook, the full step in the
+    finish hook (the accepted state at t^{n+1}) -- while the loop always
+    advances the full step: the production coupler's hook semantics
+    (_advance_with(lam, theta) / _advance_with(lam_end, 1.0)). With no
+    committed linkage yet (--open-loop-first-step) the step runs open
+    loop, eps = 0.
+    """
+    eps = 0.0 if state["lam_n"] is None else (lam - state["lam_n"]) / (fraction * dt)
     if eps_tau > 0.0:
         sigma = dt / (dt + eps_tau)
         eps = sigma * eps + (1.0 - sigma) * lowpass["mem"]
@@ -378,13 +417,13 @@ def push_segment(i_new):
 
 def hook_theta():
     counts["theta"] += 1
-    i_new, _ = advance_circuit(measure_lambda())
+    i_new, _ = advance_circuit(measure_lambda(), theta)
     push_segment(i_new)
 
 
 def hook_finish():
     lam_end = measure_lambda()
-    i_new, eps = advance_circuit(lam_end)
+    i_new, eps = advance_circuit(lam_end, 1.0)
     push_segment(i_new)
     state["i_n"] = i_new
     state["lam_n"] = lam_end
@@ -402,7 +441,9 @@ def record_native_step():
     state["step"] += 1
     scale = warpx.get_external_vector_potential_scale("drive", state["t_n"])
     lam_end = warpx.get_coil_flux_linkage("drive")
-    eps = (lam_end - state["lam_n"]) / (theta * dt)
+    # informational only (the engine computes its own eps): the raw
+    # finish-hook difference over the full step
+    eps = 0.0 if state["lam_n"] is None else (lam_end - state["lam_n"]) / dt
     state["lam_n"] = lam_end
     history.append((state["step"], state["t_n"], -1, scale, lam_end, eps))
 
@@ -417,8 +458,10 @@ if args.driver == "python":
         callbacks.installcallback(name, function)
     # Seed the committed linkage at t = 0 exactly like the native
     # driver's step-entry measurement: between steps Bfield_fp holds the
-    # totals, which at scale 0 equal the plasma response.
-    state["lam_n"] = measure_lambda()
+    # totals, which at scale 0 equal the plasma response -- unless the
+    # production coupler's convention is under test (--open-loop-first-
+    # step): no lambda^n before the first finish hook.
+    state["lam_n"] = None if args.open_loop_first_step else measure_lambda()
 else:
     callbacks.installcallback("afterstep", record_native_step)
     state["lam_n"] = measure_lambda()

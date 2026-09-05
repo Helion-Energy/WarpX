@@ -2250,10 +2250,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // one sync, one all-reduce per measurement) and an in-process
     // AdvanceInterval: residual scope restores EXACT circuit-in-residual
     // coupling at native cost. In-residual (accept = false) advances
-    // target the theta-stage time and replay from the committed interval
+    // target the theta-stage time (or the full step with the EMF over
+    // the theta interval under circuit.residual_advance = full_step, the
+    // python hook's semantics) and replay from the committed interval
     // entry; the single accept = true advance and FinishStep commit fire
     // from FinishStateUpdate on the accepted end-of-step state, so
-    // discontinuous engine transitions latch in committed time only.
+    // discontinuous engine transitions latch in committed time only. The
+    // step's EMF reference is the first iterate's linkage or, under
+    // circuit.linkage_reference = accepted, the previous accepting
+    // evaluation's (first step open loop) -- see CircuitCoupler::Params.
     // Default false (driver = python, bit-identical).
     bool m_circuit_native = false;
     // Whether the native circuit step is open: BeginStep is fired lazily

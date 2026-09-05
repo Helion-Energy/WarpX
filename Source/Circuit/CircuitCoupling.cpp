@@ -126,6 +126,31 @@ CircuitCoupling::CircuitCoupling ()
         "circuit.eps_lowpass_tau filters the EMF the coupler hands a "
         "compiled engine and requires circuit.engine = external (the "
         "Python-callback engine computes its own EMF)");
+    // Newton-scope coupling model knobs (see CircuitCoupler::Params):
+    // which linkage the step's EMF is differenced against, and how far
+    // the in-residual advance reaches. Both default to the previous
+    // behaviour; the alternatives are the python coupling reference's
+    // conventions, for driver parity.
+    {
+        std::string ref = "first_iterate";
+        pp_circuit.query("linkage_reference", ref);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            ref == "first_iterate" || ref == "accepted",
+            "circuit.linkage_reference must be 'first_iterate' or 'accepted'");
+        m_coupler_params.linkage_reference_accepted = (ref == "accepted");
+        std::string adv = "theta_stage";
+        pp_circuit.query("residual_advance", adv);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            adv == "theta_stage" || adv == "full_step",
+            "circuit.residual_advance must be 'theta_stage' or 'full_step'");
+        m_coupler_params.residual_advance_full_step = (adv == "full_step");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (ref == "first_iterate" && adv == "theta_stage") ||
+                m_engine == "external",
+            "circuit.linkage_reference / circuit.residual_advance shape the "
+            "EMF the coupler hands a compiled engine and require "
+            "circuit.engine = external");
+    }
 }
 
 void
@@ -368,6 +393,15 @@ CircuitCoupling::InitData ()
                                ? " [one-pole EMA on the port EMF, memory "
                                  "committed on accept]"
                                : " [off: raw interval EMF]")
+                       << ", linkage_reference = "
+                       << (m_coupler_params.linkage_reference_accepted
+                               ? "accepted [previous accepting evaluation; "
+                                 "first step open loop]"
+                               : "first_iterate")
+                       << ", residual_advance = "
+                       << (m_coupler_params.residual_advance_full_step
+                               ? "full_step [EMF over the theta interval]"
+                               : "theta_stage")
                        << ")\n";
 #endif
     }

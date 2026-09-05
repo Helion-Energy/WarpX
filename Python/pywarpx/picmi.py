@@ -4144,6 +4144,19 @@ class CircuitCoupling(object):
         Circuit-wide default mask radius [m] of the coils' 'loop' probes
         (0 = no mask); CircuitCoil(probe_exclusion_radius=...) overrides
         it per coil.
+
+    linkage_reference: str, optional
+        Newton-scope driving: 'first_iterate' (default; the step's EMF is
+        differenced against the first residual evaluation's linkage) or
+        'accepted' (against the previous step's accepting evaluation;
+        the first step runs open loop -- the python coupling reference's
+        convention).
+
+    residual_advance: str, optional
+        Newton-scope driving: 'theta_stage' (default; in-residual
+        advances target the theta-stage time) or 'full_step' (advance
+        the whole step with the EMF differenced over the theta interval,
+        the python hook's semantics; identical at theta = 1).
     """
 
     def __init__(
@@ -4158,6 +4171,8 @@ class CircuitCoupling(object):
         corrector_rtol=None,
         eps_lowpass_tau=None,
         probe_exclusion_radius=None,
+        linkage_reference=None,
+        residual_advance=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -4169,6 +4184,8 @@ class CircuitCoupling(object):
         self.corrector_rtol = corrector_rtol
         self.eps_lowpass_tau = eps_lowpass_tau
         self.probe_exclusion_radius = probe_exclusion_radius
+        self.linkage_reference = linkage_reference
+        self.residual_advance = residual_advance
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -4205,6 +4222,10 @@ class CircuitCoupling(object):
             pywarpx.circuit.eps_lowpass_tau = self.eps_lowpass_tau
         if self.probe_exclusion_radius is not None:
             pywarpx.circuit.probe_exclusion_radius = self.probe_exclusion_radius
+        if self.linkage_reference is not None:
+            pywarpx.circuit.linkage_reference = self.linkage_reference
+        if self.residual_advance is not None:
+            pywarpx.circuit.residual_advance = self.residual_advance
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):
