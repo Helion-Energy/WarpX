@@ -2362,7 +2362,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the electron frame.
 
     viscosity: float or str, default=0 (off)
-    fluid_reconstruction: {"none", "median", "vanalbada", "unlimited"}, optional
+    fluid_reconstruction: {"none", "median", "vanalbada", "unlimited", "smart", "smart_smooth"}, optional
         TVD reconstruction of the face states handed to the recast fluid
         flux; the default "none" is the bit-identical donor-cell path.
         Without it the recast hands hlld/central the RAW cell-centre
@@ -2382,6 +2382,27 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         edge, but new extrema up to 0.10355 of the local jump on the
         opposite-sign branch. "unlimited" is the oscillatory
         centered-slope reference (diagnostic only).
+        "smart" is the SMART limiter of Gaskell and Lau (1988), hard
+        form: the third-order QUICK face value clipped to the
+        convection-boundedness criterion, in Sweby form
+        psi(r) = max(0, min(2 r, 1/4 + 3/4 r, 4)). psi(1) = 1 lies in the
+        interior of the linear QUICK branch, so smooth flow is exactly
+        second order with NO derivative kink there (the kinks are at
+        slope ratios 0, 1/5 and 5, far from the smooth-flow point where
+        minmod's selection kink sits; measured, that smoothness buys
+        accuracy rather than solver speed -- hard SMART costs about a
+        third more Newton iterations than the smoothed median on the 1D
+        contact sine, "smart_smooth" 7-11% more at comparable width);
+        every face state stays inside the interval
+        of the two adjacent cells (a new-extremum bound of exactly zero
+        at the reconstruction level). psi reaches 4, beyond the
+        explicit TVD region psi <= 2: SMART is bounded in the
+        convection-boundedness sense that applies to the implicit
+        solve, not TVD for an explicit update. It is upwind-biased, so
+        the two one-sided face states are built with opposite donor
+        roles. "smart_smooth" rounds its three kinks in ratio space
+        with the dimensionless width reconstruction_kappa (smooth-flow
+        defect kappa^2/12, a kappa/4 excursion at an exact extremum).
         The reconstruction acts on primitive variables and floors every
         reconstructed density and internal energy, so the conserved ion
         energy is never reconstructed directly and E_i - KE stays above
@@ -2394,9 +2415,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         overshoot.
 
     reconstruction_kappa: float, default=0.01
-        Smoothing width fraction of the "median" limiter (unused by the
-        other modes); both the numerical diffusivity and the
-        new-extremum bound above scale linearly in it.
+        Smoothing width fraction of the "median" limiter; both the
+        numerical diffusivity and the new-extremum bound above scale
+        linearly in it. For "smart_smooth" it is the dimensionless width
+        of the rounded Sweby function in ratio space (smooth-flow defect
+        kappa^2/12, a kappa/4 excursion at an exact extremum). Unused by
+        the other modes.
 
     central_dissipation: float, default=0 (off)
         Limited Rusanov (local Lax--Friedrichs) jump penalty on the
@@ -3412,14 +3436,34 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         copies; with circuit_hook_scope="residual" this restores
         EXACT circuit-in-residual coupling at native cost.
 
-    braginskii_tangential_limiter: {"minmod", "none"}, optional
+    braginskii_tangential_limiter: {"minmod", "none", "smart", "smart_upwind"}, optional
         Slope treatment of the Braginskii cross-term tangential gradient
         (thermal_conduction_model="braginskii" only). The default
         "minmod" uses the monotone Sharma-Hammett one-sided slopes, so
         the cross-term flux cannot demand states below the local stencil
         minimum; "none" selects the legacy centered corner stencil (the
         non-monotone reference, measured to carry a wall-ledger runaway
-        at clamp-forced anisotropy).
+        at clamp-forced anisotropy). "smart" replaces each cell's minmod
+        pair by the symmetric SMART pair
+        L(a, b) = [a psi(b/a) + b psi(a/b)]/2 with psi the SMART limiter
+        of Gaskell and Lau (1988): the centered tangential slope wherever
+        the two one-sided differences are within a factor 5 of each
+        other, three times the smaller one beyond, zero at extrema. Its
+        3x gain near tangential extrema (not its kinks: a kink-smoothed
+        pair behaves identically) costs about twice minmod's Newton
+        iterations and breaks the exact maximum principle minmod has
+        (measured on the oblique-field Braginskii test). "smart_upwind"
+        is the advectionalized cross term: each cell's half of the face
+        tangential gradient is the difference of two SMART
+        normalized-variable face values reconstructed from that cell's
+        effective upwind side (set by the sign of b_n b_t and by which
+        side of the face the cell sits on), so the cross term is
+        differenced like an upwinded advective flux. Newton work like
+        minmod's; the direction rule sets that cost, not the
+        monotonicity -- the option does not satisfy a maximum principle
+        (2.7e-3 undershoot of the initial contrast where minmod has 0).
+        It reads two tangential neighbours on each side (the fluid
+        registers carry two guard cells).
 
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the

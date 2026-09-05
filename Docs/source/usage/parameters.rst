@@ -5457,8 +5457,8 @@ Jacobian probes.
     :default: ``none``
 
     TVD reconstruction of the face states handed to the recast fluid
-    flux: one of ``none`` (the default), ``median``, ``vanalbada``, or
-    ``unlimited``. Requires a recast flux
+    flux: one of ``none`` (the default), ``median``, ``vanalbada``,
+    ``unlimited``, ``smart``, or ``smart_smooth``. Requires a recast flux
     (``implicit_mhd.fluid_flux = hlld`` or ``central``) and strictly
     positive positivity floors (see below).
 
@@ -5505,6 +5505,51 @@ Jacobian probes.
     ``unlimited`` is the plain centered slope — second order and
     oscillatory. It is a diagnostic reference (the twin that must ring in
     the TVD regression), never a production mode.
+
+    ``smart`` is the SMART limiter of Gaskell & Lau (Int. J. Numer.
+    Methods Fluids 8 (1988) 617), hard form: the third-order QUICK face
+    value clipped to the convection-boundedness criterion. In Sweby form,
+    with :math:`r = \Delta_{down}/\Delta_{up}` the ratio of the donor
+    cell's downwind to upwind one-sided difference,
+
+    .. math::
+
+        \psi(r) = \max\left(0, \min\left(2 r, \tfrac{1}{4} + \tfrac{3}{4} r, 4\right)\right),
+
+    equivalently the normalized-variable map :math:`\phi_f = 3\phi_C`
+    on :math:`(0, 1/6)`, :math:`3/8 + 3\phi_C/4` on :math:`[1/6, 5/6]`,
+    :math:`1` on :math:`(5/6, 1)` and :math:`\phi_C` (donor cell)
+    otherwise, with :math:`\phi_C = (q_C - q_U)/(q_D - q_U)`.
+    :math:`\psi(1) = 1` lies in the *interior* of the linear QUICK
+    branch, so smooth flow is exactly second order with **no derivative
+    kink** there — the kinks sit at :math:`r = 0`, :math:`1/5` and
+    :math:`5`, far from the smooth-flow point where minmod's selection
+    kink :math:`\Delta_{up} = \Delta_{down}` lives. Measured, that
+    smoothness buys accuracy rather than solver speed: on the 1D contact
+    sine hard SMART costs about a third more Newton iterations than the
+    smoothed ``median`` and ``smart_smooth`` 7-11% more at comparable
+    width, while being the sharper, less diffusive limiter. Every face
+    state stays
+    inside the interval of the two cells adjacent to the face
+    (:math:`\psi \le 2 r` on every branch), i.e. a new-extremum bound of
+    exactly zero at the reconstruction level. :math:`\psi` reaches 4,
+    beyond Sweby's explicit TVD region :math:`\psi \le 2`: SMART is not
+    TVD for an explicit update, it is *bounded* in the
+    convection-boundedness sense, which is the statement that applies to
+    the implicit solve. Because it is upwind-biased, the two one-sided
+    face states are built with opposite donor roles (the right cell's
+    left-face state treats the right cell as the donor of a leftward
+    flow), which also makes the reconstruction mirror-covariant.
+
+    ``smart_smooth`` is the same limiter with its three kinks rounded by
+    the ``smooth_min``/``smooth_max`` idiom in *ratio* space at the
+    dimensionless width :pp:param:`implicit_mhd.reconstruction_kappa`.
+    Unlike the median's slope-keyed width this costs no first-order
+    slope defect (the smooth-flow defect is :math:`\kappa^2/12`); the
+    only :math:`O(\kappa)` residue is at an exact extremum, where it
+    leaves a slope of :math:`\kappa\,|\Delta_{up}|/2` (a new-extremum
+    excursion of :math:`\kappa/4` of the local difference, the same
+    :math:`\kappa/4` the median leaves at the same :math:`\kappa`).
 
     The reconstruction is applied to PRIMITIVE variables — density,
     velocity, the SPECIFIC internal energies, the cell-centered magnetic
@@ -5614,13 +5659,16 @@ Jacobian probes.
     :type: ``float``
     :default: ``0.01``
 
-    Smoothing width fraction of the ``median`` limiter (unused by the
-    other modes). It buys JFNK smoothness at the minmod kinks and costs a
-    numerical diffusivity :math:`0.354\,\kappa\,|u|\,\Delta x` plus new
-    extrema bounded by :math:`\kappa/4` of the largest stencil
-    difference; both scale linearly in :math:`\kappa`, so a deck that
-    needs a tighter bound can lower it as long as the width stays far
-    above the matrix-free probe scale.
+    Smoothing width fraction of the ``median`` limiter. It buys JFNK
+    smoothness at the minmod kinks and costs a numerical diffusivity
+    :math:`0.354\,\kappa\,|u|\,\Delta x` plus new extrema bounded by
+    :math:`\kappa/4` of the largest stencil difference; both scale
+    linearly in :math:`\kappa`, so a deck that needs a tighter bound can
+    lower it as long as the width stays far above the matrix-free probe
+    scale. For ``smart_smooth`` it is the dimensionless width of the
+    rounded Sweby function in ratio space (smooth-flow slope defect
+    :math:`\kappa^2/12`, new-extremum excursion :math:`\kappa/4` of the
+    local difference at an exact extremum). Unused by the other modes.
 
 .. pp:param:: implicit_mhd.viscosity
     :type: ``float``
@@ -5976,6 +6024,55 @@ Jacobian probes.
     stencil is non-monotone and, at clamp-forced anisotropy, carried a
     measured wall-ledger heating runaway. ``none`` selects the legacy
     centered corner average.
+
+    ``smart`` replaces each cell's minmod pair by the symmetric SMART
+    pair :math:`L(a, b) = [a\,\psi(b/a) + b\,\psi(a/b)]/2` with
+    :math:`\psi` the SMART limiter of Gaskell & Lau (1988) (see
+    :pp:param:`implicit_mhd.fluid_reconstruction`), which has the closed
+    form :math:`\mathrm{sign}(a)\min(3\min(|a|, |b|), (|a| + |b|)/2)`
+    for :math:`ab > 0` and zero otherwise: the centered tangential slope
+    wherever the two one-sided differences are within a factor 5 of each
+    other, three times the smaller one beyond, zero at extrema. It never
+    exceeds the centered corner value of ``none``, but its threefold gain
+    near tangential extrema is what the Newton solve pays for: measured
+    on the oblique-field Braginskii test, it costs about twice
+    ``minmod``'s Newton iterations at a linear contraction of ~0.5 per
+    iteration (``minmod`` ~0.2), a pair with its kinks smoothed converges
+    identically, and along the family :math:`\mathrm{sign}(a)\min(g
+    \min(|a|,|b|), (|a|+|b|)/2)` (:math:`g = 1` minmod, 2 MC, 3 this
+    pair) both the Newton cost and the maximum-principle violation grow
+    monotonically with :math:`g`; only :math:`g = 1` holds the maximum
+    principle exactly (0 against :math:`2\times 10^{-3}` of the initial
+    contrast for this pair).
+
+    ``smart_upwind`` is the *advectionalized* cross term. The cross flux
+    through a normal face, :math:`-\rho (\chi_\parallel -
+    \chi_\perp) \hat b_n \hat b_t\, \partial_t e`, differenced as
+    :math:`[e(t + 1/2) - e(t - 1/2)]/h_t`, enters each adjacent cell
+    exactly like the divergence of an advective flux of :math:`e` along
+    the tangential direction, with an effective velocity whose sign is
+    set by :math:`\mathrm{sign}(\hat b_n \hat b_t)` and by which side
+    of the face the cell sits on (the two cells see opposite signs).
+    Each cell's half of the face tangential gradient is therefore the
+    difference of the two tangential half-face values reconstructed with
+    SMART in normalized-variable form from *that cell's* upwind side, so
+    the cross term is differenced like an upwinded advective flux: the
+    half-face values are bounded by their neighbours and a linear
+    profile gives the exact slope (the QUICK branch is exact for
+    quadratics). This is **not** a maximum principle: the neighbour
+    cell's half of the same face gradient is downwind-biased for this
+    cell (one face flux cannot be upwind for both cells it enters) and
+    the plateau-edge QUICK value :math:`q_C + \Delta_{up}/4` is non-zero
+    where minmod's difference vanishes. Measured on the oblique-field
+    Braginskii test the option leaves an undershoot of
+    :math:`2.7\times 10^{-3}` of the initial contrast where ``minmod``
+    leaves exactly 0 (the centered stencil :math:`4.6\times 10^{-3}`),
+    and flipping the direction rule moves that by 1% while costing 36%
+    more Newton iterations — the rule sets the Newton cost (like
+    ``minmod``'s: 148 against 150 total iterations), not the
+    monotonicity. The stencil reads two tangential neighbours on each
+    side of a cell (the fluid registers carry two guard cells and every
+    ghost fill covers both).
 
 .. pp:param:: implicit_mhd.conduction_coulomb_log
     :type: ``float``

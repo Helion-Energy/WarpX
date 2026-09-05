@@ -27,6 +27,14 @@
  *      * the new-extremum bounds of each mode, and
  *      * Lipschitz smoothness across the minmod SELECTION kink
  *        d_up = d_down, where a HARD minmod's derivative jumps 1 -> 0.
+ *      * the SMART family (smart_slope, smart_slope_smooth, smart_pair,
+ *        smart_face_value, smart_upwind_tangential_difference): the
+ *        Sweby-form identity psi(r) = max(0, min(2r, 1/4 + 3r/4, 4)),
+ *        the normalized-variable table, the symmetric pair's closed
+ *        form, exact second order at d_up = d_down with NO kink there,
+ *        a new-extremum bound of exactly zero for the hard form, the
+ *        exactness of the advectionalized tangential difference on
+ *        linear and quadratic rows and its sign at a tangential peak.
  *
  * B. FACE-STATE ADMISSIBILITY -- the production constraint. The ion
  *    energy channel is the fragile one in the formation campaign (arms
@@ -78,6 +86,12 @@ void check (const bool ok, const char* what)
 double hard_median (const double a, const double b, const double c)
 {
     return std::min(std::max(a, b), std::max(c, std::min(a, b)));
+}
+
+// Sweby-form SMART limiter, the literal textbook expression.
+double smart_psi (const double r)
+{
+    return std::max(0.0, std::min({2.0 * r, 0.25 + 0.75 * r, 4.0}));
 }
 
 // The deck-scale floors of the RZ formation production deck, so the
@@ -237,6 +251,10 @@ int main ()
         theta_implicit_mhd::reconstruction_vanalbada, 1);
     const FluxParameters unlimited = make_parameters(
         theta_implicit_mhd::reconstruction_unlimited, 1);
+    const FluxParameters smart = make_parameters(
+        theta_implicit_mhd::reconstruction_smart, 1);
+    const FluxParameters smart_smooth = make_parameters(
+        theta_implicit_mhd::reconstruction_smart_smooth, 1);
 
     const double predicted_defect =
         1.0 - median.reconstruction_kappa / std::sqrt(2.0);
@@ -262,6 +280,156 @@ int main ()
               "median does not clip a smooth extremum");
     }
 
+    // SMART (Gaskell & Lau 1988). The slope form is checked against the
+    // literal Sweby expression, the symmetric pair against its
+    // symmetrization, the face value against the normalized-variable
+    // table, and the advectionalized tangential difference against the
+    // exact derivative of linear and quadratic rows.
+    {
+        double worst_slope = 0.0;
+        double worst_pair = 0.0;
+        double worst_nvd = 0.0;
+        for (int trial = 0; trial < 200000; ++trial) {
+            const double a = uniform(rng);
+            const double b = uniform(rng);
+            if (std::abs(a) < 1.0e-9 || std::abs(b) < 1.0e-9) {
+                continue;
+            }
+            const double scale = std::abs(a) + std::abs(b);
+            worst_slope = std::max(
+                worst_slope,
+                std::abs(theta_implicit_mhd::smart_slope(a, b) -
+                         a * smart_psi(b / a)) /
+                    scale);
+            worst_pair = std::max(
+                worst_pair,
+                std::abs(theta_implicit_mhd::smart_pair(a, b) -
+                         0.5 * (a * smart_psi(b / a) + b * smart_psi(a / b))) /
+                    scale);
+            // Normalized-variable table: phi_C = (q_C - q_U)/(q_D - q_U).
+            const double q_upwind = uniform(rng);
+            const double q_donor = q_upwind + a;
+            const double q_downwind = q_donor + b;
+            const double span = q_downwind - q_upwind;
+            const double phi_c = (q_donor - q_upwind) / span;
+            double phi_f = phi_c;
+            if (phi_c > 0.0 && phi_c < 1.0 / 6.0) {
+                phi_f = 3.0 * phi_c;
+            } else if (phi_c >= 1.0 / 6.0 && phi_c <= 5.0 / 6.0) {
+                phi_f = 3.0 / 8.0 + 0.75 * phi_c;
+            } else if (phi_c > 5.0 / 6.0 && phi_c < 1.0) {
+                phi_f = 1.0;
+            }
+            worst_nvd = std::max(
+                worst_nvd,
+                std::abs(theta_implicit_mhd::smart_face_value(
+                             q_upwind, q_donor, q_downwind) -
+                         (q_upwind + phi_f * span)) /
+                    scale);
+        }
+        std::printf("SMART slope vs Sweby form: worst %.3e; pair vs its "
+                    "symmetrization: worst %.3e; face value vs NVD table: "
+                    "worst %.3e\n",
+                    worst_slope, worst_pair, worst_nvd);
+        check(worst_slope < 1.0e-13, "smart_slope is not d_up psi(r)");
+        check(worst_pair < 1.0e-13,
+              "smart_pair is not the symmetrized SMART slope");
+        check(worst_nvd < 1.0e-13,
+              "smart_face_value is not the SMART NVD table");
+
+        // Exact second order in smooth flow, and the smoothed form's
+        // documented w^2/12 defect.
+        for (const double slope : {1.0e-3, 1.0, 1.0e5}) {
+            check(std::abs(theta_implicit_mhd::smart_slope(slope, slope) -
+                           slope) <= 2.0e-16 * slope,
+                  "smart_slope(d, d) != d");
+            check(std::abs(theta_implicit_mhd::smart_pair(slope, slope) -
+                           slope) <= 2.0e-16 * slope,
+                  "smart_pair(d, d) != d");
+            check(theta_implicit_mhd::smart_slope(slope, -slope) == 0.0 &&
+                      theta_implicit_mhd::smart_pair(slope, -slope) == 0.0,
+                  "SMART does not vanish at an extremum");
+            const double width = smart_smooth.reconstruction_kappa;
+            const double smooth = theta_implicit_mhd::smart_slope_smooth(
+                slope, slope, 1.0e-6 * slope, width);
+            check(std::abs(smooth / slope - 1.0) < 0.25 * width * width,
+                  "smart_slope_smooth smooth-flow defect exceeds w^2/4");
+            // The extremum residue: the clip smooth_max(., 0, w) of an
+            // argument that is itself ~0 leaves w/2 of the upwind
+            // difference (0.495 w at w = 0.01).
+            const double residue = theta_implicit_mhd::smart_slope_smooth(
+                slope, 0.0, 1.0e-6 * slope, width);
+            check(std::abs(residue / slope - 0.5 * width) < 0.02 * width,
+                  "smart_slope_smooth extremum residue is not w/2");
+        }
+        // The guard of the ratio: r = d_up d_down/(d_up^2 + guard^2) is
+        // capped at d_down/(2 guard), so within a guard of d_up = 0 the
+        // smoothed slope stays below |d_up| where the hard form ramps as
+        // 4 |d_up| (its psi = 4 branch). Dropping the guard^2 term from
+        // the denominator turns this into the hard 4 |d_up| and fails.
+        for (const double guard : {1.0e-6, 1.0e-3, 1.0}) {
+            for (const double fraction : {1.0e-3, 1.0e-2, 0.1, 1.0}) {
+                const double d_up = fraction * guard;
+                const double bounded = theta_implicit_mhd::smart_slope_smooth(
+                    d_up, guard, guard, smart_smooth.reconstruction_kappa);
+                check(std::abs(bounded) <= std::abs(d_up),
+                      "smart_slope_smooth is not guard-regularized near "
+                      "d_up = 0");
+                if (fraction < 0.2) {
+                    // d_down/d_up > 5: the hard form is on its psi = 4
+                    // branch, so the guard's effect is the whole story.
+                    check(std::abs(theta_implicit_mhd::smart_slope(d_up, guard) -
+                                   4.0 * d_up) <= 1.0e-15 * guard,
+                          "hard smart_slope is not 4 d_up on the psi = 4 "
+                          "branch");
+                }
+            }
+        }
+        std::printf("smart_slope_smooth(d, d)/d - 1 = %.3e (w^2/12 = %.3e)\n",
+                    theta_implicit_mhd::smart_slope_smooth(
+                        1.0, 1.0, 1.0e-6, smart_smooth.reconstruction_kappa) -
+                        1.0,
+                    smart_smooth.reconstruction_kappa *
+                        smart_smooth.reconstruction_kappa / 12.0);
+
+        // Advectionalized tangential difference: exact on linear AND
+        // quadratic rows from either upwind side -- the QUICK branch is
+        // exact for quadratics, and it is the active branch as long as
+        // the row's adjacent slope ratios stay inside [1/5, 5], which
+        // |c2| <= 0.1 |c1| guarantees on t in [-2, 2] -- and at a
+        // symmetric tangential peak the cell's own half has the sign that
+        // pulls the peak back (the effective transport of the -1 side is
+        // toward +t, so a positive difference DRAINS the cell; the +1
+        // side is the mirror image).
+        for (const int side : {-1, 1}) {
+            for (const double c1 : {-2.0, 0.7}) {
+                for (const double c2 : {0.0, 0.1 * c1}) {
+                    const auto row = [&] (const double t) {
+                        return 5.0 + c1 * t + c2 * t * t;
+                    };
+                    const double difference =
+                        theta_implicit_mhd::smart_upwind_tangential_difference(
+                            row(-2.0), row(-1.0), row(0.0), row(1.0), row(2.0),
+                            side);
+                    check(std::abs(difference - c1) < 1.0e-13,
+                          "smart_upwind_tangential_difference is not exact "
+                          "on a quadratic row");
+                }
+            }
+        }
+        const double peak_minus = theta_implicit_mhd::
+            smart_upwind_tangential_difference(0.0, 1.0, 2.0, 1.0, 0.0, -1);
+        const double peak_plus = theta_implicit_mhd::
+            smart_upwind_tangential_difference(0.0, 1.0, 2.0, 1.0, 0.0, 1);
+        std::printf("advectionalized difference at a peak: side -1 %.3f, "
+                    "side +1 %.3f\n",
+                    peak_minus, peak_plus);
+        check(peak_minus > 0.0 && peak_plus < 0.0 &&
+                  peak_minus == -peak_plus,
+              "the advectionalized difference does not drain a tangential "
+              "peak from both sides");
+    }
+
     // New-extremum bounds. The smoothed median's excursion is unbounded
     // relative to a VANISHING local jump (its kinks lie on rays through
     // the origin, so a homogeneous smoothing rounds the d_down = 0 ray
@@ -269,9 +437,11 @@ int main ()
     // is the measure that matters at a plateau edge. van Albada is
     // exactly zero on that ray and pays 0.10355 of the local jump on the
     // opposite-sign branch instead.
-    double local_bound[3] = {0.0, 0.0, 0.0};
-    double stencil_bound[3] = {0.0, 0.0, 0.0};
-    const FluxParameters* modes[3] = {&median, &albada, &unlimited};
+    constexpr int n_modes = 5;
+    double local_bound[n_modes] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    double stencil_bound[n_modes] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    const FluxParameters* modes[n_modes] = {&median, &albada, &unlimited,
+                                            &smart, &smart_smooth};
     for (int trial = 0; trial < 500000; ++trial) {
         const double q[4] = {uniform(rng), uniform(rng), uniform(rng),
                              uniform(rng)};
@@ -283,14 +453,20 @@ int main ()
         if (reach < 1.0e-12) {
             continue;
         }
-        for (int mode = 0; mode < 3; ++mode) {
+        // Round-off allowance for the modes whose bound is exactly zero:
+        // q_C + (q_D - q_C) need not reproduce q_D to the last bit.
+        const double roundoff =
+            8.0e-16 * std::max({std::abs(q[0]), std::abs(q[1]),
+                                std::abs(q[2]), std::abs(q[3])});
+        for (int mode = 0; mode < n_modes; ++mode) {
             double face_left = 0.0;
             double face_right = 0.0;
             theta_implicit_mhd::reconstruct_face_pair(
                 q[0], q[1], q[2], q[3], *modes[mode], face_left, face_right);
-            const double outside =
+            const double outside_raw =
                 std::max({0.0, low - face_left, face_left - high,
                           low - face_right, face_right - high});
+            const double outside = (outside_raw > roundoff) ? outside_raw : 0.0;
             stencil_bound[mode] =
                 std::max(stencil_bound[mode], outside / reach);
             if (high - low > 1.0e-3) {
@@ -299,8 +475,10 @@ int main ()
             }
         }
     }
-    const char* mode_names[3] = {"median   ", "vanalbada", "unlimited"};
-    for (int mode = 0; mode < 3; ++mode) {
+    const char* mode_names[n_modes] = {"median      ", "vanalbada   ",
+                                       "unlimited   ", "smart       ",
+                                       "smart_smooth"};
+    for (int mode = 0; mode < n_modes; ++mode) {
         std::printf(
             "%s new extrema: %10.6f of the local jump, %10.6f of the "
             "stencil scale\n",
@@ -312,6 +490,18 @@ int main ()
           "van Albada excursion exceeds the 0.10355 bound");
     check(local_bound[2] > 0.4,
           "the unlimited reconstruction does not overshoot");
+    // Hard SMART: every face state stays inside [q_C, q_D] (psi <= 2 r),
+    // so its new-extremum bound is exactly zero at the reconstruction
+    // level, relative to the local jump AND to the stencil scale.
+    check(local_bound[3] == 0.0 && stencil_bound[3] == 0.0,
+          "hard SMART leaves the adjacent-cell interval");
+    // Smoothed SMART: the only O(w) residue is at an extremum, w/2 of
+    // the upwind difference in slope, i.e. w/4 of the stencil scale in
+    // face value (measured 0.2471 w; the median's kappa/4 at the same
+    // kappa); unbounded relative to a vanishing local jump, like the
+    // median.
+    check(stencil_bound[4] < 0.3 * smart_smooth.reconstruction_kappa,
+          "smoothed SMART excursion exceeds 0.3 w of the stencil scale");
 
     // MIRROR SYMMETRY. Reversing the stencil must swap the two face
     // states and nothing else:
@@ -332,7 +522,7 @@ int main ()
             const double scale =
                 std::max({std::abs(q[0]), std::abs(q[1]), std::abs(q[2]),
                           std::abs(q[3]), 1.0e-300});
-            for (int mode = 0; mode < 3; ++mode) {
+            for (int mode = 0; mode < n_modes; ++mode) {
                 double face_left = 0.0;
                 double face_right = 0.0;
                 double mirror_left = 0.0;
@@ -348,6 +538,17 @@ int main ()
                     std::max(std::abs(mirror_left - face_right),
                              std::abs(mirror_right - face_left)) /
                         scale);
+                if (mode == 3) {
+                    // The hard SMART reconstruction uses no guard, so
+                    // the donor-ordered construction of the two face
+                    // states (see reconstruct_face_pair) is mirror
+                    // covariant to the BIT, not just to round-off: an
+                    // upwind-biased limiter fed in the wrong order would
+                    // fail this by O(1).
+                    check(mirror_left == face_right &&
+                              mirror_right == face_left,
+                          "hard SMART is not bitwise mirror covariant");
+                }
             }
         }
         std::printf("mirror symmetry: worst relative asymmetry %.3e\n",
@@ -383,6 +584,23 @@ int main ()
               "the median derivative jump is (near) the hard minmod kink");
         check(std::abs(albada_below - albada_above) < 0.05,
               "van Albada is not smooth at d_up = d_down");
+        // SMART sits on its linear QUICK branch (d_up/4 + 3 d_down/4) on
+        // both sides of d_up = d_down: the HARD form has no kink there at
+        // all (derivative exactly 1/4 on both sides), which is the whole
+        // point of the option for the matrix-free Newton solve.
+        const double smart_below = derivative(smart, -3.0e-3);
+        const double smart_above = derivative(smart, 3.0e-3);
+        const double smart_smooth_below = derivative(smart_smooth, -3.0e-3);
+        const double smart_smooth_above = derivative(smart_smooth, 3.0e-3);
+        std::printf("d(sigma)/d(d_up) across d_up = d_down: smart %.6f -> "
+                    "%.6f (exact 0.25), smart_smooth %.6f -> %.6f\n",
+                    smart_below, smart_above, smart_smooth_below,
+                    smart_smooth_above);
+        check(std::abs(smart_below - 0.25) < 1.0e-6 &&
+                  std::abs(smart_above - 0.25) < 1.0e-6,
+              "hard SMART is not on its linear branch at d_up = d_down");
+        check(std::abs(smart_smooth_below - smart_smooth_above) < 1.0e-3,
+              "smoothed SMART is not smooth at d_up = d_down");
     }
 
     // ------------------------------------------------------------------
@@ -391,10 +609,12 @@ int main ()
     const double electron_energy_floor =
         electron_pressure_floor / (gamma_gas - 1.0);
     const double ion_internal_floor = ion_pressure_floor / (gamma_gas - 1.0);
-    const int limiter_modes[3] = {
+    const int limiter_modes[5] = {
         theta_implicit_mhd::reconstruction_median,
         theta_implicit_mhd::reconstruction_vanalbada,
-        theta_implicit_mhd::reconstruction_unlimited};
+        theta_implicit_mhd::reconstruction_unlimited,
+        theta_implicit_mhd::reconstruction_smart,
+        theta_implicit_mhd::reconstruction_smart_smooth};
     const char* closure_names[4] = {"barotropic", "total_energy",
                                     "dual_energy", "cgl"};
     for (int closure = 0; closure < 4; ++closure) {
