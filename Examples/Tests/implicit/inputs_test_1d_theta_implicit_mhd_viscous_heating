@@ -1,0 +1,153 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.Te = 1.0
+my_constants.gamma = 5.0/3.0
+# Solver-vec normalization ONLY (the energy blocks are scaled by
+# B_ref^2/mu0): the thermal magnetic field, as in the shear anchor deck.
+my_constants.B_ref = sqrt(mu0 * P0)
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.sound_speed = sqrt(gamma*P0/rho0)
+# 10% of the sound speed: KE/U_i = 5.6e-3, so the viscous heating moves
+# U_i by a well-conditioned 0.5% over the run while the flow stays
+# EXACTLY incompressible (see the velocity comment below).
+my_constants.shear = 1.0e-1 * sound_speed
+# The reference code's formation-segment viscosity card value.
+my_constants.nu = 2000.0
+my_constants.dt = 2.5e-7
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 64
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-12
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = sound_speed
+implicit_mhd.reference_magnetic_field = B_ref
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * P0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * (n0 * Te * q_e)
+implicit_mhd.fluid_flux = central
+
+# Viscous-heating energy ledger of the dual-energy closure.
+#
+# A decaying CIRCULARLY POLARIZED transverse shear on a uniform column
+# at rest: v_x = A cos(2 pi z/Lz), v_y = A sin(2 pi z/Lz). Both
+# components are discrete eigenmodes of the viscous face-difference
+# Laplacian (they decay at exactly nu k_eff^2, k_eff^2 = (4/dz^2)
+# sin^2(k dz/2); at viscous_theta = 1 the per-step factor is exactly
+# 1/(1 + nu k_eff^2 dt), at 0.5 it is (1 - x/2)/(1 + x/2)), and their
+# face shears add to (du_x)^2 + (du_y)^2 = A^2 (2 sin(k dz/2))^2, the
+# SAME on every face. So the viscous dissipation is uniform in z, the
+# pressure stays uniform, div u = 0 and v_z = 0 hold to round-off, and
+# the ONLY energy exchange in the whole deck is transverse kinetic
+# energy -> ion internal energy through the viscous stress: with no
+# magnetic field (B = 0 exactly, so no Lorentz work), no Riemann
+# dissipation (central flux), no advection and no PdV work, the internal
+# register's gain must equal the kinetic-energy loss exactly, step by
+# step, and the conservative E_i must not move at all.
+#
+# dual_energy_sync = 0 is what makes this observable: with the re-sync
+# on, every thermal cell's U_i is overwritten by E_i - KE at each step
+# end and the register's own booking is invisible. The twins (CMake):
+#   viscous_theta = 1.0                    -- the staged (BE) stress
+#   ion_closure = total_energy             -- the conservative twin
+#   dual_energy_viscous_heating = legacy   -- the pre-2026-09 booking,
+#                                             exact at theta_v = 0.5 and
+#                                             (1 + nu k_eff^2 dt/2) high
+#                                             at theta_v = 1.0
+#   viscous_flux_limit_factor = 0.3        -- the free-streaming cap
+#                                             binding (decay 3.4 % slower):
+#                                             the register must carry the
+#                                             CAPPED stress
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.electron_pressure(x,y,z) = n0 * Te * q_e
+implicit_mhd.velocity_x(x,y,z) = shear * cos(2*pi*z/Lz)
+implicit_mhd.velocity_y(x,y,z) = shear * sin(2*pi*z/Lz)
+implicit_mhd.viscosity = nu
+# Verification mode: the unsynchronized closure needs the explicit opt-in.
+implicit_mhd.dual_energy_sync = 0
+implicit_mhd.allow_dual_energy_sync_off = 1
+implicit_mhd.dual_energy_viscous_heating = stress_work
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_momentum_x \
+                       implicit_mhd_momentum_y \
+                       implicit_mhd_momentum_z \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

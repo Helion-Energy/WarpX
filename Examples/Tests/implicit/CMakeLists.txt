@@ -1589,6 +1589,135 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_viscosity_shear  # dependency
 )
 
+# Viscous-heating energy ledger of the dual-energy closure. A decaying
+# CIRCULARLY POLARIZED transverse shear (v_x = A cos kz, v_y = A sin kz,
+# B = 0) has the same face dissipation on every face, so the flow stays
+# exactly incompressible and the ONLY energy exchange is transverse KE ->
+# ion internal energy through the viscous stress. With the step-end
+# re-sync off (dual_energy_sync = 0) the internal register's own booking
+# is observable: sum(dU_i) must equal -sum(dKE) to round-off, the
+# conservative E_i must not move, and both amplitudes must decay by the
+# analytic per-step factor of the staged viscous operator.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_dual  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_viscous_heating  # inputs
+    "analysis_mhd_viscous_heating.py stress_work_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The staged (backward-Euler) stress, viscous_theta = 1: the stress is
+# formed from u^{n+1} while the kinetic-energy identity pairs the momentum
+# increment with u^{n+1/2}; the stress_work booking is the exact mixed
+# product, so the identity still holds to round-off (and the per-step
+# decay factor is exactly 1/(1 + nu k_eff^2 dt)).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_dual_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py stress_work_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The conservative twins: under total_energy the stress work is a face
+# flux of E_i, so sum(E_i) is constant to round-off at either stage.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_total  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.ion_closure=total_energy"  # inputs
+    "analysis_mhd_viscous_heating.py total_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_total_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.ion_closure=total_energy implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py total_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The legacy pointwise booking (dual_energy_viscous_heating = legacy):
+# exact in the interior at viscous_theta = theta (the two bookings agree
+# where the old one was right) ...
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_legacy  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.dual_energy_viscous_heating=legacy"  # inputs
+    "analysis_mhd_viscous_heating.py legacy_cn diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... and exactly (1 + nu k_eff^2 dt/2) x the kinetic energy removed at
+# viscous_theta = 1 (it heats with |grad u^{n+1/2}|^2 while the staged
+# stress removes grad u^{n+1} . grad u^{n+1/2}) -- the discriminating
+# case that pins what the knob reproduces.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_legacy_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.dual_energy_viscous_heating=legacy implicit_mhd.viscous_theta=1.0"  # inputs
+    "analysis_mhd_viscous_heating.py legacy_be diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The free-streaming viscous cap binding (f = 0.3: the decay is 3.4 %
+# slower than the linear operator's): the register must carry the CAPPED
+# stress, so the ledger identity still holds to round-off while the
+# analytic decay check is skipped. A register built from the pre-cap
+# stress is off by 3.3 % here and passes every uncapped test.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscous_heating_dual_cap  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscous_heating implicit_mhd.viscous_flux_limit_factor=0.3"  # inputs
+    "analysis_mhd_viscous_heating.py stress_work_cap diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ row-wise ledger on the wall decks (dual_energy, re-sync off,
+# theta = 0.5 so the discrete kinetic-energy identity is exact): per
+# radial row the internal register's gain must equal the conservative
+# register's implied internal gain d(E_i - KE). This is where the RZ
+# metric weights of the deposit (invisible to any domain sum on a uniform
+# grid; dropping them halves the axis row) and the wall band coefficient
+# (the legacy booking reads 0.033 in the band rows) are gated.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscous_heating_band  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.ion_closure=dual_energy implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1 implicit_evolve.theta=0.5 diag1.fields_to_plot=implicit_mhd_mass_density implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z"  # inputs
+    "analysis_mhd_viscous_heating_rz.py diags/diag000000 diags/diag000003 band"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The no-slip interface face: the wall-adjacent live row (14) must book
+# exactly its own loss 2 mu |u_t|^2/dn^2 (the legacy booking reads
+# 0.120 there); dt is reduced so the PdV work of the developing radial
+# flow (O(dt^2)) stays below the interior rows' tolerance.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscous_heating_no_slip  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip implicit_mhd.ion_closure=dual_energy implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1 implicit_evolve.theta=0.5 my_constants.dt=1.0e-8 diag1.fields_to_plot=implicit_mhd_mass_density implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z"  # inputs
+    "analysis_mhd_viscous_heating_rz.py diags/diag000000 diags/diag000003 no_slip"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # ion thermal conduction on the central-flux face registers: a 1% sinusoidal
 # ion-temperature mode on a uniform static background, with chi_i stiff
 # against the acoustic response (chi k / c_s ~ 57), must decay at the

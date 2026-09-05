@@ -613,6 +613,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
             signal_alfven_left,  // fan rotational bounds S_M -+ c_An*:
             signal_alfven_right, // corner-EMF dissipation coefficients
             ion_internal_energy, // dual_energy closure: U_i advective flux
+            // dual_energy closure, dual_energy_viscous_heating =
+            // stress_work: the per-face viscous DISSIPATION
+            // -Pi_f . (u_R - u_L)/dn >= 0 (where the stress is
+            // dissipative), built from the very same face stress the
+            // momentum channel carries (coefficient, wall band, no-slip
+            // image, region multiplier, free-streaming cap, viscous_theta
+            // stage); the RHS deposits half of it into each adjacent
+            // cell's U_i with the face's own metric weight.
+            viscous_dissipation,
             count
         };
     };
@@ -732,6 +741,55 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // sync), so the two energy variables cannot drift apart in thermal
     // regions.
     amrex::Real m_dual_energy_sync_threshold = 0.99;
+    // Dual-energy end-of-step re-sync switch (implicit_mhd.dual_energy_sync,
+    // default 1 = on, bit-identical). 0 disables BOTH legs of the
+    // re-sync above (the mixmaster E_i rewrite and the Enzo U_i
+    // overwrite), leaving E_i and U_i as independent registers. This is a
+    // VERIFICATION switch: with the sync on, a thermal cell's U_i is
+    // overwritten by E_i - KE at every step end, so no diagnostic can see
+    // what U_i's own sources booked; the viscous-heating ctests turn it
+    // off to read the U_i budget directly. Not for production (the
+    // KE-dominated cancellation drift then accumulates in E_i, see the
+    // comment above). Guarded like allow_hlld: turning it off requires
+    // implicit_mhd.allow_dual_energy_sync_off = 1, so no production deck
+    // can reach the unsynchronized closure by a one-token slip.
+    bool m_dual_energy_sync = true;
+    bool m_allow_dual_energy_sync_off = false;
+    // How the dual-energy internal register U_i receives the viscous
+    // heating (implicit_mhd.dual_energy_viscous_heating):
+    //   "stress_work" (default) -- the per-face dissipation
+    //     Q_f = -Pi_f . (u_R - u_L)/dn built in ComputeDirectionalFaceFluxes
+    //     from the SAME face stress Pi_f the momentum flux carries (same
+    //     coefficient incl. the wall viscosity band, the same no-slip
+    //     antisymmetric image, the same nu_op region multiplier, the same
+    //     free-streaming cap, the same viscous_theta stage), with
+    //     u_R - u_L the theta-stage velocity difference the discrete
+    //     kinetic-energy identity pairs with the momentum increment (the
+    //     image applied to it too, and likewise at a domain-boundary face
+    //     whose far side is a boundary ghost). Deposited half to each
+    //     adjacent cell through the FaceFluxComponent::viscous_dissipation
+    //     register with the face's metric weight, so sum(dU_i) = -sum(dKE)
+    //     to round-off for any viscous_theta WHEN implicit_evolve.theta =
+    //     0.5 -- the theta-stage velocity is the midpoint (u^n + u^{n+1})/2
+    //     the discrete kinetic-energy identity needs only at theta = 1/2;
+    //     at theta = 1 the register under-books the loss by |dm|^2/(2 rho)
+    //     per cell and step (0.2 % domain-wide and ~3 % in the
+    //     fastest-relaxing rows of the RZ band ctest deck). Positive
+    //     semi-definite wherever the stress is dissipative; at
+    //     viscous_theta = theta it is exactly
+    //     mu_f |du/dn|^2/(1 + |Pi|/(f p)) >= 0 for any fluid_reconstruction
+    //     (the viscous stress differences the cell-centred states).
+    //   "legacy" -- the pre-2026-09-04 pointwise source: rho_f nu |du/dn|^2
+    //     from cell-centred theta-stage velocities and the bare user
+    //     viscosity, half to each cell, ignoring the wall viscosity band
+    //     (band_value = 0 then deposits heat on faces that carry NO
+    //     stress; band_value > 0 heats at rho nu instead of the band's
+    //     mu), the no-slip image (a quarter of the removed KE at an
+    //     interface face), the free-streaming cap (uncapped heat from a
+    //     capped stress) and the viscous_theta stage (at theta_v = 1 the
+    //     heating is (1 + nu k^2 dt/2) times the KE removed). Kept only to
+    //     reproduce runs that flew it.
+    std::string m_dual_energy_viscous_heating = "stress_work";
     // Per-step frozen max_domain(U_i_old) of the cutoff mask.
     amrex::Real m_dual_energy_internal_old_max = 0.0;
     // CGL isotropization: Braginskii ion-ion collision rate times this

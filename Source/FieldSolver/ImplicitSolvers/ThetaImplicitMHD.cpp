@@ -845,6 +845,23 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_dual_energy_internal_cutoff);
     utils::parser::queryWithParser(pp, "dual_energy_sync_threshold",
                                    m_dual_energy_sync_threshold);
+    // Verification switch for the dual-energy re-sync and the booking
+    // mode of the U_i viscous heating (see the header).
+    pp.query("dual_energy_sync", m_dual_energy_sync);
+    // Same pattern as allow_hlld: the unsynchronized closure is a
+    // verification mode and must be opted into explicitly.
+    pp.query("allow_dual_energy_sync_off", m_allow_dual_energy_sync_off);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_dual_energy_sync || m_allow_dual_energy_sync_off,
+        "implicit_mhd.dual_energy_sync = 0 leaves E_i and U_i unsynchronized "
+        "and is a verification switch only -- set "
+        "implicit_mhd.allow_dual_energy_sync_off = 1 to opt in");
+    pp.query("dual_energy_viscous_heating", m_dual_energy_viscous_heating);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_dual_energy_viscous_heating == "stress_work" ||
+            m_dual_energy_viscous_heating == "legacy",
+        "implicit_mhd.dual_energy_viscous_heating must be 'stress_work' "
+        "or 'legacy'");
     pp.query("evolve_ion_fluid", m_evolve_ion_fluid);
     utils::parser::queryWithParser(pp, "pinned_cell_report_max",
                                    m_pinned_cell_report_max);
@@ -3575,7 +3592,21 @@ void ThetaImplicitMHD::PrintParameters () const
         amrex::Print() << "Dual-energy internal cutoff:   "
                        << m_dual_energy_internal_cutoff << "\n"
                        << "Dual-energy sync threshold:    "
-                       << m_dual_energy_sync_threshold << "\n";
+                       << m_dual_energy_sync_threshold << "\n"
+                       << "Dual-energy step-end re-sync:  "
+                       << (m_dual_energy_sync
+                               ? "on"
+                               : "OFF (verification mode: E_i and U_i "
+                                 "evolve independently)")
+                       << "\n"
+                       << "Dual-energy viscous heating:   "
+                       << m_dual_energy_viscous_heating
+                       << (m_dual_energy_viscous_heating == "stress_work"
+                               ? " (U_i receives the exact KE the face "
+                                 "stress removes)"
+                               : " (pointwise rho nu |du/dn|^2, "
+                                 "pre-2026-09 booking)")
+                       << "\n";
     }
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
@@ -7333,6 +7364,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool viscous_stage = (m_viscous_theta != m_theta);
     const amrex::Real viscous_new_weight = m_viscous_theta / m_theta;
     const amrex::Real viscous_old_weight = 1.0_rt - viscous_new_weight;
+    // Dual-energy viscous DISSIPATION register
+    // (implicit_mhd.dual_energy_viscous_heating = stress_work, see the
+    // header): the viscous block below also fills
+    // FaceFluxComponent::viscous_dissipation with -Pi_f . (u_R - u_L)/dn,
+    // the exact kinetic energy its own momentum stress removes from the
+    // two cells the face joins. false = the register stays exactly zero
+    // (legacy pointwise heating, or not dual_energy) -- bit-identical.
+    const bool viscous_dissipation_register =
+        (m_ion_closure == "dual_energy") &&
+        (m_dual_energy_viscous_heating == "stress_work");
+    // The register's kinetic-energy pairing treats the far side of a
+    // z-domain END face as a boundary ghost (paired antisymmetrically,
+    // like a rigid-wall interface) unless z is periodic, in which case
+    // the far side is a live cell of the periodic image.
+#if defined(WARPX_DIM_RZ)
+    const bool viscous_z_periodic = m_WarpX->Geom(0).isPeriodic(1);
+#else
+    const bool viscous_z_periodic = m_WarpX->Geom(0).isPeriodic(0);
+#endif
     const bool add_conduction =
         braginskii ||
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
@@ -7892,6 +7942,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     constexpr int flux_ion_perp_energy = FaceFluxComponent::ion_perp_energy;
     constexpr int flux_ion_internal_energy =
         FaceFluxComponent::ion_internal_energy;
+    constexpr int flux_viscous_dissipation =
+        FaceFluxComponent::viscous_dissipation;
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
@@ -8497,6 +8549,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                   region_scale_at(i, j));
                 }
                 amrex::Real viscous_work = 0.0_rt;
+                amrex::Real viscous_dissipation = 0.0_rt;
                 // Staged old-state velocities for viscous_theta. Hoisted
                 // out of the component loop: both sides' densities are
                 // component-independent, and the floor must match the one
@@ -8538,6 +8591,66 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             left_velocity = -right_velocity;
                         }
                     }
+                    // Kinetic-energy PAIRING velocities of the dual-energy
+                    // dissipation register (viscous_dissipation_register;
+                    // see the host constant): the THETA-stage CELL-CENTRED
+                    // velocities of the two cells this face moves momentum
+                    // between. Those are what the discrete kinetic-energy
+                    // identity KE^{n+1} - KE^n = u^{n+theta} . dm (exact at
+                    // theta = 1/2, uniform density; at theta = 1 it misses
+                    // |dm|^2/(2 rho) per cell and step) pairs with the
+                    // momentum increment -- the same cell-centred states the
+                    // stress itself differences (cell_left/cell_right; the
+                    // reconstruction rewrites only the advective fan), and
+                    // NOT the viscous-stage velocities: the heat booked must
+                    // be the kinetic energy the stress ACTUALLY removes,
+                    // whatever velocity level the stress was formed from.
+                    // When the far side of the face is not a live cell --
+                    // the masked cell of a rigid-wall interface (frozen
+                    // under wall_thermal_bc != none, which is what makes
+                    // wall_interface true; its half of the deposit is
+                    // discarded with wall_live), or the boundary ghost of a
+                    // non-periodic z-domain end face or of the r_max face
+                    // (never deposited: outside the valid box) -- it is
+                    // paired antisymmetrically, -u_live, so the live half of
+                    // the face dissipation is exactly the live cell's own
+                    // loss u_live . Pi_f/dn for EVERY component, whichever
+                    // image (no-slip antisymmetric, absorb, rectified or
+                    // copied ghost, z_lo mirror) the stress used.
+                    amrex::Real pair_left_velocity = 0.0_rt;
+                    amrex::Real pair_right_velocity = 0.0_rt;
+                    if (viscous_dissipation_register) {
+                        pair_left_velocity =
+                            mom(il, jl, kl, component) /
+                            std::max(rho(il, jl, kl),
+                                     parameters.density_floor);
+                        pair_right_velocity =
+                            mom(i, j, k, component) /
+                            std::max(rho(i, j, k), parameters.density_floor);
+                        bool far_right = wall_interface && wall_right_masked;
+                        bool far_left = wall_interface && !wall_right_masked;
+                        if (normal == 2 && !viscous_z_periodic) {
+#if defined(WARPX_DIM_RZ)
+                            const int face_axial_index = j;
+#else
+                            const int face_axial_index = i;
+#endif
+                            far_left = far_left ||
+                                       (face_axial_index == z_end_face_lo);
+                            far_right = far_right ||
+                                        (face_axial_index == z_end_face_hi);
+                        }
+#if defined(WARPX_DIM_RZ)
+                        if (normal == 0 && i == radial_wall_face) {
+                            far_right = true;
+                        }
+#endif
+                        if (far_right) {
+                            pair_right_velocity = -pair_left_velocity;
+                        } else if (far_left) {
+                            pair_left_velocity = -pair_right_velocity;
+                        }
+                    }
                     amrex::Real viscous_stress =
                         -viscous_coefficient *
                         (right_velocity - left_velocity) *
@@ -8572,8 +8685,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     viscous_work += 0.5_rt *
                                     (left_velocity + right_velocity) *
                                     viscous_stress;
+                    if (viscous_dissipation_register) {
+                        // The FINAL stress (staged, banded, imaged,
+                        // region-scaled, capped) times the pairing
+                        // difference: -Pi_f . (u_R - u_L)/dn is the rate at
+                        // which this face's momentum flux drains kinetic
+                        // energy from the two cells together. At
+                        // viscous_theta = theta and donor states this is
+                        // mu_f |du/dn|^2 / (1 + |Pi|/(f p_i)) >= 0; in
+                        // general it is positive exactly where the stress
+                        // is dissipative, and the exact KE loss always.
+                        viscous_dissipation -=
+                            viscous_stress *
+                            (pair_right_velocity - pair_left_velocity) *
+                            inverse_normal_size;
+                    }
                 }
                 flux.ion_energy += viscous_work;
+                // Zero unless viscous_dissipation_register (struct default).
+                flux.viscous_dissipation = viscous_dissipation;
             }
 
             // Thermal conduction (implicit_mhd.thermal_diffusivity_* or
@@ -10259,6 +10389,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_parallel_energy = 0.0_rt;
                 flux.ion_perp_energy = 0.0_rt;
                 flux.ion_internal_energy = 0.0_rt;
+                flux.viscous_dissipation = 0.0_rt;
                 flux.electron_velocity = 0.0_rt;
             }
 #endif
@@ -10280,6 +10411,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // struct default untouched there).
             flux_arr(i, j, k, flux_ion_internal_energy) =
                 flux.ion_internal_energy;
+            // Zero unless dual_energy with dual_energy_viscous_heating =
+            // stress_work (the viscous block leaves the default otherwise).
+            flux_arr(i, j, k, flux_viscous_dissipation) =
+                flux.viscous_dissipation;
             flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
             flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
             flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
@@ -12100,8 +12235,21 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // per-edge nu (dv)^2 deposit).
     const amrex::Real dual_ion_internal_floor =
         dual_energy_closure ? ion_energy_floor : 0.0_rt;
+    // Two bookings (implicit_mhd.dual_energy_viscous_heating, see the
+    // header). "stress_work" (default): U_i receives half of each face's
+    // viscous_dissipation register, which ComputeDirectionalFaceFluxes
+    // filled from the very momentum stress it applied (coefficient incl.
+    // the wall band, no-slip image, nu_op multiplier, free-streaming cap,
+    // viscous_theta stage), paired with the theta-stage cell velocities
+    // -- the exact kinetic energy the stress removes. "legacy": the
+    // pointwise rho_f nu |du/dn|^2 source below (add_viscous_heating),
+    // which ignores all of those.
+    const bool viscous_heating_stress_work =
+        dual_energy_closure &&
+        (m_dual_energy_viscous_heating == "stress_work");
     const bool add_viscous_heating =
-        dual_energy_closure && m_viscosity > 0.0_rt;
+        dual_energy_closure && !viscous_heating_stress_work &&
+        m_viscosity > 0.0_rt;
     const amrex::Real viscosity = m_viscosity;
     // The dual-energy heating source must carry the SAME face
     // coefficient as the conservative stress pair, so the reference code's nu_op
@@ -12355,6 +12503,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int flux_ion_perp_energy = FaceFluxComponent::ion_perp_energy;
     constexpr int flux_ion_internal_energy =
         FaceFluxComponent::ion_internal_energy;
+    constexpr int flux_viscous_dissipation =
+        FaceFluxComponent::viscous_dissipation;
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
 
@@ -13249,6 +13399,42 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          face_dissipation(i - 1, j, k, inverse_dr) +
                          face_dissipation(i, j + 1, k, inverse_dz) +
                          face_dissipation(i, j - 1, k, inverse_dz));
+#endif
+                    viscous_heating *= halo_source_taper;
+                }
+                if (viscous_heating_stress_work) {
+                    // stress_work booking: half of each adjacent face's
+                    // dissipation register -- the exact kinetic energy the
+                    // momentum stress on that face removes from the pair
+                    // of cells it joins -- with the SAME metric weights
+                    // the momentum divergence uses, so the cell-summed
+                    // U_i gain equals the kinetic-energy loss to round-off
+                    // (RZ included). Tapered across the pedestal band like
+                    // the legacy source and every other reactive source:
+                    // the pedestal's viscous KE loss is dropped there by
+                    // the same policy that zeroes its reactive response.
+                    viscous_heating =
+                        0.5_rt *
+                        (flux_arr(izh, jzh, kzh, flux_viscous_dissipation) +
+                         flux_arr(i, j, k, flux_viscous_dissipation));
+#if defined(WARPX_DIM_RZ)
+                    {
+                        const amrex::Real radial_center =
+                            radial_lower + (i + 0.5_rt) * radial_cell_size;
+                        const amrex::Real weight_high =
+                            (radial_lower + (i + 1.0_rt) * radial_cell_size) /
+                            radial_center;
+                        const amrex::Real weight_low =
+                            (radial_lower + i * radial_cell_size) /
+                            radial_center;
+                        viscous_heating +=
+                            0.5_rt *
+                            (weight_high *
+                                 rflux_arr(i + 1, j, k,
+                                           flux_viscous_dissipation) +
+                             weight_low *
+                                 rflux_arr(i, j, k, flux_viscous_dissipation));
+                    }
 #endif
                     viscous_heating *= halo_source_taper;
                 }
@@ -14985,7 +15171,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             });
         }
         ion_energy_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
-        if (m_ion_closure == "dual_energy") {
+        if (m_ion_closure == "dual_energy" && m_dual_energy_sync) {
             // Dual-energy re-sync at the accepted step end, the port of
             // The reference code's mixmaster temperature update (ntb.f90:102-106,
             // which rewrites BOTH wio and wik from the blended pressure

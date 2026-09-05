@@ -229,9 +229,19 @@ struct FaceFlux {
     amrex::Real ion_perp_energy = 0.0;
     // Dual-energy closure: advective flux of the auxiliary internal
     // energy U_i (populated by hlld_flux/central_flux only when
-    // FluxParameters::dual_energy_closure is set; the blended PdV work
-    // and the viscous heating are pointwise RHS sources, not fluxes).
+    // FluxParameters::dual_energy_closure is set; the blended PdV work is
+    // a pointwise RHS source, the viscous heating is either the
+    // viscous_dissipation register below or the legacy pointwise source).
     amrex::Real ion_internal_energy = 0.0;
+    // Dual-energy closure, implicit_mhd.dual_energy_viscous_heating =
+    // stress_work: the per-face viscous DISSIPATION -Pi_f . (u_R - u_L)/dn
+    // that the caller (ComputeDirectionalFaceFluxes) builds from the very
+    // same face stress it adds to momentum[]; the fluid RHS deposits half
+    // of it into each adjacent cell's U_i. A face-centred SOURCE density
+    // (no sign flip across the face), not a flux -- it rides the face
+    // registers so the stress and its heat are one assembly. Zero under
+    // every other closure/mode.
+    amrex::Real viscous_dissipation = 0.0;
     // --- HLLD additions (populated by hlld_flux only; default-zero so
     // the existing hllc/rusanov paths are undisturbed). ---
     // Maxwell-stress part of the momentum flux; momentum[] holds the
@@ -2324,10 +2334,11 @@ hlld_flux (const CellState& left, const CellState& right,
     if (parameters.dual_energy_closure) {
         // Dual-energy auxiliary internal energy: pure advection with the
         // contact (star values fraction * U_i, the U_e/CGL pattern). The
-        // blended PdV work -p_blend div u and the viscous heating are
-        // pointwise sources in the fluid RHS, not fluxes: U_i is the
-        // internal-energy (non-conservative) formulation riding next to
-        // the conservative E_i channel above.
+        // blended PdV work -p_blend div u is a pointwise source in the
+        // fluid RHS and the viscous heating rides the caller's
+        // viscous_dissipation register (or the legacy pointwise source):
+        // U_i is the internal-energy (non-conservative) formulation
+        // riding next to the conservative E_i channel above.
         const amrex::Real uint_star_left =
             fraction_left * left.ion_internal_energy;
         const amrex::Real uint_star_right =
@@ -2603,7 +2614,9 @@ central_flux (const CellState& left, const CellState& right,
     if (parameters.dual_energy_closure) {
         // Dual-energy auxiliary internal energy: centered pure advection
         // (the q -> 0 limit of the hlld_flux star channel); the blended
-        // PdV work and the viscous heating are pointwise RHS sources.
+        // PdV work is a pointwise RHS source and the viscous heating rides
+        // the caller's viscous_dissipation register (or the legacy
+        // pointwise source).
         flux.ion_internal_energy =
             0.5 * (u_left * left.ion_internal_energy +
                    u_right * right.ion_internal_energy);
