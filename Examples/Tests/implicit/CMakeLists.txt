@@ -1876,12 +1876,6 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
 )
-# The symmetric-pair arm runs 20 Newton iterations on every one of its 10
-# steps by construction (that is the behaviour it pins), so it is the
-# long one of the family (~2.5 min alone on two ranks): excluded from the
-# quick set via the repo's documented `ctest -LE slow`, like the
-# central_dissipation family.
-label_warpx_test(test_rz_theta_implicit_mhd_braginskii_oblique_smart slow)
 
 # Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
 # _off run first (unpreconditioned), then the block run compares its
