@@ -3284,6 +3284,25 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         compressed plasma touches the wall and floors it in the halo.
         Requires wall_viscosity_mask=True.
 
+    wall_viscosity_band_mode: str, default='absolute'
+        How a positive wall_viscosity_band_value is applied on a band
+        face. 'absolute' (default, bit-identical to the pre-knob code):
+        a hard SET to the band value, the reference code's contract,
+        ignoring the open-region viscosity multiplier as the reference
+        operator does. 'capped': min(band value, interior coefficient),
+        the interior coefficient being the same rho_f * viscosity
+        (times the open-region multiplier when active) the face would
+        carry without the band -- the band never EXCEEDS the local
+        physical dynamic viscosity. Where rho_f nu > band value
+        (compressed plasma at the wall) the band is unchanged, the
+        reduced viscosity it is meant to be; where rho_f nu < band
+        value (the near-vacuum halo, ~30x below at 1e18 m^-3 with
+        viscosity 2000 m^2/s) the face keeps its physical rho_f nu
+        instead of a floor that dissipates the wall-inflow shear as
+        ion heat. One coefficient still feeds the stress, its work and
+        the dissipation register. Requires a positive
+        wall_viscosity_band_value.
+
     wall_no_slip: bool, default=False
         reference-parity NO-SLIP FACE condition of the shaped wall
         (requires an active wall_model and an active wall_thermal_bc --
@@ -3598,6 +3617,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_viscosity_mask=None,
         wall_viscosity_mask_width=None,
         wall_viscosity_band_value=None,
+        wall_viscosity_band_mode=None,
         wall_no_slip=None,
         wall_friction_heating=None,
         thermal_diffusivity_ion=None,
@@ -3738,6 +3758,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_viscosity_mask = wall_viscosity_mask
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
         self.wall_viscosity_band_value = wall_viscosity_band_value
+        self.wall_viscosity_band_mode = wall_viscosity_band_mode
         self.wall_no_slip = wall_no_slip
         self.wall_friction_heating = wall_friction_heating
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
@@ -3907,6 +3928,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value
+        implicit_mhd.wall_viscosity_band_mode = self.wall_viscosity_band_mode
         implicit_mhd.wall_no_slip = self.wall_no_slip
         implicit_mhd.wall_friction_heating = self.wall_friction_heating
         # strings route to the parser signature; numbers keep the

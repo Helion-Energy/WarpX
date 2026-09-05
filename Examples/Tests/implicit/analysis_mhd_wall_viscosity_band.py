@@ -21,14 +21,19 @@ in every cell whose two radial faces carry the SAME mu (in RZ,
 r W = -mu A^2 r^2 gives the r-weighted divergence
 (r_hi^2 - r_lo^2)/(r_c dr) = 2 exactly).
 
-Three coefficient regimes of the same deck, each asserted against its
+Four coefficient regimes of the same deck, each asserted against its
 OWN analytic mu -- this is what makes the band a coefficient
 SUBSTITUTION rather than a zeroing:
 
   unmasked  wall_viscosity_mask = 0        -> mu = rho nu everywhere
   zero      mask on, band value 0          -> mu = 0 on band faces
   band      mask on, band value 1e-4 Pa s  -> mu = 1e-4 on band faces
-                                              (the reference code's small_vis)
+                                              (the reference code's small_vis,
+                                              wall_viscosity_band_mode absolute)
+  capped    mask on, band value 1e-4 Pa s,
+            wall_viscosity_band_mode capped -> mu = min(1e-4, rho nu) on band
+                                              faces: the band never exceeds
+                                              the interior's own coefficient
 
 Band faces are i >= first_masked - width = 12, and the band is
 deliberately one cell wider than needed so the two gated rows (13, 14)
@@ -48,10 +53,18 @@ the reference code's pedestal 1e-4 Pa s is a 29.9x INCREASE -- the halo-side fac
 the same pedestal that CAPS the coefficient 3.3-40x below rho nu where
 compressed plasma touches the wall.
 
+The optional fourth argument overrides the deck's number density
+(my_constants.n0 on the command line): at 1e20 m^-3 rho nu = 3.345e-6 Pa s
+sits BELOW the 1e-4 pedestal, so the cap binds and the capped band rows
+heat at the interior rate; at 1e22 m^-3 rho nu = 3.345e-4 Pa s sits
+ABOVE it, the cap does not bind and capped == absolute (the band is
+then the reduced viscosity it is meant to be, 0.3x the interior).
+
 Usage:
-  analysis_mhd_wall_viscosity_band.py <initial> <final> unmasked
-  analysis_mhd_wall_viscosity_band.py <initial> <final> zero
-  analysis_mhd_wall_viscosity_band.py <initial> <final> band
+  analysis_mhd_wall_viscosity_band.py <initial> <final> unmasked [n0]
+  analysis_mhd_wall_viscosity_band.py <initial> <final> zero [n0]
+  analysis_mhd_wall_viscosity_band.py <initial> <final> band [n0]
+  analysis_mhd_wall_viscosity_band.py <initial> <final> capped [n0]
 """
 
 import sys
@@ -63,7 +76,8 @@ import yt
 yt.set_log_level(50)
 
 # constants from inputs_test_rz_theta_implicit_mhd_wall_viscosity_band
-NUMBER_DENSITY = 1.0e20
+# (the number density may be overridden on the command line, argv[4])
+NUMBER_DENSITY = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0e20
 RHO0 = NUMBER_DENSITY * constants.proton_mass
 SHEAR_RATE = 1.0e3
 VISCOSITY = 20.0
@@ -99,7 +113,7 @@ def get_data(plotfile):
 initial_ds, initial = get_data(sys.argv[1])
 final_ds, final = get_data(sys.argv[2])
 mode = sys.argv[3]
-assert mode in ("unmasked", "zero", "band"), f"unknown mode {mode}"
+assert mode in ("unmasked", "zero", "band", "capped"), f"unknown mode {mode}"
 
 elapsed_time = float(final_ds.current_time - initial_ds.current_time)
 assert elapsed_time > 0.0
@@ -122,10 +136,11 @@ band_viscosity = {
     "unmasked": INTERIOR_VISCOSITY,
     "zero": 0.0,
     "band": BAND_VALUE,
+    "capped": min(BAND_VALUE, INTERIOR_VISCOSITY),
 }[mode]
 band_deposit = deposit_of(band_viscosity)
 
-print(f"mode = {mode}, elapsed {elapsed_time:.6e} s")
+print(f"mode = {mode}, n0 = {NUMBER_DENSITY:.3e} m^-3, elapsed {elapsed_time:.6e} s")
 print(
     f"interior mu = {INTERIOR_VISCOSITY:.6e} Pa s -> analytic deposit "
     f"{interior_deposit:.6e} J/m^3"

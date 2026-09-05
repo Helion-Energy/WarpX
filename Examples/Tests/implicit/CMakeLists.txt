@@ -2594,6 +2594,65 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# wall viscosity band MODE (implicit_mhd.wall_viscosity_band_mode), the
+# CAPPED pedestal at the deck's own density: rho nu = 3.345e-6 Pa s sits
+# 29.9x BELOW the 1e-4 Pa s band value, so the cap min(band, rho nu)
+# binds and the band rows must heat at the INTERIOR rate 2 rho nu A^2
+# -- the band never exceeds the physical dynamic viscosity (the halo
+# side of the production deck, where the absolute pedestal is a 30x
+# floor that dissipates the wall-inflow shear as ion heat)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_capped  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.wall_viscosity_band_mode=capped"  # inputs
+    "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 capped"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... and where the cap binds it must bind EXACTLY: with min(band, rho_f nu)
+# returning the interior product itself, the capped run at 1e20 m^-3 is
+# BIT-IDENTICAL to the unmasked run (Newton history and every plotfile
+# field), so the band is provably a coefficient bound and nothing else
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_capped_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.wall_viscosity_band_mode=capped"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_wall_viscosity_band_unmasked/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_viscosity_band_unmasked  # dependency
+)
+
+# The band as a REDUCED viscosity: the same deck at 1e22 m^-3 puts the
+# interior rho nu = 3.345e-4 Pa s ABOVE the 1e-4 band value (the
+# production deck's core, rho nu ~ 3.3e-4 at 5e19 m^-3 and 2000 m^2/s),
+# so the absolute pedestal is 0.3x the interior and the band rows must
+# heat at 2 * 1e-4 * A^2 while the interior keeps its own deposit
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_core  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band my_constants.n0=1.0e22"  # inputs
+    "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 band 1.0e22"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... where the interior coefficient exceeds the band value the cap must
+# NOT bind: capped at 1e22 m^-3 is BIT-IDENTICAL to absolute at 1e22 m^-3
+# (the core is untouched by the mode; only the halo side changes)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_core_capped_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band my_constants.n0=1.0e22 implicit_mhd.wall_viscosity_band_mode=capped"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_wall_viscosity_band_core/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_viscosity_band_core  # dependency
+)
+
 # The reference code's nu_op open-region viscosity multiplier (step.f90 disip:199-201,
 # WHERE (psi > nu_op_bnd) vis = nu_op_mul vis -- the reference shot arms it at 8 us
 # with 0.1 above 5e-4 Wb/rad). An axially sheared rotation on a uniform
