@@ -30,10 +30,16 @@ the in-loop feedback accumulation headroom.
 """
 
 import os
+import sys
 
 import numpy as np
 
-BASELINE_DIRECTORY = "../test_rz_theta_implicit_mhd_circuit_hook_residual"
+# The python-driver reference run directory: the residual-scope hook test
+# by default, or the twin named on the command line (the coupling-model
+# parity arms pass their own reference).
+BASELINE_DIRECTORY = (
+    sys.argv[1] if len(sys.argv) > 1 else "../test_rz_theta_implicit_mhd_circuit_hook_residual"
+)
 HISTORY_FILE = "circuit_hook_history.csv"
 
 SCALE_RTOL = 1.0e-8

@@ -104,9 +104,13 @@ file from the deck; the WarpX-side driver must generate it the same way
    zero current, the clock is continuous, and the locked fluxes +
    station sums are logged.
 4. **eps hold** -- overwritten each `AdvanceInterval` from the argument
-   (the coupler holds the predictor value); no plugin-side EMA, matching
-   the hetools reference (`eps_elec = eps_sign * d * dPhi/dt`, west rows
-   mirrored from east, extra/ring channels 0).
+   (the coupler holds the predictor value); no plugin-side EMA. The
+   production reference COUPLER low-passes the measured EMF before the
+   circuit sees it (a one-pole EMA, memory committed by the finish hook);
+   its WarpX twin is the coupler-side knob `circuit.eps_lowpass_tau`, so
+   the plugin applies the eps it is handed as-is (`eps_elec = eps_sign * d
+   * dPhi/dt`, west rows mirror the east) whether the coupler filtered it
+   or not.
 5. **checkpoint** -- `WriteCheckpoint` serializes the accepted entry
    snapshot (x, m, the six SwdBank arrays) + `lock_phase` + the live
    stepper clock `t0` in hexfloat: `ReadCheckpoint` restores bit-exactly

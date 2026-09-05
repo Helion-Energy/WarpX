@@ -112,6 +112,20 @@ CircuitCoupling::CircuitCoupling ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_coupler_params.corrector_iterations >= 0,
         "circuit.coupling.corrector_iterations must be >= 0");
+    // Optional EMF low-pass handed to a compiled engine (see
+    // CircuitCoupler::Params::eps_lowpass_tau). The Python-callback engine
+    // computes its own EMF from the linkage registers, so the knob would be
+    // a silent no-op there: refuse the pairing.
+    utils::parser::queryWithParser(pp_circuit,
+        "eps_lowpass_tau", m_coupler_params.eps_lowpass_tau);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupler_params.eps_lowpass_tau >= 0.0,
+        "circuit.eps_lowpass_tau must be >= 0 (seconds; 0 = off)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupler_params.eps_lowpass_tau == 0.0 || m_engine == "external",
+        "circuit.eps_lowpass_tau filters the EMF the coupler hands a "
+        "compiled engine and requires circuit.engine = external (the "
+        "Python-callback engine computes its own EMF)");
 }
 
 void
@@ -312,11 +326,23 @@ CircuitCoupling::InitData ()
         }
         m_coupler = std::make_unique<CircuitCoupler>(
             m_coils, m_probes, m_coupler_params, std::move(plugin));
+        // The coupler's own per-step memory (EMF low-pass state) is part
+        // of the checkpoint; restore it with the engine state.
+        if (!m_restart_dir.empty()) {
+            m_coupler->ReadMemoryCheckpoint(m_restart_dir);
+        }
         amrex::Print() << "Circuit coupling engine: " << m_engine
                        << " (corrector_iterations = "
                        << m_coupler_params.corrector_iterations
                        << ", corrector_rtol = "
-                       << m_coupler_params.corrector_rtol << ")\n";
+                       << m_coupler_params.corrector_rtol
+                       << ", eps_lowpass_tau = "
+                       << m_coupler_params.eps_lowpass_tau << " s"
+                       << (m_coupler_params.eps_lowpass_tau > 0.0
+                               ? " [one-pole EMA on the port EMF, memory "
+                                 "committed on accept]"
+                               : " [off: raw interval EMF]")
+                       << ")\n";
 #endif
     }
 }
@@ -344,9 +370,11 @@ CircuitCoupling::WriteCheckpointData (std::string const& dir) const
     ofs.close();
 
     // A compiled engine checkpoints its own state (I/O rank only, like the
-    // segments above); the Python engine re-seeds itself on restart.
+    // segments above); the Python engine re-seeds itself on restart. The
+    // coupler's per-step memory (EMF low-pass state) goes with it.
     if (m_coupler && m_coupler->Plugin() != nullptr) {
         m_coupler->Plugin()->WriteCheckpoint(dir);
+        m_coupler->WriteMemoryCheckpoint(dir);
     }
 }
 

@@ -4124,6 +4124,12 @@ class CircuitCoupling(object):
 
     corrector_rtol: float, optional
         Early-exit tolerance of the corrector on the realized coil scales.
+
+    eps_lowpass_tau: float, optional
+        Time constant [s] of a one-pole low-pass (EMA) on every measured
+        coil's port EMF before it reaches a compiled engine (default 0 =
+        off = the raw interval-averaged EMF); the filter memory is
+        committed only by the accepting evaluation of a step.
     """
 
     def __init__(
@@ -4136,6 +4142,7 @@ class CircuitCoupling(object):
         probe_crosscheck=None,
         corrector_iterations=None,
         corrector_rtol=None,
+        eps_lowpass_tau=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -4145,6 +4152,7 @@ class CircuitCoupling(object):
         self.probe_crosscheck = probe_crosscheck
         self.corrector_iterations = corrector_iterations
         self.corrector_rtol = corrector_rtol
+        self.eps_lowpass_tau = eps_lowpass_tau
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -4176,6 +4184,8 @@ class CircuitCoupling(object):
             )
         if self.corrector_rtol is not None:
             pywarpx.circuit.add_new_attr("coupling.corrector_rtol", self.corrector_rtol)
+        if self.eps_lowpass_tau is not None:
+            pywarpx.circuit.eps_lowpass_tau = self.eps_lowpass_tau
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):

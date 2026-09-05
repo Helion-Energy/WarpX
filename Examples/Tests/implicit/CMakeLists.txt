@@ -3759,6 +3759,28 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# coupling-model parity arms: the python-hook reference with the
+# production coupler's EMF low-pass (one-pole EMA, memory committed by
+# the finish hook) and its native twin through circuit.eps_lowpass_tau;
+# the analysis asserts the committed per-step scales and linkages agree
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_parity_reference  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --eps-tau-steps 3"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_parity_native  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --eps-tau-steps 3"  # inputs
+    "analysis_mhd_circuit_native_parity.py ../test_rz_theta_implicit_mhd_circuit_parity_reference"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_parity_reference  # dependency
+)
 
 
 add_warpx_test(

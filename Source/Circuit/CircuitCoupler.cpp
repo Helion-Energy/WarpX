@@ -19,6 +19,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <utility>
 
 using namespace amrex;
@@ -153,17 +156,46 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
         // lambda_phys * I_ref * n_turns, so the port EMF is
         // d lambda / dt / (I_ref * n_turns). Unmeasured (probe = none)
         // coils get zero; engines keep their own held/smoothed EMF.
+        //
+        // Optional one-pole low-pass (Params::eps_lowpass_tau > 0): the
+        // fresh interval-averaged EMF is blended with the per-coil memory
+        // committed at the previous ACCEPTED evaluation,
+        //     e = sigma * e_raw + (1 - sigma) * e_mem,
+        //     sigma = dt_step / (dt_step + tau),
+        // dt_step being the coupling step (BeginStep*), not this
+        // sub-interval. The memory moves ONLY here on accept = true: the
+        // filtered value of the accepting evaluation becomes e_mem for
+        // the next step, and every non-accepted evaluation in between
+        // reads the same frozen memory -- the python reference's
+        // "pending value committed by the finish hook" contract. (A step
+        // replayed after a failed solve never accepted, so its memory is
+        // untouched, exactly like its interval-entry linkages.) The
+        // filter is linear, so applying it to the volts value here equals
+        // the reference's filter on the linkage rate before its division
+        // by the reference current up to roundoff.
         std::vector<amrex::Real> eps;
         const amrex::Real dt_sub = m_interval.t1 - m_interval.t0;
+        const bool lowpass =
+            (m_params.eps_lowpass_tau > 0.0_rt && m_step_dt > 0.0_rt);
+        const amrex::Real sigma = lowpass
+            ? m_step_dt / (m_step_dt + m_params.eps_lowpass_tau) : 1.0_rt;
         for (int ic = 0; ic < m_coils.size(); ++ic) {
             const warpx::circuit::Coil& c = m_coils.coil(ic);
+            const bool measured =
+                (m_probes[ic] != warpx::circuit::ProbeKind::none);
             amrex::Real e = 0.0_rt;
-            if (m_probes[ic] != warpx::circuit::ProbeKind::none &&
-                dt_sub > 0.0_rt && m_lambda.count(c.name) > 0) {
+            if (measured && dt_sub > 0.0_rt && m_lambda.count(c.name) > 0) {
                 const amrex::Real lam0 = m_lambda_start.count(c.name)
                     ? m_lambda_start.at(c.name) : m_lambda.at(c.name);
                 e = (m_lambda.at(c.name) - lam0) / dt_sub
                     / (c.I_ref * c.n_turns);
+            }
+            if (lowpass && measured) {
+                const auto mem = m_eps_filt.find(c.name);
+                const amrex::Real e_mem =
+                    (mem != m_eps_filt.end()) ? mem->second : 0.0_rt;
+                e = sigma * e + (1.0_rt - sigma) * e_mem;
+                if (accept) { m_eps_filt[c.name] = e; }
             }
             eps.push_back(e);
         }
@@ -198,6 +230,7 @@ CircuitCoupler::BeginStep (const amrex::Real t0, const amrex::Real dt)
 {
     m_interval = Interval{t0, t0 + dt, -1, 0};
     m_substep_count = 0;
+    m_step_dt = dt;
     // The evolved fields hold the plasma response here (called after the
     // split-field subtraction): seed the linkage registers at t^n.
     MeasureLinkages(true);
@@ -272,6 +305,7 @@ CircuitCoupler::BeginStepMeasured (const amrex::Real t0, const amrex::Real dt)
 {
     m_interval = Interval{t0, t0 + dt, -1, 0};
     m_substep_count = 0;
+    m_step_dt = dt;
     // The caller measured the committed t^n state (MeasureLinkages):
     // seed the interval-entry linkage registers from it. The engine
     // snapshots its accepted state; the first EvaluateInterval of the
@@ -311,4 +345,77 @@ CircuitCoupler::CoilLinkageOr (std::string const& coil_name,
 {
     const auto it = m_lambda.find(coil_name);
     return (it != m_lambda.end()) ? it->second : fallback;
+}
+
+namespace
+{
+    /** Bit-exact text form of a double (C99 hexfloat) for the memory
+     * checkpoint; read back with strtod. */
+    std::string HexDouble (const double v)
+    {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%a", v);
+        return buf;
+    }
+
+    void WriteMemoryBlock (std::ofstream& ofs, const char* key,
+                           std::map<std::string, amrex::Real> const& block)
+    {
+        ofs << key << " " << block.size() << "\n";
+        for (const auto& [name, value] : block) {
+            ofs << name << " " << HexDouble(static_cast<double>(value)) << "\n";
+        }
+    }
+}
+
+void
+CircuitCoupler::WriteMemoryCheckpoint (std::string const& dir) const
+{
+    const std::string path = dir + "/circuit_coupler_memory.dat";
+    std::ofstream ofs{path, std::ofstream::out};
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ofs.good(),
+        "CircuitCoupler: cannot write '" + path + "'");
+    // Block-structured: "<key> <count>" then <count> "<name> <hexfloat>"
+    // lines; a reader skips nothing and aborts on an unknown key, so the
+    // format can only grow by adding blocks.
+    ofs << "version 1\n";
+    WriteMemoryBlock(ofs, "eps_filt", m_eps_filt);
+}
+
+void
+CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
+{
+    const std::string path = dir + "/circuit_coupler_memory.dat";
+    std::ifstream ifs{path, std::ifstream::in};
+    if (!ifs.good()) {
+        // Checkpoints from before the memory file existed: the memory
+        // restarts from zero (a filter warm-up transient, disclosed).
+        amrex::Print() << "Circuit coupler memory: no " << path
+                       << " in the checkpoint; the EMF low-pass memory "
+                       << "restarts from zero\n";
+        return;
+    }
+    std::string token;
+    int version = 0;
+    ifs >> token >> version;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(token == "version" && version == 1,
+        "unsupported circuit_coupler_memory.dat format in '" + path + "'");
+    std::string key;
+    std::size_t count = 0;
+    while (ifs >> key >> count) {
+        std::map<std::string, amrex::Real>* block = nullptr;
+        if (key == "eps_filt") { block = &m_eps_filt; }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(block != nullptr,
+            "circuit_coupler_memory.dat: unknown block '" + key + "'");
+        block->clear();
+        for (std::size_t i = 0; i < count; ++i) {
+            std::string name, hex;
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(ifs >> name >> hex),
+                "circuit_coupler_memory.dat: truncated block '" + key + "'");
+            (*block)[name] = static_cast<amrex::Real>(
+                std::strtod(hex.c_str(), nullptr));
+        }
+    }
+    amrex::Print() << "Circuit coupler memory: restored from " << path
+                   << " (" << m_eps_filt.size() << " EMF low-pass entries)\n";
 }

@@ -7924,6 +7924,25 @@ Jacobian probes.
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. pp:param:: circuit.eps_lowpass_tau
+    :type: ``float``
+    :default: ``0.``
+    :optional:
+
+    Time constant [s] of a one-pole low-pass (exponential moving average) applied by the
+    coupler to every measured coil's port EMF before it is handed to a compiled engine
+    (:pp:param:`circuit.engine` = ``external``; the Python-callback engine computes its own
+    EMF and refuses the knob). ``0`` disables the filter (the raw interval-averaged
+    :math:`\varepsilon = \Delta\lambda_p/\Delta t` of today). With :math:`\tau > 0`,
+    :math:`\varepsilon = \sigma\,\varepsilon_\mathrm{raw} + (1-\sigma)\,\varepsilon_\mathrm{mem}`
+    with :math:`\sigma = \Delta t_\mathrm{step}/(\Delta t_\mathrm{step} + \tau)` (the coupling
+    STEP dt, so sub-interval evaluations use the same weight as the accepting one), and the
+    memory :math:`\varepsilon_\mathrm{mem}` is committed only by the accepting evaluation of
+    a step: all non-accepted (residual, corrector) evaluations of that step see the same
+    frozen memory, keeping the EMF-to-scales map a smooth function of the iterate. This is the
+    per-step-frozen filter contract of the python coupling reference. The memory is part of the
+    checkpoint (``circuit_coupler_memory.dat``).
+
 .. pp:param:: warpx.grid_type
     :type: ``string``, ``collocated``, ``staggered`` or ``hybrid``
 

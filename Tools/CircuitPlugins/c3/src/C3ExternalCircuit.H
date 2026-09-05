@@ -40,8 +40,12 @@ namespace c3 {
  *     by contract, so the swap latches immediately and the entry
  *     snapshot is retaken.
  *  4. eps hold: overwritten on every AdvanceInterval from the argument
- *     (the coupler-held predictor value); no plugin-side EMA -- the
- *     hetools reference applies the raw held EMF as-is.
+ *     (the coupler-held predictor value); no plugin-side EMA. The
+ *     production reference coupler's low-pass on the measured EMF lives
+ *     in the COUPLER, not in the circuit model, and its WarpX twin is the
+ *     coupler-side circuit.eps_lowpass_tau (memory committed on accept);
+ *     the plugin applies whatever eps it is handed, filtered or raw,
+ *     exactly like the reference stepper applies eps_elec.
  *  5. checkpoint: WriteCheckpoint serializes the accepted entry snapshot
  *     + lock_phase + the live stepper clock (hexfloat, bit-exact).
  */

@@ -70,6 +70,24 @@ public:
          * crosscheck_rtol (a validation knob; circuit.probe_crosscheck). */
         bool probe_crosscheck = false;
         amrex::Real crosscheck_rtol = 1.0e-12;
+        /** One-pole low-pass (exponential moving average) on every
+         * measured coil's port EMF before it is handed to a compiled
+         * engine, time constant [s] (circuit.eps_lowpass_tau; 0 = off =
+         * the raw interval-averaged EMF, bit-identical to a coupler
+         * without the knob):
+         *     e = sigma * e_raw + (1 - sigma) * e_mem,
+         *     sigma = dt_step / (dt_step + tau),
+         * with dt_step the coupling STEP dt (the weight is a per-step
+         * quantity: a theta-stage or corrector sub-interval filters with
+         * the same sigma as the accepting evaluation). The memory e_mem
+         * is committed ONLY by the accepting (accept = true) evaluation
+         * of a step -- every non-accepted evaluation of that step sees
+         * the same frozen memory, so the eps -> scales map stays a smooth
+         * function of the iterate. This is the python coupling
+         * reference's per-step-frozen filter contract (its pending filter
+         * value is committed by the finish hook), reproduced here so
+         * both drivers apply the same model. */
+        amrex::Real eps_lowpass_tau = 0.0;
     };
 
     CircuitCoupler (warpx::circuit::CoilSet const& coils,
@@ -160,6 +178,16 @@ public:
      * configuration and checkpoint delegation. */
     [[nodiscard]] ExternalCircuit* Plugin () const { return m_plugin.get(); }
 
+    /** Persist / restore the coupler's per-step measurement memory (the
+     * committed EMF low-pass state per coil) into / from
+     * `<dir>/circuit_coupler_memory.dat`. Without it a restart re-seeds
+     * the memory from zero and the drive carries a filter warm-up
+     * transient the uninterrupted run never had. Write on the I/O rank
+     * only; read on every rank (rank-replicated state); tolerant of
+     * checkpoints written before the file existed. */
+    void WriteMemoryCheckpoint (std::string const& dir) const;
+    void ReadMemoryCheckpoint (std::string const& dir);
+
 private:
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
     void FireEngine (char const* hook, bool accept);
@@ -172,8 +200,12 @@ private:
 
     Interval m_interval;
     int m_substep_count = 0;
+    amrex::Real m_step_dt = 0.0;                        //!< the coupling step's dt
     std::map<std::string, amrex::Real> m_lambda;        //!< latest measurement
     std::map<std::string, amrex::Real> m_lambda_start;  //!< at interval entry
+    /** Committed EMF low-pass memory [V] per coil (Params::eps_lowpass_tau);
+     * moves only on accept = true. */
+    std::map<std::string, amrex::Real> m_eps_filt;
 
     warpx::circuit::LinkageBatch m_batch;               //!< batched probes
     std::vector<amrex::Real> m_lambda_scratch;

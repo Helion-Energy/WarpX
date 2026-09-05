@@ -45,6 +45,11 @@ Three axes, selected by CLI flags (combined into the CTest arms):
     reciprocity probes on the extra coils (ring-kernel unit fields):
     exercises the batched reciprocity path (native only).
 
+--eps-tau-steps X         EMF low-pass with time constant X*dt on the
+    drive coil's back-EMF, the production coupler's one-pole EMA whose
+    memory is committed only by the finish hook (python) /
+    circuit.eps_lowpass_tau (native). 0 = off.
+
 The deck writes circuit_hook_history.csv (per step: hook calls, the
 committed scale, lambda, eps).
 """
@@ -87,6 +92,12 @@ parser.add_argument(
     action="store_true",
     help="Green's open r_hi boundary + reciprocity extra-coil probes",
 )
+parser.add_argument(
+    "--eps-tau-steps",
+    type=float,
+    default=0.0,
+    help="EMF low-pass time constant in units of dt (0 = off)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -111,6 +122,7 @@ alfven_speed = B0 / np.sqrt(constants.mu0 * rho0)
 dt = 0.5 * (2.0 * zmax / nz) / np.sqrt(sound_speed**2 + alfven_speed**2)
 max_steps = 5
 theta = 1.0
+eps_tau = args.eps_tau_steps * dt
 
 # --- toy driven RL circuit --------------------------------------------
 # Unit reference current: the coil scale IS the loop current. V0/R_C = 1
@@ -210,6 +222,7 @@ if args.driver == "native":
         # for ParmParse; plain floats (numpy reprs are not parseable)
         plugin_config=f"R={float(R_C)},L={float(L_C)},V0={float(V0)}",
         probe_crosscheck=args.crosscheck,
+        eps_lowpass_tau=(eps_tau if eps_tau > 0.0 else None),
     )
 
 solver = picmi.HybridPICSolver(
@@ -283,6 +296,11 @@ bz_wrapper = None
 state = {"i_n": 0.0, "lam_n": 0.0, "t_n": 0.0, "step": 0}
 counts = {"theta": 0}
 history = []
+# EMF low-pass memory (--eps-tau-steps): "mem" is the committed filter
+# state every evaluation of the step reads; "pending" the filtered value
+# of the latest evaluation, committed by the finish hook only -- the
+# production coupler's per-step-frozen contract.
+lowpass = {"mem": 0.0, "pending": None}
 
 
 def measure_lambda():
@@ -316,6 +334,10 @@ def measure_lambda():
 def advance_circuit(lam):
     """Backward-Euler RL advance from the committed snapshot."""
     eps = (lam - state["lam_n"]) / (theta * dt)
+    if eps_tau > 0.0:
+        sigma = dt / (dt + eps_tau)
+        eps = sigma * eps + (1.0 - sigma) * lowpass["mem"]
+        lowpass["pending"] = eps
     i_new = (state["i_n"] + (dt / L_C) * (V0 - eps)) / (1.0 + dt * R_C / L_C)
     return i_new, eps
 
@@ -338,6 +360,8 @@ def hook_finish():
     push_segment(i_new)
     state["i_n"] = i_new
     state["lam_n"] = lam_end
+    if lowpass["pending"] is not None:
+        lowpass["mem"] = lowpass["pending"]  # committed from the accepted state
     state["t_n"] += dt
     state["step"] += 1
     history.append((state["step"], state["t_n"], counts["theta"], i_new, lam_end, eps))
