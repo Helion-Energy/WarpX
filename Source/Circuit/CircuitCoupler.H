@@ -90,8 +90,12 @@ public:
         amrex::Real eps_lowpass_tau = 0.0;
     };
 
+    /** \param probes           per-coil probe kind
+     *  \param probe_exclusion  per-coil mask radius [m] of the loop probe
+     *                          (ignored by the other kinds) */
     CircuitCoupler (warpx::circuit::CoilSet const& coils,
                     std::vector<warpx::circuit::ProbeKind> probes,
+                    std::vector<double> probe_exclusion,
                     Params params,
                     std::unique_ptr<ExternalCircuit> plugin);
 
@@ -195,6 +199,7 @@ private:
 
     warpx::circuit::CoilSet const& m_coils;
     std::vector<warpx::circuit::ProbeKind> m_probes;
+    std::vector<double> m_probe_exclusion;   //!< loop-probe mask radii [m]
     Params m_params;
     std::unique_ptr<ExternalCircuit> m_plugin;
 

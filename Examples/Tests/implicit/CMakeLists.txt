@@ -3759,6 +3759,19 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# analytic-loop-probe twin of the reciprocity crosscheck: in-domain
+# measured-only coils with circuit.<coil>.probe = loop (exclusion mask,
+# upper axial plane excluded); circuit.probe_crosscheck pins the batched
+# loop weights against the single-coil LoopLinkage reference
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_crosscheck_loop  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --extra-coils 2 --crosscheck --r-open --loop-probe"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
 # coupling-model parity arms: the python-hook reference with the
 # production coupler's EMF low-pass (one-pole EMA, memory committed by
 # the finish hook) and its native twin through circuit.eps_lowpass_tau;

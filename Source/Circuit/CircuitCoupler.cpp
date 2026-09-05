@@ -30,13 +30,20 @@ using warpx::fields::FieldType;
 
 CircuitCoupler::CircuitCoupler (warpx::circuit::CoilSet const& coils,
                                 std::vector<warpx::circuit::ProbeKind> probes,
+                                std::vector<double> probe_exclusion,
                                 Params params,
                                 std::unique_ptr<ExternalCircuit> plugin)
     : m_coils(coils),
       m_probes(std::move(probes)),
+      m_probe_exclusion(std::move(probe_exclusion)),
       m_params(params),
       m_plugin(std::move(plugin))
-{}
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        static_cast<int>(m_probes.size()) == m_coils.size() &&
+            static_cast<int>(m_probe_exclusion.size()) == m_coils.size(),
+        "CircuitCoupler: probe kind / exclusion vectors must match the coil set");
+}
 
 void
 CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
@@ -45,10 +52,14 @@ CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
     auto& warpx = WarpX::GetInstance();
     auto* hybrid = warpx.get_pointer_HybridPICModel();
 
+    // J-based rows (reciprocity on the coil's unit field, or the analytic
+    // loop probe) need the plasma current; disk rows read B_z.
     bool any_reciprocity = false;
     bool any_disk = false;
     for (const ProbeKind kind : m_probes) {
-        if (kind == ProbeKind::reciprocity) { any_reciprocity = true; }
+        if (kind == ProbeKind::reciprocity || kind == ProbeKind::loop) {
+            any_reciprocity = true;
+        }
         if (kind == ProbeKind::disk) { any_disk = true; }
     }
     if (any_reciprocity && refresh_plasma_current) {
@@ -81,8 +92,8 @@ CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
                 ablastr::fields::Direction{1}, 0);
         }
     }
-    m_batch.Measure(m_coils, m_probes, m_a_theta_scratch, bz, j_theta,
-                    m_lambda_scratch);
+    m_batch.Measure(m_coils, m_probes, m_probe_exclusion, m_a_theta_scratch,
+                    bz, j_theta, m_lambda_scratch);
     for (int ic = 0; ic < m_coils.size(); ++ic) {
         if (m_probes[ic] == ProbeKind::none) { continue; }
         m_lambda[m_coils.coil(ic).name] = m_lambda_scratch[ic];
@@ -95,9 +106,11 @@ CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
             const Coil& c = m_coils.coil(ic);
             const ProbeKind kind = m_probes[ic];
             if (kind == ProbeKind::none) { continue; }
-            const amrex::Real reference = (kind == ProbeKind::disk)
-                ? DiskFluxLinkage(c, *bz)
-                : ReciprocityLinkage(*m_a_theta_scratch[ic], *j_theta);
+            const amrex::Real reference =
+                (kind == ProbeKind::disk) ? DiskFluxLinkage(c, *bz)
+                : (kind == ProbeKind::loop)
+                    ? LoopLinkage(c, *j_theta, m_probe_exclusion[ic])
+                    : ReciprocityLinkage(*m_a_theta_scratch[ic], *j_theta);
             const amrex::Real batched = m_lambda_scratch[ic];
             const amrex::Real scale = std::max(
                 std::abs(reference), std::abs(batched));

@@ -7830,8 +7830,16 @@ Jacobian probes.
       coupling engine — ``disk`` (plasma-frame :math:`B_z` through the coil circle, the same
       staircase rules as the discrete self-inductance; valid with conducting walls),
       ``reciprocity`` (:math:`\int A^\mathrm{unit} \cdot J_p\, dV`; exact in free space,
-      requires the Green's-function open boundary), or ``none`` (drive-only).
-      ``default`` selects reciprocity when the open boundary is active, disk otherwise.
+      requires the Green's-function open boundary), ``loop`` (free-space reciprocity against
+      the ANALYTIC loop vector potential of the declared filament -- the discrete Yee-clipped
+      loop kernel at the coil's ``r``, ``z`` as given, no image, no softening -- over the nodal
+      plasma current with the nodes within ``probe_exclusion_radius`` of the filament masked
+      out and the upper axial node plane excluded: term for term the integrand of the python
+      coupling reference's loop probe, for driver parity; requires the open boundary like
+      ``reciprocity``), or ``none`` (drive-only). ``default`` selects reciprocity when the
+      open boundary is active, disk otherwise.
+    * ``probe_exclusion_radius`` (default :pp:param:`circuit.probe_exclusion_radius`): the
+      ``loop`` probe's mask radius [m] around this coil's filament.
 
 .. pp:param:: circuit.engine
     :type: ``str``
@@ -7923,6 +7931,19 @@ Jacobian probes.
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. pp:param:: circuit.probe_exclusion_radius
+    :type: ``float``
+    :default: ``0.``
+    :optional:
+
+    Circuit-wide default of the ``loop`` probe's mask radius [m] (see ``probe`` under
+    :pp:param:`circuit.coils`): nodes of the plasma current within this distance of a coil's
+    filament are excluded from its linkage integral (``0`` = no mask). The python coupling
+    reference masks two radial cells: the discrete double-curl of the singular loop A leaves an
+    O(1) truncation residue in the plasma-response field there, which would otherwise register
+    as an in-phase spurious linkage with maximal weight. Overridden per coil by
+    ``circuit.<name>.probe_exclusion_radius``.
 
 .. pp:param:: circuit.eps_lowpass_tau
     :type: ``float``

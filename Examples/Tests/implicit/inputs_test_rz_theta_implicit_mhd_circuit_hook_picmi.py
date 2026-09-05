@@ -45,6 +45,12 @@ Three axes, selected by CLI flags (combined into the CTest arms):
     reciprocity probes on the extra coils (ring-kernel unit fields):
     exercises the batched reciprocity path (native only).
 
+--loop-probe              with --r-open: the extra coils sit INSIDE the
+    domain, measured by the analytic-loop probe (circuit.<coil>.probe =
+    loop, exclusion radius 2 dr) instead of reciprocity on a filled unit
+    field; with --crosscheck the batched loop weights are pinned against
+    the single-coil LoopLinkage reference (native only).
+
 --eps-tau-steps X         EMF low-pass with time constant X*dt on the
     drive coil's back-EMF, the production coupler's one-pole EMA whose
     memory is committed only by the finish hook (python) /
@@ -91,6 +97,11 @@ parser.add_argument(
     "--r-open",
     action="store_true",
     help="Green's open r_hi boundary + reciprocity extra-coil probes",
+)
+parser.add_argument(
+    "--loop-probe",
+    action="store_true",
+    help="with --r-open: analytic-loop probes (with exclusion mask) on in-domain extra coils",
 )
 parser.add_argument(
     "--eps-tau-steps",
@@ -187,7 +198,24 @@ if args.driver == "native":
         )
     ]
     for k, name in enumerate(extra_names):
-        if args.r_open:
+        if args.r_open and args.loop_probe:
+            # Analytic-loop rows: measured-only coils INSIDE the domain
+            # (zero painted field), the python reference's loop-probe
+            # integrand with a two-cell exclusion mask around each
+            # filament, valid under the Green's open boundary.
+            coils.append(
+                picmi.CircuitCoil(
+                    name=name,
+                    r=0.03 + 0.005 * k,
+                    z=-0.1 + 0.05 * k,
+                    n_turns=1.0,
+                    I_ref=1.0,
+                    fill_unit_field=False,
+                    probe="loop",
+                    probe_exclusion_radius=2.0 * dr,
+                )
+            )
+        elif args.r_open:
             # Reciprocity rows: real ring-kernel unit fields on coils
             # outside the wall, valid under the Green's open boundary.
             coils.append(

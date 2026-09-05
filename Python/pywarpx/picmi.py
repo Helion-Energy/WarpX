@@ -4061,7 +4061,14 @@ class CircuitCoil(object):
 
     probe: str, optional
         The coil's plasma flux-linkage measurement: 'default', 'disk',
-        'reciprocity' or 'none'.
+        'reciprocity', 'loop' (reciprocity against the analytic loop
+        vector potential of the declared filament, nodes within
+        probe_exclusion_radius masked; the python coupling reference's
+        loop-probe integrand) or 'none'.
+
+    probe_exclusion_radius: float, optional
+        Mask radius [m] of the 'loop' probe around the filament (default:
+        the circuit-wide CircuitCoupling probe_exclusion_radius).
     """
 
     def __init__(
@@ -4074,6 +4081,7 @@ class CircuitCoil(object):
         field_name=None,
         fill_unit_field=None,
         probe=None,
+        probe_exclusion_radius=None,
     ):
         self.name = name
         self.r = r
@@ -4083,6 +4091,7 @@ class CircuitCoil(object):
         self.field_name = field_name
         self.fill_unit_field = fill_unit_field
         self.probe = probe
+        self.probe_exclusion_radius = probe_exclusion_radius
 
 
 class CircuitCoupling(object):
@@ -4130,6 +4139,11 @@ class CircuitCoupling(object):
         coil's port EMF before it reaches a compiled engine (default 0 =
         off = the raw interval-averaged EMF); the filter memory is
         committed only by the accepting evaluation of a step.
+
+    probe_exclusion_radius: float, optional
+        Circuit-wide default mask radius [m] of the coils' 'loop' probes
+        (0 = no mask); CircuitCoil(probe_exclusion_radius=...) overrides
+        it per coil.
     """
 
     def __init__(
@@ -4143,6 +4157,7 @@ class CircuitCoupling(object):
         corrector_iterations=None,
         corrector_rtol=None,
         eps_lowpass_tau=None,
+        probe_exclusion_radius=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -4153,6 +4168,7 @@ class CircuitCoupling(object):
         self.corrector_iterations = corrector_iterations
         self.corrector_rtol = corrector_rtol
         self.eps_lowpass_tau = eps_lowpass_tau
+        self.probe_exclusion_radius = probe_exclusion_radius
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -4165,6 +4181,7 @@ class CircuitCoupling(object):
                 (coil.field_name, "field_name"),
                 (coil.fill_unit_field, "fill_unit_field"),
                 (coil.probe, "probe"),
+                (coil.probe_exclusion_radius, "probe_exclusion_radius"),
             ):
                 if attr is not None:
                     pywarpx.circuit.add_new_attr(f"{coil.name}.{key}", attr)
@@ -4186,6 +4203,8 @@ class CircuitCoupling(object):
             pywarpx.circuit.add_new_attr("coupling.corrector_rtol", self.corrector_rtol)
         if self.eps_lowpass_tau is not None:
             pywarpx.circuit.eps_lowpass_tau = self.eps_lowpass_tau
+        if self.probe_exclusion_radius is not None:
+            pywarpx.circuit.probe_exclusion_radius = self.probe_exclusion_radius
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):

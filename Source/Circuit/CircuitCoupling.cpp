@@ -245,11 +245,26 @@ CircuitCoupling::InitData ()
     // (a conducting wall's image response is not in the unit A).
     const bool open_bc = GreensFunctionOpenBC::IsActive();
     const amrex::ParmParse pp_circuit("circuit");
+    // The analytic-loop probe's mask radius [m]: a global default with a
+    // per-coil override; 0 = no mask. Read for every coil (the other
+    // probe kinds ignore it).
+    double exclusion_default = 0.0;
+    utils::parser::queryWithParser(pp_circuit, "probe_exclusion_radius",
+                                   exclusion_default);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(exclusion_default >= 0.0,
+        "circuit.probe_exclusion_radius must be >= 0 (meters)");
     m_probes.assign(m_coils.size(), ProbeKind::none);
+    m_probe_exclusion.assign(m_coils.size(), exclusion_default);
     for (int ic = 0; ic < m_coils.size(); ++ic) {
         const Coil& c = m_coils.coil(ic);
         std::string probe = "default";
         pp_circuit.query((c.name + ".probe").c_str(), probe);
+        utils::parser::queryWithParser(pp_circuit,
+            (c.name + ".probe_exclusion_radius").c_str(),
+            m_probe_exclusion[ic]);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_probe_exclusion[ic] >= 0.0,
+            "circuit." + c.name + ".probe_exclusion_radius must be >= 0 "
+            "(meters)");
         if (probe == "default") {
             probe = open_bc ? "reciprocity" : "disk";
         }
@@ -264,10 +279,20 @@ CircuitCoupling::InitData ()
                 "reciprocity is invalid against a conducting wall); use "
                 "the disk probe instead");
             m_probes[ic] = ProbeKind::reciprocity;
+        } else if (probe == "loop") {
+            // Free-space reciprocity against the analytic loop A of the
+            // declared filament (the python coupling reference's probe
+            // integrand): the same open-boundary requirement.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(open_bc,
+                "circuit." + c.name + ".probe = loop is a free-space "
+                "reciprocity functional and requires the Green's-function "
+                "open field boundary; use the disk probe against a "
+                "conducting wall");
+            m_probes[ic] = ProbeKind::loop;
         } else {
             WARPX_ABORT_WITH_MESSAGE(
                 "circuit." + c.name + ".probe must be one of: default, "
-                "disk, reciprocity, none");
+                "disk, reciprocity, loop, none");
         }
     }
 
@@ -325,7 +350,8 @@ CircuitCoupling::InitData ()
             }
         }
         m_coupler = std::make_unique<CircuitCoupler>(
-            m_coils, m_probes, m_coupler_params, std::move(plugin));
+            m_coils, m_probes, m_probe_exclusion, m_coupler_params,
+            std::move(plugin));
         // The coupler's own per-step memory (EMF low-pass state) is part
         // of the checkpoint; restore it with the engine state.
         if (!m_restart_dir.empty()) {

@@ -189,6 +189,68 @@ ReciprocityLinkage (const amrex::MultiFab& A_theta,
 }
 
 amrex::Real
+LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
+             const double exclusion_radius)
+{
+    BL_PROFILE("warpx::circuit::LoopLinkage");
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(coil, J_theta, exclusion_radius);
+    WARPX_ABORT_WITH_MESSAGE(
+        "LoopLinkage is an RZ (m = 0) measurement");
+    return 0.0_rt;
+#else
+    auto& warpx = WarpX::GetInstance();
+    const auto& geom = warpx.Geom(0);
+    const double dr = geom.CellSize(0);
+    const double dz = geom.CellSize(1);
+    const double plo_r = geom.ProbLo(0);
+    const double plo_z = geom.ProbLo(1);
+    const int nr = geom.Domain().length(0);
+    const int nz = geom.Domain().length(1);
+
+    // The filament AS DECLARED (no quarter-cell offset added: the
+    // reference probe receives the already placed filament), the coil's
+    // reference amp-turns, and the mask radius.
+    const double r_c = coil.r;
+    const double z_c = coil.z;
+    const double amps = coil.I_ref * coil.n_turns;
+    const double excl2 = exclusion_radius * exclusion_radius;
+
+    const amrex::iMultiFab& owner =
+        CachedOwnerMask(J_theta, geom.periodicity());
+
+    ReduceOps<ReduceOpSum> reduce_op;
+    ReduceData<double> reduce_data(reduce_op);
+    for (MFIter mfi(J_theta, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box tb = mfi.tilebox(amrex::IntVect(1));
+        const auto jt = J_theta.const_array(mfi);
+        const auto msk = owner.const_array(mfi);
+        const int nr_l = nr;
+        const int nz_l = nz;
+        reduce_op.eval(tb, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> GpuTuple<double>
+            {
+                // shared nodes once; the upper axial node plane excluded
+                if (msk(i, j, 0) == 0 || j == nz_l) { return 0.0; }
+                const double r = plo_r + i * dr;
+                const double z = plo_z + j * dz;
+                const double d2 = (r - r_c) * (r - r_c) + (z - z_c) * (z - z_c);
+                if (d2 < excl2) { return 0.0; }   // the exclusion mask
+                // trapezoid end-weights in r only
+                const double w_r = (i == 0 || i == nr_l) ? 0.5 : 1.0;
+                return w_r * r * amps * YeeLoopATheta(r, z, r_c, z_c)
+                       * static_cast<double>(jt(i, j, 0, 0));
+            });
+    }
+    double lam = amrex::get<0>(reduce_data.value(reduce_op));
+    ParallelDescriptor::ReduceRealSum(lam);
+    lam *= 2.0 * ablastr::coils::pi_ring * dr * dz;
+
+    return static_cast<amrex::Real>(lam);
+#endif
+}
+
+amrex::Real
 CouplingPowerIntegral (const std::array<const amrex::MultiFab*, 3>& J,
                        const std::array<const amrex::MultiFab*, 3>& E)
 {
@@ -246,12 +308,13 @@ CouplingPowerIntegral (const std::array<const amrex::MultiFab*, 3>& J,
 void
 LinkageBatch::BuildPack (const CoilSet& coils,
                          const std::vector<ProbeKind>& probes,
+                         const std::vector<double>& exclusion_radius,
                          const std::vector<const amrex::MultiFab*>& a_theta,
                          const amrex::MultiFab* bz,
                          const amrex::MultiFab* j_theta)
 {
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(coils, probes, a_theta, bz, j_theta);
+    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta);
     WARPX_ABORT_WITH_MESSAGE(
         "LinkageBatch is an RZ (m = 0) measurement");
 #else
@@ -291,13 +354,14 @@ LinkageBatch::BuildPack (const CoilSet& coils,
         return jobs[box_index].back();
     };
 
-    // Enumerate the jobs (host) in a fixed order: reciprocity rows over
-    // the J boxes, then disk rows over the Bz boxes.
+    // Enumerate the jobs (host) in a fixed order: reciprocity and loop
+    // rows over the J boxes, then disk rows over the Bz boxes.
     if (j_theta != nullptr) {
         for (amrex::MFIter mfi(*j_theta); mfi.isValid(); ++mfi) {
             const amrex::Box vb = mfi.validbox();
             for (int ic = 0; ic < m_ncoils; ++ic) {
-                if (probes[ic] == ProbeKind::reciprocity) {
+                if (probes[ic] == ProbeKind::reciprocity ||
+                    probes[ic] == ProbeKind::loop) {
                     append_job(m_jobs_j, mfi.index(), ic, vb);
                 }
             }
@@ -362,7 +426,6 @@ LinkageBatch::BuildPack (const CoilSet& coils,
             if (it == m_jobs_j.end()) { continue; }
             const auto msk = owner.const_array(mfi);
             for (const Job& job : it->second) {
-                const auto a = a_theta[job.row]->const_array(mfi);
                 const amrex::Box box = job.box;
                 const long w_offset = job.weight_offset;
                 const int nr_l = nr;
@@ -370,6 +433,39 @@ LinkageBatch::BuildPack (const CoilSet& coils,
                     2.0 * ablastr::coils::pi_ring * dr * dz;
                 const double plo_r_l = plo_r;
                 const double dr_l = dr;
+                if (probes[job.row] == ProbeKind::loop) {
+                    // LoopLinkage's integrand: the analytic loop A of the
+                    // declared filament, masked within the exclusion
+                    // radius, the upper axial node plane excluded.
+                    const Coil& c = coils.coil(job.row);
+                    const double r_c = c.r;
+                    const double z_c = c.z;
+                    const double amps = c.I_ref * c.n_turns;
+                    const double excl2 = exclusion_radius[job.row]
+                                         * exclusion_radius[job.row];
+                    const double plo_z_l = plo_z;
+                    const double dz_l = dz;
+                    const int nz_l = nz;
+                    amrex::ParallelFor(box,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+                        {
+                            const amrex::Box b = box;
+                            const long lin = b.index(amrex::IntVect(i, j));
+                            const double r = plo_r_l + i * dr_l;
+                            const double z = plo_z_l + j * dz_l;
+                            const double w_r =
+                                (i == 0 || i == nr_l) ? 0.5 : 1.0;
+                            const double d2 = (r - r_c) * (r - r_c)
+                                              + (z - z_c) * (z - z_c);
+                            weights[w_offset + lin] =
+                                (msk(i, j, 0) == 0 || j == nz_l || d2 < excl2)
+                                    ? 0.0
+                                    : w_r * r * factor * amps
+                                          * YeeLoopATheta(r, z, r_c, z_c);
+                        });
+                    continue;
+                }
+                const auto a = a_theta[job.row]->const_array(mfi);
                 amrex::ParallelFor(box,
                     [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
                     {
@@ -441,6 +537,7 @@ LinkageBatch::BuildPack (const CoilSet& coils,
 void
 LinkageBatch::Measure (const CoilSet& coils,
                        const std::vector<ProbeKind>& probes,
+                       const std::vector<double>& exclusion_radius,
                        const std::vector<const amrex::MultiFab*>& a_theta,
                        const amrex::MultiFab* bz,
                        const amrex::MultiFab* j_theta,
@@ -453,7 +550,7 @@ LinkageBatch::Measure (const CoilSet& coils,
     // circuit.probe_crosscheck).
     BL_PROFILE("warpx::circuit::LinkageBatch::Measure");
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(coils, probes, a_theta, bz, j_theta);
+    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta);
     lambda.assign(coils.size(), 0.0);
     WARPX_ABORT_WITH_MESSAGE(
         "LinkageBatch is an RZ (m = 0) measurement");
@@ -471,7 +568,7 @@ LinkageBatch::Measure (const CoilSet& coils,
          (m_key_ba_bz == bz->boxArray() &&
           m_key_dm_bz == bz->DistributionMap()));
     if (!key_hit) {
-        BuildPack(coils, probes, a_theta, bz, j_theta);
+        BuildPack(coils, probes, exclusion_radius, a_theta, bz, j_theta);
     }
 
     const double* const AMREX_RESTRICT weights = m_weights.data();
