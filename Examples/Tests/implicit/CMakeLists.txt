@@ -2682,6 +2682,64 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Open-region multiplier x CAPPED wall viscosity band -- the one gate on the
+# ORDER "scale, then min" (implicit_mhd.wall_viscosity_band_mode = capped
+# bounds the interior coefficient INCLUDING its region scale). The
+# open-region deck with non-periodic z (the wall mask requires it) and a
+# PEC cylinder wall at r = 0.30 m (first masked cell 19 at dr = 1/64 m): a
+# band of width 2 puts every band face at r >= 0.266 m, inside the
+# large-psi region (r > 0.25 m, multiplier 0.1), where the scaled interior
+# coefficient 0.1 rho nu = 3.3e-5 Pa s sits BELOW the 1e-4 band value.
+# The cap therefore binds on every band face and the capped run must be
+# BIT-IDENTICAL to the same walled deck without the band. A min that saw
+# the unscaled rho nu = 3.3e-4 (or a scale applied after the min) would
+# not bind and would reproduce the ABSOLUTE band instead. Reference run
+# first (no band; nothing to assert beyond completion):
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_viscosity_open_region boundary.field_lo=none none boundary.field_hi=pec none implicit_mhd.wall_model=pec implicit_mhd.wall_polyline_file=wall_cylinder_r30.csv"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall_band_capped_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_viscosity_open_region boundary.field_lo=none none boundary.field_hi=pec none implicit_mhd.wall_model=pec implicit_mhd.wall_polyline_file=wall_cylinder_r30.csv implicit_mhd.wall_viscosity_mask=1 implicit_mhd.wall_viscosity_mask_width=2 implicit_mhd.wall_viscosity_band_value=1.0e-4 implicit_mhd.wall_viscosity_band_mode=capped"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_viscosity_open_region_wall/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall  # dependency
+)
+
+# ... and the null control: with the region multiplier off (nu_op_mul = 1)
+# the interior coefficient is the full rho nu = 3.3e-4 Pa s ABOVE the band
+# value, the cap must NOT bind, and the capped band is BIT-IDENTICAL to the
+# absolute band (both a 0.3x reduced viscosity on the band faces). Together
+# the two twins pin the scale-then-min order from both sides.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall_band_absolute_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_viscosity_open_region boundary.field_lo=none none boundary.field_hi=pec none implicit_mhd.wall_model=pec implicit_mhd.wall_polyline_file=wall_cylinder_r30.csv implicit_mhd.wall_viscosity_mask=1 implicit_mhd.wall_viscosity_mask_width=2 implicit_mhd.wall_viscosity_band_value=1.0e-4 my_constants.nu_op_mul=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall_band_capped_off_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_viscosity_open_region boundary.field_lo=none none boundary.field_hi=pec none implicit_mhd.wall_model=pec implicit_mhd.wall_polyline_file=wall_cylinder_r30.csv implicit_mhd.wall_viscosity_mask=1 implicit_mhd.wall_viscosity_mask_width=2 implicit_mhd.wall_viscosity_band_value=1.0e-4 implicit_mhd.wall_viscosity_band_mode=capped my_constants.nu_op_mul=1.0"  # inputs
+    "analysis_mhd_wall_heat_flux_cap_identity.py diags ../test_rz_theta_implicit_mhd_viscosity_open_region_wall_band_absolute_off/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_viscosity_open_region_wall_band_absolute_off  # dependency
+)
+
 # Reference-parity NO-SLIP PIN, NULL TWIN (implicit_mhd.wall_no_slip=0 on
 # the CLI): today's free-slip stair wall -- the masked-side image copies
 # the tangential momentum verbatim, so the wall-adjacent rows slide at

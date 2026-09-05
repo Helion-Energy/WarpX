@@ -1749,7 +1749,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //     value (the near-vacuum halo: 30x below on the production
     //     formation deck at 1e18 m^-3) the face keeps its physical
     //     rho_f nu instead of a floor that dissipates the wall-inflow
-    //     shear as ion heat. The coefficient is C^0 in the state with a
+    //     shear as ion heat. rho_f is the interior stress's own face
+    //     density, the mean of the two adjacent theta-stage cell
+    //     densities -- on a contour face one of them is the frozen wall
+    //     image (the floor under the exterior clamp), so a no-slip wall
+    //     face is bounded by the same 0.5 (rho_live + rho_image) nu the
+    //     unmasked no-slip path carries. The coefficient is C^0 in the state with a
     //     derivative jump where the cap switches (a hard min, so the
     //     binding branch is EXACTLY rho_f nu), like the flux limiters'
     //     switch points. ----

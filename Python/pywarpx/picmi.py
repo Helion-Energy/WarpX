@@ -3299,7 +3299,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         value (the near-vacuum halo, ~30x below at 1e18 m^-3 with
         viscosity 2000 m^2/s) the face keeps its physical rho_f nu
         instead of a floor that dissipates the wall-inflow shear as
-        ion heat. One coefficient still feeds the stress, its work and
+        ion heat (rho_f is the interior stress's own face density, the
+        mean of the two adjacent cell densities; on a contour face one
+        of them is the frozen wall image). One coefficient still feeds the stress, its work and
         the dissipation register. Requires a positive
         wall_viscosity_band_value.
 
