@@ -1844,11 +1844,12 @@ add_warpx_test(
 # limiter convergence table. minmod is the production default (converges
 # in 11-15 Newton/step and holds the maximum principle exactly);
 # smart_upwind is the advectionalized SMART form (converges like minmod,
-# does not hold the maximum principle exactly); smart is the symmetric
-# SMART pair, whose derivative kinks on the steep spot front make the
-# Newton contraction linear -- it runs to the iteration cap at every
-# conduction number tried, so its arm runs with require_convergence off
-# and the analysis pins the measured stall level instead.
+# does not hold the maximum principle exactly: its direction rule sets
+# the Newton cost, not the monotonicity); smart is the symmetric SMART
+# pair, whose 3x gain near tangential extrema costs about twice minmod's
+# Newton iterations at a linear contraction of ~0.5 per iteration
+# (minmod ~0.2; smoothing its kinks changes nothing), so its arm raises
+# the Newton cap to 40 and is held to the same convergence gate.
 add_warpx_test(
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # name
     RZ  # dims
@@ -1862,7 +1863,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_braginskii_oblique_smart  # name
     RZ  # dims
     2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=smart newton.require_convergence=0 newton.max_frozen_steps=1000"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=smart newton.max_iterations=40"  # inputs
     "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 smart"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency

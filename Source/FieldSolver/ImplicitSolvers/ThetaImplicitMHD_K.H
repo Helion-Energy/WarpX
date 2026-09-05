@@ -357,10 +357,13 @@ smooth_max (const amrex::Real a, const amrex::Real b,
 // psi(1) = 1 and r = 1 lies in the INTERIOR of the linear QUICK branch,
 // so smooth flow is exactly second order and C-infinity -- the kinks sit
 // at r = 0 (an extremum), r = 1/5 and r = 5, far from the smooth-flow
-// point where minmod's selection kink (d_up = d_down) lives. That is
-// the property the matrix-free Newton solve wants: in smooth regions
-// the residual sits on one analytic branch instead of straddling a
-// derivative jump on every face. psi reaches 4, beyond Sweby's explicit
+// point where minmod's selection kink (d_up = d_down) lives. Measured
+// on the recast reconstruction site (1D contact sine, hlld, the
+// reconstruction_order family), that smoothness buys accuracy, not
+// solver speed: hard SMART costs about a third more Newton iterations
+// than the smoothed median and the ratio-space-smoothed SMART 7-11%
+// more at comparable width, while being the sharper, less diffusive
+// limiter. psi reaches 4, beyond Sweby's explicit
 // TVD region psi <= 2: SMART is NOT TVD for an explicit update (a
 // downwind-face extrapolation can overshoot the upwind neighbour), but
 // its face value is bounded by the donor and downwind cells (psi <= 2 r
@@ -448,12 +451,22 @@ smart_face_value (const amrex::Real q_upwind, const amrex::Real q_donor,
  * i.e. the CENTERED slope wherever the two differences are within a
  * factor 5 of each other, and three times the smaller one beyond that
  * (the generalized-minmod/MC family with parameter 3 in place of MC's
- * 2). On a smooth profile (a ~ b) it is therefore the plain centered
- * tangential slope with NO kink -- minmod's selection kink at a = b is
- * gone -- and its magnitude never exceeds the centered corner value the
- * "none" mode uses, so it is at most as anti-diffusive as the legacy
- * stencil while still vanishing at extrema. C^0 (kinks at |b| = |a|/5,
- * |b| = 5 |a| and a b = 0).
+ * 2). On a smooth profile (a ~ b) it is the plain centered tangential
+ * slope, and its magnitude never exceeds the centered corner value the
+ * "none" mode uses. Near a tangential extremum it ramps as
+ * 3 min(|a|, |b|): THREE TIMES minmod's gain, and that gain -- not its
+ * C^0 kinks (at |b| = |a|/5, |b| = 5 |a| and a b = 0) -- is what the
+ * Newton solve pays for. Measured on the oblique Braginskii deck
+ * (test_rz_theta_implicit_mhd_braginskii_oblique_*): the pair costs
+ * about twice minmod's Newton iterations at a contraction of ~0.5 per
+ * iteration (minmod ~0.2; both linear), a pair with all three kinks
+ * rounded in ratio space converges exactly like the hard one, and along
+ * the family L_g = sign(a) min(g min(|a|,|b|), (|a|+|b|)/2) (g = 1
+ * minmod, 2 MC, 3 this pair) both the Newton cost and the
+ * maximum-principle violation grow monotonically with g. Only g = 1,
+ * the Sharma-Hammett bound |L| <= min(|a|, |b|), holds the maximum
+ * principle exactly (0 against 2.0e-3 of the initial contrast for this
+ * pair at a face conduction number ~70).
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 smart_pair (const amrex::Real up_difference,
@@ -481,12 +494,21 @@ smart_pair (const amrex::Real up_difference,
  * opposite signs). Each cell's own half of the face gradient is
  * therefore built from the two tangential half-face values reconstructed
  * with SMART in normalized-variable form from ITS upwind side, so the
- * cross term is limited exactly like an upwinded advective flux: the
- * face values are CBC-bounded by their neighbours, a linear profile
- * gives the exact slope (the QUICK branch is exact for quadratics, so
- * the difference is a second-order derivative estimate), and a cell that
- * is a tangential extremum can only be pulled back toward its
- * neighbours by its own half.
+ * cross term is differenced like an upwinded advective flux: the
+ * half-face values are CBC-bounded by their neighbours and a linear
+ * profile gives the exact slope (the QUICK branch is exact for
+ * quadratics, so the difference is a second-order derivative estimate).
+ * This is NOT a maximum principle. The neighbour cell's half of the
+ * same face gradient is downwind-biased for this cell (one face flux
+ * cannot be upwind for both cells it enters), and the plateau-edge
+ * QUICK value q_C + d_up/4 is non-zero where minmod's difference
+ * vanishes; measured on the oblique Braginskii deck the option leaves
+ * an undershoot of 2.7e-3 of the initial contrast where minmod leaves
+ * exactly 0 (centered stencil 4.6e-3) at a face conduction number ~70,
+ * and flipping the direction rule moves that by 1% (5.42e-4 against
+ * 5.34e-4 at ~28) while costing 36% more Newton iterations: the
+ * direction rule sets the Newton cost, not the monotonicity. Its
+ * Newton work matches minmod's (148 against 150 total at ~70).
  *
  * The five samples are the cell's row along the tangential direction,
  * e(t - 2) .. e(t + 2); upwind_side = -1 means the upwind cell lies on

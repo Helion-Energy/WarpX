@@ -5524,8 +5524,12 @@ Jacobian probes.
     branch, so smooth flow is exactly second order with **no derivative
     kink** there — the kinks sit at :math:`r = 0`, :math:`1/5` and
     :math:`5`, far from the smooth-flow point where minmod's selection
-    kink :math:`\Delta_{up} = \Delta_{down}` lives, which is the
-    property the matrix-free Newton solve wants. Every face state stays
+    kink :math:`\Delta_{up} = \Delta_{down}` lives. Measured, that
+    smoothness buys accuracy rather than solver speed: on the 1D contact
+    sine hard SMART costs about a third more Newton iterations than the
+    smoothed ``median`` and ``smart_smooth`` 7-11% more at comparable
+    width, while being the sharper, less diffusive limiter. Every face
+    state stays
     inside the interval of the two cells adjacent to the face
     (:math:`\psi \le 2 r` on every branch), i.e. a new-extremum bound of
     exactly zero at the reconstruction level. :math:`\psi` reaches 4,
@@ -6028,10 +6032,18 @@ Jacobian probes.
     form :math:`\mathrm{sign}(a)\min(3\min(|a|, |b|), (|a| + |b|)/2)`
     for :math:`ab > 0` and zero otherwise: the centered tangential slope
     wherever the two one-sided differences are within a factor 5 of each
-    other, three times the smaller one beyond, zero at extrema. It has
-    no derivative kink in smooth flow (minmod's selection kink at
-    :math:`a = b` is gone) and never exceeds the centered corner value of
-    ``none``.
+    other, three times the smaller one beyond, zero at extrema. It never
+    exceeds the centered corner value of ``none``, but its threefold gain
+    near tangential extrema is what the Newton solve pays for: measured
+    on the oblique-field Braginskii test, it costs about twice
+    ``minmod``'s Newton iterations at a linear contraction of ~0.5 per
+    iteration (``minmod`` ~0.2), a pair with its kinks smoothed converges
+    identically, and along the family :math:`\mathrm{sign}(a)\min(g
+    \min(|a|,|b|), (|a|+|b|)/2)` (:math:`g = 1` minmod, 2 MC, 3 this
+    pair) both the Newton cost and the maximum-principle violation grow
+    monotonically with :math:`g`; only :math:`g = 1` holds the maximum
+    principle exactly (0 against :math:`2\times 10^{-3}` of the initial
+    contrast for this pair).
 
     ``smart_upwind`` is the *advectionalized* cross term. The cross flux
     through a normal face, :math:`-\rho (\chi_\parallel -
@@ -6044,13 +6056,23 @@ Jacobian probes.
     Each cell's half of the face tangential gradient is therefore the
     difference of the two tangential half-face values reconstructed with
     SMART in normalized-variable form from *that cell's* upwind side, so
-    the cross term is limited exactly like an upwinded advective flux:
-    the half-face values are bounded by their neighbours, a linear
+    the cross term is differenced like an upwinded advective flux: the
+    half-face values are bounded by their neighbours and a linear
     profile gives the exact slope (the QUICK branch is exact for
-    quadratics), and a cell that is a tangential extremum is only ever
-    pulled back toward its neighbours by its own half. The stencil reads
-    two tangential neighbours on each side of a cell (the fluid
-    registers carry two guard cells and every ghost fill covers both).
+    quadratics). This is **not** a maximum principle: the neighbour
+    cell's half of the same face gradient is downwind-biased for this
+    cell (one face flux cannot be upwind for both cells it enters) and
+    the plateau-edge QUICK value :math:`q_C + \Delta_{up}/4` is non-zero
+    where minmod's difference vanishes. Measured on the oblique-field
+    Braginskii test the option leaves an undershoot of
+    :math:`2.7\times 10^{-3}` of the initial contrast where ``minmod``
+    leaves exactly 0 (the centered stencil :math:`4.6\times 10^{-3}`),
+    and flipping the direction rule moves that by 1% while costing 36%
+    more Newton iterations — the rule sets the Newton cost (like
+    ``minmod``'s: 148 against 150 total iterations), not the
+    monotonicity. The stencil reads two tangential neighbours on each
+    side of a cell (the fluid registers carry two guard cells and every
+    ghost fill covers both).
 
 .. pp:param:: implicit_mhd.conduction_coulomb_log
     :type: ``float``

@@ -13,27 +13,26 @@ the gate of the cross-term tangential limiter options
 A 2x-hot Gaussian electron spot sits off axis in a strongly magnetized
 poloidal field tilted ~25 degrees at the spot, so the tangential corner
 stencil of the tensor flux carries an O(1) fraction of the parallel flux
-through both face families, at a face conduction number ~50-100 in the
-background and several hundred at the spot peak. Exact anisotropic
+through both face families, at a face conduction number ~30 in the
+background and over a hundred at the spot peak (the deck default; the
+limiter study's stiff row is the override dt = 5e-9, D ~ 70). Exact anisotropic
 diffusion obeys the maximum principle: no cell may leave the initial
 [e_min, e_max]. The centered corner stencil ("none") is non-monotone and
 the minmod / SMART variants are the remedies; this test measures what
 each does.
 
 Gates (on the arm it is run for):
- 1. every step's Newton solve converged (newton.txt), and the total
-    Newton and GMRES work is printed for the convergence table. The
-    symmetric SMART pair ("smart") is the exception: its derivative
-    kinks (slope ratios 1/5 and 5, right on the steep spot front) make
-    the Newton contraction LINEAR (GMRES fully converged, residual down
-    by a factor 2-3 per iteration), so it runs to the iteration cap and
-    stalls at a relative norm of 6e-8 (D ~ 14), 9e-8 (D ~ 28) and 8e-6
-    (D ~ 70) where minmod and smart_upwind meet the solver tolerances;
-    that arm runs with newton.require_convergence = 0 and is gated at
-    1e-4, i.e. the test pins the measured stall level (with a 1000x
-    margin over the CTest dt) and the fact that the stalled solve still
-    conserves energy and stays inside the limited-arm monotonicity
-    ceiling;
+ 1. every step's Newton solve met one of the deck's exit tolerances
+    (newton.txt, absolute 1e-12 or relative 1e-10), and the total Newton
+    and GMRES work is printed for the convergence table. All limited arms
+    contract LINEARLY (GMRES converges to round-off in every iteration;
+    only the C-infinity centered stencil shows the finite-difference
+    Jacobian's quadratic phase): minmod at ~0.2 per iteration,
+    smart_upwind ~0.34, the symmetric SMART pair ~0.5 -- the pair's 3x
+    gain near tangential extrema, not its kinks (a kink-smoothed pair
+    converges identically), so the smart arm is registered with
+    newton.max_iterations = 40 (it needs 16-28 iterations per step at
+    the CTest dt, about twice minmod's) and held to the same gate;
  2. the r-weighted electron energy ledger closes to solver tolerance
     (the tensor flux, tangential term included, is a conservative face
     flux);
@@ -69,11 +68,9 @@ axial_extent = 1.0
 LIMITED_CEILING = 1.0e-2
 # Newton exit criteria of the deck (newton.absolute_tolerance 1e-12,
 # newton.relative_tolerance 1e-10): a converged step met EITHER, with a
-# 2x margin on the printed norms. The symmetric SMART pair is gated on
-# its measured stall level instead (see the docstring).
+# 2x margin on the printed norms.
 ABSOLUTE_TOLERANCE = 1.0e-12
 RELATIVE_TOLERANCE = 1.0e-10
-STALL_CEILING = {"smart": 1.0e-4}
 
 
 def get_data(plotfile):
@@ -123,23 +120,16 @@ print(
     f"worst final relative norm = {relative_norms.max():.3e}"
 )
 assert steps >= 1
-if limiter in STALL_CEILING:
-    assert np.all(relative_norms < STALL_CEILING[limiter]), (
-        limiter,
-        relative_norms.max(),
-        STALL_CEILING[limiter],
-    )
-else:
-    converged = (absolute_norms < 2.0 * ABSOLUTE_TOLERANCE) | (
-        relative_norms < 2.0 * RELATIVE_TOLERANCE
-    )
-    assert np.all(converged), (
-        limiter,
-        "steps not converged:",
-        np.flatnonzero(~converged) + 1,
-        absolute_norms[~converged],
-        relative_norms[~converged],
-    )
+converged = (absolute_norms < 2.0 * ABSOLUTE_TOLERANCE) | (
+    relative_norms < 2.0 * RELATIVE_TOLERANCE
+)
+assert np.all(converged), (
+    limiter,
+    "steps not converged:",
+    np.flatnonzero(~converged) + 1,
+    absolute_norms[~converged],
+    relative_norms[~converged],
+)
 
 # 2. Conservation.
 initial_total = np.sum(initial_energy * r_grid)

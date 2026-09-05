@@ -362,6 +362,29 @@ int main ()
             check(std::abs(residue / slope - 0.5 * width) < 0.02 * width,
                   "smart_slope_smooth extremum residue is not w/2");
         }
+        // The guard of the ratio: r = d_up d_down/(d_up^2 + guard^2) is
+        // capped at d_down/(2 guard), so within a guard of d_up = 0 the
+        // smoothed slope stays below |d_up| where the hard form ramps as
+        // 4 |d_up| (its psi = 4 branch). Dropping the guard^2 term from
+        // the denominator turns this into the hard 4 |d_up| and fails.
+        for (const double guard : {1.0e-6, 1.0e-3, 1.0}) {
+            for (const double fraction : {1.0e-3, 1.0e-2, 0.1, 1.0}) {
+                const double d_up = fraction * guard;
+                const double bounded = theta_implicit_mhd::smart_slope_smooth(
+                    d_up, guard, guard, smart_smooth.reconstruction_kappa);
+                check(std::abs(bounded) <= std::abs(d_up),
+                      "smart_slope_smooth is not guard-regularized near "
+                      "d_up = 0");
+                if (fraction < 0.2) {
+                    // d_down/d_up > 5: the hard form is on its psi = 4
+                    // branch, so the guard's effect is the whole story.
+                    check(std::abs(theta_implicit_mhd::smart_slope(d_up, guard) -
+                                   4.0 * d_up) <= 1.0e-15 * guard,
+                          "hard smart_slope is not 4 d_up on the psi = 4 "
+                          "branch");
+                }
+            }
+        }
         std::printf("smart_slope_smooth(d, d)/d - 1 = %.3e (w^2/12 = %.3e)\n",
                     theta_implicit_mhd::smart_slope_smooth(
                         1.0, 1.0, 1.0e-6, smart_smooth.reconstruction_kappa) -

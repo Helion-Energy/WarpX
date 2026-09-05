@@ -1765,14 +1765,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the plasma-edge electron_energy direction pinning. "smart" is the
     // symmetric SMART pair (smart_pair in _K.H): the centered slope
     // wherever the two one-sided differences are within a factor 5,
-    // three times the smaller one beyond, zero at extrema -- no kink in
-    // smooth flow, where minmod's selection kink sits. "smart_upwind"
+    // three times the smaller one beyond, zero at extrema. Its 3x gain
+    // near tangential extrema (not its kinks: a kink-smoothed pair
+    // behaves identically) costs about twice minmod's Newton iterations
+    // and breaks the exact maximum principle minmod has (measured,
+    // test_rz_theta_implicit_mhd_braginskii_oblique_*). "smart_upwind"
     // is the ADVECTIONALIZED form (smart_upwind_tangential_difference):
     // each cell's half of the face tangential gradient is the difference
     // of two SMART normalized-variable face values reconstructed from
     // that cell's effective upwind side (sign of b_n b_t and of its side
-    // of the face), i.e. the cross term is limited like an upwinded
-    // advective flux.
+    // of the face), i.e. the cross term is differenced like an upwinded
+    // advective flux. Newton work like minmod's; the direction rule sets
+    // that cost, not the monotonicity -- the option does not satisfy a
+    // maximum principle (2.7e-3 undershoot where minmod has 0).
     // Default minmod (2026-08-29 parity audit): the centered corner
     // stencil of the Braginskii cross term is non-monotone where
     // The reference code's FEM form is SPD; at clamp-forced anisotropy it carried a

@@ -2389,8 +2389,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         interior of the linear QUICK branch, so smooth flow is exactly
         second order with NO derivative kink there (the kinks are at
         slope ratios 0, 1/5 and 5, far from the smooth-flow point where
-        minmod's selection kink sits -- the property the matrix-free
-        Newton solve wants); every face state stays inside the interval
+        minmod's selection kink sits; measured, that smoothness buys
+        accuracy rather than solver speed -- hard SMART costs about a
+        third more Newton iterations than the smoothed median on the 1D
+        contact sine, "smart_smooth" 7-11% more at comparable width);
+        every face state stays inside the interval
         of the two adjacent cells (a new-extremum bound of exactly zero
         at the reconstruction level). psi reaches 4, beyond the
         explicit TVD region psi <= 2: SMART is bounded in the
@@ -3445,16 +3448,22 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         L(a, b) = [a psi(b/a) + b psi(a/b)]/2 with psi the SMART limiter
         of Gaskell and Lau (1988): the centered tangential slope wherever
         the two one-sided differences are within a factor 5 of each
-        other, three times the smaller one beyond, zero at extrema -- no
-        derivative kink in smooth flow, where minmod's selection kink
-        sits. "smart_upwind" is the advectionalized cross term: each
-        cell's half of the face tangential gradient is the difference of
-        two SMART normalized-variable face values reconstructed from that
-        cell's effective upwind side (set by the sign of b_n b_t and by
-        which side of the face the cell sits on), so the cross term is
-        limited exactly like an upwinded advective flux. It reads two
-        tangential neighbours on each side (the fluid registers carry
-        two guard cells).
+        other, three times the smaller one beyond, zero at extrema. Its
+        3x gain near tangential extrema (not its kinks: a kink-smoothed
+        pair behaves identically) costs about twice minmod's Newton
+        iterations and breaks the exact maximum principle minmod has
+        (measured on the oblique-field Braginskii test). "smart_upwind"
+        is the advectionalized cross term: each cell's half of the face
+        tangential gradient is the difference of two SMART
+        normalized-variable face values reconstructed from that cell's
+        effective upwind side (set by the sign of b_n b_t and by which
+        side of the face the cell sits on), so the cross term is
+        differenced like an upwinded advective flux. Newton work like
+        minmod's; the direction rule sets that cost, not the
+        monotonicity -- the option does not satisfy a maximum principle
+        (2.7e-3 undershoot of the initial contrast where minmod has 0).
+        It reads two tangential neighbours on each side (the fluid
+        registers carry two guard cells).
 
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
