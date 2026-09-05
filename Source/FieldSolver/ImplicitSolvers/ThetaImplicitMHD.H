@@ -1546,7 +1546,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //     dropped energy is tallied per step (m_wall_friction_energy_dropped)
     //     and printed/written with the shaped-wall ledger. The normal
     //     viscous component at an interface (the absorb image) is not
-    //     friction and is left as it is.
+    //     friction and is left as it is. CENTERING: the kinetic-energy
+    //     identity behind the export is exact at implicit_evolve.theta =
+    //     0.5 for any viscous_theta (the exported work uses the
+    //     theta-stage velocity, the midpoint only there); at theta = 1 the
+    //     fraction k dt/(2 + k dt), k = 2 mu/(rho dn^2), of the friction
+    //     work stays in E_i - KE as heat -- 21-76 % at the production
+    //     wall row -- so drop is not fit for a backward-Euler global
+    //     centering at halo density. Requires dual_energy_viscous_heating
+    //     = stress_work under dual_energy (asserted).
     std::string m_wall_friction_heating = "book";
     amrex::Real m_wall_friction_energy_dropped = 0.0;
     std::string m_wall_ledger_file;

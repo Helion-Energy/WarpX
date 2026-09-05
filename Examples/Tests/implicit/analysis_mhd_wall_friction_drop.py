@@ -39,8 +39,29 @@ Checks:
      book run (3e-4; the two flows differ at the level of the pressure the
      friction heat builds under book).
 
+CENTERING. The identity behind `drop` (E_i loses exactly the kinetic
+energy the wall shear removes) is exact at implicit_evolve.theta = 0.5
+for any viscous_theta; at theta = 1 the fraction k dt/(2 + k dt),
+k = 2 mu/(rho dn^2), of the friction work stays in E_i - KE as heat, and
+this gate does not apply. The optional third argument selects the
+viscous stage of the pair of runs:
+  cn (default)  viscous_theta = theta = 0.5: the stress is formed from
+                the midpoint velocity, the friction deposit is
+                sum_n dt w 2 mu |u_mid|^2/dn^2, and check A is the ratio
+                dU_i/d(E_i - KE) in the wall row;
+  be            viscous_theta = 1 (the production centering, theta still
+                0.5): the stress is formed from u^{n+1} while the pairing
+                (and the export) use the midpoint, so the deposit is the
+                mixed product sum_n dt w 2 mu (u_mid . u^{n+1})/dn^2, and
+                check A is ABSOLUTE -- |d(E_i - KE) - dU_i| below 1e-4 of
+                the friction deposit -- because the interior work flux is
+                formed with the staged face velocity while the register
+                pairs the theta-stage one, an O(dt^2) per-cell mismatch
+                present under book as well (the RZ ledger gate cannot run
+                at this centering either).
+
 Usage:
-    analysis_mhd_wall_friction_drop.py <drop diags dir> <book diags dir>
+    analysis_mhd_wall_friction_drop.py <drop diags dir> <book diags dir> [cn|be]
 """
 
 import sys
@@ -49,6 +70,8 @@ import numpy as np
 import yt
 
 drop_dir, book_dir = sys.argv[1], sys.argv[2]
+stage = sys.argv[3] if len(sys.argv) > 3 else "cn"
+assert stage in ("cn", "be"), f"unknown stage {stage}"
 
 # Deck constants (inputs_test_rz_theta_implicit_mhd_wall_no_slip with the
 # ctest overrides); m_p is the WarpX parser constant (CODATA 2022).
@@ -106,33 +129,54 @@ drop = [load(f"{drop_dir}/diag{step:06d}") for step in range(n_steps + 1)]
 book0, book1 = load(f"{book_dir}/diag000000"), load(f"{book_dir}/diag000003")
 drop0, drop1 = drop[0], drop[-1]
 
-# A. cell-wise identity under drop in the wall row (z-mean).
 dU_drop = (drop1["implicit_mhd_ion_internal_energy"] - drop0["implicit_mhd_ion_internal_energy"])
 dI_drop = internal(drop1) - internal(drop0)
-ratio = dU_drop[wall_row].mean() / dI_drop[wall_row].mean()
-# Under drop the wall row's remaining heating is ~1e-3 of the book value
-# (the interior shear only), so the O(dt^2) PdV work of the developing
-# radial flow -- 1.7e-7 of the book heating in this row -- is ~1e-3 of
-# what is left (measured 8.9e-4); gate at 3e-3.
-assert abs(ratio - 1.0) < 3.0e-3, f"drop: wall-row dU_i/d(E_i-KE) = {ratio:.6f}"
-print(f"[drop] wall row dU_i/d(E_i-KE) = {ratio:.7f} (identity holds without the friction)")
+dU_book = book1["implicit_mhd_ion_internal_energy"] - book0["implicit_mhd_ion_internal_energy"]
 
-# B. the friction deposit, from the drop run's own midpoint velocities:
-# per step, w 2 mu |u_t|^2/dn^2 dt with u_t the tangential (theta, z)
-# velocity of the wall row at the theta = 1/2 stage.
+# B (computed first: check A's absolute form needs it). The friction
+# deposit from the drop run's own velocities: per step, w 2 mu
+# (u_pair . u_stress)/dn^2 dt on the tangential (theta, z) components of
+# the wall row, with u_pair the midpoint (the theta = 1/2 stage the export
+# and the register pair with) and u_stress the velocity the stress is
+# formed from: the midpoint at viscous_theta = theta (cn), u^{n+1} at
+# viscous_theta = 1 (be).
 friction = np.zeros(nz)
 for n in range(n_steps):
     f_a, f_b = drop[n], drop[n + 1]
     rho = 0.5 * (f_a["implicit_mhd_mass_density"][wall_row] + f_b["implicit_mhd_mass_density"][wall_row])
-    u_t2 = 0.0
+    product = 0.0
     for name in ("implicit_mhd_momentum_t", "implicit_mhd_momentum_z"):
-        u_mid = 0.5 * (
-            f_a[name][wall_row] / f_a["implicit_mhd_mass_density"][wall_row]
-            + f_b[name][wall_row] / f_b["implicit_mhd_mass_density"][wall_row]
-        )
-        u_t2 = u_t2 + u_mid**2
-    friction += dt * weight_wall * 2.0 * rho * nu * u_t2 / dr**2
-dU_book = book1["implicit_mhd_ion_internal_energy"] - book0["implicit_mhd_ion_internal_energy"]
+        u_a = f_a[name][wall_row] / f_a["implicit_mhd_mass_density"][wall_row]
+        u_b = f_b[name][wall_row] / f_b["implicit_mhd_mass_density"][wall_row]
+        u_mid = 0.5 * (u_a + u_b)
+        u_stress = u_mid if stage == "cn" else u_b
+        product = product + u_mid * u_stress
+    friction += dt * weight_wall * 2.0 * rho * nu * product / dr**2
+
+# A. cell-wise identity under drop in the wall row (z-mean).
+ratio = dU_drop[wall_row].mean() / dI_drop[wall_row].mean()
+if stage == "cn":
+    # Under drop the wall row's remaining heating is ~1e-3 of the book
+    # value (the interior shear only), so the O(dt^2) PdV work of the
+    # developing radial flow -- 1.7e-7 of the book heating in this row --
+    # is ~1e-3 of what is left (measured 8.9e-4); gate at 3e-3.
+    assert abs(ratio - 1.0) < 3.0e-3, f"drop: wall-row dU_i/d(E_i-KE) = {ratio:.6f}"
+    print(f"[drop] wall row dU_i/d(E_i-KE) = {ratio:.7f} (identity holds without the friction)")
+else:
+    # viscous_theta = 1: the interior work flux uses the staged face
+    # velocity while the register pairs the theta-stage one, an O(dt^2)
+    # per-cell mismatch present under book too, so the ratio is not the
+    # right check once drop has removed 99.9 % of the row's heating;
+    # bound the mismatch absolutely against the friction deposit
+    # (measured 1.05e-5).
+    excess = abs(dI_drop[wall_row].mean() - dU_drop[wall_row].mean()) / friction.mean()
+    assert excess < 1.0e-4, (
+        f"drop (be): |d(E_i-KE) - dU_i| in the wall row = {excess:.3e} of the friction deposit"
+    )
+    print(
+        f"[drop] wall row |d(E_i-KE) - dU_i| = {excess:.2e} of the friction deposit "
+        f"(ratio {ratio:.6f}; the friction is not in E_i - KE either)"
+    )
 removed = dU_book[wall_row] - dU_drop[wall_row]
 worst = np.max(np.abs(removed / friction - 1.0))
 assert worst < 1.0e-3, (

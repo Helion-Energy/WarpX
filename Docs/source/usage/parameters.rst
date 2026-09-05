@@ -5893,6 +5893,19 @@ Jacobian probes.
     friction and is left as it is; the z-end walls carry no tangential
     (no-slip) stress in this solver, so nothing is dropped there.
 
+    CENTERING. The kinetic-energy identity behind ``drop`` is exact at
+    ``implicit_evolve.theta = 0.5`` for any
+    :pp:param:`implicit_mhd.viscous_theta` (the exported work uses the
+    theta-stage velocity, which is the midpoint only there); at
+    ``theta = 1`` the fraction :math:`k\,\Delta t/(2 + k\,\Delta t)`,
+    :math:`k = 2\mu/(\rho\,\Delta n^2)`, of the friction work stays in
+    :math:`E_i - K` as heat (21-76 % at the production wall row), so
+    ``drop`` is not fit for a backward-Euler global centering at halo
+    density. Under ``ion_closure = dual_energy`` it requires
+    :pp:param:`implicit_mhd.dual_energy_viscous_heating` ``= stress_work``
+    (the legacy pointwise :math:`U_i` source would keep booking the wall
+    friction into :math:`U_i` while :math:`E_i` exports it; asserted).
+
 .. pp:param:: implicit_mhd.thermal_diffusivity_ion
     :type: ``float``
     :default: ``0``

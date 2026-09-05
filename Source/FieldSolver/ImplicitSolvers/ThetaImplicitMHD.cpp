@@ -1918,6 +1918,19 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "implicit_mhd.wall_friction_heating = drop acts on the no-slip "
             "wall faces and requires implicit_mhd.wall_no_slip = 1 "
             "(otherwise it would be a silent no-op)");
+        // The drop only reaches U_i through the dissipation register; the
+        // legacy pointwise U_i source differences the frozen masked
+        // velocity and would keep heating U_i while E_i exports the same
+        // energy (measured: wall-row dU_i/d(E_i - KE) = 115 with the pair).
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_wall_friction_heating == "book" ||
+                m_ion_closure != "dual_energy" ||
+                m_dual_energy_viscous_heating == "stress_work",
+            "implicit_mhd.wall_friction_heating = drop with "
+            "implicit_mhd.ion_closure = dual_energy requires "
+            "implicit_mhd.dual_energy_viscous_heating = stress_work: the "
+            "legacy pointwise U_i heating would keep booking the wall "
+            "friction into U_i while E_i exports it");
         if (m_wall_mask.IsActive()) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_use_recast,
                 "implicit_mhd.wall_model = pec/pec_response/dielectric "
