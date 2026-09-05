@@ -70,9 +70,18 @@ Two gates and one measurement:
    reconstruction is applied to the face STATES, so the flux stays
    single-valued and the divergence still telescopes).
 
-Usage: analysis_mhd_reconstruction_order.py <initial> <final>
-       (this test is the median n = 128 arm; the other five arms are read
-        from ../test_1d_theta_implicit_mhd_reconstruction_order_*/diags)
+Usage: analysis_mhd_reconstruction_order.py <initial> <final> [mode]
+       (this test is the <mode> n = 128 arm, mode = median by default; the
+        donor-cell arms and the two coarser <mode> arms are read from
+        ../test_1d_theta_implicit_mhd_reconstruction_order_*/diags). The
+        SMART arms (mode = smart, smart_smooth) are held to the same
+        second-order and separation gates as the median. Measured:
+        median orders [1.847, 1.918], smart and smart_smooth [2.010,
+        2.103] with L1/A = 1.69e-4 at n = 128 against the median's
+        7.30e-4 and D_eff = 0.041 m^2/s against 2.25 -- SMART's psi(1) = 1
+        sits in the interior of its linear QUICK branch and its
+        face values are third-order wherever the CBC bound allows, so it
+        clips less at the sine's extrema than minmod does.
 """
 
 import os
@@ -101,6 +110,8 @@ WAVENUMBER = 2.0 * np.pi / DOMAIN_LENGTH
 
 TEST_STEM = "test_1d_theta_implicit_mhd_reconstruction_order"
 PLOTFILE = "diags/diag000100"
+# The limited mode this test IS (its n = 128 arm runs in this directory).
+LIMITED_MODE = sys.argv[3] if len(sys.argv) > 3 else "median"
 
 
 def get_density(plotfile):
@@ -115,7 +126,7 @@ def get_density(plotfile):
 
 
 def arm_plotfile(mode, cells):
-    if mode == "median" and cells == 128:
+    if mode == LIMITED_MODE and cells == 128:
         return PLOTFILE
     return os.path.join("..", f"{TEST_STEM}_{mode}_n{cells}", PLOTFILE)
 
@@ -157,7 +168,7 @@ fast_speed = max(sound_speed, alfven_speed)
 
 cell_counts = [32, 64, 128]
 results = {}
-for mode in ("none", "median"):
+for mode in ("none", LIMITED_MODE):
     errors = []
     diffusivities = []
     for cells in cell_counts:
@@ -180,7 +191,7 @@ for mode in ("none", "median"):
     }
 
 print(f"fast speed c_f = {fast_speed:.4e} m/s, |u| = {VELOCITY:.4e} m/s")
-for mode in ("none", "median"):
+for mode in ("none", LIMITED_MODE):
     entry = results[mode]
     print(f"--- fluid_reconstruction = {mode}")
     for index, cells in enumerate(cell_counts):
@@ -197,12 +208,12 @@ for mode in ("none", "median"):
     print(f"    overall order    {entry['overall']:.3f}")
 
 off = results["none"]
-on = results["median"]
+on = results[LIMITED_MODE]
 
 # 1. ORDER.
 assert off["overall"] <= 1.3, f"donor cell is not first order: {off['overall']}"
 assert all(order <= 1.3 for order in off["orders"]), off["orders"]
-assert on["overall"] >= 1.5, f"median limiter is not second order: {on['overall']}"
+assert on["overall"] >= 1.5, f"{LIMITED_MODE} limiter is not second order: {on['overall']}"
 assert all(order >= 1.5 for order in on["orders"]), on["orders"]
 # The separation is the point: at the finest grid the limited scheme must
 # be a large factor more accurate than donor cell.

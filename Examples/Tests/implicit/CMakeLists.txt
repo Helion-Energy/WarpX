@@ -1229,6 +1229,34 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_mirror_full  # dependency
 )
 
+# The same mirror-parity gate for the UPWIND-BIASED SMART reconstruction:
+# its slope is not symmetric in the two one-sided differences, so the
+# covariance rests on reconstruct_face_pair feeding the right cell's
+# state in donor order (right - L(far_right - right, right - left)/2).
+# A limiter fed in the wrong order fails this by O(1) on every z face.
+# The smoothed form holds the standard 1e-11 budget (measured 7.1e-15,
+# like median and vanalbada); the hard form is bitwise covariant at the
+# reconstruction level but its C^0 kinks let the two halves' Newton
+# iterates separate at 1.8e-11, so it is held to 1e-10.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_full_reconstruction_smart_smooth  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_full implicit_mhd.fluid_reconstruction=smart_smooth"  # inputs
+    "analysis_mhd_mirror_full.py diags/diag000000 diags/diag000032"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_full_reconstruction  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_full_reconstruction_smart  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_full implicit_mhd.fluid_reconstruction=smart"  # inputs
+    "analysis_mhd_mirror_full.py diags/diag000000 diags/diag000032 1.0e-10"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_full_reconstruction_smart_smooth  # dependency
+)
+
 # Green's-function open r_hi boundary through the implicit residual: the
 # same outflow physics with the uniform Bz supplied by the split external
 # vector potential; the ghost fill (a linear map of the interior J_theta)
@@ -1805,6 +1833,55 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+
+# Braginskii cross term LIVE (implicit_mhd.braginskii_tangential_limiter):
+# the spreading plasma with the spot off axis and the field tilted ~25
+# degrees at the spot by an external vector potential, at a face
+# conduction number ~30 (over a hundred at the 2x-hot peak). Exact
+# anisotropic diffusion obeys the maximum principle; each arm is gated on
+# Newton convergence at every step, conservation, the maximum principle
+# (limited arms) and anisotropy, and prints its Newton/GMRES work for the
+# limiter convergence table. minmod is the production default (converges
+# in 11-15 Newton/step and holds the maximum principle exactly);
+# smart_upwind is the advectionalized SMART form (converges like minmod,
+# does not hold the maximum principle exactly); smart is the symmetric
+# SMART pair, whose derivative kinks on the steep spot front make the
+# Newton contraction linear -- it runs to the iteration cap at every
+# conduction number tried, so its arm runs with require_convergence off
+# and the analysis pins the measured stall level instead.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=minmod"  # inputs
+    "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 minmod"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_smart  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=smart newton.require_convergence=0 newton.max_frozen_steps=1000"  # inputs
+    "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 smart"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_smart_upwind  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=smart_upwind"  # inputs
+    "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 smart_upwind"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
+)
+# The symmetric-pair arm runs 20 Newton iterations on every one of its 10
+# steps by construction (that is the behaviour it pins), so it is the
+# long one of the family (~2.5 min alone on two ranks): excluded from the
+# quick set via the repo's documented `ctest -LE slow`, like the
+# central_dissipation family.
+label_warpx_test(test_rz_theta_implicit_mhd_braginskii_oblique_smart slow)
 
 # Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
 # _off run first (unpreconditioned), then the block run compares its
@@ -3097,6 +3174,67 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_reconstruction_order_median_n64  # dependency
 )
 
+# SMART (Gaskell & Lau 1988) arms of the same family: the same
+# second-order and separation gates against the donor-cell arms above
+# (analysis argument = the limited mode). SMART's psi(1) = 1 sits in the
+# interior of its linear QUICK branch, so it clips only at the sine's
+# extrema, exactly like minmod, and must show the same order; the
+# smoothed twin's w^2/12 slope defect is invisible at this resolution.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 implicit_mhd.fluid_reconstruction=smart"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 implicit_mhd.fluid_reconstruction=smart"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=128 implicit_mhd.fluid_reconstruction=smart"  # inputs
+    "analysis_mhd_reconstruction_order.py diags/diag000000 diags/diag000100 smart"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_n64  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_smooth_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 implicit_mhd.fluid_reconstruction=smart_smooth"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_smart  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_smooth_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 implicit_mhd.fluid_reconstruction=smart_smooth"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_smooth_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_smooth  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=128 implicit_mhd.fluid_reconstruction=smart_smooth"  # inputs
+    "analysis_mhd_reconstruction_order.py diags/diag000000 diags/diag000100 smart_smooth"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_smart_smooth_n64  # dependency
+)
+
 # TVD / NO NEW EXTREMA. A 4:1 square contact advected 0.4 domain lengths
 # with hlld. The median limiter must hold the invariant interval while
 # the UNLIMITED twin (the same reconstruction with the limiter removed)
@@ -3130,6 +3268,28 @@ add_warpx_test(
     OFF  # checksum
     test_1d_theta_implicit_mhd_reconstruction_tvd_vanalbada  # dependency
 )
+# SMART arms (Gaskell & Lau 1988): the hard form's face states never
+# leave the adjacent-cell interval, the smoothed form leaves 0.15 kappa of
+# the local difference at an exact extremum; both are gated by the same
+# ceiling as median/vanalbada in the analysis below.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd_smart  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=smart"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_tvd_unlimited  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd_smart_smooth  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=smart_smooth"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_tvd_smart  # dependency
+)
 add_warpx_test(
     test_1d_theta_implicit_mhd_reconstruction_tvd  # name
     1  # dims
@@ -3137,7 +3297,7 @@ add_warpx_test(
     "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=median"  # inputs
     "analysis_mhd_reconstruction_tvd.py diags/diag000000 diags/diag000120"  # analysis
     OFF  # checksum
-    test_1d_theta_implicit_mhd_reconstruction_tvd_unlimited  # dependency
+    test_1d_theta_implicit_mhd_reconstruction_tvd_smart_smooth  # dependency
 )
 
 # ---------------------------------------------------------------------

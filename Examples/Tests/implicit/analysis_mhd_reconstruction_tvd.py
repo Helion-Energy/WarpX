@@ -25,14 +25,34 @@ extremum manufactured by the scheme. Four arms of the same deck:
   unlimited  the plain centered slope, i.e. the same reconstruction with
              the limiter removed. Must ring; this is what makes the
              limited results non-vacuous.
+  smart      Gaskell & Lau's SMART, hard form: every face state stays
+             inside the adjacent-cell interval (psi <= 2 r), so its
+             new-extremum bound at the reconstruction level is exactly
+             zero; what the time-evolved solution shows is the HLLD
+             fan's blending of the two bounded states.
+  smart_smooth  SMART with its kinks rounded in ratio space (width
+             reconstruction_kappa); 0.15 kappa of the local difference
+             at an exact extremum.
 
 Measured (120 steps, 128 cells), new extrema as a fraction of
 rho_high - rho_low, and the transition-band width in cells:
 
-    none        0.0e+00    46 cells
-    median      3.3e-03    23 cells
-    vanalbada   5.0e-03    20 cells
-    unlimited   3.4e-01    17 cells
+    none          0.0e+00    46 cells
+    median        3.3e-03    23 cells
+    vanalbada     5.0e-03    20 cells
+    unlimited     3.4e-01    17 cells
+    smart         1.8e-03    11 cells
+    smart_smooth  1.8e-03    11 cells
+
+SMART holds the invariant interval TIGHTER than either older limiter
+(half the median's excursion, a third of van Albada's) while resolving
+the front in 11 cells -- twice as sharp as the median and sharper than
+the unlimited centered slope, because its face values are the
+third-order QUICK interpolant wherever the CBC bound allows. Its
+residual excursion is the HLLD fan's blending of two face states that
+are each inside the adjacent-cell interval, not a reconstruction
+overshoot (the unit test measures exactly zero at the reconstruction
+level).
 
 The unlimited reconstruction throws a THIRD of the contact height into
 overshoot; both limiters hold it under half a percent while resolving
@@ -123,8 +143,9 @@ span = DENSITY_HIGH - DENSITY_LOW
 # of the largest stencil difference, which at a plateau edge IS the jump.
 RECONSTRUCTION_KAPPA = 0.01
 MEDIAN_BOUND = RECONSTRUCTION_KAPPA / 4.0
+LIMITED_MODES = ("median", "vanalbada", "smart", "smart_smooth")
 arms = {}
-for mode in ("none", "median", "vanalbada", "unlimited"):
+for mode in ("none", "median", "vanalbada", "unlimited", "smart", "smart_smooth"):
     fields = final_median if mode == "median" else get_fields(arm_plotfile(mode))
     density = fields["density"]
     overshoot = max(0.0, float(np.max(density)) - DENSITY_HIGH)
@@ -150,7 +171,7 @@ for mode in ("none", "median", "vanalbada", "unlimited"):
 
 for mode, entry in arms.items():
     print(
-        f"fluid_reconstruction = {mode:10s}"
+        f"fluid_reconstruction = {mode:12s}"
         f"  new extrema = {entry['extremum']:.3e} of the jump"
         f"  transition cells = {entry['interior']:3d}"
         f"  min rho = {entry['min_density']:.6e}"
@@ -177,7 +198,7 @@ for mode, entry in arms.items():
 # real margin, not a fitted threshold -- a limiter that had actually
 # stopped limiting lands at the unlimited arm's 3.4e-1.
 LIMITED_CEILING = 10.0 * MEDIAN_BOUND
-for mode in ("median", "vanalbada"):
+for mode in LIMITED_MODES:
     assert arms[mode]["extremum"] < LIMITED_CEILING, (
         mode,
         arms[mode]["extremum"],
@@ -192,13 +213,13 @@ assert arms["none"]["extremum"] < 1.0e-9, arms["none"]["extremum"]
 # rings). Measured 3.4e-1 of the jump -- a third of the contact height
 # appearing as overshoot -- against 5.0e-3 for van Albada.
 assert arms["unlimited"]["extremum"] > 5.0e-2, arms["unlimited"]["extremum"]
-for mode in ("median", "vanalbada"):
+for mode in LIMITED_MODES:
     assert arms["unlimited"]["extremum"] > 10.0 * max(
         arms[mode]["extremum"], 1.0e-12
     ), (mode, arms["unlimited"]["extremum"], arms[mode]["extremum"])
 
 # 3. And the limiters buy sharpness over donor cell.
-for mode in ("median", "vanalbada"):
+for mode in LIMITED_MODES:
     assert arms[mode]["interior"] < arms["none"]["interior"], (
         mode,
         arms[mode]["interior"],
