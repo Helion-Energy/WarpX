@@ -952,6 +952,59 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_conduction_pc_off  # dependency
 )
 
+# Matrix-free Jacobian probe at a plasma-vacuum edge (newton.jfnk_epsilon,
+# newton.jfnk_epsilon_mode): a hot core next to a tenuous cold edge (300x
+# density, 30x temperature) under Braginskii parallel electron conduction,
+# ion fluid frozen. The edge state is ~1e-4 of the core in the solver
+# norm while the Newton corrections live at the heat front in the edge,
+# so the global probe eps = jfnk_epsilon ||U||/||dU|| is a large relative
+# perturbation exactly where chi ~ Te^{5/2} is most nonlinear. Four
+# twins: the historical global 1e-6 probe, global 1e-8, the component-
+# scaled probe (D = |U| + floor), and a component run with a flat floor
+# that must reproduce the global counts exactly. The analysis (on the
+# component run) compares the Newton work and checks all four land on
+# the same state. Measured at landing (see analysis gates): recorded in
+# analysis_mhd_probe_edge.py.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_probe_edge  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge_eps8  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_probe_edge newton.jfnk_epsilon=1.0e-8"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_probe_edge  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge_flat  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_probe_edge newton.jfnk_epsilon_mode=component newton.jfnk_component_floor=1.0e12"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_probe_edge_eps8  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge_component  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_probe_edge newton.jfnk_epsilon_mode=component"  # inputs
+    "analysis_mhd_probe_edge.py diags/diag000016 ../test_1d_theta_implicit_mhd_probe_edge ../test_1d_theta_implicit_mhd_probe_edge_eps8 ../test_1d_theta_implicit_mhd_probe_edge_flat"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_probe_edge_flat  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the

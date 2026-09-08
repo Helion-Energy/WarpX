@@ -1,0 +1,168 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Matrix-free Jacobian probe at a plasma-vacuum EDGE (newton.jfnk_epsilon,
+# newton.jfnk_epsilon_mode). A hot core (n0, Te0) sits next to a tenuous,
+# cold edge (n0/300, Te0/30) under Braginskii electron conduction along
+# a uniform B_z (the parallel channel, chi ~ Te^{5/2}/n), ion fluid
+# frozen: the electron energy equation alone, with its T^{5/2}
+# nonlinearity, across a 300x density step. The edge state is ~1e-4 of
+# the core in the solver norm (300x density, 30x temperature), while the
+# Newton corrections concentrate at the heat front in the edge. The
+# global probe eps = jfnk_epsilon ||U||/||dU|| is sized by the core-
+# dominated norm, so at the front cells it is a ~1e2-1e3 times larger
+# RELATIVE perturbation than jfnk_epsilon and the difference quotient
+# of chi(T) is a secant across the nonlinearity rather than its
+# derivative: Newton loses its quadratic rate. The CTest twins of this
+# deck record the Newton iteration counts for the historical global
+# probe (jfnk_epsilon 1e-6, this file), the global probe at 1e-8, and
+# the component-scaled probe (newton.jfnk_epsilon_mode = component),
+# plus a component run with a flat floor that must reproduce the global
+# counts exactly (implementation consistency).
+my_constants.n0 = 1.0e19
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 30.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * Pe0)
+my_constants.nz = 128
+my_constants.Lz = 1.0
+my_constants.dz = Lz/nz
+# the edge: 300x below the core in density, 30x colder
+my_constants.step = 300.0
+my_constants.Tstep = 30.0
+my_constants.z1 = 0.3*Lz
+my_constants.z2 = 0.7*Lz
+# ~1.3-cell transition (the production edge steps tenfold per cell); the
+# core shape 0.5*(tanh((z-z1)/w) - tanh((z-z2)/w)) is written out in the
+# profiles below (the parser has no user functions)
+my_constants.w = 0.01
+# Braginskii parallel electron diffusivity chi = kappa_par/(n kB) ~
+# 3.16 kB Te tau_e/m_e ~ 6.05e6 m^2/s at (10 eV, 1e18 m^-3, lnLambda 10),
+# scaling Te^{5/2}/n: 9.4e6 (core), 5.7e6 (cold edge) and 2.8e9 (edge
+# heated to Te0). The conductive face flux is set by the smaller
+# conductivity kappa = n kB chi of the two sides, so the heat wave into
+# the cold tenuous edge is a sharp nonlinear front whose speed grows
+# with the temperature it leaves behind. dt sets the grid diffusion
+# number to 1 in the core, 0.06 in the cold edge and 300 once the edge
+# is heated: the front crosses ~45 of the 70 edge cells in 16 steps
+# (edge specific energy up 20x) and every step is a stiff, strongly
+# nonlinear solve. Measured (16 steps, rtol 1e-10): the global 1e-6
+# probe needs 7-8 Newton iterations per step, the global 1e-8 and the
+# component probes 5-7 (totals 120 vs 95 vs 94); at a tenth of this dt
+# all probes need 3 and the difference vanishes.
+my_constants.chi_hot_edge = 2.8e9
+my_constants.dt = 300.0*dz*dz/chi_hot_edge
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 16
+amr.n_cell = nz
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+# tight: the count of iterations to a deep tolerance measures the
+# convergence RATE, which is what the probe error degrades (the first
+# iterations are alike for every probe)
+newton.absolute_tolerance = 1.0e-13
+newton.relative_tolerance = 1.0e-10
+# record, do not abort: the twins are compared on their iteration counts
+newton.max_iterations = 40
+newton.require_convergence = false
+newton.diagnostic_file = diags/newton.txt
+# the probe under test (the twins override these on the command line)
+newton.jfnk_epsilon = 1.0e-6
+newton.jfnk_epsilon_mode = global
+
+# tight Krylov tolerance so the Newton counts measure the Jacobian
+# probe, not the inexactness of the linear solves
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 500
+gmres.restart_length = 100
+
+# the production block preconditioner with its conduction block
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.field_iterations = 2
+pc_mhd_block.fluid_iterations = 2
+pc_mhd_block.conduction_block = 1
+pc_mhd_block.conduction_threshold = 1.0
+pc_mhd_block.agglomeration = true
+pc_mhd_block.consolidation = true
+pc_mhd_block.max_coarsening_level = 30
+pc_mhd_block.verbose = 0
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * Pe0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+# inert bounds: the raw Braginskii coefficient must pass through
+implicit_mhd.conduction_chi_min = 1.0
+implicit_mhd.conduction_chi_max = 1.0e15
+implicit_mhd.mass_density(x,y,z) = rho0*(1.0/step + (1.0 - 1.0/step)*0.5*(tanh((z-z1)/w) - tanh((z-z2)/w)))
+implicit_mhd.electron_pressure(x,y,z) = n0*(1.0/step + (1.0 - 1.0/step)*0.5*(tanh((z-z1)/w) - tanh((z-z2)/w))) * q_e*Te0*(1.0/Tstep + (1.0 - 1.0/Tstep)*0.5*(tanh((z-z1)/w) - tanh((z-z2)/w)))
+
+# uniform axial field: the parallel channel runs along z; u = 0, J = 0,
+# eta = 0 keep the electromagnetic subsystem quiescent
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 16
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0
