@@ -1915,6 +1915,16 @@ class MHDBlockPreconditioner(PreconditionerBase):
         linearization (implicit_mhd.conduction_pc_cross_terms, required) as
         one defect-correction pass after the conduction block's V-cycle
         solve (default off; RZ only).
+    conduction_solver: {"mlmg", "direct", "banded"}, optional
+        Inner solver of the conduction block: the fixed MLMG V-cycles
+        (default), or the exact inverse of the frozen conduction rows by
+        cuDSS ("direct", CUDA builds with cuDSS) or by the portable
+        block-banded LU along z ("banded", single rank)
+
+    conduction_validate_assembly: bool, optional
+        Check the assembled conduction rows against the MLMG operator's
+        own application to roundoff at every preconditioner update
+        (diagnostic; costly)
 
     resistive_threshold: float, optional
         Grid-scale resistive diffusion number below which the resistive
@@ -1956,6 +1966,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         conduction_threshold=None,
         conduction_density_weight=None,
         conduction_cross_terms=None,
+        conduction_solver=None,
+        conduction_validate_assembly=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -1977,6 +1989,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.conduction_threshold = conduction_threshold
         self.conduction_density_weight = conduction_density_weight
         self.conduction_cross_terms = conduction_cross_terms
+        self.conduction_solver = conduction_solver
+        self.conduction_validate_assembly = conduction_validate_assembly
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -2005,6 +2019,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.conduction_threshold = self.conduction_threshold
         pc_mhd_block.conduction_density_weight = self.conduction_density_weight
         pc_mhd_block.conduction_cross_terms = self.conduction_cross_terms
+        pc_mhd_block.conduction_solver = self.conduction_solver
+        pc_mhd_block.conduction_validate_assembly = self.conduction_validate_assembly
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):

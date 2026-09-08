@@ -952,6 +952,25 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_conduction_pc_off  # dependency
 )
 
+# Exact inverse of the conduction block (pc_mhd_block.conduction_solver =
+# banded: the portable block-banded LU of the SAME frozen rows the MLMG
+# block applies; direct is the cuDSS twin, GPU builds only) on the same
+# deck, with the assembled rows checked against MLMG::apply of the stacked
+# operator to roundoff at every update (conduction_validate_assembly).
+# Gates against the MLMG-block run: same converged state, no more Newton
+# iterations, and a strict drop of the total GMRES count (an exact block
+# inverse turns the energy rows of the preconditioned Jacobian into the
+# identity at frozen coefficients).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc_banded  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_solver=banded pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000010 ../test_1d_theta_implicit_mhd_conduction_pc/diags/diag000010 10 0.95 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the
@@ -1976,6 +1995,22 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The minmod arm with the EXACT inverse of the conduction block
+# (pc_mhd_block.conduction_solver = banded) in place of its two point-
+# smoothed V-cycles: the oblique-field deck is where the MLMG block loses
+# (per-direction anisotropy 6e7 plus a live cross term the assembled
+# 5-point operator does not carry), so this pair measures how much of the
+# Krylov work the exact normal-anisotropy inverse recovers. Single rank.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_pc_banded  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.braginskii_tangential_limiter=minmod pc_mhd_block.conduction_solver=banded pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000010 ../test_rz_theta_implicit_mhd_braginskii_oblique_minmod/diags/diag000010 10 1.05 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
+)
+
 # Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
 # _off run first (unpreconditioned), then the block run compares its
 # converged state and Krylov work against it (two ranks, anisotropic).
@@ -1999,6 +2034,34 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_conduction_pc_off  # dependency
 )
 
+# Exact conduction inverse, RZ twin (cylindrical assembly: r-weighted face
+# coefficients, the r = 0 regularity face, per-direction anisotropy
+# chi_z/chi_r ~ 6e7), single rank (the banded elimination is sequential
+# along z), against the two-rank MLMG-block run.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_pc_banded  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_solver=banded pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004 4 0.5 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+# The assembly check alone on the MLMG-block run over two ranks: exercises
+# the multi-rank host gather of the assembled rows against the MLMG
+# operator (the solver aborts on a roundoff mismatch); the solve itself is
+# the MLMG block, so the counts must match the plain run's.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_pc_validate  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004 4 1.0 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
 # Conduction block under the dual_energy ion closure: the exact rank-one
 # register-pair inverse. The _off run first, then the block run compares.
 add_warpx_test(
@@ -2019,6 +2082,20 @@ add_warpx_test(
     "analysis_mhd_conduction_pc_dual.py diags/diag000008 ../test_1d_theta_implicit_mhd_conduction_pc_dual_off/diags/diag000008"  # analysis
     OFF  # checksum
     test_1d_theta_implicit_mhd_conduction_pc_dual_off  # dependency
+)
+
+# Exact conduction inverse under the dual_energy closure: the rank-one
+# register pair composes around the exact inverse of the blended
+# right-hand side exactly as around the MLMG one (the internal register
+# leaves the assembled channel set when the pair is active).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc_dual_banded  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc_dual pc_mhd_block.conduction_solver=banded pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000008 ../test_1d_theta_implicit_mhd_conduction_pc_dual/diags/diag000008 8 1.0 implicit_mhd_ion_energy implicit_mhd_ion_internal_energy implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc_dual  # dependency
 )
 
 add_warpx_test(
@@ -3211,6 +3288,21 @@ add_warpx_test(
     "analysis_mhd_conduction_pc_zwall.py diags/diag000004 ../test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_off/diags/diag000004"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_off  # dependency
+)
+
+# Exact conduction inverse with the conductive z-end exchange: the
+# Dirichlet end faces (AMReX's three-point ghost extrapolation through the
+# zero face value) are folded into the assembled rows and checked against
+# the MLMG operator; the shaped-wall/z-end remainder rows compose after
+# the exact inverse as after the MLMG one.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_banded  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction my_constants.dt=100.0*dz^2/chi_op max_step=4 jacobian.pc_type=pc_mhd_block implicit_mhd.evolve_ion_fluid=false implicit_mhd.ion_closure=barotropic implicit_mhd.reference_ion_pressure=0.0 gmres.max_iterations=3000 gmres.restart_length=300 newton.max_iterations=40 diag1.intervals=4 pc_mhd_block.conduction_block=1 pc_mhd_block.conduction_solver=banded pc_mhd_block.conduction_validate_assembly=1"  # inputs
+    "analysis_mhd_conduction_pc_exact.py diags/diag000004 ../test_rz_theta_implicit_mhd_z_wall_conduction_pc_block/diags/diag000004 4 0.15 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_z_wall_conduction_pc_block  # dependency
 )
 
 # PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 2/2 --

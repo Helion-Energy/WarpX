@@ -8,6 +8,9 @@
 #define MHD_BLOCK_PC_H_
 
 #include "Fields.H"
+#include "MHDConductionBanded.H"
+#include "MHDConductionDirect.H"
+#include "MHDConductionStencil.H"
 #include "MHDResistiveBanded.H"
 #include "MHDResistiveDirect.H"
 #include "MHDResistiveStencil.H"
@@ -31,6 +34,7 @@
 #include <AMReX_MLMG.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_ParReduce.H>
 #include <AMReX_Vector.H>
 
 #include <cmath>
@@ -257,6 +261,10 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         void ApplyResistiveBlock (T& solution);
         void ApplyResistiveCurlCurl ();
         void ValidateResistiveAssembly ();
+        void UpdateConductionExactInverse ();
+        void ValidateConductionAssembly ();
+        void ValidateConductionSolve ();
+        void ApplyConductionExactInverse ();
 
         [[nodiscard]] bool
         IsDefined () const override
@@ -404,6 +412,71 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // weight's m_conduction_density_frozen.
         std::unique_ptr<amrex::MultiFab> m_conduction_blend_frozen;
         std::unique_ptr<amrex::MultiFab> m_pair_blended_rhs;
+        // Inner solver of the conduction block
+        // (pc_mhd_block.conduction_solver). "mlmg" (the default) is the
+        // fixed two-V-cycle MLMG application above, a point-smoothed
+        // full-coarsening multigrid that is known to degrade for
+        // per-direction anisotropy above ~1e2 -- the regime of the
+        // Braginskii wall corner at the reference conduction clamp
+        // (chi_par/chi_perp = 1e4, conduction number 57 in the bulk), where
+        // the production formation arm spends 20-30 Newton iterations at
+        // 80-150 GMRES per solve on a step by 0.85 us against ~30 per solve
+        // on smooth states. (At the 970 clamp the conduction number is 0.06
+        // and the block never engages: nothing here touches that regime.)
+        // "direct" and "banded" instead invert the energy channels of the
+        // frozen stacked Helmholtz EXACTLY, the way
+        // the resistive block is inverted: the rows are emitted from the
+        // SAME cell/face coefficients the MLMG operator applies
+        // (MHDConductionStencil.H, boundaries eliminated as AMReX's
+        // MLABecLaplacian does) and factorized once per preconditioner
+        // update -- "direct" by NVIDIA cuDSS (CUDA builds configured with
+        // WarpX_CUDSS=ON; device-resident assembly on single-rank runs, a
+        // host gather on the I/O rank otherwise), "banded" by the
+        // block-banded LU along z with blocks dense over the radial line
+        // (per channel, double precision, single-rank; the portable exact
+        // inverse and the CI path). Every application is then a single
+        // forward/backward substitution. The other stacked components (mass,
+        // momentum, and the dual-energy internal register when the pair is
+        // active) keep their MLMG/identity treatment; the dual-energy pair,
+        // the wall-conduction remainder rows and the masked-band identities
+        // compose around the exact inverse exactly as around the MLMG one.
+        // pc_mhd_block.conduction_validate_assembly checks the assembled
+        // rows to roundoff against the MLMG operator's own matrix-free
+        // application at every active update (any build, any solver),
+        // checks every exact solve's residual against the same operator,
+        // and gates the device- against the host-assembled values bitwise.
+        // CAVEAT (measured): the exact inverse is only as good as the
+        // block's coefficient model. Where the density is uniform it is the
+        // Jacobian's conduction block (1.75 vs 22 GMRES per solve on the
+        // z-end deck); across a density step the plain rows omit the
+        // rho_f/rho_cell weights of the flux Jacobian and the exact inverse
+        // of those rows does not help (13.7 vs 15.4 per solve on the 1D halo
+        // deck) or is worse than the V-cycles (94-115 vs 85-97 in the
+        // production chi-1e6 climb). It must be paired with the
+        // density-weighted rows (pc_mhd_block.conduction_density_weight of
+        // the companion change), which make it the Jacobian block again
+        // (2.0 per solve on the halo deck): a warning is recorded when an
+        // exact solver runs without the weight.
+        std::string m_conduction_solver = "mlmg";
+        bool m_conduction_direct_enabled = false;
+        bool m_conduction_banded_enabled = false;
+        bool m_conduction_validate_assembly = false;
+        int m_conduction_refreeze_count = 0;
+        // Per stacked component domain boundaries of the stacked operator
+        // (kept for the conduction row assembly).
+        amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> m_signal_low_bc;
+        amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> m_signal_high_bc;
+        // Stacked component of each channel the exact inverse owns (frozen
+        // at the first assembly: electron, ion total, and the ion internal
+        // register only when the dual-energy pair is NOT active -- its
+        // blended right-hand side is zero and its rows are the plain
+        // diagonal when the pair is active).
+        amrex::GpuArray<int, 3> m_conduction_channel = {-1, -1, -1};
+        // Validation scratch: the stacked operator's action on the
+        // validation vector (no ghosts).
+        std::unique_ptr<amrex::MultiFab> m_conduction_action;
+        std::unique_ptr<warpx::mhd_pc::ConductionDirectSolver> m_conduction_direct;
+        std::unique_ptr<warpx::mhd_pc::ConductionBandedSolver> m_conduction_banded;
 
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
@@ -602,6 +675,8 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         std::unique_ptr<warpx::mhd_pc::ResistiveBandedSolver> m_resistive_banded;
 
         void ReadParameters ();
+        [[nodiscard]] warpx::mhd_pc::ConductionStencilConstants
+        MakeConductionStencilConstants () const;
         void ApplyFieldBlock (T& solution, const T& rhs);
         void SolveFieldBlock (T& solution);
         void ComputeUnitCurlCurlAction (const T& field);
@@ -681,6 +756,53 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("conduction_cross_terms", m_conduction_cross_terms);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_conduction_threshold >= 0.0,
                                      "pc_mhd_block.conduction_threshold cannot be negative");
+    pp.query("conduction_solver", m_conduction_solver);
+    pp.query("conduction_validate_assembly", m_conduction_validate_assembly);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_solver == "mlmg" || m_conduction_solver == "direct" ||
+            m_conduction_solver == "banded",
+        "pc_mhd_block.conduction_solver must be mlmg, direct, or banded");
+    m_conduction_direct_enabled = m_conduction_solver == "direct";
+    m_conduction_banded_enabled = m_conduction_solver == "banded";
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_conduction_direct_enabled ||
+            warpx::mhd_pc::ConductionDirectSolver::HaveFactorizationBackend(),
+        "pc_mhd_block.conduction_solver = direct requires a CUDA build configured "
+        "with WarpX_CUDSS=ON (NVIDIA cuDSS); mlmg is the portable default and "
+        "banded the portable exact inverse");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_conduction_banded_enabled ||
+            warpx::mhd_pc::ConductionBandedSolver::HaveBackend(),
+        "pc_mhd_block.conduction_solver = banded is not implemented for SYCL builds");
+    // Asserted here, at ParmParse time, rather than at the banded solver's
+    // Define (the first ACTIVE update, which on a production deck can be
+    // hours into the run).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_conduction_banded_enabled || amrex::ParallelDescriptor::NProcs() == 1,
+        "pc_mhd_block.conduction_solver = banded supports single-rank runs only (the "
+        "block-banded elimination is sequential along z); use direct (cuDSS) or mlmg "
+        "on multi-rank runs");
+    // F2 of the review: the exact inverse sharpens whatever coefficient
+    // model the block carries; without the density-weighted rows of the
+    // companion change it is not the Jacobian block across density steps
+    // (see the member comment). Warn, do not refuse: on uniform-density
+    // decks it is a 12x win by itself.
+    if (m_conduction_direct_enabled || m_conduction_banded_enabled)
+    {
+        bool density_weight = false;
+        pp.query("conduction_density_weight", density_weight);
+        if (!density_weight)
+        {
+            ablastr::warn_manager::WMRecordWarning(
+                "MHDBlockPC",
+                "pc_mhd_block.conduction_solver = " + m_conduction_solver +
+                    " without pc_mhd_block.conduction_density_weight = 1: the exact "
+                    "inverse of the un-weighted conduction rows does not help across "
+                    "density steps (measured worse than the two V-cycles at the "
+                    "production wall corner); pair it with the density weight",
+                ablastr::warn_manager::WarnPriority::medium);
+        }
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_signal_diffusion_scale >= 0.0,
         "pc_mhd_block.signal_diffusion_scale cannot be negative");
@@ -1002,6 +1124,13 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
 
     m_signal_acoef =
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
+    // The Cartesian assembly hands the operator the scalar cell coefficient
+    // 1 and never writes this register; the conduction row emission reads
+    // it uniformly, so it carries that 1 (RZ overwrites it with r_cell at
+    // every update).
+    m_signal_acoef->setVal(1.0);
+    m_conduction_action = std::make_unique<amrex::MultiFab>(
+        density.boxArray(), density.DistributionMap(), m_signal_components, 0);
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
     {
         // One face coefficient per stacked component: the energy
@@ -1051,13 +1180,22 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
         // Dirichlet exchange 2 chi rho (e - e_wall)/dz, whose
         // linearization at the frozen bath is the pure diagonal
         // 2 theta_c dt chi/dz^2 on the end cell. A homogeneous Dirichlet
-        // LinOp boundary with the end-face coefficient theta dt chi w
+        // LinOp boundary with the end-face coefficient b = theta dt chi w
         // (emitted by the solver into the conduction face register)
-        // reproduces exactly that: AMReX's cell-centered Dirichlet stencil
-        // puts the boundary value on the face, i.e. 2 b/dz^2 on the end
-        // cell. With a zero end-face coefficient (block inactive, no
-        // conduction channel) the Dirichlet face is inert -- identical to
-        // the Neumann default -- so nothing else changes.
+        // APPROXIMATES that: at the default MLLinOp maxorder = 3 AMReX's
+        // cell-centered Dirichlet ghost is the quadratic extrapolation
+        // through the face value, u_g = -2 u_end + u_next/3, so the end row
+        // carries 3 b/dz^2 on the diagonal and -b/(3 dz^2) on the next cell
+        // inward instead of 2 b/dz^2 (setMaxOrder(2) would reproduce the
+        // residual's row exactly; not applied, to keep the default block
+        // bit-identical -- measured on the z-end CI deck: exact inverse
+        // 1.75 -> 1.25 GMRES per Newton solve, two V-cycles 88 -> 87
+        // total). The exact conduction inverse assembles the same
+        // three-point row (MHDConductionStencil.H), gated against this
+        // operator by conduction_validate_assembly. With a zero end-face
+        // coefficient (block inactive, no conduction channel) the
+        // Dirichlet face is inert -- identical to the Neumann default -- so
+        // nothing else changes.
         m_z_end_conduction = m_ops->GetMHDZEndConductionForPC();
         constexpr int axial_direction = AMREX_SPACEDIM - 1;
         for (const auto& spec : state.getMultiFabBlockSpecs())
@@ -1085,6 +1223,8 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
             }
         }
         m_signal_operator->setDomainBC(low_bc, high_bc);
+        m_signal_low_bc = low_bc;
+        m_signal_high_bc = high_bc;
     }
     // Homogeneous boundary values on every side the map produces.
     m_signal_operator->setLevelBC(0, nullptr);
@@ -1571,6 +1711,302 @@ MHDBlockPC<T, Ops>::ValidateResistiveAssembly ()
 }
 
 template <class T, class Ops>
+warpx::mhd_pc::ConductionStencilConstants
+MHDBlockPC<T, Ops>::MakeConductionStencilConstants () const
+{
+    // The stacked operator's own conventions: alpha = beta = 1
+    // (setScalars), 1/dx_d^2 face scales, the frozen per-component domain
+    // boundaries of DefineSignalDiffusion and AMReX's Dirichlet ghost order.
+    warpx::mhd_pc::ConductionStencilConstants constants;
+    constants.alpha = 1.0;
+    const auto inverse_cell_size = m_geometry.InvCellSizeArray();
+    const amrex::Box domain = m_geometry.Domain();
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        constants.face_scale[direction] =
+            inverse_cell_size[direction] * inverse_cell_size[direction];
+        constants.domain_low[direction] = domain.smallEnd(direction);
+        constants.domain_high[direction] = domain.bigEnd(direction);
+    }
+    constants.max_order = m_signal_operator->getMaxOrder();
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        const int component = m_conduction_channel[channel];
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            for (int side = 0; side < 2; ++side)
+            {
+                int kind = static_cast<int>(warpx::mhd_pc::ConductionBoundary::Neumann);
+                if (component >= 0)
+                {
+                    const amrex::LinOpBCType bc = (side == 0)
+                                                      ? m_signal_low_bc[component][direction]
+                                                      : m_signal_high_bc[component][direction];
+                    if (m_geometry.isPeriodic(direction))
+                    {
+                        kind = static_cast<int>(warpx::mhd_pc::ConductionBoundary::Periodic);
+                    }
+                    else if (bc == amrex::LinOpBCType::Neumann)
+                    {
+                        kind = static_cast<int>(warpx::mhd_pc::ConductionBoundary::Neumann);
+                    }
+                    else if (bc == amrex::LinOpBCType::Dirichlet)
+                    {
+                        kind = static_cast<int>(warpx::mhd_pc::ConductionBoundary::Dirichlet);
+                    }
+                    else
+                    {
+                        WARPX_ABORT_WITH_MESSAGE(
+                            "pc_mhd_block: the conduction row assembly supports Neumann, "
+                            "Dirichlet and periodic energy boundaries only");
+                    }
+                }
+                constants.boundary[channel][direction][side] = kind;
+            }
+        }
+    }
+    return constants;
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::UpdateConductionExactInverse ()
+{
+    // Assemble (and factorize) the energy channels of the frozen stacked
+    // Helmholtz when an exact conduction inverse is selected, or when the
+    // assembly check is requested (any solver): the rows come from the
+    // SAME m_signal_acoef / m_signal_bcoef the MLMG operator was just
+    // handed, so the factored matrix is the applied operator by
+    // construction, gated to roundoff by ValidateConductionAssembly.
+    const bool exact_enabled = m_conduction_direct_enabled || m_conduction_banded_enabled;
+    if (!m_conduction_block_active || !(exact_enabled || m_conduction_validate_assembly))
+    {
+        return;
+    }
+
+    // Channels the exact inverse owns, frozen at the first assembly (the
+    // sparsity pattern and the banded engines are geometric).
+    amrex::GpuArray<int, 3> channels = {m_wall_conduction_component[0],
+                                        m_wall_conduction_component[1],
+                                        m_conduction_pair_active
+                                            ? -1
+                                            : m_wall_conduction_component[2]};
+    const bool first_assembly = m_conduction_direct == nullptr && m_conduction_banded == nullptr;
+    if (first_assembly)
+    {
+        m_conduction_channel = channels;
+    }
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            channels[channel] == m_conduction_channel[channel],
+            "pc_mhd_block: the set of conduction channels changed after the first "
+            "assembly (the dual-energy pair activity is expected to be static)");
+    }
+
+    amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> face_coefficients;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        face_coefficients[direction] = m_signal_bcoef[direction].get();
+    }
+    const warpx::mhd_pc::ConductionStencilConstants constants =
+        MakeConductionStencilConstants();
+
+    amrex::Real assemble_seconds = 0.0;
+    amrex::Real factorize_seconds = 0.0;
+    std::string assembly_kind;
+    if (m_conduction_direct_enabled || m_conduction_validate_assembly)
+    {
+        if (m_conduction_direct == nullptr)
+        {
+            m_conduction_direct = std::make_unique<warpx::mhd_pc::ConductionDirectSolver>();
+            m_conduction_direct->SetValidationMode(m_conduction_validate_assembly);
+        }
+        if (!m_conduction_direct->IsDefined())
+        {
+            m_conduction_direct->Define(m_geometry, constants, m_conduction_channel,
+                                        *m_signal_acoef, face_coefficients);
+        }
+        const amrex::Real assemble_start = amrex::ParallelDescriptor::second();
+        m_conduction_direct->AssembleValues(*m_signal_acoef, face_coefficients);
+        assemble_seconds = amrex::ParallelDescriptor::second() - assemble_start;
+        if (m_conduction_validate_assembly)
+        {
+            ValidateConductionAssembly();
+        }
+        if (m_conduction_direct_enabled)
+        {
+            const amrex::Real factorize_start = amrex::ParallelDescriptor::second();
+            m_conduction_direct->Factorize();
+            factorize_seconds = amrex::ParallelDescriptor::second() - factorize_start;
+        }
+        assembly_kind = m_conduction_direct->UsesDeviceAssembly() ? "direct, device assembly"
+                                                                  : "direct, host assembly";
+    }
+    if (m_conduction_banded_enabled)
+    {
+        if (m_conduction_banded == nullptr)
+        {
+            m_conduction_banded = std::make_unique<warpx::mhd_pc::ConductionBandedSolver>();
+        }
+        if (!m_conduction_banded->IsDefined())
+        {
+            m_conduction_banded->Define(m_geometry, constants, m_conduction_channel);
+        }
+        const amrex::Real assemble_start = amrex::ParallelDescriptor::second();
+        m_conduction_banded->AssembleValues(*m_signal_acoef, face_coefficients);
+        assemble_seconds = amrex::ParallelDescriptor::second() - assemble_start;
+        const amrex::Real factorize_start = amrex::ParallelDescriptor::second();
+        m_conduction_banded->Factorize();
+        factorize_seconds = amrex::ParallelDescriptor::second() - factorize_start;
+        assembly_kind = "banded, device assembly";
+    }
+    if (exact_enabled)
+    {
+        // The first refreeze carries the one-time pattern freeze and the
+        // cuDSS analysis, the second the steady per-update cost; both are
+        // always reported, later ones only when verbose.
+        ++m_conduction_refreeze_count;
+        if (m_verbose || m_conduction_refreeze_count <= 2)
+        {
+            amrex::Print() << "pc_mhd_block conduction refreeze (" << assembly_kind
+                           << "): assemble " << assemble_seconds << " s, factorize "
+                           << factorize_seconds << " s";
+            if (m_conduction_direct_enabled)
+            {
+                amrex::Print() << ", rows " << m_conduction_direct->NumRows() << ", nonzeros "
+                               << m_conduction_direct->NumValues();
+            }
+            amrex::Print() << "\n";
+        }
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ValidateConductionAssembly ()
+{
+    // Roundoff check of the assembled conduction rows against the MLMG
+    // operator's OWN matrix-free application: load the deterministic
+    // validation vector into the energy channels of the stacked solution
+    // scratch (every other component zero), apply the stacked operator
+    // through MLMG::apply -- the same Fapply and domain-ghost fills the
+    // V-cycles use -- and compare the energy channels against the
+    // assembled-matrix product. Unlike the resistive check, the two sides
+    // are independent codes (AMReX's stencil against this emission), so a
+    // pass gates the emission itself.
+    m_signal_solution->setVal(0.0);
+    m_conduction_direct->FillValidationVector(*m_signal_solution);
+    m_conduction_action->setVal(0.0);
+    m_signal_solver->apply({m_conduction_action.get()}, {m_signal_solution.get()});
+    const auto [max_difference, reference_scale] =
+        m_conduction_direct->CompareMatrixFreeAction(*m_conduction_action);
+    // Relative to the operator's own scale: the conduction rows have no
+    // identity part (unlike the resistive I + A, whose scale is >= 1), and
+    // a density-weighted form scales the whole operator by rho ~ 1e-7,
+    // where an absolute 1e-12 would be a 1e-5 relative gate.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(reference_scale) && reference_scale > RT(0.0),
+        "pc_mhd_block conduction assembly check: the assembled operator has no scale");
+    const RT tolerance = RT(1.0e-12) * reference_scale;
+    amrex::Print() << "pc_mhd_block conduction assembly check: max |assembled - MLMG "
+                      "operator| = "
+                   << max_difference << " (scale " << reference_scale << ", tolerance "
+                   << tolerance << ")\n";
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        max_difference <= tolerance,
+        "pc_mhd_block conduction assembly does not match the MLMG operator to roundoff");
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ValidateConductionSolve ()
+{
+    // Residual check of the exact solve itself (validation mode): apply the
+    // stacked MLMG operator to the returned solution and compare its
+    // energy channels with the right-hand side the solve consumed. This
+    // gates the factorization and, for the banded path, the band-tensor
+    // scatter -- which the assembly check does not see (it multiplies out
+    // the CSR rows): a transposed band tensor passes every other gate on
+    // a symmetric deck and fails this one wherever the operator is not
+    // symmetric (the Dirichlet z-end rows). Costs one operator application
+    // per preconditioner application; validation mode only.
+    m_conduction_action->setVal(0.0);
+    m_signal_solver->apply({m_conduction_action.get()}, {m_signal_solution.get()});
+    RT max_difference = RT(0.0);
+    RT rhs_scale = RT(0.0);
+    const auto action_arrays = m_conduction_action->const_arrays();
+    const auto rhs_arrays = m_signal_rhs->const_arrays();
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        const int component = m_conduction_channel[channel];
+        if (component < 0)
+        {
+            continue;
+        }
+        const auto reduced = amrex::ParReduce(
+            amrex::TypeList<amrex::ReduceOpMax, amrex::ReduceOpMax>{},
+            amrex::TypeList<RT, RT>{}, *m_conduction_action, amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int box_no, int i, int j, int k) noexcept
+                -> amrex::GpuTuple<RT, RT>
+            {
+                const RT action = action_arrays[box_no](i, j, k, component);
+                const RT rhs = rhs_arrays[box_no](i, j, k, component);
+                return {amrex::Math::abs(action - rhs), amrex::Math::abs(rhs)};
+            });
+        max_difference = amrex::max(max_difference, amrex::get<0>(reduced));
+        rhs_scale = amrex::max(rhs_scale, amrex::get<1>(reduced));
+    }
+    amrex::ParallelDescriptor::ReduceRealMax(max_difference);
+    amrex::ParallelDescriptor::ReduceRealMax(rhs_scale);
+    // A zero right-hand side (e.g. the preconditioner probed on a zero
+    // vector) has a zero exact solution: nothing to gate.
+    const RT tolerance = RT(1.0e-9) * rhs_scale;
+    if (m_verbose)
+    {
+        amrex::Print() << "pc_mhd_block conduction solve check: max |L x - b| = "
+                       << max_difference << " (|b| scale " << rhs_scale << ", tolerance "
+                       << tolerance << ")\n";
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        max_difference <= tolerance,
+        "pc_mhd_block conduction exact solve does not reproduce the right-hand side "
+        "(factorization or banded scatter inconsistent with the assembled operator)");
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplyConductionExactInverse ()
+{
+    BL_PROFILE("MHDBlockPC::ApplyConductionExactInverse()");
+
+    // energy channels of m_signal_solution := L^{-1} (energy channels of
+    // m_signal_rhs), the right-hand side already carrying the RZ metric
+    // scaling the assembled operator expects. The stationary exact inverse
+    // is standard right-preconditioned GMRES safe.
+    if (m_conduction_banded_enabled)
+    {
+        m_conduction_banded->Solve(*m_signal_rhs, *m_signal_solution);
+    }
+    else
+    {
+        m_conduction_direct->Solve(*m_signal_rhs, *m_signal_solution);
+    }
+    if (m_conduction_validate_assembly)
+    {
+        ValidateConductionSolve();
+    }
+    // The dual-energy internal register outside the channel set (pair
+    // active): zero right-hand side, plain-diagonal rows, exact solution
+    // zero -- what the MLMG path returns for it to roundoff.
+    if (m_conduction_pair_active && m_wall_conduction_component[2] >= 0 &&
+        m_conduction_channel[2] < 0)
+    {
+        m_signal_solution->setVal(0.0, m_wall_conduction_component[2], 1, 0);
+    }
+}
+
+template <class T, class Ops>
 void
 MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
 {
@@ -1862,6 +2298,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     const amrex::GpuArray<int, 3> energy_component = m_wall_conduction_component;
     const int number_of_components = m_signal_components;
 
+
     m_signal_operator->setScalars(1.0, 1.0);
     // Conductive z-end faces (Dirichlet faces of the energy components, see
     // DefineSignalDiffusion): they carry the conduction block's end-face
@@ -2039,6 +2476,10 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     // Per-component face coefficients (one per stacked block component).
     m_signal_operator->setBCoeffs(0, face_coefficients);
 
+    // Exact inverse of the conduction rows (conduction_solver = direct or
+    // banded) and/or the assembly check against the MLMG operator.
+    UpdateConductionExactInverse();
+
     if (m_verbose)
     {
         amrex::Print() << "Updating pc_mhd_block (hlld state): h = " << m_h
@@ -2059,6 +2500,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         amrex::Print() << ", conduction block = "
                        << (m_conduction_block_active ? "active" : "inactive")
                        << " (N_chi = " << m_conduction_number_max
+                       << ", solver = " << m_conduction_solver
                        << (m_conduction_density_weight_active ? ", density-weighted" : "")
                        << (m_conduction_cross_terms_active ? ", cross-term correction" : "")
                        << (m_conduction_pair_active ? ", dual-energy pair)" : ")");
@@ -2319,8 +2761,23 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         }
     }
 
+    // Exact inverse of the conduction rows (conduction_solver = direct or
+    // banded): the energy channels bypass the fixed-cycle MLMG; every other
+    // stacked component keeps its treatment (MLMG when the signal diffusion
+    // is active, the exact identity otherwise).
+    const bool conduction_exact = m_conduction_block_active &&
+                                  (m_conduction_direct_enabled || m_conduction_banded_enabled);
     if (m_signal_diffusion_active || m_conduction_block_active)
     {
+        if (!m_signal_diffusion_active && conduction_exact)
+        {
+            // Identity rows for the non-conduction components (a u = a b in
+            // the r-scaled RZ form, i.e. u = b): copy BEFORE the metric
+            // scaling below; the exact inverse overwrites the energy
+            // channels from the scaled right-hand side.
+            amrex::MultiFab::Copy(*m_signal_solution, *m_signal_rhs, 0, 0,
+                                  m_signal_components, 0);
+        }
 #if defined(WARPX_DIM_RZ)
         // The cylindrical operator assembly multiplied the equation by r.
         const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
@@ -2368,8 +2825,17 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             }
         }
 
-        m_signal_solution->setVal(0.0);
-        m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0, 0.0);
+        if (m_signal_diffusion_active || !conduction_exact)
+        {
+            m_signal_solution->setVal(0.0);
+            m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0,
+                                   0.0);
+        }
+        if (conduction_exact)
+        {
+            ApplyConductionExactInverse();
+        }
+
 
         if (m_conduction_density_weight_active)
         {
@@ -3746,6 +4212,12 @@ MHDBlockPC<T, Ops>::printParameters () const
     amrex::Print() << name << " resistive solver:     " << m_resistive_solver << "\n";
     amrex::Print() << name << " banded precision:     " << m_banded_precision << "\n";
     amrex::Print() << name << " banded refreeze:      " << m_banded_refreeze << "\n";
+    amrex::Print() << name << " conduction block:     "
+                   << (m_conduction_block ? "true" : "false") << "\n";
+    amrex::Print() << name << " conduction threshold: " << m_conduction_threshold << "\n";
+    amrex::Print() << name << " conduction solver:    " << m_conduction_solver << "\n";
+    amrex::Print() << name << " conduction validate:  "
+                   << (m_conduction_validate_assembly ? "true" : "false") << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";
     amrex::Print() << name << " agglomeration:        " << (m_agglomeration ? "true" : "false")
                    << "\n";
