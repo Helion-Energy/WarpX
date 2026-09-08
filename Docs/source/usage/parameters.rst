@@ -818,11 +818,21 @@ Overall simulation parameters
               the energy components take a homogeneous Dirichlet boundary
               at the conducting z ends and the solver emits the exchange's
               end-face coefficient, so the block owns the half-cell end
-              exchange exactly and the z-end Jacobi rows of
+              exchange and the z-end Jacobi rows of
               :pp:param:`implicit_mhd.wall_conduction_pc_rows` are not
               composed on top of it (composing them after a non-identity
               block over-damped the end cells and measured worse than no
               block); the shaped-wall interface drains keep their rows.
+              The end row the block actually carries is AMReX's
+              cell-centered Dirichlet stencil at the default
+              ``maxorder = 3`` -- a quadratic ghost through the face value,
+              i.e. :math:`3b/\Delta z^2` on the end cell and
+              :math:`-b/(3\Delta z^2)` on the next cell inward -- not the
+              residual's linearized :math:`2\theta_c\Delta t\,\chi/\Delta
+              z^2`; ``setMaxOrder(2)`` on the stacked operator would make
+              it exact (measured on the z-end CI deck: exact inverse 1.75
+              -> 1.25 GMRES per Newton solve, two V-cycles 88 -> 87 total)
+              but is not applied, to keep the default block bit-identical.
               The ``conduction_pc`` tests gate the Krylov gain against the
               block-off twins, not the assembled operator itself: a
               coefficient off by a factor of two still clusters the
@@ -843,11 +853,16 @@ Overall simulation parameters
               block. ``mlmg`` is the fixed ``fluid_iterations`` V-cycles
               above (a point-smoothed full-coarsening multigrid, known to
               degrade for per-direction anisotropy above ~1e2 -- the
-              regime of the Braginskii wall corner, where GMRES per Newton
-              solve was measured at 100-150 against ~35 elsewhere on the
-              production formation deck). ``direct`` and ``banded``
-              instead invert the energy channels of the frozen stacked
-              Helmholtz EXACTLY, the way the resistive block is inverted:
+              regime of the Braginskii wall corner at the reference
+              conduction clamp, chi_par/chi_perp = 1e4 with a conduction
+              number of 57 in the bulk, where the production formation arm
+              spends 20-30 Newton iterations at 80-150 GMRES per solve on
+              a step by 0.85 us against ~30 per solve on smooth states; at
+              the 970 clamp the conduction number is 0.06 and the block
+              never engages, so this knob is inert there). ``direct`` and
+              ``banded`` instead invert the energy channels of the frozen
+              stacked Helmholtz EXACTLY, the way the resistive block is
+              inverted:
               the sparse rows are emitted from the SAME cell and per-face
               coefficients the MLMG operator applies (the solver's frozen
               :math:`\theta_c \Delta t\, \chi_{nn}`, the RZ metric folded
@@ -870,6 +885,20 @@ Overall simulation parameters
               remainder rows and the masked-band identities compose
               around the exact inverse exactly as around the MLMG one.
               At the default every existing deck is bit-identical.
+              CAVEAT (measured): the exact inverse is only as good as the
+              block's coefficient model. Where the density is uniform it
+              is the Jacobian's conduction block (1.75 vs 22 GMRES per
+              Newton solve on the z-end deck); across a density step the
+              plain rows omit the :math:`\rho_f/\rho_\text{cell}` weights
+              of the flux Jacobian, and the exact inverse of those rows
+              does not help (13.7 vs 15.4 per solve on the 1D halo deck)
+              or is worse than the two V-cycles (94-115 vs 85-97 in the
+              production chi-1e6 climb). Pair it with the density-weighted
+              rows (``pc_mhd_block.conduction_density_weight``), which make
+              it the Jacobian block again (2.0 per solve on the halo deck,
+              3x fewer GMRES and 10x less wall in the production climb); a
+              warning is recorded when ``direct`` or ``banded`` runs
+              without the weight.
             - ``pc_mhd_block.conduction_validate_assembly`` (``bool``,
               default: false): recast path only; at every active
               preconditioner update (with any ``conduction_solver``),
@@ -880,8 +909,13 @@ Overall simulation parameters
               codes -- to :math:`10^{-12}` of the operator scale,
               aborting on mismatch; on single-rank runs the device- and
               host-assembled values are additionally compared bitwise
-              (:math:`\le 4` ULP asserted). Used by the
-              ``conduction_pc_*_banded`` and ``conduction_pc_validate``
+              (:math:`\le 4` ULP asserted). With ``direct`` or ``banded``
+              every exact solve is additionally checked: the operator
+              applied to the returned solution must reproduce the
+              right-hand side to :math:`10^{-9}` of its scale (this gates
+              the factorization and the banded scatter themselves; a
+              transposed band tensor fails it on the z-end deck). Used by
+              the ``conduction_pc_*_banded`` and ``conduction_pc_validate``
               tests.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)

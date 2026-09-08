@@ -546,6 +546,14 @@ ConductionDirectSolver::EmitLocalRows ()
         }
         else
         {
+            // A structure change between updates would otherwise write past
+            // the frozen entry list before the structure assertion below
+            // fires; the emission structure is geometric (Dirichlet order
+            // from box length and max_order), so this never trips.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                entry < static_cast<std::size_t>(m_local_entry_values.size()),
+                "ConductionDirectSolver stencil emission grew between updates (the frozen "
+                "sparsity pattern was violated)");
             m_local_entry_values[entry] = a_value;
         }
         ++entry;

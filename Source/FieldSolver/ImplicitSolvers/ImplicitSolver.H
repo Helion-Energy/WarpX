@@ -647,13 +647,26 @@ public:
      * \brief Whether the z_lo (index 0) and z_hi (index 1) domain end faces
      * carry the theta-implicit MHD conductive z-end exchange
      * (implicit_mhd.z_wall_conduction): a half-cell Dirichlet exchange of
-     * the energy densities against the z-wall reservoir. The block
-     * preconditioner then gives its energy components a homogeneous
-     * Dirichlet boundary at those ends, so that the end-face conduction
-     * coefficient of GetMHDConductionFaceCoefficientsForPC reproduces the
-     * linearized exchange 2 chi/dz^2 on the end cell exactly. With a zero
-     * end-face coefficient (block inactive, or no conduction channel) the
-     * Dirichlet boundary is inert, i.e. identical to the Neumann default.
+     * the energy densities against the z-wall reservoir, whose
+     * linearization at the frozen bath is the pure diagonal
+     * 2 theta_c dt chi/dz^2 on the end cell. The block preconditioner then
+     * gives its energy components a homogeneous Dirichlet boundary at those
+     * ends and takes the end-face conduction coefficient of
+     * GetMHDConductionFaceCoefficientsForPC as the face coefficient b. NOTE
+     * the stencil this actually produces: AMReX's cell-centered Dirichlet
+     * ghost at the default MLLinOp maxorder = 3 is the quadratic
+     * extrapolation through the face value, u_ghost = -2 u_end + u_next/3,
+     * so the block's end row carries 3 b/dz^2 on the diagonal and
+     * -b/(3 dz^2) on the next cell inward -- not the residual's 2 b/dz^2
+     * (setMaxOrder(2) on the stacked operator would make it exact; it is
+     * not applied, to keep the default block bit-identical; measured
+     * effect on the z-end CI deck: exact inverse 1.75 -> 1.25 GMRES per
+     * Newton solve, two V-cycles 88 -> 87 total). The exact conduction
+     * inverse (pc_mhd_block.conduction_solver) assembles the same
+     * three-point row, so block and inverse agree with each other. With a
+     * zero end-face coefficient (block inactive, or no conduction channel)
+     * the Dirichlet boundary is inert, i.e. identical to the Neumann
+     * default.
      */
     [[nodiscard]] virtual amrex::Array<bool, 2> GetMHDZEndConductionForPC () const
     {
