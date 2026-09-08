@@ -1,0 +1,259 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# The WALL-CORNER STIFFNESS of the production formation deck, isolated:
+# an electron plasma column whose AXIAL EDGE sits next to a cold
+# conducting wall, threaded by an OBLIQUE field, with the production
+# Braginskii clamps (chi_par/chi_perp = 1e4 at the caps), caps, floors,
+# time step and solver settings (theta 1, inexact Newton with the forcing
+# cap 0.05, the finite-difference probe 1e-8, Newton cap 30).
+#
+# This is the smallest deck that reproduces the residual hotspot the
+# 33 us formation ladder measured: the electron energy at the plasma's
+# axial edge next to the wall, where B is oblique (|B_r/B_z| ~ 0.5 at the
+# wall row), the density drops from 5e19 to the 3.3e17 halo over ~12
+# cells and the electron temperature drops from ~10 eV to the 0.5 eV
+# wall/halo temperature over 2-3 cells at n ~ 1e18 -- the site where the
+# Braginskii parallel diffusivity crosses its 1e6 m^2/s clamp (raw
+# chi_par at 10 eV, 1e18 m^-3 is 6e6; at 5 eV, 9e17 it is 1e6, on the
+# clamp's knee; at 1 eV, 5e17 it is 4e4). At the clamp the face
+# conduction number is
+#     D_par = (gamma_e - 1) chi_par_max dt / h^2 = 57   (production),
+#     D_perp = 0.006,
+# and the wall's Dirichlet drain at the parallel scale carries 2 D_par.
+# The production block preconditioner folds only the NORMAL projection
+# chi_nn of the tensor into its point-smoothed Helmholtz block (no cross
+# term), so this deck is the baseline the conduction-block upgrades are
+# graded on: Newton iterations, GMRES iterations per Newton solve and the
+# free/pinned split per step (newton.txt), see
+# analysis_mhd_braginskii_oblique_edge.py.
+#
+# Everything else is quiescent so the run isolates the tensor conduction
+# channel: ions frozen (barotropic closure, evolve_ion_fluid = false),
+# u = 0, eta = 0, no Hall, static external field. The field is the
+# solenoidal external vector potential
+#   A_theta = B0 r/2 - (a r Lz/(2 pi)) cos(2 pi z/Lz)
+#   B_r = -a r sin(2 pi z/Lz),   B_z = B0 - (a Lz/pi) cos(2 pi z/Lz),
+# div B = 0 exactly; at the two plasma edges z = +-Lz/4 the axial field
+# is exactly B0 and |B_r| is maximal, |B_r/B_z| = tilt at the wall
+# radius (tilt 0.5 = the production hotspot's -0.025/0.05 T), with
+# opposite signs at the two edges so both field-line topologies of the
+# corner (the line from the hot edge cell reaching the wall on the core
+# side or on the halo side) are exercised. B_r vanishes at the mid-plane
+# and at the two plates, where the field is normal to the plate.
+#
+# Geometry: production cell size h = 1/128 m, a flat conducting wall
+# (EM-transparent dielectric standoff, the production wall model) at
+# r = 24 h with 8 masked rows outside it, conducting z-end plates at the
+# production wall temperature, the halo between the edge and the plate.
+# The density and temperature profiles are static (frozen ions) log-space
+# and linear tanh ramps: n from n_core to n_halo centred on the edge
+# (a factor 10 per cell at the centre: with the smoother production
+# ramp of 2-3 per cell the point-smoothed block holds GMRES at ~10 per
+# Newton solve; at tenfold per cell it climbs past 60 within five steps,
+# the production signature), T_e from Te_core to Te_halo centred two
+# cells outboard (width 0.8 h, a factor ~4 per cell), where the
+# production profile at 0.5 us puts them.
+#
+# Attribution switches (command-line overrides; see the analysis and the
+# report of the preconditioner campaign):
+#   my_constants.tilt = 0                     -> aligned field (no cross term, chi_rr = chi_perp)
+#   implicit_mhd.braginskii_cross_term_scale = 0
+#                                             -> tangential term dropped, chi_nn kept
+#   implicit_mhd.conduction_chi_perp_max = chi_par_max (and chi_perp_min = chi_par_min)
+#                                             -> isotropic tensor
+#   implicit_mhd.conduction_coefficient_state = step_old
+#                                             -> Braginskii T^5/2 frozen per step
+#   implicit_mhd.conduction_chi_par_min = chi_par_max
+#                                             -> chi_par pinned at the clamp (linear operator)
+#   implicit_mhd.wall_conduction_scale = perp -> wall drain at the perp clamp class
+#   my_constants.w_T = 100                    -> no temperature front
+#   pc_mhd_block.conduction_block = 0         -> conduction block off
+my_constants.h = 1.0/128.0
+my_constants.nr = 32
+my_constants.nz = 56
+my_constants.Lr = nr * h
+my_constants.Lz = nz * h
+my_constants.r_wall = 24.0 * h
+my_constants.m_i = 2.0 * m_p
+my_constants.n_core = 5.0e19
+my_constants.n_halo = 3.3e17
+my_constants.Te_core = 10.0
+my_constants.Te_halo = 0.5
+my_constants.gamma = 5.0/3.0
+# production reference density, floors (5e-4 of it), vacuum threshold
+# (5e-3 of it) and the reference field of the solver's block scaling
+my_constants.n_ref = 1.5e20
+my_constants.rho_ref = n_ref * m_i
+my_constants.floor_frac = 5.0e-4
+my_constants.vac_frac = 5.0e-3
+my_constants.B_ref = 0.2
+# field: axial B0 at the edges, |B_r/B_z| = tilt at the wall radius there
+my_constants.B0 = 0.05
+my_constants.tilt = 0.5
+my_constants.a = tilt * B0 / r_wall
+# edge and front positions and widths: the log-space density ramp is
+# TENFOLD PER CELL at its centre (w_n = h ln(n_core/n_halo) / (2 ln 10));
+# the temperature front two cells outboard is a factor ~4 per cell
+my_constants.z_edge = 0.25 * Lz
+my_constants.w_n = h * log(n_core/n_halo) / (2.0 * log(10.0))
+my_constants.z_front = z_edge + 2.0 * h
+my_constants.w_T = 0.8 * h
+# production Braginskii clamps, kappa/(n kB) convention
+my_constants.chi_par_min = 100.0
+my_constants.chi_par_max = 1.0e6
+my_constants.chi_perp_min = 1.0
+my_constants.chi_perp_max = 100.0
+# production time step (0.4 x 0.02 ion cyclotron periods at 0.2 T):
+# D_par = (gamma - 1) chi_par_max dt / h^2 = 57 at the clamp
+my_constants.dt = 5.2e-9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+# The production ladder's solver settings (theta 1 everywhere, inexact
+# Newton with the Eisenstat-Walker forcing capped at 0.05, the
+# finite-difference Jacobian probe 1e-8, Newton cap 30, exit at 1e-4).
+# require_convergence is off so an unconverged step is GRADED by the
+# analysis instead of aborting the run.
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-4
+newton.max_iterations = 30
+newton.require_convergence = 0
+newton.adaptive_forcing = 1
+newton.forcing_max = 0.05
+newton.jfnk_epsilon = 1.0e-8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-6
+gmres.max_iterations = 500
+gmres.restart_length = 120
+
+# The production block preconditioner with its conduction Helmholtz
+# block (point-smoothed V-cycles on the normal-projection coefficients).
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.field_iterations = 2
+pc_mhd_block.fluid_iterations = 2
+pc_mhd_block.conduction_block = 1
+pc_mhd_block.conduction_threshold = 1.0
+pc_mhd_block.agglomeration = true
+pc_mhd_block.consolidation = true
+pc_mhd_block.max_coarsening_level = 30
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te_core
+hybrid_pic_model.n0_ref = n_core
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# The oblique field enters as an external vector potential (the split
+# external fields the dielectric wall model requires; the grid
+# external-field parser supports only Bz in RZ).
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = tilt
+external_vector_potential.tilt.Ay_external_grid_function(x,y,z) = \
+    "0.5*B0*x - a*x*Lz/(2*pi)*cos(2*pi*z/Lz)"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho_ref
+implicit_mhd.reference_magnetic_field = B_ref
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.ion_charge_to_mass = q_e / m_i
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = floor_frac * rho_ref
+implicit_mhd.electron_pressure_floor = floor_frac * n_ref * q_e * Te_halo
+implicit_mhd.vacuum_mass_density = vac_frac * rho_ref
+implicit_mhd.vacuum_drag_rate = 2.0e9
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# required by the central flux; inert here (u = 0, frozen ions)
+implicit_mhd.viscosity = 0.5
+
+# Braginskii electron conduction with the production clamps, the
+# free-streaming limiter and the backward-Euler conduction stage.
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+implicit_mhd.braginskii_tangential_limiter = minmod
+implicit_mhd.conduction_chi_par_min = chi_par_min
+implicit_mhd.conduction_chi_par_max = chi_par_max
+implicit_mhd.conduction_chi_perp_min = chi_perp_min
+implicit_mhd.conduction_chi_perp_max = chi_perp_max
+implicit_mhd.conduction_flux_limit_factor = 3.0
+implicit_mhd.conduction_theta = 1.0
+
+# Static column: log-space tanh density ramp centred on the edge, linear
+# tanh temperature front two cells outboard of it.
+implicit_mhd.mass_density(x,y,z) = \
+    "m_i * n_halo * exp(log(n_core/n_halo) * 0.5 * (1.0 - tanh((abs(z) - z_edge)/w_n)))"
+implicit_mhd.electron_pressure(x,y,z) = \
+    "q_e * n_halo * exp(log(n_core/n_halo) * 0.5 * (1.0 - tanh((abs(z) - z_edge)/w_n))) * (Te_halo + (Te_core - Te_halo) * 0.5 * (1.0 - tanh((abs(z) - z_front)/w_T)))"
+
+# The conducting wall: the production dielectric standoff with the hard
+# Dirichlet thermal pin at the parallel clamp class, sonic-capped
+# (electron factor 5, the production value).
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_flat_r1875.csv
+implicit_mhd.wall_thermal_bc = dirichlet
+implicit_mhd.wall_temperature = Te_halo
+implicit_mhd.wall_conduction_scale = parallel
+implicit_mhd.wall_heat_flux_cap = sonic
+implicit_mhd.wall_heat_flux_cap_factor_electron = 5.0
+
+# Conducting z-end plates at the wall temperature (production).
+implicit_mhd.z_boundary_fluid = wall_temperature
+implicit_mhd.z_wall_temperature = Te_halo
+implicit_mhd.z_wall_conduction = 1
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

@@ -644,6 +644,48 @@ public:
     }
 
     /**
+     * \brief Layout of the extra components of the conduction face
+     * registers (GetMHDConductionFaceCoefficientsForPC) beyond the three
+     * normal coefficients: component MHDConductionPCFaceDensityComponent
+     * holds the coefficient-state face density rho_f the conductive flux
+     * was formed with (always written with the normal coefficients), and
+     * components MHDConductionPCCrossComponent + channel hold the frozen
+     * cross-term coefficients chi_nt of the Braginskii flux linearization
+     * F_n = -rho_f (chi_nn d_n e + chi_nt d_t e) (electron, ion total, ion
+     * internal; written only when the solver's
+     * implicit_mhd.conduction_pc_cross_terms is on, see
+     * GetMHDConductionCrossTermsForPC). The flux Jacobian in the energy
+     * densities is rho_f chi/(h rho_R) on the right cell and
+     * rho_f chi/(h rho_L) on the left, so a block that weights its
+     * Helmholtz by the density needs rho_f together with the cell density
+     * of GetMHDConductionDensityForPC.
+     */
+    static constexpr int MHDConductionPCFaceDensityComponent = 3;
+    static constexpr int MHDConductionPCCrossComponent = 4;
+
+    /**
+     * \brief Cell-centered linearization density of the conduction
+     * registers (the live density the specific energies e = U/rho were
+     * formed with), for the block preconditioner's density-weighted
+     * conduction Helmholtz (pc_mhd_block.conduction_density_weight), or
+     * nullptr when no conduction channel is active.
+     */
+    [[nodiscard]] virtual const amrex::MultiFab*
+    GetMHDConductionDensityForPC () const
+    {
+        return nullptr;
+    }
+
+    /**
+     * \brief Whether the cross-term components of the conduction face
+     * registers are written (implicit_mhd.conduction_pc_cross_terms).
+     */
+    [[nodiscard]] virtual bool GetMHDConductionCrossTermsForPC () const
+    {
+        return false;
+    }
+
+    /**
      * \brief Whether the z_lo (index 0) and z_hi (index 1) domain end faces
      * carry the theta-implicit MHD conductive z-end exchange
      * (implicit_mhd.z_wall_conduction): a half-cell Dirichlet exchange of

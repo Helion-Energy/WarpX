@@ -487,6 +487,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_conduction_pc_active ? m_conduction_pc_blend.get() : nullptr;
     }
 
+    [[nodiscard]] const amrex::MultiFab* GetMHDConductionDensityForPC () const override
+    {
+        return m_conduction_pc_active ? m_conduction_pc_density : nullptr;
+    }
+
+    [[nodiscard]] bool GetMHDConductionCrossTermsForPC () const override
+    {
+        return m_conduction_pc_active && m_conduction_pc_cross_terms;
+    }
+
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
@@ -1452,14 +1462,53 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // bit-identical; with the block engaged only the Newton iterates
     // change, never the converged state.
     bool m_conduction_pc_coefficients = true;
+    // Cross-term (tangential) coefficients of the Braginskii flux
+    // linearization for the block (implicit_mhd.conduction_pc_cross_terms,
+    // default off = bit-identical): components 4-6 of the face registers,
+    // see ConductionPCCrossElectron below. Consumed by
+    // pc_mhd_block.conduction_cross_terms (the MLABecLaplacian path has
+    // no 9-point stencil, so the consumer is a defect correction there
+    // or an assembled operator).
+    bool m_conduction_pc_cross_terms = false;
     bool m_conduction_pc_active = false;
+    // The linearization density of the registers (the live cell density
+    // the specific energies e = U/rho were formed with), handed to the
+    // block for its density-weighted Helmholtz
+    // (pc_mhd_block.conduction_density_weight); set in ComputeFaceFluxes.
+    const amrex::MultiFab* m_conduction_pc_density = nullptr;
     amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM>
         m_conduction_pc_coefficient;
     std::unique_ptr<amrex::MultiFab> m_conduction_pc_blend;
     static constexpr int ConductionPCElectron = 0;
     static constexpr int ConductionPCIonTotal = 1;
     static constexpr int ConductionPCIonInternal = 2;
-    static constexpr int ConductionPCComponents = 3;
+    // Face density of the linearization (ImplicitSolver::
+    // MHDConductionPCFaceDensityComponent): the coefficient-state face
+    // density rho_f the conductive flux F = -rho_f chi (e_R - e_L)/h was
+    // formed with (arithmetic mean of the two cells in the bulk, the
+    // interior side at wall and z-end faces), written wherever a normal
+    // coefficient is. The flux Jacobian in the energy DENSITY is
+    // rho_f chi/(h rho_R) and rho_f chi/(h rho_L): the block needs rho_f
+    // and the cell density to weight its Helmholtz where rho jumps.
+    static constexpr int ConductionPCFaceDensity = 3;
+    // Cross-term coefficients (implicit_mhd.conduction_pc_cross_terms;
+    // ImplicitSolver::MHDConductionPCCrossComponent + channel): chi_nt =
+    // (chi_par - chi_perp) b_n b_t / b^2 with the same stage weight and
+    // 1/cap^2 as the normal coefficient, i.e. the coefficient of the
+    // TANGENTIAL specific-energy gradient in the linearized normal flux
+    //     F_n = -rho_f (chi_nn d_n e + chi_nt d_t e).
+    // Zero unless the knob is on; zero at wall and z-end faces (no
+    // tangential machinery there) and in 1D (b_t = 0). The ion internal
+    // slot stays zero like its normal counterpart (the pair blends the
+    // total slot).
+    static constexpr int ConductionPCCrossElectron = 4;
+    static constexpr int ConductionPCCrossIonTotal = 5;
+    static constexpr int ConductionPCCrossIonInternal = 6;
+    static constexpr int ConductionPCComponents = 7;
+    static_assert(ConductionPCFaceDensity ==
+                  ImplicitSolver::MHDConductionPCFaceDensityComponent);
+    static_assert(ConductionPCCrossElectron ==
+                  ImplicitSolver::MHDConductionPCCrossComponent);
     // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
     // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
     // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the
@@ -1853,6 +1902,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // measured wall-ledger runaway (3.3e11 J -> 3.5e4 J under minmod in
     // the E4 A/B). "none" remains selectable for the centered reference.
     std::string m_braginskii_tangential_limiter = "minmod";
+    // DIAGNOSTIC scale of the Braginskii cross term (implicit_mhd.
+    // braginskii_cross_term_scale, [0, 1], default 1 = bit-identical):
+    // multiplies the tangential-gradient part of the tensor flux,
+    //   q_n = -rho [chi_perp de/dn + (chi_par - chi_perp) bhat_n
+    //                (bhat_n de/dn + s bhat_t de/dt)],
+    // so s = 0 keeps the normal projection chi_nn (what the block
+    // preconditioner represents) and drops the corner stencil. NOT a
+    // physics option: s < 1 makes the flux non-tensorial (it no longer
+    // rotates with B). It exists to attribute the Newton/GMRES cost of
+    // the wall-corner edge to the cross term (the oblique_edge test),
+    // and is printed in the solver banner whenever it is not 1.
+    amrex::Real m_braginskii_cross_term_scale = 1.0;
     // Coulomb logarithm of the Braginskii collision times tau_e/tau_i: a
     // positive constant, or -1 for the LIVE two-branch form evaluated at
     // each face from the face density and temperatures

@@ -908,6 +908,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // were preconditioned as identities -- the measured "Newton frozen"
     // class of failure. The knob exists for A/B measurement.
     pp.query("conduction_pc_coefficients", m_conduction_pc_coefficients);
+    pp.query("conduction_pc_cross_terms", m_conduction_pc_cross_terms);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_conduction_pc_cross_terms || m_conduction_pc_coefficients,
+        "implicit_mhd.conduction_pc_cross_terms extends the conduction PC "
+        "registers and requires implicit_mhd.conduction_pc_coefficients = 1");
     pp.query("wall_conduction_validate_rows",
              m_wall_conduction_validate_rows);
     utils::parser::queryWithParser(pp,
@@ -932,6 +937,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "hllc_contact_blend", m_hllc_contact_blend);
     pp.query("ion_closure", m_ion_closure);
     pp.query("braginskii_tangential_limiter", m_braginskii_tangential_limiter);
+    utils::parser::queryWithParser(pp, "braginskii_cross_term_scale",
+                                   m_braginskii_cross_term_scale);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_braginskii_cross_term_scale >= 0.0_rt &&
+            m_braginskii_cross_term_scale <= 1.0_rt,
+        "implicit_mhd.braginskii_cross_term_scale must lie in [0, 1] (1 = the "
+        "tensor flux; smaller values are a diagnostic, not a physics option)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_braginskii_tangential_limiter == "none" ||
             m_braginskii_tangential_limiter == "minmod" ||
@@ -3650,6 +3662,17 @@ void ThetaImplicitMHD::PrintParameters () const
                    << (m_conduction_pc_coefficients ? "on" : "off")
                    << " (bulk-conduction face registers for pc_mhd_block."
                       "conduction_block)\n"
+                   << "Conduction PC cross terms:     "
+                   << (m_conduction_pc_cross_terms ? "on" : "off")
+                   << " (frozen chi_nt registers for pc_mhd_block."
+                      "conduction_cross_terms)\n"
+                   << "Braginskii cross-term scale:   "
+                   << m_braginskii_cross_term_scale
+                   << (m_braginskii_cross_term_scale == 1.0_rt
+                           ? " (the tensor flux)"
+                           : " (DIAGNOSTIC: tangential term scaled, flux is "
+                             "not tensorial)")
+                   << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
                    << "Conduction theta:              " << m_conduction_theta
                    << "\n"
@@ -7280,6 +7303,8 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
     if (m_conduction_pc_active) {
         const amrex::MultiFab& density =
             *m_WarpX->m_fields.get(MassDensityName, 0);
+        // The linearization density of the registers (see the member).
+        m_conduction_pc_density = &density;
         for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
             if (m_conduction_pc_coefficient[direction] == nullptr) {
                 m_conduction_pc_coefficient[direction] =
@@ -7543,9 +7568,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         : (m_braginskii_tangential_limiter == "smart")        ? 1
         : (m_braginskii_tangential_limiter == "smart_upwind") ? 2
                                                               : 0;
+    // Diagnostic scale of the cross term (see the member): exactly 1 on
+    // every production deck, so the multiply below is bit-identical.
+    const amrex::Real brag_cross_scale = m_braginskii_cross_term_scale;
 #if !defined(WARPX_DIM_RZ)
     // The tangential corner stencil exists only in RZ.
-    amrex::ignore_unused(brag_tangential_minmod, brag_tangential_smart);
+    amrex::ignore_unused(brag_tangential_minmod, brag_tangential_smart,
+                         brag_cross_scale);
 #endif
     const bool chi_needs_state =
         chi_any_parser || conduction_limit > 0.0_rt || braginskii;
@@ -8234,6 +8263,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         conduction_stage ? stage_new_weight : 1.0_rt;
     const int conduction_pc_electron = ConductionPCElectron;
     const int conduction_pc_ion_total = ConductionPCIonTotal;
+    // Face density and (optional) frozen cross-term coefficients of the
+    // linearization, see the register layout in the header. The cross
+    // coefficient (chi_par - chi_perp) b_n b_t / b^2 is zero in 1D
+    // (b_t = 0) and at wall / z-end faces (no tangential machinery).
+    const int conduction_pc_face_density = ConductionPCFaceDensity;
+    const bool emit_conduction_pc_cross =
+        emit_conduction_pc && m_conduction_pc_cross_terms;
+    const int conduction_pc_cross_electron = ConductionPCCrossElectron;
+    const int conduction_pc_cross_ion_total = ConductionPCCrossIonTotal;
     for (amrex::MFIter mfi(face_flux_mf); mfi.isValid(); ++mfi) {
         // Grow in the transverse direction(s): the corner UCT EMF reads
         // both adjacent faces of each family, including one ghost face at
@@ -10292,6 +10330,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             conduction_pc(i, j, k, conduction_pc_ion_total) =
                                 conduction_pc_stage_weight * chi_ion_face *
                                 corner_weight / (z_end_cap * z_end_cap);
+                            conduction_pc(i, j, k, conduction_pc_face_density) =
+                                face_density;
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
@@ -10308,7 +10348,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                              (brag_chi_par_ion - brag_chi_perp_ion) *
                                  brag_bn *
                                  (brag_bn * gradient_normal +
-                                  brag_bt * brag_grad_t_ion) /
+                                  brag_cross_scale * brag_bt *
+                                      brag_grad_t_ion) /
                                  brag_b2_dir);
                         if (conduction_limit > 0.0_rt) {
                             // the same free-streaming harmonic cap as
@@ -10366,6 +10407,22 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         conduction_pc(i, j, k, conduction_pc_ion_total) =
                             conduction_pc_stage_weight * chi_ion_face /
                             (conduction_pc_cap * conduction_pc_cap);
+                        conduction_pc(i, j, k, conduction_pc_face_density) =
+                            face_density;
+                        if (emit_conduction_pc_cross) {
+                            // Frozen cross-term coefficient of the tensor
+                            // flux (zero for the isotropic path); carries
+                            // the diagnostic cross-term scale so block and
+                            // residual agree for any value of it.
+                            conduction_pc(i, j, k, conduction_pc_cross_ion_total) =
+                                braginskii
+                                    ? conduction_pc_stage_weight *
+                                          (brag_chi_par_ion - brag_chi_perp_ion) *
+                                          brag_cross_scale * brag_bn * brag_bt /
+                                          (brag_b2_dir * conduction_pc_cap *
+                                           conduction_pc_cap)
+                                    : 0.0_rt;
+                        }
                     }
                     if (chi_dual_energy) {
                         // Conduction is a purely internal-energy exchange:
@@ -10614,6 +10671,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                 conduction_pc_stage_weight *
                                 chi_electron_face * corner_weight /
                                 (z_end_cap * z_end_cap);
+                            conduction_pc(i, j, k, conduction_pc_face_density) =
+                                face_density;
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
@@ -10629,7 +10688,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_chi_perp_electron) *
                                  brag_bn *
                                  (brag_bn * gradient_normal +
-                                  brag_bt * brag_grad_t_electron) /
+                                  brag_cross_scale * brag_bt *
+                                      brag_grad_t_electron) /
                                  brag_b2_dir);
                         if (conduction_limit > 0.0_rt) {
                             // cap at the conduction-stage temperature
@@ -10670,6 +10730,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         conduction_pc(i, j, k, conduction_pc_electron) =
                             conduction_pc_stage_weight * chi_electron_face /
                             (conduction_pc_cap * conduction_pc_cap);
+                        conduction_pc(i, j, k, conduction_pc_face_density) =
+                            face_density;
+                        if (emit_conduction_pc_cross) {
+                            // Frozen cross-term coefficient of the tensor
+                            // flux (zero for the isotropic path).
+                            conduction_pc(i, j, k, conduction_pc_cross_electron) =
+                                braginskii
+                                    ? conduction_pc_stage_weight *
+                                          (brag_chi_par_electron -
+                                           brag_chi_perp_electron) *
+                                          brag_cross_scale * brag_bn * brag_bt /
+                                          (brag_b2_dir * conduction_pc_cap *
+                                           conduction_pc_cap)
+                                    : 0.0_rt;
+                        }
                     }
                 }
             }

@@ -835,6 +835,50 @@ Overall simulation parameters
               which the conduction block stays at the identity (on resolved
               conduction a fixed-cycle application of a near-identity
               operator only injects structure GMRES must then resolve).
+            - ``pc_mhd_block.conduction_density_weight`` (``bool``, default:
+              false): weight the conduction block by the density. The
+              conductive face flux is :math:`F = -\rho_f \chi (e_R - e_L)/h`
+              in the specific energy :math:`e = U/\rho`, so its Jacobian in
+              the energy density is :math:`\rho_f \chi/(h \rho_R)` on one
+              side of the face and :math:`\rho_f \chi/(h \rho_L)` on the
+              other: wherever the density jumps, the plain
+              ":math:`\chi` as the diffusivity of :math:`U`" the block
+              otherwise folds is off by the density ratios (a 5.5x/0.55x
+              pair at a tenfold step with the arithmetic face mean), and
+              measured on ``test_rz_theta_implicit_mhd_braginskii_oblique_edge``
+              the un-weighted block then costs MORE GMRES than no block
+              (3363 vs 2079 over ten steps; 15x on the hot-column variant)
+              while a 2-3x-per-cell ramp is fine. With the weight the block
+              solves the exactly equivalent symmetric system in :math:`e`,
+              :math:`(R + \theta_c \Delta t\, K)\, y = r`,
+              :math:`\delta U = R y`, with :math:`R = \mathrm{diag}(\rho)`
+              as the Helmholtz a-coefficient and :math:`\rho_f \chi` as the
+              face coefficient (both from the solver's registers,
+              :pp:param:`implicit_mhd.conduction_pc_coefficients`; the cell
+              density is frozen at each preconditioner update, so the block
+              is one fixed operator across the GMRES iterations of a Newton
+              solve). The other stacked fluid rows must be identities for
+              this: with ``pc_mhd_block.signal_diffusion_scale > 0`` the
+              block warns and runs un-weighted. Off is bit-identical.
+            - ``pc_mhd_block.conduction_cross_terms`` (``bool``, default:
+              false): consume the frozen cross-term coefficients of the
+              Braginskii flux linearization
+              (:pp:param:`implicit_mhd.conduction_pc_cross_terms`, required)
+              in the conduction block. The cell-centered Helmholtz
+              (``MLABecLaplacian``) has no 9-point stencil, so the block
+              applies an approximate cross operator :math:`K_{nt}` -- the
+              centered 4-cell corner stencil of the tangential gradient
+              with the frozen :math:`\chi_{nt}`, NOT the residual's
+              limited stencil -- as ONE defect-correction pass after its
+              V-cycle solve, :math:`x_1 = x_0 - M^{-1}\, \theta_c \Delta t\,
+              K_{nt} x_0`, i.e. a first-order inverse of
+              :math:`M + \theta_c \Delta t\, K_{nt}` at the cost of a second
+              solve per application. Measured on the oblique-edge test it
+              does not reduce the GMRES count (a first-order correction
+              cannot hold a cross coupling of conduction number ~20); it is
+              kept as the reference consumer and the gate of the register
+              contents. RZ only (the corner stencil exists only there). Off
+              is bit-identical.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)
@@ -6981,7 +7025,49 @@ Jacobian probes.
     to both registers). Without a conduction channel nothing is allocated;
     with the block engaged only the Newton iterates change, never the
     converged state. ``0`` restores the identity energy blocks for A/B
-    measurement.
+    measurement. The registers also carry, per face, the coefficient-state
+    face density :math:`\rho_f` the flux was formed with (component 3),
+    which ``pc_mhd_block.conduction_density_weight`` needs together with
+    the cell density.
+
+.. pp:param:: implicit_mhd.conduction_pc_cross_terms
+    :type: ``bool``
+    :default: ``false``
+
+    Also hand the block preconditioner the frozen CROSS-TERM coefficients
+    of the Braginskii flux linearization: per face and energy channel
+    :math:`\chi_{nt} = (\chi_\parallel - \chi_\perp)\, \hat b_n \hat b_t /
+    b^2`, with the same conduction-stage weight and free-streaming
+    :math:`1/\mathrm{cap}^2` factor as the normal coefficient, so that the
+    linearized normal flux reads :math:`F_n = -\rho_f (\chi_{nn}
+    \partial_n e + \chi_{nt} \partial_t e)` (components 4-6 of the face
+    registers; zero at wall and z-end faces and in 1D; the diagnostic
+    :pp:param:`implicit_mhd.braginskii_cross_term_scale` is folded in, so
+    block and residual agree for any value of it). Consumed by
+    ``pc_mhd_block.conduction_cross_terms`` (the MLMG path applies them as
+    a defect correction) or by an assembled conduction operator. Off is
+    bit-identical (the components stay zero and nothing reads them).
+    Motivation: on ``test_rz_theta_implicit_mhd_braginskii_oblique_edge``
+    dropping the cross term from the residual halves the GMRES count with
+    the temperature front present and cuts it 7x on the hot-column
+    variant, so a block that ignores it misrepresents the operator by
+    that much.
+
+.. pp:param:: implicit_mhd.braginskii_cross_term_scale
+    :type: ``float``
+    :default: ``1.0``
+
+    DIAGNOSTIC scale :math:`s \in [0, 1]` of the Braginskii cross term:
+    the tangential-gradient part of the tensor flux is multiplied by
+    :math:`s`, :math:`q_n = -\rho [\chi_\perp \partial_n e + (\chi_\parallel -
+    \chi_\perp) \hat b_n (\hat b_n \partial_n e + s\, \hat b_t \partial_t e)]`,
+    so :math:`s = 0` keeps the normal projection :math:`\chi_{nn}` (what
+    the block preconditioner represents) and drops the corner stencil.
+    NOT a physics option: for :math:`s < 1` the flux is no longer a tensor
+    (it does not rotate with :math:`B`). It exists to attribute the
+    Newton/GMRES cost of the wall-corner edge to the cross term; ``1``
+    (the default) is bit-identical and any other value is printed in the
+    solver banner.
 
 .. pp:param:: implicit_mhd.wall_conduction_pc_rows
     :type: ``bool``

@@ -1900,6 +1900,22 @@ class MHDBlockPreconditioner(PreconditionerBase):
         Largest conduction number theta_c dt chi/h^2 below which the
         conduction block stays at the identity (default 1.0).
 
+    conduction_density_weight: bool, optional
+        Weight the conduction block by the density (default off): solve the
+        symmetric system in the specific energy, (R + theta_c dt K) y = r,
+        dU = R y, with R = diag(rho) as the Helmholtz a-coefficient and
+        rho_f chi as the face coefficient, which is the exact linearization
+        of the conductive flux in the energy density where the density
+        jumps (the plain chi-as-diffusivity block is off by the density
+        ratios there and measured worse than no block at a tenfold step).
+        Requires the shared signal diffusion off.
+
+    conduction_cross_terms: bool, optional
+        Consume the frozen cross-term coefficients of the Braginskii flux
+        linearization (implicit_mhd.conduction_pc_cross_terms, required) as
+        one defect-correction pass after the conduction block's V-cycle
+        solve (default off; RZ only).
+
     resistive_threshold: float, optional
         Grid-scale resistive diffusion number below which the resistive
         block is the exact identity at zero cost
@@ -1938,6 +1954,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         resistive_validate_assembly=None,
         conduction_block=None,
         conduction_threshold=None,
+        conduction_density_weight=None,
+        conduction_cross_terms=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -1957,6 +1975,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.resistive_validate_assembly = resistive_validate_assembly
         self.conduction_block = conduction_block
         self.conduction_threshold = conduction_threshold
+        self.conduction_density_weight = conduction_density_weight
+        self.conduction_cross_terms = conduction_cross_terms
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -1983,6 +2003,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.resistive_validate_assembly = self.resistive_validate_assembly
         pc_mhd_block.conduction_block = self.conduction_block
         pc_mhd_block.conduction_threshold = self.conduction_threshold
+        pc_mhd_block.conduction_density_weight = self.conduction_density_weight
+        pc_mhd_block.conduction_cross_terms = self.conduction_cross_terms
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):
@@ -3336,6 +3358,21 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the Jacobian carries. Off restores the identity energy blocks for
         A/B measurement; the converged state never depends on it.
 
+    conduction_pc_cross_terms: bool, default=False
+        Also hand the block preconditioner the frozen cross-term
+        coefficients chi_nt = (chi_par - chi_perp) b_n b_t / b^2 of the
+        Braginskii flux linearization (per face and channel, same stage
+        weight and cap factor as the normal coefficient), for
+        pc_mhd_block.conduction_cross_terms or an assembled conduction
+        operator. Off is bit-identical.
+
+    braginskii_cross_term_scale: float, default=1.0
+        DIAGNOSTIC scale in [0, 1] of the Braginskii cross term (the
+        tangential-gradient part of the tensor flux); 0 keeps the normal
+        projection only. Not a physics option (the flux stops being a
+        tensor); it attributes the Newton/GMRES cost of an oblique edge to
+        the cross term. 1 is bit-identical.
+
     wall_friction_heating: str, default="book"
         Where the tangential friction work of the no-slip wall faces goes
         (requires wall_no_slip=True). "book": the wall does no work, so
@@ -3638,6 +3675,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_corner_temperature_pin_rate=None,
         viscous_flux_limit_factor=None,
         conduction_pc_coefficients=None,
+        conduction_pc_cross_terms=None,
+        braginskii_cross_term_scale=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3779,6 +3818,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_corner_temperature_pin_rate = wall_corner_temperature_pin_rate
         self.viscous_flux_limit_factor = viscous_flux_limit_factor
         self.conduction_pc_coefficients = conduction_pc_coefficients
+        self.conduction_pc_cross_terms = conduction_pc_cross_terms
+        self.braginskii_cross_term_scale = braginskii_cross_term_scale
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3971,6 +4012,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         )
         implicit_mhd.viscous_flux_limit_factor = self.viscous_flux_limit_factor
         implicit_mhd.conduction_pc_coefficients = self.conduction_pc_coefficients
+        implicit_mhd.conduction_pc_cross_terms = self.conduction_pc_cross_terms
+        implicit_mhd.braginskii_cross_term_scale = self.braginskii_cross_term_scale
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

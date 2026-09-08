@@ -1921,6 +1921,61 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
 )
 
+# Wall-corner conduction stiffness of the production formation deck: an
+# electron column's axial edge (tenfold density step per cell, 10 -> 0.5 eV
+# temperature front) next to a cold conducting wall in an oblique field,
+# Braginskii chi_par/chi_perp = 1e4 at the production clamps, theta 1 and
+# the production inexact-Newton settings. Records the point-smoothed
+# conduction block's Newton and GMRES counts (the baseline a better block
+# must beat; see analysis_mhd_braginskii_oblique_edge.py for the
+# "improved" mode an upgrade arm runs against this baseline).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 baseline"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The density-weighted block on the same deck (the "improved" arm: every
+# step converged, GMRES at most half the baseline's; measured 233 vs 3363).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_density_weight  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1"  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 improved ../test_rz_theta_implicit_mhd_braginskii_oblique_edge/diags/diag000010 ../test_rz_theta_implicit_mhd_braginskii_oblique_edge/diags/newton.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge  # dependency
+)
+# Ions evolving (dual-energy pair, hot-ion front, equilibration, ion sonic
+# cap) with the density weight: the only arm whose non-energy rows carry a
+# right-hand side, i.e. the gate on the weight's identity-row premultiply
+# and the pair's inverse (measured 114 Newton / 787 GMRES; without the
+# premultiply 73 / 41500).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_ions_density_weight  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.evolve_ion_fluid=true implicit_mhd.ion_closure=dual_energy implicit_mhd.reference_ion_pressure=n_core*q_e*50.0 implicit_mhd.ion_pressure_floor=floor_frac*n_ref*q_e*Te_halo implicit_mhd.ion_pressure(x,y,z)=q_e*n_halo*exp(log(n_core/n_halo)*0.5*(1.0-tanh((abs(z)-z_edge)/w_n)))*(Te_halo+(50.0-Te_halo)*0.5*(1.0-tanh((abs(z)-z_front)/w_T))) implicit_mhd.electron_ion_equilibration=1.0 implicit_mhd.wall_heat_flux_cap_factor_ion=2.5"  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 ions"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The frozen cross-term registers and their MLMG consumer on top of the
+# weight: the gate on the register contents (sign-sensitive: 40 / 266
+# measured, 46 / 616 with the sign of b_n b_t flipped).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_cross_terms  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.conduction_pc_cross_terms=1 pc_mhd_block.conduction_cross_terms=1"  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 cross"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
 # _off run first (unpreconditioned), then the block run compares its
 # converged state and Krylov work against it (two ranks, anisotropic).
