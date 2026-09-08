@@ -1750,7 +1750,14 @@ MHDBlockPC<T, Ops>::ValidateConductionAssembly ()
     m_signal_solver->apply({m_conduction_action.get()}, {m_signal_solution.get()});
     const auto [max_difference, reference_scale] =
         m_conduction_direct->CompareMatrixFreeAction(*m_conduction_action);
-    const RT tolerance = RT(1.0e-12) * amrex::max(RT(1.0), reference_scale);
+    // Relative to the operator's own scale: the conduction rows have no
+    // identity part (unlike the resistive I + A, whose scale is >= 1), and
+    // a density-weighted form scales the whole operator by rho ~ 1e-7,
+    // where an absolute 1e-12 would be a 1e-5 relative gate.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(reference_scale) && reference_scale > RT(0.0),
+        "pc_mhd_block conduction assembly check: the assembled operator has no scale");
+    const RT tolerance = RT(1.0e-12) * reference_scale;
     amrex::Print() << "pc_mhd_block conduction assembly check: max |assembled - MLMG "
                       "operator| = "
                    << max_difference << " (scale " << reference_scale << ", tolerance "
