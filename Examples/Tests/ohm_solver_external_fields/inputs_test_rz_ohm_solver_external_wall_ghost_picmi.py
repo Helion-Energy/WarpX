@@ -120,7 +120,12 @@ def ghost_ring_errors(mf, prediction, ghost_i, nodal_z):
     nodal_z: True if the field is nodal in z (z_j = z_lo + j*DZ), else
              cell-centered (z_j = z_lo + (j+0.5)*DZ).
     """
-    ng = mf.n_grow_vect
+    # Global-index read through the register (layout-agnostic and
+    # device-aware, Fortran order r, z, comp): 1j is the first r_max
+    # domain-ghost ring (global radial index ghost_i), gathered from the
+    # wall-adjacent FABs only.
+    ring = mf[1j, :, 0]
+    assert mf.shape[0] == ghost_i, "ghost_i is not the first r_max ghost ring"
     n_wall = 0
     max_err = 0.0
     max_pred = 0.0
@@ -132,15 +137,10 @@ def ghost_ring_errors(mf, prediction, ghost_i, nodal_z):
         if vb.big_end[0] != ghost_i - 1:
             continue
         n_wall += 1
-        arr = np.array(mf.array(mfi), copy=False)  # [comp, k, j, i]
-        lo_i = vb.small_end[0] - ng[0]
-        lo_j = vb.small_end[1] - ng[1]
-        ii = ghost_i - lo_i
         for j in range(vb.small_end[1], vb.big_end[1] + 1):
-            jj = j - lo_j
             z_j = z_lo_domain + (j if nodal_z else (j + 0.5)) * DZ
             pred = prediction(z_j)
-            err = abs(arr[0, 0, jj, ii] - pred)
+            err = abs(ring[j] - pred)
             max_err = max(max_err, err)
             max_pred = max(max_pred, abs(pred))
     return n_wall, max_err, max_pred

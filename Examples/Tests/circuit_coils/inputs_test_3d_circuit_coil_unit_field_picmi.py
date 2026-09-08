@@ -122,13 +122,13 @@ NODAL = {
 
 def scan(mf, comp):
     nodal = NODAL[comp]
-    ng = mf.n_grow_vect
+    # Global-index read through the register (layout-agnostic and
+    # device-aware, Fortran order x, y, z, comp) over the valid cells.
+    valid = mf[:, :, :, 0]
     max_err = 0.0
     max_ref = 0.0
     for mfi in mf:
         vb = mfi.validbox()
-        arr = np.array(mf.array(mfi), copy=False)
-        lo = [vb.small_end[d] - ng[d] for d in range(3)]
         for k in range(vb.small_end[2], vb.big_end[2] + 1):
             z = PLO + (k if nodal[2] else k + 0.5) * DX
             for j in range(vb.small_end[1], vb.big_end[1] + 1):
@@ -141,7 +141,7 @@ def scan(mf, comp):
                         ref = -a_th * y / rho if rho > 0 else 0.0
                     else:
                         ref = a_th * x / rho if rho > 0 else 0.0
-                    val = arr[0, k - lo[2], j - lo[1], i - lo[0]]
+                    val = valid[i, j, k]
                     max_err = max(max_err, abs(val - ref))
                     max_ref = max(max_ref, abs(ref))
     return max_err, max_ref

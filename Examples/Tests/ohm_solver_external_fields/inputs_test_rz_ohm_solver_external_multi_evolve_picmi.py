@@ -96,13 +96,11 @@ simulation.initialize_warpx()
 
 def max_bz_total():
     bz = simulation.fields.get("Bfield_fp", dir="z", level=0)
-    local = 0.0
-    for mfi in bz:
-        arr = np.array(bz.array(mfi), copy=False)
-        local = max(local, float(np.max(np.abs(arr))))
-    buf = np.zeros(1)
-    comm.Allreduce(np.array([local]), buf, op=mpi.MAX)
-    return buf[0]
+    # Global-index read through the register (layout-agnostic and
+    # device-aware; the empty tuple spans the valid cells plus the domain
+    # ghosts). The gather is collective and returns the full array on every
+    # rank, so no further reduction is needed.
+    return float(np.max(np.abs(bz[()])))
 
 
 for call in range(N_CALLS):

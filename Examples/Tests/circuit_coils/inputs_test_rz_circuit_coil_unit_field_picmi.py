@@ -131,16 +131,19 @@ fields = simulation.fields
 
 
 def scan(mf, prediction_of_rz, nodal_r, nodal_z, ghost_i):
-    ng = mf.n_grow_vect
+    # Global-index reads through the register (layout-agnostic and
+    # device-aware, Fortran order r, z, comp): ":" spans the valid cells and
+    # 1j is the first r_max domain-ghost ring (global radial index ghost_i),
+    # gathered from the wall-adjacent FABs only.
+    valid = mf[:, :, 0]
+    ring = mf[1j, :, 0]
+    assert valid.shape[0] == ghost_i, "ghost_i is not the first r_max ghost ring"
     n_wall = 0
     max_err = 0.0
     max_ref = 0.0
     z_lo_domain = -LZ / 2.0
     for mfi in mf:
         vb = mfi.validbox()
-        arr = np.array(mf.array(mfi), copy=False)
-        lo_i = vb.small_end[0] - ng[0]
-        lo_j = vb.small_end[1] - ng[1]
         i_list = list(range(vb.small_end[0], vb.big_end[0] + 1))
         if vb.big_end[0] == ghost_i - 1:
             n_wall += 1
@@ -150,7 +153,8 @@ def scan(mf, prediction_of_rz, nodal_r, nodal_z, ghost_i):
             for i in i_list:
                 r_i = (i if nodal_r else (i + 0.5)) * DR
                 ref = prediction_of_rz(r_i, z_j)
-                max_err = max(max_err, abs(arr[0, 0, j - lo_j, i - lo_i] - ref))
+                val = ring[j] if i == ghost_i else valid[i, j]
+                max_err = max(max_err, abs(val - ref))
                 max_ref = max(max_ref, abs(ref))
     return n_wall, max_err, max_ref
 

@@ -11,6 +11,8 @@
 # --- The vacuum identity pins the grid: B_ext == s(t) * (discrete curl of
 # --- the unit A) everywhere including the r_max domain-ghost ring. Hook
 # --- accounting verifies the predictor-corrector loop ran.
+# --- substeps=16 is deliberately generous: an active coupler turns the RK4 NaN-restart
+# --- into a hard abort by design, so coupled decks run RKF45 or an ample fixed count.
 
 import numpy as np
 from mpi4py import MPI as mpi
@@ -95,7 +97,7 @@ solver = picmi.HybridPICSolver(
     n0=N0,
     n_floor=0.01 * N0,
     plasma_resistivity=1.0e-6,
-    substeps=4,
+    substeps=16,  # generous by design (see the header)
     A_external=A_ext,
     circuit=circuit,
 )
@@ -251,15 +253,19 @@ def bz_replica(r_c, z):
 fields = simulation.fields
 bz = fields.get("hybrid_B_fp_external", dir="z", level=0)
 
+# Global-index reads through the register (layout-agnostic and device-aware,
+# Fortran order r, z, comp): ":" spans the valid cells and 1j is the first
+# r_max domain-ghost ring (global radial index NR), gathered from the
+# wall-adjacent FABs only.
+bz_valid = bz[:, :, 0]
+bz_ring = bz[1j, :, 0]
+assert bz_valid.shape[0] == NR, "NR is not the first r_max ghost ring"
+
 max_err = 0.0
 max_ref = 0.0
 n_wall = 0
-ng = bz.n_grow_vect
 for mfi in bz:
     vb = mfi.validbox()
-    arr = np.array(bz.array(mfi), copy=False)
-    lo_i = vb.small_end[0] - ng[0]
-    lo_j = vb.small_end[1] - ng[1]
     i_list = list(range(vb.small_end[0], vb.big_end[0] + 1))
     if vb.big_end[0] == NR - 1:
         n_wall += 1
@@ -268,7 +274,8 @@ for mfi in bz:
         z_j = -LZ / 2.0 + j * DZ
         for i in i_list:
             ref = bz_replica((i + 0.5) * DR, z_j)
-            max_err = max(max_err, abs(arr[0, 0, j - lo_j, i - lo_i] - ref))
+            val = bz_ring[j] if i == NR else bz_valid[i, j]
+            max_err = max(max_err, abs(val - ref))
             max_ref = max(max_ref, abs(ref))
 
 vals = np.zeros(2)
