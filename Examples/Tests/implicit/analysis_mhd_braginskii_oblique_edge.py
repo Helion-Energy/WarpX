@@ -155,9 +155,12 @@ missed = missed_steps(rows)
 print(f"{mode}: steps missing the 1e-4 exit: {missed.tolist()}")
 
 # --- physics sanity: frozen density, draining wall, maximum principle ---
-np.testing.assert_allclose(final_density, initial_density, rtol=1.0e-12)
+# Live rows only: the shaped wall's exterior clamp scrapes the 8 masked
+# rows to the rigid vacuum image on the first step, after the initial
+# plotfile is written, so only the fluid inside the wall is compared.
 r = ((np.arange(number_of_cells_r) + 0.5) * cell_size)[:, np.newaxis]
 live = slice(0, live_rows)
+np.testing.assert_allclose(final_density[live], initial_density[live], rtol=1.0e-12)
 initial_total = np.sum(initial_energy[live] * r[live])
 final_total = np.sum(final_energy[live] * r[live])
 print(
