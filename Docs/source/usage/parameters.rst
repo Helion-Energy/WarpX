@@ -827,14 +827,62 @@ Overall simulation parameters
               block-off twins, not the assembled operator itself: a
               coefficient off by a factor of two still clusters the
               spectrum and costs only a few iterations, so those gates
-              would not catch it (a direct assembled-operator check is a
-              follow-on).
+              would not catch it; the assembled-operator check is
+              :pp:param:`pc_mhd_block.conduction_validate_assembly`
+              below, which compares the emitted rows against the MLMG
+              operator's own application (it does not, however, compare
+              either against the residual's Jacobian).
             - ``pc_mhd_block.conduction_threshold`` (``float``, default:
               1.0): largest conduction number
               :math:`\theta_c \Delta t\, \chi / h^2` over the faces below
               which the conduction block stays at the identity (on resolved
               conduction a fixed-cycle application of a near-identity
               operator only injects structure GMRES must then resolve).
+            - ``pc_mhd_block.conduction_solver`` (``string``, default:
+              ``mlmg``): recast path only; inner solver of the conduction
+              block. ``mlmg`` is the fixed ``fluid_iterations`` V-cycles
+              above (a point-smoothed full-coarsening multigrid, known to
+              degrade for per-direction anisotropy above ~1e2 -- the
+              regime of the Braginskii wall corner, where GMRES per Newton
+              solve was measured at 100-150 against ~35 elsewhere on the
+              production formation deck). ``direct`` and ``banded``
+              instead invert the energy channels of the frozen stacked
+              Helmholtz EXACTLY, the way the resistive block is inverted:
+              the sparse rows are emitted from the SAME cell and per-face
+              coefficients the MLMG operator applies (the solver's frozen
+              :math:`\theta_c \Delta t\, \chi_{nn}`, the RZ metric folded
+              in, Neumann/Dirichlet/periodic domain faces eliminated as
+              AMReX's ``MLABecLaplacian`` does, i.e. the three-point
+              Dirichlet ghost extrapolation at a conducting z end), and
+              factorized once per preconditioner update, so every
+              application is a single forward/backward substitution.
+              ``direct`` factorizes with NVIDIA cuDSS (CUDA builds
+              configured with ``-DWarpX_CUDSS=ON``; the values are
+              refreshed device-resident on single-rank runs and gathered
+              through the host on the I/O rank otherwise); ``banded`` is
+              the portable block-banded LU along z of each channel (blocks
+              dense over the radial line, bandwidth 1 -- doubled by the
+              folded ring ordering of a periodic z -- in double precision;
+              single-rank runs only). The other stacked components (mass,
+              momentum, and the dual-energy internal register while the
+              rank-one pair is active) keep their MLMG or identity
+              treatment, and the dual-energy pair, the wall-conduction
+              remainder rows and the masked-band identities compose
+              around the exact inverse exactly as around the MLMG one.
+              At the default every existing deck is bit-identical.
+            - ``pc_mhd_block.conduction_validate_assembly`` (``bool``,
+              default: false): recast path only; at every active
+              preconditioner update (with any ``conduction_solver``),
+              assemble the conduction rows and check their product on a
+              deterministic pseudo-random vector against ``MLMG::apply``
+              of the stacked operator itself -- AMReX's stencil and
+              domain-ghost fills against this emission, two independent
+              codes -- to :math:`10^{-12}` of the operator scale,
+              aborting on mismatch; on single-rank runs the device- and
+              host-assembled values are additionally compared bitwise
+              (:math:`\le 4` ULP asserted). Used by the
+              ``conduction_pc_*_banded`` and ``conduction_pc_validate``
+              tests.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)
