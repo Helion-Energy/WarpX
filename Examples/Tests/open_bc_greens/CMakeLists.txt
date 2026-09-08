@@ -21,6 +21,17 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_btheta_zcaps_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_btheta_zcaps_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # declared before test_rz_open_bc_greens_ring, which depends on it
 add_warpx_test(
     test_rz_open_bc_greens_ring_pec  # name
@@ -62,6 +73,28 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_zcaps_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_zcaps_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_zonly_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_zonly_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_rz_open_bc_greens_transient_sub20  # name
     RZ  # dims
@@ -81,3 +114,8 @@ add_warpx_test(
     OFF  # checksum
     test_rz_open_bc_greens_transient_sub20  # dependency
 )
+
+# The z-cap decks run to a resistive steady state and exceed the default CI
+# time budget on 2 cores.
+label_warpx_test(test_rz_open_bc_greens_zcaps_picmi slow)
+label_warpx_test(test_rz_open_bc_greens_zonly_picmi slow)

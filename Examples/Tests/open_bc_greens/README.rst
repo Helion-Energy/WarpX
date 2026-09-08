@@ -117,6 +117,27 @@ PIXIE3D resistive-wall BC paper (arXiv:2606.05446):
 * ``test_rz_open_bc_greens_btheta_isoz``: same column with PEC z faces,
   exercising the isolated-z kernel branch (no image sum) and the
   non-periodic B_theta corner clamp of the ghost fill.
+* ``test_rz_open_bc_greens_zcaps_picmi``: magnetostatic cap gate of the
+  open z faces (self-validating python driver, reads guard cells from the
+  live grid). Off-center ring, ALL free faces open: the cap-band ghost
+  Br/Bz must match the analytic isolated free-space field to the r-face
+  tolerance (measured 2.6e-3 / 4.4e-3 at 32x32 against 0.02), ghost
+  B_theta must vanish identically, and div B must be machine zero on
+  every all-psi/evolved cell including the corner ghosts (measured
+  1e-14 / 3e-18; the evolved/psi seam bands sit at the fill accuracy,
+  2.4e-3).
+* ``test_rz_open_bc_greens_btheta_zcaps_picmi``: the axial current column
+  crossing both open caps. Ghost B_theta must be the bitwise z-invariant
+  continuation of the last valid plane (Ampere with the enclosed
+  axial-current profile frozen at its boundary-plane value), carry the
+  analytic :math:`\mu_0 I_{enc}(r)/(2\pi r)` to the interior tolerance,
+  and the corner ghosts the exact :math:`r_c B_\theta` continuation; the
+  poloidal field and the psi contraction must stay exactly zero.
+* ``test_rz_open_bc_greens_zonly_picmi``: the z-only combination (PEC
+  conducting wall at r_hi + open caps -- the plugged flux-conserver
+  configuration). Boots, stays finite, machine-div on the pure-psi cap
+  cells at interior radii, exact B_theta continuation, no ghost/valid
+  tear.
 
 Measured on the ring test grid (32x64): open-BC wall-band error 4.9e-3
 vs analytic (PEC baseline: 2.1, i.e. a ~440x image suppression), and the
@@ -125,25 +146,27 @@ wall-band error vs interior coarsening factor is
 keeps the error near the discretization floor because the bin size is
 capped by the distance-to-face criterion regardless of C.
 
-Limitations (phase 1)
----------------------
+Limitations
+-----------
 
 RZ geometry with m = 0 only; hybrid-PIC solver only; single level; ``open``
-allowed on the r_hi face only; the domain must include the axis. The fill
-applies to the evolved (plasma-response) field: loading applied fields via
-``warpx.B_ext_grid_init_style`` is rejected with an abort (a curl-free
-field written into the evolved B would be erased at the open face and
-drive a spurious wall current sheet) -- use the hybrid solver's split
-external fields (``hybrid_pic_model.add_external_fields``), which provide
-their own ghost values. E-field ghosts at the open face are not filled
-(the Ohm advance does not consume them).
+allowed on the r_hi, z_lo and z_hi faces in any combination (r_lo is the
+symmetry axis; open z faces require non-periodic z); the domain must
+include the axis. The fill applies to the evolved (plasma-response) field:
+loading applied fields via ``warpx.B_ext_grid_init_style`` is rejected
+with an abort (a curl-free field written into the evolved B would be
+erased at the open faces and drive a spurious wall current sheet) -- use
+the hybrid solver's split external fields
+(``hybrid_pic_model.add_external_fields``), which provide their own ghost
+values. E-field ghosts at the open faces are not filled (the Ohm advance
+does not consume them).
 
-z faces: periodic z is the validated configuration (all psi-path tests).
-Non-periodic z faces run with an isolated-z (free-space) kernel; the
-toroidal-field path is covered by ``btheta_isoz``, but the poloidal ghost
-fill with conducting z faces omits the z-wall image response, so its
-accuracy near the corners is not validated -- treat open r_hi with
-non-periodic z as experimental for poloidal fields.
+The source binning is graded against the r_hi face only: a source
+concentration within ~coarsening cells of an open z cap is coarse-grained
+at O(1) in-bin phase there (see OPEN_BC_GREENS_DESIGN.md Sec. 7). With
+conducting z faces (``btheta_isoz``) the poloidal ghost fill omits the
+z-wall image response, so its accuracy near the corners is not validated
+-- prefer open z faces when the poloidal field reaches the ends.
 
 Planned follow-ups: the resistive ring-decay convergence test (design
 test 2) and the whistler/fast-pulse reflection measurement at the open

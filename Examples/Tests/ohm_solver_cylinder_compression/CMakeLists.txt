@@ -23,6 +23,20 @@ add_warpx_test(
 )
 label_warpx_test(test_rz_ohm_solver_cylinder_compression_picmi slow)
 
+# Circuit-coupled equivalence of the RZ compression test. Defined after its
+# dependency: add_warpx_test drops any test whose dependency is not yet
+# defined, so this entry must follow the base test.
+add_warpx_test(
+    test_rz_circuit_cylinder_compression_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_circuit_cylinder_compression_picmi.py --test"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_rz_ohm_solver_cylinder_compression_picmi  # dependency
+)
+label_warpx_test(test_rz_circuit_cylinder_compression_picmi slow)
+
 # Theta-implicit variants of the RZ compression test. These exercise the
 # external vector-potential drive in total-field form (the step-averaged
 # inductive E_ext enters the Ohm residual and the theta-Faraday advance
