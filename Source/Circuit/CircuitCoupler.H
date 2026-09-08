@@ -86,7 +86,10 @@ public:
          * function of the iterate. This is the python coupling
          * reference's per-step-frozen filter contract (its pending filter
          * value is committed by the finish hook), reproduced here so
-         * both drivers apply the same model. */
+         * both drivers apply the same model. Defined for the measured-step
+         * protocol (BeginStepMeasured) only: BeginStep (the explicit
+         * substep protocol, one accept per substep) refuses a nonzero
+         * value. */
         amrex::Real eps_lowpass_tau = 0.0;
         /** Which linkage the step's EMF differences are taken against
          * (circuit.linkage_reference; Newton-scope driving via

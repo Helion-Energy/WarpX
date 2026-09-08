@@ -8099,9 +8099,6 @@ Jacobian probes.
     by less than this relative amount.
 
 
-Grid types (collocated, staggered, hybrid)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 .. pp:param:: circuit.probe_exclusion_radius
     :type: ``float``
     :default: ``0.``
@@ -8132,7 +8129,10 @@ Grid types (collocated, staggered, hybrid)
     a step: all non-accepted (residual, corrector) evaluations of that step see the same
     frozen memory, keeping the EMF-to-scales map a smooth function of the iterate. This is the
     per-step-frozen filter contract of the python coupling reference. The memory is part of the
-    checkpoint (``circuit_coupler_memory.dat``).
+    checkpoint (``circuit_coupler_memory.dat``). Defined for the measured-step coupling protocol
+    (the theta-implicit MHD residual hooks, one accepting evaluation per step) only: the explicit
+    substep protocol accepts once per substep and refuses a nonzero value at run time rather than
+    filtering with a per-substep memory under a per-step weight.
 
 .. pp:param:: circuit.linkage_reference
     :type: ``str``
@@ -8165,6 +8165,10 @@ Grid types (collocated, staggered, hybrid)
     \theta s^{n+1}` and :math:`E_\mathrm{ext} = -(s^{n+1} - s^n)/\Delta t` -- the python hook's
     semantics (the accepting advance is over the full step in both cases). The two coincide at
     :math:`\theta = 1`. Requires :pp:param:`circuit.engine` = ``external``.
+
+
+Grid types (collocated, staggered, hybrid)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. pp:param:: warpx.grid_type
     :type: ``string``, ``collocated``, ``staggered`` or ``hybrid``
