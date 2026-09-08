@@ -37,11 +37,24 @@
  *            the Krylov direction v (Pernice-Walker). The historical behaviour.
  * component: eps = jfnk_epsilon ||D^{-1} U|| / ||D^{-1} v|| with the diagonal
  *            component scale D = diag(|U_i| + floor_c), floor_c a per-block
- *            additive floor: every component is perturbed by jfnk_epsilon of its
- *            OWN magnitude in the root-mean-square sense, whatever the block
- *            scales and however the state varies within a block (the
- *            Knoll-Keyes / Brown-Saad per-component relative perturbation). See
- *            JacobianFunctionMF::apply for the column-scaling derivation.
+ *            additive floor: ONE scalar perturbation per Jacobian application,
+ *            sized in the component-scaled ("typical value") variables D^{-1} U
+ *            (the scaling of the unknowns of Dennis & Schnabel, Numerical
+ *            Methods for Unconstrained Optimization and Nonlinear Equations,
+ *            1983, ch. 7), so that every component is perturbed by jfnk_epsilon
+ *            of its OWN magnitude in the root-mean-square sense, whatever the
+ *            block scales and however the state varies within a block. It is
+ *            NOT a per-component epsilon: the direction stays the Krylov
+ *            direction. The scalar-epsilon sizing rules themselves are those of
+ *            Knoll & Keyes, JCP 193 (2004) 357, sec. 2.3.1, eqs. (11)-(14). See
+ *            JacobianFunctionMF::apply for the column-scaling derivation, which
+ *            rests on the right-preconditioned finite-difference product of the
+ *            same paper, eqs. (25)-(28).
+ *
+ * The component scale D is rebuilt from the base state at every
+ * setBaseSolution() (once per Newton iteration); nothing in the probe itself
+ * can detect a stale D, so the optional probe report (setProbeReportFile)
+ * recomputes |U| + floor from the base state and asserts it equals D.
  */
 AMREX_ENUM(JFNKEpsilonMode, global, component);
 
@@ -126,6 +139,21 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
             m_W.Copy(a_U);
             m_W.divideBy(m_D);
             m_normY0_scaled = std::sqrt(m_W.dotProduct(m_W, false));
+            // A non-finite scaled norm (a NaN/inf in the state, or a zero
+            // component scale) must not silently demote the component mode
+            // to the global branch in apply(): abort with a message.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                std::isfinite(m_normY0_scaled),
+                "JacobianFunctionMF: the component probe scale ||D^{-1} U|| is "
+                "not finite (non-finite state or zero component scale)");
+            if (m_eps_mode == JFNKEpsilonMode::component &&
+                m_normY0_scaled == 0.0 && !m_zero_scale_warned) {
+                m_zero_scale_warned = true;
+                amrex::Print() << "WARNING: JacobianFunctionMF: the base state "
+                                  "is identically zero; the component probe "
+                                  "falls back to the global sizing rule for "
+                                  "this solve (reported once)\n";
+            }
         }
     }
 
@@ -234,6 +262,7 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     std::string m_probe_report_file;
     bool m_probe_report_pending = false;
     bool m_probe_report_header_written = false;
+    bool m_zero_scale_warned = false;
 
     void reportProbe ( RT a_eps, const T& a_dU );
     // component mode work vectors: the probe scale D of the current
@@ -316,10 +345,13 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
             eps = 1.0_rt;
         } else if (m_eps_mode == JFNKEpsilonMode::component &&
                    m_normY0_scaled > 0.0) {
-            /* Component-scaled probe (Knoll & Keyes, JCP 193 (2004) 357,
-             * sec. 3.2; Brown & Saad, SIAM J. Sci. Stat. Comput. 11 (1990)
-             * 450): size the perturbation relative to each component's own
-             * magnitude instead of the global state norm.
+            /* Component-scaled probe: a scalar perturbation sized in the
+             * component-scaled (typical-value) variables, Dennis & Schnabel
+             * 1983 ch. 7, so that the perturbation is relative to each
+             * component's own magnitude instead of the global state norm.
+             * The scalar-epsilon sizing follows Knoll & Keyes, JCP 193 (2004)
+             * 357, sec. 2.3.1 (eqs. 11-14); the realization below is their
+             * right-preconditioned finite-difference product, eqs. (25)-(28).
              *
              * Realized as a right (column) scaling of the Jacobian. With
              * D = diag(|U_i| + floor_c) the linear system J dU = F is solved
@@ -399,6 +431,18 @@ template <class T, class Ops>
 void JacobianFunctionMF<T,Ops>::reportProbe ( RT a_eps, const T& a_dU )
 {
     BL_PROFILE("JacobianFunctionMF::reportProbe()");
+    // Staleness guard: the component scale must be the one of the current
+    // base state. Rebuild |U| + floor into the scratch vector (the same
+    // operations that built m_D, so the two agree bit for bit when D is
+    // fresh) and require an exactly zero difference.
+    m_W.Copy(m_Y0);
+    m_W.abs();
+    m_W.addBlockConstants(m_component_floors);
+    m_W.increment(m_D, RT(-1.0));
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_W.dotProduct(m_W, false) == RT(0.0),
+        "JacobianFunctionMF::reportProbe(): the component probe scale D is "
+        "stale (not rebuilt from the current base state)");
     // Serialize the base state, the probe direction and the component scale
     // (all in block-reference units: copyTo divides by the block scales, so
     // D_i / s_c = |U_i| / s_c + f_c and the ratios below are unchanged).

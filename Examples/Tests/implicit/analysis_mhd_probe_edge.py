@@ -27,10 +27,18 @@ cumulative, [8] last linear residual):
   global8    newton.jfnk_epsilon = 1e-8, mode global
   component  newton.jfnk_epsilon = 1e-6, mode component (D = |U| + floor)
   flat       mode component with newton.jfnk_component_floor = 1e12: the
-             floor swamps |U_i|, D is a constant multiple of the block
-             reference scales, and the component probe reduces to the
-             global one EXACTLY (the constant cancels in
-             ||D^-1 U||/||D^-1 dU||) -- an implementation check.
+             floor swamps |U_i| (D_i = 1e12 s_c + |U_i| is block-constant
+             to 1e-12 relative), and the component probe reduces to the
+             global one UP TO ROUND-OFF (the constant cancels in
+             ||D^-1 U||/||D^-1 dU||, but |U_i|/floor ~ 1e-12 survives and
+             the unweighted and weighted sums are different arithmetic):
+             identical iteration counts and a final state within 1e-12 of
+             global6 are expected, NOT byte identity. This is a
+             D-consistency check: any inconsistency in how D enters the
+             numerator and the denominator of eps is amplified by the 1e12
+             floor (measured: swapping the numerator for the unscaled norm
+             freezes every step), while the count gate itself resolves eps
+             errors only above ~10% (a 1.01x eps reproduces every count).
 
 Each run also writes diags/probe_report.txt (newton.jfnk_probe_report_file):
 the effective relative perturbation eps |v_i|/(|U_i| + floor) of the probe
@@ -40,12 +48,13 @@ the mechanism behind the counts.
 Gates:
 1. Physics: all four runs land on the same state (electron energy fields
    agree to 1e-6 of the field scale: the SAME nonlinear problem is solved
-   to newton.relative_tolerance = 1e-8 each step) and conduction conserves
+   to newton.relative_tolerance = 1e-10 each step) and conduction conserves
    sum(U_e) to round-off in every run (periodic domain, conservative
    fluxes).
-2. Consistency: flat reproduces global6 step by step -- identical Newton
+2. Consistency: flat reproduces global6 up to round-off -- identical Newton
    and GMRES iteration counts every step and the same final state to
-   round-off (1e-12 of the field scale; measured 2e-16).
+   1e-12 of the field scale (measured 2e-16); see the flat entry above for
+   what this does and does not prove.
 3. The probe matters: every step of the component run converges within
    newton.max_iterations, its total Newton work is below 0.9 of the
    historical global 1e-6 probe's (measured 0.78: 94 vs 120 over 16
@@ -157,7 +166,8 @@ for name, h in histories.items():
     newton_total = int(h[-1, 3])
     gmres_total = int(h[-1, 7])
     max_per_step = int(np.max(h[:, 2]))
-    unconverged = int(np.sum((h[:, 4] > 1.0e-13) & (h[:, 5] > 1.0e-8)))
+    # the deck's tolerances: newton.absolute_tolerance 1e-13, relative 1e-10
+    unconverged = int(np.sum((h[:, 4] > 1.0e-13) & (h[:, 5] > 1.0e-10)))
     totals[name] = (newton_total, gmres_total, unconverged)
     print(
         f"{name:10s} {newton_total:7d} {gmres_total:7d} {max_per_step:9d} "
@@ -200,13 +210,15 @@ assert mechanism["global8"][7] < 0.1 * mechanism["global6"][7]
 assert mechanism["component"][7] < 1.0e-4, "component: edge over-perturbed"
 assert mechanism["component"][7] < 0.01 * mechanism["global6"][7]
 
-# --- gate 2: the flat-floor component probe IS the global probe ---
-# Identical Newton and GMRES counts every step, and the same final state
-# to round-off (measured 2e-16 of the field scale, against 1e-14 for the
-# genuinely different probes). The exit residuals themselves are
-# converged noise (~1e-12 of the step's initial residual) and differ at
-# the 1e-4 level between the two arithmetic paths of eps; they are
-# printed, not gated.
+# --- gate 2: the flat-floor component probe reproduces the global probe ---
+# up to round-off (D-consistency check, see the docstring): identical
+# Newton and GMRES counts every step, and the same final state to 1e-12 of
+# the field scale (measured 2e-16, against 1e-14 for the genuinely
+# different probes). The exit residuals themselves are converged noise
+# (~1e-12 of the step's initial residual) and differ at the 1e-4 level
+# between the two arithmetic paths of eps; they are printed, not gated.
+# Resolution of the count gate: ~10% in eps (a 1.01x eps reproduces every
+# count on this deck; 1.1x moves 2 of 16 steps).
 flat, global6 = histories["flat"], histories["global6"]
 assert np.array_equal(flat[:, 2], global6[:, 2]), "flat: Newton counts differ from global6"
 assert np.array_equal(flat[:, 6], global6[:, 6]), "flat: GMRES counts differ from global6"
@@ -230,7 +242,7 @@ print(
 )
 # LANDING MEASUREMENT (16 steps, rtol 1e-10): global 1e-6 120 Newton /
 # 2103 GMRES (7-8 per step), global 1e-8 95 / 1664, component 94 / 1647
-# (5-7 per step), flat 120 / 2103 = global6 exactly. Gates: the component
+# (5-7 per step), flat 120 / 2103 = global6 in every count. Gates: the component
 # probe within 0.9 of the global 1e-6 count (measured 0.78) and within one
 # iteration per step of the global 1e-8 count.
 assert component_newton <= 0.9 * global6_newton

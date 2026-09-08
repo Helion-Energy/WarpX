@@ -960,8 +960,10 @@ add_warpx_test(
 # so the global probe eps = jfnk_epsilon ||U||/||dU|| is a large relative
 # perturbation exactly where chi ~ Te^{5/2} is most nonlinear. Four
 # twins: the historical global 1e-6 probe, global 1e-8, the component-
-# scaled probe (D = |U| + floor), and a component run with a flat floor
-# that must reproduce the global counts exactly. The analysis (on the
+# scaled probe (D = |U| + floor), and a component run with a flat 1e12
+# floor that reproduces the global probe up to round-off (a D-consistency
+# check: equal counts and a state within 1e-12, not byte identity). The
+# analysis (on the
 # component run) compares the Newton work and checks all four land on
 # the same state. Measured at landing (see analysis gates): recorded in
 # analysis_mhd_probe_edge.py.

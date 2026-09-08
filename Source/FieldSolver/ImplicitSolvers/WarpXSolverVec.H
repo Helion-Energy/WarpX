@@ -344,7 +344,12 @@ public:
      * with a_apply_block_scales = false the plain, unweighted sum over all
      * degrees of freedom is returned (same nodal duplicate masks). The
      * unweighted form is for quantities that are already dimensionless
-     * per component, e.g. a state divided by a component-wise scale.
+     * per component, e.g. a state divided by a component-wise scale
+     * (the component-scaled Jacobian probe relies on it). Any fused or
+     * packed implementation of this product MUST honor the flag: a
+     * weighted result in place of the unweighted one mis-sizes the probe
+     * by the block weights (measured: eps off by ~1e3, every Newton step
+     * frozen).
      */
     [[nodiscard]] RT dotProduct ( const WarpXSolverVec&  a_X,
                                   bool a_apply_block_scales ) const;

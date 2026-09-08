@@ -18,8 +18,8 @@
 # deck record the Newton iteration counts for the historical global
 # probe (jfnk_epsilon 1e-6, this file), the global probe at 1e-8, and
 # the component-scaled probe (newton.jfnk_epsilon_mode = component),
-# plus a component run with a flat floor that must reproduce the global
-# counts exactly (implementation consistency).
+# plus a component run with a flat floor that reproduces the global
+# counts up to round-off (a D-consistency check).
 my_constants.n0 = 1.0e19
 my_constants.rho0 = n0 * m_p
 my_constants.Te0 = 30.0

@@ -2093,7 +2093,8 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     jfnk_probe_report_file: string, optional
         Diagnostic file with one row per Newton iteration of the effective
         relative perturbation statistics of the probe (small vs large
-        components).
+        components); 'none' or 'off' disables it. Costs three host copies
+        of the state per Newton iteration when enabled.
     """
 
     def __init__(

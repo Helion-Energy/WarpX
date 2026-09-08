@@ -187,11 +187,14 @@ private:
     std::vector<amrex::Real> m_component_floor_fractions;
 
     /**
-     * \brief Diagnostic file (newton.jfnk_probe_report_file, default none):
-     * one row per Newton iteration with the statistics of the effective
-     * relative perturbation eps |v_i| / (|U_i| + floor) of the probe over
-     * the components the Krylov direction touches, split into small
-     * components (below 1e-2 of their block reference scale) and large.
+     * \brief Diagnostic file (newton.jfnk_probe_report_file, default none;
+     * "none"/"off" disable): one row per Newton iteration with the
+     * statistics of the effective relative perturbation
+     * eps |v_i| / (|U_i| + floor) of the probe over the components the
+     * Krylov direction touches, split into small components (below 1e-2 of
+     * their block reference scale) and large. Costs three host copies of
+     * the state and three reductions per Newton iteration when enabled;
+     * a no-op (bit-identical) when unset.
      */
     std::string m_jfnk_probe_report_file;
 
@@ -449,6 +452,11 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
         m_jfnk_component_floor > 0.0,
         "newton.jfnk_component_floor must be positive");
     pp_newton.query("jfnk_probe_report_file", m_jfnk_probe_report_file);
+    // "none" (or "off") switches the diagnostic off, so a deck that sets a
+    // file can be overridden from the command line.
+    if (m_jfnk_probe_report_file == "none" || m_jfnk_probe_report_file == "off") {
+        m_jfnk_probe_report_file.clear();
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_max_frozen_steps > 0,
         "newton.max_frozen_steps must be positive");
