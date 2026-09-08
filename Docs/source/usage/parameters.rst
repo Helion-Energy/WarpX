@@ -4852,17 +4852,19 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
     :type: ``bool``
-    :default: ``false``
+    :default: ``true``
     :optional:
 
     If ``algo.evolve_scheme = theta_implicit_hybrid``, subtract the resistive part of the Ohm field
     (:math:`\eta \mathbf{J}` and hyper-resistivity) from the electric field gathered by the ions.
     This makes the implicit particle push momentum-consistent with the explicit scheme, where ions
     gather the no-resistivity Ohm field and the ion-side resistive friction is the separate
-    (optional) resistive-drag collision operator; without it the ions pick up a spurious resistive
-    acceleration and the Joule energy accounting double-counts. The correction couples the resistive
-    field into the particle response and can destabilize the Newton nonlinear solver in
-    whistler-marginal configurations; it is validated with the Picard solver.
+    (optional) resistive-drag collision operator; with the full Ohm field in the push the ions pick
+    up a spurious resistive acceleration and the Joule energy accounting double-counts. The
+    correction is assembled per residual evaluation with both Ohm passes through the same boundary
+    stack, so it is compatible with the Newton and the Picard nonlinear solvers. With resistivity on,
+    the ion energy decreases faster than under the full-field push (the resistive work is not
+    delivered to the ions); set ``false`` only to reproduce trajectories from before this default.
 
 .. pp:param:: hybrid_pic_model.darwin
     :type: ``bool``
