@@ -58,6 +58,10 @@ Field solvers define the updates of electric and magnetic fields.
 
 .. autoclass:: pywarpx.picmi.HybridPICSolver
 
+.. autoclass:: pywarpx.picmi.CircuitCoil
+
+.. autoclass:: pywarpx.picmi.CircuitCoupling
+
 Object that allows smoothing of fields.
 
 .. autoclass:: pywarpx.picmi.BinomialSmoother

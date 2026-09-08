@@ -2295,6 +2295,11 @@ class CircuitCoupling(object):
         against the single-coil reference probes and abort on
         disagreement.
 
+    probe_crosscheck_rtol: float, optional
+        Relative disagreement bound of probe_crosscheck (default 1.e-12;
+        the batched path differs from the reference probes only in
+        floating-point summation order).
+
     corrector_iterations: int, optional
         Predictor-corrector passes per coupling substep (default 1;
         0 = lagged predictor only).
@@ -2335,6 +2340,7 @@ class CircuitCoupling(object):
         plugin_config=None,
         plugin_restart_config=None,
         probe_crosscheck=None,
+        probe_crosscheck_rtol=None,
         corrector_iterations=None,
         corrector_rtol=None,
         eps_lowpass_tau=None,
@@ -2348,6 +2354,7 @@ class CircuitCoupling(object):
         self.plugin_config = plugin_config
         self.plugin_restart_config = plugin_restart_config
         self.probe_crosscheck = probe_crosscheck
+        self.probe_crosscheck_rtol = probe_crosscheck_rtol
         self.corrector_iterations = corrector_iterations
         self.corrector_rtol = corrector_rtol
         self.eps_lowpass_tau = eps_lowpass_tau
@@ -2380,6 +2387,8 @@ class CircuitCoupling(object):
             pywarpx.circuit.plugin_restart_config = self.plugin_restart_config
         if self.probe_crosscheck is not None:
             pywarpx.circuit.probe_crosscheck = self.probe_crosscheck
+        if self.probe_crosscheck_rtol is not None:
+            pywarpx.circuit.probe_crosscheck_rtol = self.probe_crosscheck_rtol
         if self.corrector_iterations is not None:
             pywarpx.circuit.add_new_attr(
                 "coupling.corrector_iterations", self.corrector_iterations
