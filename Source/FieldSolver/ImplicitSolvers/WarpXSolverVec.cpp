@@ -215,7 +215,7 @@ void WarpXSolverVec::fusedSetVal (const RT a)
     });
 }
 
-amrex::Real WarpXSolverVec::fusedDot (const WarpXSolverVec& X) const
+amrex::Real WarpXSolverVec::fusedDot (const WarpXSolverVec& X, const bool a_apply_block_scales) const
 {
     BL_PROFILE("WarpXSolverVec::fusedDot");
     auto const& layout = m_dofs->m_fused;
@@ -224,6 +224,7 @@ amrex::Real WarpXSolverVec::fusedDot (const WarpXSolverVec& X) const
     const int nseg = layout.nseg;
     const auto* ya = fusedArrays();
     const auto* xa = X.fusedArrays();
+    const bool weighted = a_apply_block_scales;
     amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
     amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
     using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -233,7 +234,8 @@ amrex::Real WarpXSolverVec::fusedDot (const WarpXSolverVec& X) const
             const int s = fused_segment(offs, nseg, idx);
             const auto c = fused_decode(segs[s].box, idx - offs[s]);
             if (!segs[s].mask(c.i, c.j, c.k)) { return {0.0}; }
-            return {segs[s].inv_scale2 * ya[s](c.i, c.j, c.k, c.n) * xa[s](c.i, c.j, c.k, c.n)};
+            const amrex::Real weight = weighted ? segs[s].inv_scale2 : 1.0;
+            return {weight * ya[s](c.i, c.j, c.k, c.n) * xa[s](c.i, c.j, c.k, c.n)};
         });
     amrex::Real result = amrex::get<0>(reduce_data.value(reduce_op));
     amrex::ParallelAllReduce::Sum(result, amrex::ParallelContext::CommunicatorSub());
@@ -756,7 +758,11 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
 {
     assertIsDefined( a_X );
     assertSameType( a_X );
-    if (FusedLevel() >= 2 && fusedAvailable()) { return fusedDot(a_X); }
+    // NOTE for the merge with the component-probe branch (dotProduct(a_X,
+    // a_apply_block_scales)): the fused path must receive that flag,
+    // fusedDot(a_X, a_apply_block_scales), or the unweighted component norm
+    // would silently become the weighted solver norm at fused_vector_ops = 2.
+    if (FusedLevel() >= 2 && fusedAvailable()) { return fusedDot(a_X, true); }
 
     amrex::Real result = 0.0;
     const bool local = true;

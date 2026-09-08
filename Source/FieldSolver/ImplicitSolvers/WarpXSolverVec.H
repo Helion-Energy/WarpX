@@ -96,7 +96,9 @@ public:
     void fusedIncrement (const WarpXSolverVec& X, RT a);
     void fusedScale (RT a);
     void fusedSetVal (RT a);
-    [[nodiscard]] RT fusedDot (const WarpXSolverVec& X) const;
+    //! inner product over the fused layout; a_apply_block_scales = false
+    //! drops the 1/scale^2 block weights (the unweighted component norm)
+    [[nodiscard]] RT fusedDot (const WarpXSolverVec& X, bool a_apply_block_scales = true) const;
     void fusedCopyTo (amrex::Real* a_arr) const;
     void fusedCopyFrom (const amrex::Real* a_arr);
 
