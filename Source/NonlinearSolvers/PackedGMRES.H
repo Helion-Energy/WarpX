@@ -153,6 +153,17 @@ public:
     //! Name of the orthogonalization kernels in use ("blas" or "native").
     [[nodiscard]] std::string gemvBackend () const { return m_use_blas ? "blas" : "native"; }
 
+    // --- packed kernels (implementation detail; public because the CUDA
+    // extended device lambdas they launch may not live in private members)
+    //! a_out[j] = sum_i basis_j[i] * a_w[i] for j < a_ncols (global sum over ranks)
+    void dot_many (const RT* a_basis, int a_ncols, const RT* a_w, RT* a_out);
+    //! a_w += a_sign * sum_j a_coef[j] basis_j (a_coef on the host)
+    void axpy_many (const RT* a_basis, int a_ncols, const RT* a_coef, RT a_sign, RT* a_w);
+    void scale (RT* a_w, RT a_fac);
+    //! a_out = a*x + b*y
+    void axpby (RT* a_out, RT a, const RT* a_x, RT b, const RT* a_y);
+    void set_zero (RT* a_w);
+
 private:
 
     // --- GMRES bookkeeping (ported from AMReX_GMRES.H) ---------------------
@@ -165,20 +176,11 @@ private:
     void gram_schmidt_orthogonalization (int it);
     void update_hessenberg (int it, bool happyend, RT& res);
 
-    // --- packed kernels ----------------------------------------------------
     //! column j of the packed Krylov basis
     [[nodiscard]] RT* basis (int j) { return m_basis.data() + std::size_t(j) * std::size_t(m_n); }
     [[nodiscard]] const RT* basis (int j) const { return m_basis.data() + std::size_t(j) * std::size_t(m_n); }
-    //! a_out[j] = sum_i basis_j[i] * a_w[i] for j < a_ncols (global sum over ranks)
-    void dot_many (const RT* a_basis, int a_ncols, const RT* a_w, RT* a_out);
-    //! a_w += a_sign * sum_j a_coef[j] basis_j (a_coef on the host)
-    void axpy_many (const RT* a_basis, int a_ncols, const RT* a_coef, RT a_sign, RT* a_w);
     //! global squared 2-norm of a packed vector
     [[nodiscard]] RT norm2_squared (const RT* a_w);
-    void scale (RT* a_w, RT a_fac);
-    //! a_out = a*x + b*y
-    void axpby (RT* a_out, RT a, const RT* a_x, RT b, const RT* a_y);
-    void set_zero (RT* a_w);
     void copy_packed (RT* a_dst, const RT* a_src);
 
     void pack (V const& a_v, RT* a_dst) { BL_PROFILE("PackedGMRES::pack"); a_v.copyTo(a_dst); }

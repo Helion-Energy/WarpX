@@ -87,6 +87,19 @@ public:
         return m_dofs != nullptr && m_dofs->m_fused.nseg > 0 && m_num_amr_levels == 1;
     }
 
+    // one-launch implementations over the fused layout (see FusedLevel);
+    // public because the CUDA extended device lambdas they launch may not
+    // live in private members -- use the regular operations above instead
+    void fusedCopy (const WarpXSolverVec& X);
+    void fusedPlus (const WarpXSolverVec& X, RT sign);
+    void fusedLinComb (RT a, const WarpXSolverVec& X, RT b, const WarpXSolverVec& Y);
+    void fusedIncrement (const WarpXSolverVec& X, RT a);
+    void fusedScale (RT a);
+    void fusedSetVal (RT a);
+    [[nodiscard]] RT fusedDot (const WarpXSolverVec& X) const;
+    void fusedCopyTo (amrex::Real* a_arr) const;
+    void fusedCopyFrom (const amrex::Real* a_arr);
+
     void Define ( WarpX*  a_WarpX,
              const std::string&  a_vector_type_name,
              const std::string&  a_scalar_type_name = "none" );
@@ -527,17 +540,6 @@ private:
     mutable bool m_fused_arrays_built = false;
 
     [[nodiscard]] const amrex::Array4<amrex::Real>* fusedArrays () const;
-
-    // one-launch implementations over the fused layout (see FusedLevel)
-    void fusedCopy (const WarpXSolverVec& X);
-    void fusedPlus (const WarpXSolverVec& X, RT sign);
-    void fusedLinComb (RT a, const WarpXSolverVec& X, RT b, const WarpXSolverVec& Y);
-    void fusedIncrement (const WarpXSolverVec& X, RT a);
-    void fusedScale (RT a);
-    void fusedSetVal (RT a);
-    [[nodiscard]] RT fusedDot (const WarpXSolverVec& X) const;
-    void fusedCopyTo (amrex::Real* a_arr) const;
-    void fusedCopyFrom (const amrex::Real* a_arr);
 
     void DefineData (WarpX* a_WarpX,
                      const std::string& a_vector_type_name,
