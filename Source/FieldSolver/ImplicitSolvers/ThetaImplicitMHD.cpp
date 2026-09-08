@@ -10411,12 +10411,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             face_density;
                         if (emit_conduction_pc_cross) {
                             // Frozen cross-term coefficient of the tensor
-                            // flux (zero for the isotropic path).
+                            // flux (zero for the isotropic path); carries
+                            // the diagnostic cross-term scale so block and
+                            // residual agree for any value of it.
                             conduction_pc(i, j, k, conduction_pc_cross_ion_total) =
                                 braginskii
                                     ? conduction_pc_stage_weight *
                                           (brag_chi_par_ion - brag_chi_perp_ion) *
-                                          brag_bn * brag_bt /
+                                          brag_cross_scale * brag_bn * brag_bt /
                                           (brag_b2_dir * conduction_pc_cap *
                                            conduction_pc_cap)
                                     : 0.0_rt;
@@ -10738,7 +10740,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     ? conduction_pc_stage_weight *
                                           (brag_chi_par_electron -
                                            brag_chi_perp_electron) *
-                                          brag_bn * brag_bt /
+                                          brag_cross_scale * brag_bn * brag_bt /
                                           (brag_b2_dir * conduction_pc_cap *
                                            conduction_pc_cap)
                                     : 0.0_rt;

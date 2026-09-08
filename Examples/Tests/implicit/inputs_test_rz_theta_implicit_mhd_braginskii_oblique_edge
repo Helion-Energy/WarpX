@@ -67,7 +67,7 @@
 #                                             -> Braginskii T^5/2 frozen per step
 #   implicit_mhd.conduction_chi_par_min = chi_par_max
 #                                             -> chi_par pinned at the clamp (linear operator)
-#   implicit_mhd.wall_thermal_bc = zero_flux  -> wall drain off
+#   implicit_mhd.wall_conduction_scale = perp -> wall drain at the perp clamp class
 #   my_constants.w_T = 100                    -> no temperature front
 #   pc_mhd_block.conduction_block = 0         -> conduction block off
 my_constants.h = 1.0/128.0

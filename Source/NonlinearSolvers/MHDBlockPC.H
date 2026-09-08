@@ -22,6 +22,7 @@
 #include "Utils/WarpXConst.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_Array.H>
 #include <AMReX_MLABecLaplacian.H>
@@ -342,10 +343,20 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // stacked rows must be identities for this (no signal diffusion),
         // which is asserted. rho_f comes from the face registers
         // (ImplicitSolver::MHDConductionPCFaceDensityComponent), rho_cell
-        // from GetMHDConductionDensityForPC.
+        // from GetMHDConductionDensityForPC -- COPIED at Update into
+        // m_conduction_density_frozen and read from that copy everywhere
+        // else: the solver's pointer is its live fields register, which
+        // every residual evaluation (the JFNK probes inside one GMRES
+        // solve, the line-search trials) overwrites, and the
+        // preconditioner must be one fixed operator across the GMRES
+        // iterations of a Newton solve. When the shared signal diffusion
+        // is active the weight cannot be applied (the non-energy rows are
+        // no longer identities); the block then warns and runs
+        // un-weighted, so a default-on weight degrades instead of aborting.
         bool m_conduction_density_weight = false;
         bool m_conduction_density_weight_active = false;
         const amrex::MultiFab* m_conduction_density = nullptr;
+        std::unique_ptr<amrex::MultiFab> m_conduction_density_frozen;
         static constexpr int ConductionFaceDensityComponent = 3;
         // Cross-term defect correction (pc_mhd_block.conduction_cross_terms,
         // default off = bit-identical; RZ only, where the corner stencil
@@ -998,6 +1009,9 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
     // a stacked right-hand side / solution pair for the second solve.
     m_cross_specific = std::make_unique<amrex::MultiFab>(density.boxArray(),
                                                          density.DistributionMap(), 3, 1);
+    // The density weight's frozen linearization density (see the members).
+    m_conduction_density_frozen = std::make_unique<amrex::MultiFab>(
+        density.boxArray(), density.DistributionMap(), 1, 0);
     m_cross_rhs = std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(),
                                                     m_signal_components, 0);
     m_cross_solution = std::make_unique<amrex::MultiFab>(
@@ -1773,11 +1787,30 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
                 "pc_mhd_block.conduction_density_weight: the conduction face registers "
                 "carry no face-density component");
         }
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_signal_diffusion_active,
-            "pc_mhd_block.conduction_density_weight requires the shared signal "
-            "diffusion to be inactive (signal_diffusion_scale = 0): the weighted "
-            "Helmholtz keeps the non-energy rows as identities");
+        // Layout contract with the solver side (ThetaImplicitMHD.H
+        // static_asserts the same two numbers against ImplicitSolver's).
+        static_assert(ConductionFaceDensityComponent ==
+                      Ops::MHDConductionPCFaceDensityComponent);
+        static_assert(ConductionCrossComponent == Ops::MHDConductionPCCrossComponent);
+        if (m_signal_diffusion_active)
+        {
+            // Precedence rule: the weight needs identity non-energy rows;
+            // with the shared signal diffusion active it degrades to the
+            // un-weighted block instead of aborting the run.
+            ablastr::warn_manager::WMRecordWarning(
+                "MHDBlockPC",
+                "pc_mhd_block.conduction_density_weight requires the shared signal "
+                "diffusion to be inactive (signal_diffusion_scale = 0); the conduction "
+                "block runs UN-weighted while the signal diffusion is active",
+                ablastr::warn_manager::WarnPriority::medium);
+            m_conduction_density_weight_active = false;
+        }
+    }
+    if (m_conduction_density_weight_active)
+    {
+        // Freeze the linearization density for this preconditioner update
+        // (see the members): every apply below reads the copy.
+        amrex::MultiFab::Copy(*m_conduction_density_frozen, *m_conduction_density, 0, 0, 1, 0);
     }
     const bool density_weight = m_conduction_density_weight_active;
     const int face_density_component = ConductionFaceDensityComponent;
@@ -1847,7 +1880,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         const auto conduction_z = add_conduction
                                       ? conduction_faces[1]->const_array(mfi)
                                       : amrex::Array4<const amrex::Real>{};
-        const auto rho_cell = density_weight ? m_conduction_density->const_array(mfi)
+        const auto rho_cell = density_weight ? m_conduction_density_frozen->const_array(mfi)
                                              : amrex::Array4<const amrex::Real>{};
         amrex::ParallelFor(
             mfi.validbox(),
@@ -1928,7 +1961,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     if (density_weight)
     {
         // density weight: a = rho (see the RZ branch)
-        amrex::MultiFab::Copy(*m_signal_acoef, *m_conduction_density, 0, 0, 1, 0);
+        amrex::MultiFab::Copy(*m_signal_acoef, *m_conduction_density_frozen, 0, 0, 1, 0);
         m_signal_operator->setACoeffs(0, *m_signal_acoef);
     }
     else
@@ -2039,7 +2072,7 @@ MHDBlockPC<T, Ops>::ApplyConductionCrossCorrection ()
     // density weight (the block's linearization variable), x0 otherwise.
     const amrex::GpuArray<int, 3> energy_component = m_wall_conduction_component;
     const bool density_weight = m_conduction_density_weight_active;
-    const auto* const density = m_conduction_density;
+    const auto* const density = m_conduction_density_frozen.get();
     const int cross_component = ConductionCrossComponent;
     const int face_density_component = ConductionFaceDensityComponent;
     const RT h = m_h;
@@ -2301,7 +2334,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
             {
                 const auto signal_rhs = m_signal_rhs->array(mfi);
-                const auto rho = m_conduction_density->const_array(mfi);
+                const auto rho = m_conduction_density_frozen->const_array(mfi);
                 amrex::ParallelFor(
                     mfi.validbox(), weighted_components,
                     [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
@@ -2329,7 +2362,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
             {
                 const auto signal_solution = m_signal_solution->array(mfi);
-                const auto rho = m_conduction_density->const_array(mfi);
+                const auto rho = m_conduction_density_frozen->const_array(mfi);
                 amrex::ParallelFor(
                     mfi.validbox(), weighted_components,
                     [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)

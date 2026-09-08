@@ -854,24 +854,31 @@ Overall simulation parameters
               :math:`\delta U = R y`, with :math:`R = \mathrm{diag}(\rho)`
               as the Helmholtz a-coefficient and :math:`\rho_f \chi` as the
               face coefficient (both from the solver's registers,
-              :pp:param:`implicit_mhd.conduction_pc_coefficients`). The
-              other stacked fluid rows must be identities for this
-              (``pc_mhd_block.signal_diffusion_scale = 0``, asserted). Off
-              is bit-identical.
+              :pp:param:`implicit_mhd.conduction_pc_coefficients`; the cell
+              density is frozen at each preconditioner update, so the block
+              is one fixed operator across the GMRES iterations of a Newton
+              solve). The other stacked fluid rows must be identities for
+              this: with ``pc_mhd_block.signal_diffusion_scale > 0`` the
+              block warns and runs un-weighted. Off is bit-identical.
             - ``pc_mhd_block.conduction_cross_terms`` (``bool``, default:
               false): consume the frozen cross-term coefficients of the
               Braginskii flux linearization
               (:pp:param:`implicit_mhd.conduction_pc_cross_terms`, required)
               in the conduction block. The cell-centered Helmholtz
               (``MLABecLaplacian``) has no 9-point stencil, so the block
-              applies the cross operator :math:`K_{nt}` (centered 4-cell
-              corner stencil of the tangential gradient with the frozen
-              :math:`\chi_{nt}`) as ONE defect-correction pass after its
+              applies an approximate cross operator :math:`K_{nt}` -- the
+              centered 4-cell corner stencil of the tangential gradient
+              with the frozen :math:`\chi_{nt}`, NOT the residual's
+              limited stencil -- as ONE defect-correction pass after its
               V-cycle solve, :math:`x_1 = x_0 - M^{-1}\, \theta_c \Delta t\,
               K_{nt} x_0`, i.e. a first-order inverse of
               :math:`M + \theta_c \Delta t\, K_{nt}` at the cost of a second
-              solve per application. RZ only (the corner stencil exists
-              only there). Off is bit-identical.
+              solve per application. Measured on the oblique-edge test it
+              does not reduce the GMRES count (a first-order correction
+              cannot hold a cross coupling of conduction number ~20); it is
+              kept as the reference consumer and the gate of the register
+              contents. RZ only (the corner stencil exists only there). Off
+              is bit-identical.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)
@@ -7034,7 +7041,9 @@ Jacobian probes.
     :math:`1/\mathrm{cap}^2` factor as the normal coefficient, so that the
     linearized normal flux reads :math:`F_n = -\rho_f (\chi_{nn}
     \partial_n e + \chi_{nt} \partial_t e)` (components 4-6 of the face
-    registers; zero at wall and z-end faces and in 1D). Consumed by
+    registers; zero at wall and z-end faces and in 1D; the diagnostic
+    :pp:param:`implicit_mhd.braginskii_cross_term_scale` is folded in, so
+    block and residual agree for any value of it). Consumed by
     ``pc_mhd_block.conduction_cross_terms`` (the MLMG path applies them as
     a defect correction) or by an assembled conduction operator. Off is
     bit-identical (the components stay zero and nothing reads them).

@@ -46,18 +46,42 @@ step, which is the finding the deck records. Gates:
 mode = "improved" (a conduction-block upgrade on the same deck; the
 registered arm is pc_mhd_block.conduction_density_weight = 1, measured
 at landing Newton 35, GMRES 233, 7 per solve, every step within 1e-4;
-a direct/assembled block or the cross-term consumer run the same way):
+a direct/assembled block runs the same way):
  the physics gates, every step within the 1e-4 exit, and against the
  baseline run: cumulative GMRES at most half the baseline's, Newton not
- above the baseline's, and the same final state to the accuracy the
- baseline itself reached (a preconditioner may not move the answer: the
- tolerance is ten times the baseline's worst exit residual, never below
- 1e-6, because the baseline's stagnated steps are only accurate to that).
+ above the baseline's, and the same final state to 1e-3 relative (a
+ preconditioner may not move the answer; measured 2.3e-5 -- the
+ baseline's one stagnated step is pulled back by the converged steps
+ that follow, so the state, unlike that step's residual, is accurate).
+
+mode = "ions" (the deck with the ion fluid evolving under the dual-energy
+closure, a 50 -> 0.5 eV ion front, Spitzer equilibration and the ion
+sonic cap, plus the density weight): the only registered arm in which
+the non-energy rows of the stacked Helmholtz carry a right-hand side
+and the dual-energy pair is live, so it is the gate on the weight's
+identity-row premultiply and on the pair's inverse under the weight
+(removing the premultiply is byte-identical on the frozen-ion arms and
+costs 73 Newton / 41500 GMRES here). Measured at landing 114 Newton /
+787 GMRES / all steps within 1e-4. Gates: every step within the exit
+tolerance, Newton <= 150, GMRES <= 1200; the frozen-density and
+maximum-principle checks do not apply (the ions move; the hot ions heat
+the electrons above their initial maximum).
+
+mode = "cross" (the density weight plus the frozen cross-term registers
+implicit_mhd.conduction_pc_cross_terms and their MLMG consumer
+pc_mhd_block.conduction_cross_terms): the gate on the register contents
+(components 4-6 of the face registers) until an assembled operator
+carries its own parity check -- the consumer is sign-sensitive (measured
+at landing 40 Newton / 266 GMRES; with the sign of b_n b_t flipped in the
+registers 46 / 616). Gates: the electron-only physics gates, every step
+within the exit tolerance, Newton <= 60, GMRES <= 400.
 
 Usage:
   analysis_mhd_braginskii_oblique_edge.py <initial> <final> baseline
   analysis_mhd_braginskii_oblique_edge.py <initial> <final> improved \
       <baseline_final_plotfile> <baseline_newton.txt>
+  analysis_mhd_braginskii_oblique_edge.py <initial> <final> ions
+  analysis_mhd_braginskii_oblique_edge.py <initial> <final> cross
 """
 
 import sys
@@ -89,10 +113,16 @@ BASELINE_WORST_EXIT = 2.0e-2
 # Maximum-principle excursion as a fraction of the initial contrast.
 EXCURSION_CEILING = 2.0e-2
 # "improved" mode: GMRES fraction of the baseline, Newton drift and the
-# state agreement floor (see the header).
+# state agreement (see the header; measured 2.3e-5, 40x margin).
 IMPROVED_GMRES_FRACTION = 0.5
 IMPROVED_NEWTON_DRIFT = 0
-STATE_TOLERANCE_FLOOR = 1.0e-6
+STATE_TOLERANCE = 1.0e-3
+# "ions" and "cross" modes: absolute ceilings (measured 114 / 787 and
+# 40 / 266 at landing; the cross arm's sign-flipped sabotage gives 616).
+IONS_NEWTON_CEILING = 150
+IONS_GMRES_CEILING = 1200
+CROSS_NEWTON_CEILING = 60
+CROSS_GMRES_CEILING = 400
 
 
 def get_data(plotfile):
@@ -143,7 +173,7 @@ def missed_steps(rows):
 
 
 mode = sys.argv[3]
-assert mode in ("baseline", "improved"), mode
+assert mode in ("baseline", "improved", "ions", "cross"), mode
 initial_ds, initial_energy, initial_density = get_data(sys.argv[1])
 final_ds, final_energy, final_density = get_data(sys.argv[2])
 assert float(final_ds.current_time - initial_ds.current_time) > 0.0
@@ -160,28 +190,41 @@ print(f"{mode}: steps missing the 1e-4 exit: {missed.tolist()}")
 # plotfile is written, so only the fluid inside the wall is compared.
 r = ((np.arange(number_of_cells_r) + 0.5) * cell_size)[:, np.newaxis]
 live = slice(0, live_rows)
-np.testing.assert_allclose(final_density[live], initial_density[live], rtol=1.0e-12)
-initial_total = np.sum(initial_energy[live] * r[live])
-final_total = np.sum(final_energy[live] * r[live])
-print(
-    f"{mode}: r-weighted live electron energy {initial_total:.6e} -> {final_total:.6e} "
-    f"(relative change {(final_total - initial_total) / initial_total:.3e})"
-)
-assert final_total < initial_total, "the wall and plate drains must remove energy"
-initial_specific = initial_energy[live] / initial_density[live]
-final_specific = final_energy[live] / final_density[live]
-e_min = float(np.min(initial_specific))
-e_max = float(np.max(initial_specific))
-contrast = e_max - e_min
-overshoot = max(0.0, float(np.max(final_specific)) - e_max) / contrast
-undershoot = max(0.0, e_min - float(np.min(final_specific))) / contrast
-print(
-    f"{mode}: maximum-principle excursion: overshoot {overshoot:.3e}, "
-    f"undershoot {undershoot:.3e} of the initial contrast (ceiling {EXCURSION_CEILING:.0e})"
-)
-assert max(overshoot, undershoot) < EXCURSION_CEILING, (overshoot, undershoot)
+assert np.all(np.isfinite(final_energy)) and np.all(final_density[live] > 0.0)
+if mode == "ions":
+    # the ions move and heat the electrons: only the record's gates apply
+    print(f"{mode}: min/max live density {final_density[live].min():.3e} / {final_density[live].max():.3e}")
+else:
+    np.testing.assert_allclose(final_density[live], initial_density[live], rtol=1.0e-12)
+    initial_total = np.sum(initial_energy[live] * r[live])
+    final_total = np.sum(final_energy[live] * r[live])
+    print(
+        f"{mode}: r-weighted live electron energy {initial_total:.6e} -> {final_total:.6e} "
+        f"(relative change {(final_total - initial_total) / initial_total:.3e})"
+    )
+    assert final_total < initial_total, "the wall and plate drains must remove energy"
+    initial_specific = initial_energy[live] / initial_density[live]
+    final_specific = final_energy[live] / final_density[live]
+    e_min = float(np.min(initial_specific))
+    e_max = float(np.max(initial_specific))
+    contrast = e_max - e_min
+    overshoot = max(0.0, float(np.max(final_specific)) - e_max) / contrast
+    undershoot = max(0.0, e_min - float(np.min(final_specific))) / contrast
+    print(
+        f"{mode}: maximum-principle excursion: overshoot {overshoot:.3e}, "
+        f"undershoot {undershoot:.3e} of the initial contrast (ceiling {EXCURSION_CEILING:.0e})"
+    )
+    assert max(overshoot, undershoot) < EXCURSION_CEILING, (overshoot, undershoot)
 
-if mode == "baseline":
+if mode == "ions":
+    assert len(missed) == 0, missed.tolist()
+    assert newton_total <= IONS_NEWTON_CEILING, (newton_total, IONS_NEWTON_CEILING)
+    assert gmres_total <= IONS_GMRES_CEILING, (gmres_total, IONS_GMRES_CEILING)
+elif mode == "cross":
+    assert len(missed) == 0, missed.tolist()
+    assert newton_total <= CROSS_NEWTON_CEILING, (newton_total, CROSS_NEWTON_CEILING)
+    assert gmres_total <= CROSS_GMRES_CEILING, (gmres_total, CROSS_GMRES_CEILING)
+elif mode == "baseline":
     # --- gates 1 and 2: the recorded behaviour of the point-smoothed block ---
     assert len(missed) <= BASELINE_MAX_MISSED_STEPS, missed.tolist()
     assert rows[:, 5].max() <= BASELINE_WORST_EXIT, rows[:, 5].max()
@@ -196,12 +239,11 @@ else:
     baseline_newton, baseline_gmres = report("baseline", baseline_rows)
     scale = float(np.max(np.abs(baseline_energy[live])))
     deviation = float(np.max(np.abs(final_energy[live] - baseline_energy[live]))) / scale
-    state_tolerance = max(STATE_TOLERANCE_FLOOR, 10.0 * float(baseline_rows[:, 5].max()))
     print(
         f"improved: max |U_e - U_e(baseline)| / max|U_e| = {deviation:.3e} "
-        f"(tolerance {state_tolerance:.1e} from the baseline's worst exit)"
+        f"(tolerance {STATE_TOLERANCE:.1e})"
     )
-    assert deviation < state_tolerance, (deviation, state_tolerance)
+    assert deviation < STATE_TOLERANCE, (deviation, STATE_TOLERANCE)
     assert newton_total <= baseline_newton + IMPROVED_NEWTON_DRIFT, (newton_total, baseline_newton)
     print(
         f"improved: cumulative GMRES {gmres_total} vs baseline {baseline_gmres} "
