@@ -1921,6 +1921,35 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
 )
 
+# Wall-corner conduction stiffness of the production formation deck: an
+# electron column's axial edge (tenfold density step per cell, 10 -> 0.5 eV
+# temperature front) next to a cold conducting wall in an oblique field,
+# Braginskii chi_par/chi_perp = 1e4 at the production clamps, theta 1 and
+# the production inexact-Newton settings. Records the point-smoothed
+# conduction block's Newton and GMRES counts (the baseline a better block
+# must beat; see analysis_mhd_braginskii_oblique_edge.py for the
+# "improved" mode an upgrade arm runs against this baseline).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 baseline"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The density-weighted block on the same deck (the "improved" arm: every
+# step converged, GMRES at most half the baseline's; measured 233 vs 3363).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_density_weight  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1"  # inputs
+    "analysis_mhd_braginskii_oblique_edge.py diags/diag000000 diags/diag000010 improved ../test_rz_theta_implicit_mhd_braginskii_oblique_edge/diags/diag000010 ../test_rz_theta_implicit_mhd_braginskii_oblique_edge/diags/newton.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge  # dependency
+)
+
 # Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
 # _off run first (unpreconditioned), then the block run compares its
 # converged state and Krylov work against it (two ranks, anisotropic).
