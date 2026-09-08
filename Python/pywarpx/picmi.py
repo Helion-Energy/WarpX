@@ -3716,6 +3716,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         g = 1/(1 + z) -> 0 while waves/advection keep second-order
         centering. The conduction coefficients keep their own
         conduction_coefficient_state rule.
+    fused_vector_ops: int, default=0
+        Kernel fusion level of the solver-vector operations behind the
+        nonlinear and linear solvers (``implicit_evolve.fused_vector_ops``):
+        0 = one kernel per MultiFab per operation, 1 = the elementwise
+        operations as one kernel over the fused layout of the state
+        (bit-identical), 2 = also the inner product as one kernel plus one
+        reduction (round-off-level change of the summation order)
     """
 
     def __init__(
@@ -3860,6 +3867,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         positivity_safety=None,
         evolve_ion_fluid=None,
         include_joule_heating=None,
+        fused_vector_ops=None,
     ):
         self.nonlinear_solver = nonlinear_solver
         self.mass_density = mass_density
@@ -4003,6 +4011,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
         self.include_joule_heating = include_joule_heating
+        self.fused_vector_ops = fused_vector_ops
 
         assert isinstance(nonlinear_solver, NonlinearSolverBase)
 
@@ -4010,6 +4019,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         pywarpx.algo.evolve_scheme = "theta_implicit_mhd"
         implicit_evolve = pywarpx.warpx.get_bucket("implicit_evolve")
         implicit_evolve.theta = self.theta
+        implicit_evolve.fused_vector_ops = self.fused_vector_ops
 
         implicit_mhd = pywarpx.warpx.get_bucket("implicit_mhd")
         implicit_mhd.__setattr__("mass_density(x,y,z)", self.mass_density)

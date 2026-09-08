@@ -2236,6 +2236,33 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_conduction_pc  # dependency
 )
 
+# Fused solver-vector operations (implicit_evolve.fused_vector_ops): level 1
+# fuses every elementwise operation into one kernel with unchanged
+# per-element expressions and must reproduce the amrex_gmres run to the
+# bit (newton.txt byte-identical, plotfile fields identical); level 2 also
+# fuses the inner product (summation order changes at round-off) and is
+# checked with the packed solver's self test (packed reference operations
+# against the fused ones) and the twin comparison.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_vector_ops_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc implicit_evolve.fused_vector_ops=1"  # inputs
+    "analysis_mhd_fused_identity.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_vector_ops  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc implicit_evolve.fused_vector_ops=2 newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
 # Conduction block under the dual_energy ion closure: the exact rank-one
 # register-pair inverse. The _off run first, then the block run compares.
 add_warpx_test(

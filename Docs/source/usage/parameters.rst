@@ -251,6 +251,9 @@ Overall simulation parameters
       - **Nonlinear solvers:**
         Advancing the implicit system in time requires solving a nonlinear system. The nonlinear solver options are ``picard`` and ``newton``.
 
+        - ``implicit_evolve.fused_vector_ops`` (``int``, default: 0)
+          Kernel fusion level of the solver-vector operations behind the nonlinear and linear solvers. ``0``: one kernel per MultiFab of the state per vector operation (and one host synchronization per MultiFab for every inner product). ``1``: the elementwise operations (copy, increment, linear combination, scale, set, pack/unpack of the serialized vector) run as ONE kernel over a fused layout of every box of every MultiFab of the state; the per-element expressions are unchanged, so results are bit-identical. ``2``: the inner product also runs as one kernel plus one reduction (the summation order changes, at round-off level). Levels 1 and 2 remove the per-MultiFab launch latency and synchronizations that dominate the Krylov bookkeeping of a multi-block state on a GPU (the theta-implicit MHD state has about a dozen MultiFabs).
+
         - ``implicit_evolve.nonlinear_solver`` (``string``, default: None)
 
         - ``implicit_evolve.nonlinear_solver = picard``: Use a Picard iteration method. Requires small time steps; often non-convergent for large time steps.

@@ -21,7 +21,9 @@ void WarpXSolverDOF::Define ( WarpX* const        a_WarpX,
                               const std::string&  a_vector_type_name,
                               const std::string&  a_scalar_type_name,
                               const std::vector<WarpXSolverMultiFabBlockSpec>&
-                                  a_multifab_block_specs )
+                                  a_multifab_block_specs,
+                              const amrex::Real   a_vector_scale,
+                              const amrex::Real   a_scalar_scale )
 {
     if (a_vector_type_name=="Efield_fp") {
         m_array_type = FieldType::Efield_fp;
@@ -144,6 +146,75 @@ void WarpXSolverDOF::Define ( WarpX* const        a_WarpX,
     }
 
     amrex::Print() << "Defined DOF object for linear solves (total DOFs = " << m_nDoFs_g << ").\n";
+
+    if (a_num_amr_levels == 1) {
+        define_fused_layout(a_WarpX, a_multifab_block_specs, a_vector_scale, a_scalar_scale);
+    }
+}
+
+void WarpXSolverDOF::define_fused_layout (
+    WarpX* const a_WarpX,
+    const std::vector<WarpXSolverMultiFabBlockSpec>& a_multifab_block_specs,
+    const amrex::Real a_vector_scale,
+    const amrex::Real a_scalar_scale)
+{
+    constexpr int lev = 0;
+    auto& layout = m_fused;
+    layout.host_segments.clear();
+    layout.total = 0;
+
+    // One segment per valid box, MultiFabs in the order of the vector's
+    // operations (array components, scalar, extra blocks), FABs in MFIter
+    // order: the same order every WarpXSolverVec of this type uses to
+    // build its Array4 table.
+    auto add_segments = [&] (const iMultiFab& dof, const iMultiFab& mask, const Real scale)
+    {
+        const int ncomp = dof.nComp() / 2;
+        for (MFIter mfi(dof); mfi.isValid(); ++mfi) {
+            WarpXSolverFusedSegment segment;
+            segment.box = mfi.validbox();
+            segment.offset = layout.total;
+            segment.ncomp = ncomp;
+            segment.scale = scale;
+            segment.inv_scale = 1.0 / scale;
+            segment.inv_scale2 = 1.0 / (scale * scale);
+            segment.mask = mask.const_array(mfi);
+            segment.dof = dof.const_array(mfi);
+            layout.host_segments.push_back(segment);
+            layout.total += static_cast<Long>(segment.box.numPts()) * ncomp;
+        }
+    };
+
+    if (m_array_type != FieldType::None) {
+        for (int n = 0; n < 3; ++n) {
+            const auto* mask = a_WarpX->getFieldDotMaskPointer(m_array_type, lev, ablastr::fields::Direction{n});
+            add_segments(*m_array[lev][n], *mask, a_vector_scale);
+        }
+    }
+    if (m_scalar_type != FieldType::None) {
+        const auto* mask = a_WarpX->getFieldDotMaskPointer(m_scalar_type, lev, ablastr::fields::Direction{0});
+        add_segments(*m_scalar[lev], *mask, a_scalar_scale);
+    }
+    for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+        add_segments(*m_multifab_blocks[iblock].dofs[lev],
+                     *m_multifab_blocks[iblock].masks[lev],
+                     a_multifab_block_specs[iblock].scale);
+    }
+
+    layout.nseg = static_cast<int>(layout.host_segments.size());
+    layout.segments.resize(layout.host_segments.size());
+    if (!layout.host_segments.empty()) {
+        Gpu::copy(Gpu::hostToDevice, layout.host_segments.begin(), layout.host_segments.end(),
+                  layout.segments.begin());
+    }
+    std::vector<Long> offsets(layout.host_segments.size() + 1);
+    for (std::size_t s = 0; s < layout.host_segments.size(); ++s) {
+        offsets[s] = layout.host_segments[s].offset;
+    }
+    offsets.back() = layout.total;
+    layout.offsets.resize(offsets.size());
+    Gpu::copy(Gpu::hostToDevice, offsets.begin(), offsets.end(), layout.offsets.begin());
+    Gpu::streamSynchronize();
 }
 
 void WarpXSolverDOF::fill_local_dof (iMultiFab& dof, iMultiFab const& mask)
