@@ -2206,6 +2206,36 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_conduction_pc  # dependency
 )
 
+# Packed-basis GMRES (newton.linear_solver = packed_gmres) twins of the
+# conduction-block tests: the same decks and solver settings (restart
+# length 100, Newton rtol 1e-10, the block preconditioner) with the Krylov
+# basis packed on the serialized DOF layout and its in-run self test
+# (packed inner products, norms, axpy/lincomb, pack/unpack round trip and
+# GEMV kernels against the solver-vector operations). The RZ run on two
+# ranks exercises the owner-mask deduplication of the shared box faces of
+# the staggered field blocks and the periodic z identification in the
+# packed layout. The analysis compares the Newton/GMRES counts and the
+# converged state with the amrex_gmres run.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_packed_gmres  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000010 ../test_1d_theta_implicit_mhd_conduction_pc/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_packed_gmres  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
 # Conduction block under the dual_energy ion closure: the exact rank-one
 # register-pair inverse. The _off run first, then the block run compares.
 add_warpx_test(

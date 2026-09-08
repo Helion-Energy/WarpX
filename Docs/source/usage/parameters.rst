@@ -266,7 +266,11 @@ Overall simulation parameters
         - ``implicit_evolve.nonlinear_solver = newton``: Use a PS-JFNK method. Required for large time steps, but efficiency often relies on preconditioning and/or using ``implicit_evolve.use_mass_matrices_jacobian = true``.
 
           - ``newton.verbose`` (``bool``, default: true)
-          - ``newton.linear_solver`` (``string``, default: "gmres") Other excepted value, "petsc_ksp".
+          - ``newton.linear_solver`` (``string``, default: "amrex_gmres") Other accepted values: "packed_gmres", "petsc_ksp".
+            ``packed_gmres`` is the same restarted GMRES algorithm as ``amrex_gmres`` (right preconditioning, two passes of classical Gram-Schmidt, Givens rotations, the same convergence test and restart semantics) run on a packed copy of the solver vector: the Krylov basis is one contiguous device array of ``restart_length + 1`` serialized vectors (owned degrees of freedom only, block scales folded in, so the packed inner product equals the solver vector's inner product up to summation order), and each Gram-Schmidt pass is two matrix-vector products against that array instead of ``2 (it+1)`` inner products and Saxpys of one kernel launch per MultiFab each. The Jacobian-vector product and the preconditioner are applied on solver vectors (unpack, apply, pack). Iteration counts are those of ``amrex_gmres`` up to round-off; the orthogonalization cost no longer grows with the number of MultiFabs in the state. It takes the ``amrex_gmres.*`` keys as its own (a deck that switches solvers keeps its settings), overridden by ``packed_gmres.*`` and then by the legacy ``gmres.*`` keys, plus:
+
+            - ``packed_gmres.gemv`` (``string``, default: ``auto``): ``blas`` (cuBLAS; CUDA builds configured with ``WarpX_CUBLAS=ON``, the default there), ``native`` (portable fused kernels: a deterministic two-stage reduction for the inner products, one fused pass for the updates), or ``auto`` (``blas`` when available).
+            - ``packed_gmres.self_test`` (``bool``, default: false): at the first solve, check the packed inner products, norms, axpy/lincomb, the pack/unpack round trip and the GEMV kernels against the solver-vector operations and abort on a mismatch.
           - ``newton.require_convergence`` (``bool``, default: true).
             When ``false``, a Newton step that reaches ``max_iterations``
             without converging — or whose residual-decreasing line search

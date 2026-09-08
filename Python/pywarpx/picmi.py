@@ -1682,6 +1682,51 @@ class GMRESLinearSolver(LinearSolverBase):
         amrex_gmres.max_iterations = self.max_iterations
 
 
+class PackedGMRESLinearSolver(GMRESLinearSolver):
+    """
+    Sets up the packed GMRES linear solver for the implicit Newton nonlinear solver.
+
+    The same restarted GMRES algorithm as GMRESLinearSolver (right
+    preconditioning, two-pass classical Gram-Schmidt, Givens rotations) run
+    on a packed copy of the solver vector: the Krylov basis is one contiguous
+    device array of restart_length + 1 serialized vectors and each
+    Gram-Schmidt pass is two matrix-vector products against it instead of
+    2 (it+1) inner products and Saxpys of one kernel per MultiFab each. The
+    Jacobian-vector product and the preconditioner act on solver vectors.
+
+    Parameters
+    ----------
+    gemv: string, default='auto'
+        Orthogonalization kernels: 'blas' (cuBLAS; CUDA builds configured
+        with WarpX_CUBLAS=ON), 'native' (portable fused kernels), or 'auto'
+        ('blas' when available)
+
+    self_test: bool, default=False
+        Check the packed inner products, norms, axpy/lincomb, the pack/unpack
+        round trip and the GEMV kernels against the solver-vector operations
+        at the first solve, aborting on a mismatch
+
+    The remaining parameters are those of GMRESLinearSolver.
+    """
+
+    def __init__(self, gemv=None, self_test=None, **kw):
+        self.gemv = gemv
+        self.self_test = self_test
+        super().__init__(**kw)
+
+    def linear_solver_initialize_inputs(self, nonlinear_solver=None):
+        if nonlinear_solver is not None:
+            nonlinear_solver.linear_solver = "packed_gmres"
+        packed_gmres = pywarpx.warpx.get_bucket("packed_gmres")
+        packed_gmres.verbose_int = self.verbose_int
+        packed_gmres.restart_length = self.restart_length
+        packed_gmres.absolute_tolerance = self.absolute_tolerance
+        packed_gmres.relative_tolerance = self.relative_tolerance
+        packed_gmres.max_iterations = self.max_iterations
+        packed_gmres.gemv = self.gemv
+        packed_gmres.self_test = self.self_test
+
+
 class PETScKSPLinearSolver(LinearSolverBase):
     """
     Sets up the petsc_ksp linear solver for the implicit Newton nonlinear solver
