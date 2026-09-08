@@ -19,6 +19,7 @@
 #include <AMReX.H>
 #include <AMReX_Algorithm.H>
 #include <AMReX_Array4.H>
+#include <AMReX_BLProfiler.H>
 #include <AMReX_Box.H>
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuAtomic.H>
@@ -81,12 +82,58 @@ namespace
         return PhysConst::mu0 / (4.0_rt * MathConst::pi)
                * std::sqrt(d2) * ((2.0_rt - m) * K - 2.0_rt * E);
     }
+
+    /** Sum a device-resident vector across the MPI ranks. Single-rank
+     * runs return immediately (the data never leaves the device); with
+     * GPU-aware MPI the reduction operates on the device buffer in place;
+     * otherwise ONE small host staging round trip is used. The trailing
+     * copy back to the device is stream-ordered, so no synchronization is
+     * needed before subsequent same-stream kernels. */
+    void SumOverRanks (amrex::Real* device_data,
+                       amrex::Vector<amrex::Real>& host_staging, int n)
+    {
+        if (amrex::ParallelDescriptor::NProcs() == 1) { return; }
+#if defined(AMREX_USE_MPI) && defined(AMREX_USE_GPU)
+        if (amrex::ParallelDescriptor::UseGpuAwareMpi()) {
+            amrex::Gpu::streamSynchronize();
+            MPI_Allreduce(MPI_IN_PLACE, device_data, n,
+                          amrex::ParallelDescriptor::Mpi_typemap<amrex::Real>::type(),
+                          MPI_SUM, amrex::ParallelDescriptor::Communicator());
+            return;
+        }
+#endif
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            device_data, device_data + n, host_staging.begin());
+        amrex::Gpu::streamSynchronize();
+        amrex::ParallelDescriptor::ReduceRealSum(host_staging.data(), n);
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+            host_staging.begin(), host_staging.begin() + n, device_data);
+    }
+
+    /** psi-table value of the nodal point (i, j): the r_hi band holds
+     * i in [nr, nr+ngr] at every j, the appended cap bands hold
+     * i in [0, nr-1] at the nodal-j ghost band of each open z face.
+     * Sharing one table across faces makes the corner ghosts of adjacent
+     * fills agree identically. */
+    [[nodiscard]] AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real PsiAt (amrex::Real const* AMREX_RESTRICT psi, int i, int j,
+                       int nr, int psi_nj, int ngz, int nz,
+                       int caplo_base, int caphi_base)
+    {
+        if (i >= nr) { return psi[(i - nr) * psi_nj + (j + ngz)]; }
+        const int row = (j <= 0)
+            ? caplo_base + i * (ngz + 1) + (j + ngz)
+            : caphi_base + i * (ngz + 1) + (j - nz);
+        return psi[row];
+    }
 }
 
 bool GreensFunctionOpenBC::IsActive ()
 {
     return (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC)
-        && (WarpX::field_boundary_hi[0] == FieldBoundaryType::Open);
+        && (WarpX::field_boundary_hi[0] == FieldBoundaryType::Open ||
+            WarpX::field_boundary_lo[1] == FieldBoundaryType::Open ||
+            WarpX::field_boundary_hi[1] == FieldBoundaryType::Open);
 }
 
 void GreensFunctionOpenBC::FillGhostsZeroGradientRhi (amrex::MultiFab& a_mf,
@@ -135,11 +182,18 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
         geom.ProbLo(0) == 0.0_rt,
         "The Green's-function open boundary requires the RZ domain to include "
         "the axis (geometry.prob_lo[0] == 0).");
+    m_r_open = (WarpX::field_boundary_hi[0] == FieldBoundaryType::Open);
+    m_z_lo_open = (WarpX::field_boundary_lo[1] == FieldBoundaryType::Open);
+    m_z_hi_open = (WarpX::field_boundary_hi[1] == FieldBoundaryType::Open);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        WarpX::field_boundary_lo[1] != FieldBoundaryType::Open &&
-        WarpX::field_boundary_hi[1] != FieldBoundaryType::Open &&
         WarpX::field_boundary_lo[0] != FieldBoundaryType::Open,
-        "The Green's-function open boundary is only implemented on the r_hi face.");
+        "The Green's-function open boundary is only implemented on the r_hi, "
+        "z_lo and z_hi faces (r_lo is the symmetry axis).");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_r_open || m_z_lo_open || m_z_hi_open,
+        "GreensFunctionOpenBC::Define called without any open face selected.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(geom.isPeriodic(1) && (m_z_lo_open || m_z_hi_open)),
+        "The Green's-function open boundary on a z face requires non-periodic z.");
 
     // Externally applied fields initialized directly into the evolved B
     // (warpx.B_ext_grid_init_style) are curl-free inside the domain, so the
@@ -207,11 +261,20 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     m_zmin = geom.ProbLo(1);
     m_periodic_z = geom.isPeriodic(1);
 
-    // psi table: nodal (i, j) with i in [m_nr, m_nr + m_ngr],
-    // j in [-m_ngz, m_nz + m_ngz]
-    m_psi_ni = m_ngr + 1;
+    // psi table, r_hi band: nodal (i, j) with i in [m_nr, m_nr + m_ngr],
+    // j in [-m_ngz, m_nz + m_ngz]. When r_hi is not open only the face-node
+    // column i = m_nr is kept: the z-cap fills difference psi across it, and
+    // the r ghosts beyond it belong to the radial boundary condition.
+    m_psi_ni = m_r_open ? m_ngr + 1 : 1;
     m_psi_nj = m_nz + 2 * m_ngz + 1;
-    const int nrows = m_psi_ni * m_psi_nj;
+    const int nrows_r = m_psi_ni * m_psi_nj;
+    // psi table, z cap bands: nodal (i, j) with i in [0, m_nr - 1] and the
+    // (m_ngz + 1) nodal-j ghost band of each open cap; the i >= m_nr corner
+    // columns are shared with the r_hi band so corner ghosts are filled
+    // from the same psi values by every face.
+    m_ncaprows_lo = m_z_lo_open ? m_nr * (m_ngz + 1) : 0;
+    m_ncaprows_hi = m_z_hi_open ? m_nr * (m_ngz + 1) : 0;
+    const int nrows = nrows_r + m_ncaprows_lo + m_ncaprows_hi;
 
     // ---- Graded source bins ------------------------------------------------
     // Source nodes are i in [1, m_nr-1], j in [0, m_nz-1]. (The r = 0 axis
@@ -335,7 +398,87 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
         }
     }
 
+    // ---- Dense cap-row kernel ----------------------------------------------
+    // The z-cap psi rows evaluate at a fixed nodal-j band while the source
+    // bins span all of z, so the z-offset factorization above buys nothing
+    // for them: their kernel is a dense [cap row][3 * nbins] block, columns
+    // aligned with the source-moment vector, with the moments evaluated at
+    // each bin's actual (r_c, z_c) center (same finite-difference dipole
+    // recipe as the offset tables). Open z caps require non-periodic z, so
+    // there is no image sum.
+    //
+    // Unlike the r_hi band (whose face node is dropped from the source
+    // support), the boundary-plane source nodes coincide with cap psi
+    // points: the filament kernel is log-singular there (K(m -> 1)), and a
+    // raw entry turns any boundary-plane current -- including the
+    // per-stage feedback seed of the fill's own ghost row -- into a
+    // runaway. Regularize sub-cell separations as an equivalent filament
+    // of minor radius a (cell-scale), which bounds the self entry at the
+    // standard mu0 r (ln(8r/a) - 2) loop self-inductance scale.
+    const int ncaprows = m_ncaprows_lo + m_ncaprows_hi;
+    const amrex::Long cap_kernel_size =
+        static_cast<amrex::Long>(ncaprows) * m_ncols;
+    amrex::Vector<amrex::Real> cap_kernel_h(cap_kernel_size);
+    if (ncaprows > 0) {
+        const int nz = m_nz;
+        const int ncaprows_lo = m_ncaprows_lo;
+        const int nrbins = m_nrbins;
+        const amrex::Real a_reg = 0.5_rt * std::min(dr, dz);
+        const auto ring_psi_reg =
+            [a_reg] (amrex::Real rb, amrex::Real zb,
+                     amrex::Real rs, amrex::Real zs) -> amrex::Real
+        {
+            const amrex::Real dzs = zb - zs;
+            const amrex::Real drs = rb - rs;
+            if (dzs * dzs + drs * drs >= a_reg * a_reg) {
+                return RingPsiPerAmp(rb, zb, rs, zs);
+            }
+            const amrex::Real dz_eff =
+                std::sqrt(std::max(a_reg * a_reg - drs * drs, 0.0_rt));
+            return RingPsiPerAmp(rb, zb, rs, zb - dz_eff);
+        };
+#ifdef AMREX_USE_OMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+        for (int row = 0; row < ncaprows; ++row) {
+            const bool hi_side = (row >= ncaprows_lo);
+            const int local = hi_side ? row - ncaprows_lo : row;
+            const int i = local / (ngz + 1);
+            const int jj = local % (ngz + 1);
+            // nodal j of the psi point: [-ngz, 0] (lo cap), [nz, nz+ngz] (hi)
+            const int j = hi_side ? nz + jj : jj - ngz;
+            const amrex::Real rb = i * dr;
+            // column-major layout, entry (row, c) at c * ncaprows + row:
+            // the GEMV's row-threads then read each column coalesced
+            amrex::Real* const kcol = cap_kernel_h.data() + row;
+            const auto stride = static_cast<amrex::Long>(ncaprows);
+            for (int b = 0; b < nrbins; ++b) {
+                const amrex::Real rs = bin_rc_h[b];
+                const int wz = bin_wz_h[b];
+                const int nzb = bin_nzb_h[b];
+                for (int bj = 0; bj < nzb; ++bj) {
+                    // z of the psi point relative to the bin's actual center
+                    const amrex::Real zb = (j - (wz * bj + 0.5_rt * (wz - 1))) * dz;
+                    const amrex::Real d0 =
+                        std::sqrt(zb * zb + (rb + rs) * (rb + rs));
+                    const amrex::Real h = 1.0e-5_rt * d0;
+                    const int c0 = 3 * (bin_col0_h[b] + bj);
+                    kcol[c0 * stride] = ring_psi_reg(rb, zb, rs, 0.0_rt);
+                    kcol[(c0 + 1) * stride] =
+                        (ring_psi_reg(rb, zb, rs + h, 0.0_rt)
+                         - ring_psi_reg(rb, zb, rs - h, 0.0_rt))
+                        / (2.0_rt * h);
+                    kcol[(c0 + 2) * stride] =
+                        (ring_psi_reg(rb, zb, rs, h)
+                         - ring_psi_reg(rb, zb, rs, -h))
+                        / (2.0_rt * h);
+                }
+            }
+        }
+    }
+
     m_kernel.resize(kernel_h.size());
+    m_cap_kernel.resize(cap_kernel_h.size());
     m_rbin_of_i.resize(m_nr);
     m_bin_rc.resize(m_nrbins);
     m_bin_wz.resize(m_nrbins);
@@ -348,6 +491,10 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     m_psi_host.resize(nrows);
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
         kernel_h.begin(), kernel_h.end(), m_kernel.begin());
+    if (ncaprows > 0) {
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+            cap_kernel_h.begin(), cap_kernel_h.end(), m_cap_kernel.begin());
+    }
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
         rbin_of_i_h.begin(), rbin_of_i_h.end(), m_rbin_of_i.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
@@ -362,11 +509,18 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
         bin_koff_h.begin(), bin_koff_h.end(), m_bin_koff.begin());
     amrex::Gpu::streamSynchronize();
 
-    amrex::Print() << "GreensFunctionOpenBC: open (free-space) boundary active on r_hi;"
-                   << " " << m_nrbins << " graded radial bins, " << m_nbins
+    std::string faces;
+    if (m_r_open) { faces += " r_hi"; }
+    if (m_z_lo_open) { faces += " z_lo"; }
+    if (m_z_hi_open) { faces += " z_hi"; }
+    amrex::Print() << "GreensFunctionOpenBC: open (free-space) boundary active on" << faces
+                   << "; " << m_nrbins << " graded radial bins, " << m_nbins
                    << " source bins, kernel " << kernel_size << " reals ("
                    << static_cast<double>(kernel_size * sizeof(amrex::Real))
                       / (1024.0 * 1024.0) << " MB,"
+                   << " cap kernel " << cap_kernel_size << " reals ("
+                   << static_cast<double>(cap_kernel_size * sizeof(amrex::Real))
+                      / (1024.0 * 1024.0) << " MB),"
                    << " interior coarsening " << m_coarsening << ", "
                    << (m_periodic_z ? "periodic" : "isolated") << " z)\n";
 
@@ -376,6 +530,7 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
 void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bfield,
                                           amrex::Geometry const& geom, int lev)
 {
+    BL_PROFILE("GreensFunctionOpenBC::ApplyToBfield()");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
         "The Green's-function open boundary only supports a single level.");
 
@@ -385,10 +540,14 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     // current before differencing across box seams below (the caller
     // applies this BC right after the valid-cell Faraday update, before
     // its own FillBoundary).
-    for (int d = 0; d < 3; ++d) {
-        Bfield[d]->FillBoundary(geom.periodicity());
+    {
+        BL_PROFILE("GreensOpenBC::FillBoundary");
+        for (int d = 0; d < 3; ++d) {
+            Bfield[d]->FillBoundary(geom.periodicity());
+        }
     }
 
+    BL_PROFILE_VAR("GreensOpenBC::deposit", blp_deposit);
     // ---- 1. Deposit the coarse source moments (I, I dr, I dz) per bin ----
     amrex::Real* const AMREX_RESTRICT src = m_src.data();
     const int ncols = m_ncols;
@@ -415,7 +574,20 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
         // Each source node (i, j) is owned by the rank whose valid
         // cell-centered box contains cell (i, j); this counts every node
         // exactly once and drops the r_hi face node (i = m_nr) and, for
-        // non-periodic z, the top node (j = m_nz).
+        // non-periodic z, the top node (j = m_nz). The bottom plane node
+        // (j = 0) stays in the support: its curl straddles the boundary
+        // plane and reads the cap ghost row (the previous application's
+        // fill when the z_lo cap is open -- a per-stage-lagged contraction
+        // that converges with the integrator, same as the design doc's
+        // per-stage closure treatment). Excluding it instead makes any
+        // REAL boundary-plane current (an open-field-line column crossing
+        // the cap) invisible to the fill, an unstable feedback channel:
+        // the ghost field then misses the plane sheet, the plane-row curl
+        // misreads, and the Ohm E pumps the invisible current further
+        // (observed as a boundary-plane B_theta/B_r runaway on a
+        // mirror-plugged equilibrium hold). Restarts are safe: checkpoints store the ghost
+        // cells (VisMF), so the first post-restart deposit reads exactly
+        // the pre-checkpoint fill values.
         amrex::ParallelFor(vbx_cc,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
                 if (i < 1 || i > nr - 1) { return; }  // axis and face nodes
@@ -440,24 +612,28 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
             });
     }
 
-    // ---- 2. Global reduction of the moments ----
-    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
-        m_src.begin(), m_src.end(), m_src_host.begin());
-    amrex::Gpu::streamSynchronize();
-    amrex::ParallelDescriptor::ReduceRealSum(m_src_host.data(), m_ncols);
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-        m_src_host.begin(), m_src_host.end(), m_src.begin());
-    amrex::Gpu::streamSynchronize();
+    BL_PROFILE_VAR_STOP(blp_deposit);
+
+    // ---- 2. Global reduction of the moments (device-resident; see
+    // SumOverRanks: single-rank runs never leave the device) ----
+    SumOverRanks(m_src.data(), m_src_host, m_ncols);
+
+    BL_PROFILE_VAR("GreensOpenBC::gemv", blp_gemv);
 
     // ---- 3. GEMV: psi at the ghost psi-points ----
     // The rows (psi points) are distributed over the MPI ranks -- the
     // kernel tables are replicated but each row is computed by exactly one
     // rank -- and the assembled psi vector (a few thousand reals) is then
-    // summed across ranks alongside the existing source reduction.
-    const int nrows = m_psi_ni * m_psi_nj;
+    // summed across ranks alongside the existing source reduction. The
+    // r_hi-band rows contract the per-radial-bin z-offset tables; the
+    // appended z-cap rows are straight dot products with their dense
+    // kernel block.
+    const int nrows_r = m_psi_ni * m_psi_nj;
+    const int nrows = nrows_r + m_ncaprows_lo + m_ncaprows_hi;
     const int psi_nj = m_psi_nj;
     const int nrbins = m_nrbins;
     const amrex::Real* const AMREX_RESTRICT kernel = m_kernel.data();
+    const amrex::Real* const AMREX_RESTRICT cap_kernel = m_cap_kernel.data();
     amrex::Real* const AMREX_RESTRICT psi = m_psi.data();
 
     const int nprocs = amrex::ParallelDescriptor::NProcs();
@@ -465,9 +641,64 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     const int rows_per_rank = (nrows + nprocs - 1) / nprocs;
     const int row0 = std::min(myproc * rows_per_rank, nrows);
     const int nlocal = std::min(rows_per_rank, nrows - row0);
+    const int ncaprows_tot = m_ncaprows_lo + m_ncaprows_hi;
 
-    amrex::ParallelFor(nrows, [=] AMREX_GPU_DEVICE (int row) { psi[row] = 0.0_rt; });
-    amrex::ParallelFor(nlocal, [=] AMREX_GPU_DEVICE (int idx) {
+    if (nprocs > 1) {
+        // rows owned by other ranks must be zero under the summing reduce;
+        // a single rank overwrites every row below
+        amrex::ParallelFor(nrows,
+            [=] AMREX_GPU_DEVICE (int row) { psi[row] = 0.0_rt; });
+    }
+    BL_PROFILE_VAR("GreensOpenBC::gemv_rband", blp_rband);
+    const int nlocal_r = std::max(0, std::min(nlocal, nrows_r - row0));
+#if defined(AMREX_USE_GPU)
+    // GPU: one thread per (row, radial bin) with a deterministic ordered
+    // recombination (ascending b) -- the serial per-row loop leaves only
+    // ~psi_nj resident threads and runs latency-bound (measured
+    // 2.5 ms/fill at the 64x512 hold resolution). The regrouping shifts
+    // results by O(eps) relative to the serial chain; the CPU branch
+    // below keeps the exact original summation order, which the knob-off
+    // suite bit-checks.
+    if (nlocal_r > 0) {
+        if (m_rband_partial.size() <
+                static_cast<amrex::Long>(nlocal_r) * nrbins) {
+            m_rband_partial.resize(static_cast<amrex::Long>(nlocal_r) * nrbins);
+        }
+        amrex::Real* const AMREX_RESTRICT rband_partial = m_rband_partial.data();
+        amrex::ParallelFor(nlocal_r * nrbins,
+            [=] AMREX_GPU_DEVICE (int idx) {
+                const int lrow = idx % nlocal_r;
+                const int b = idx / nlocal_r;
+                const int row = row0 + lrow;
+                const int ip = row / psi_nj;
+                const int jp = row % psi_nj;
+                const int wz = bin_wz[b];
+                const int nzb = bin_nzb[b];
+                const int L = psi_nj + wz * (nzb - 1);
+                const amrex::Real* const AMREX_RESTRICT blk =
+                    kernel + bin_koff[b] + (static_cast<amrex::Long>(ip) * 3) * L;
+                const amrex::Real* const AMREX_RESTRICT sb = src + 3 * bin_col0[b];
+                amrex::Real s = 0.0_rt;
+                for (int bj = 0; bj < nzb; ++bj) {
+                    // offset-table index of (psi row jp, z bin bj)
+                    const int oo = jp + wz * (nzb - 1 - bj);
+                    s += blk[oo] * sb[3 * bj]
+                         + blk[L + oo] * sb[3 * bj + 1]
+                         + blk[2 * L + oo] * sb[3 * bj + 2];
+                }
+                rband_partial[static_cast<amrex::Long>(b) * nlocal_r + lrow] = s;
+            });
+        amrex::ParallelFor(nlocal_r, [=] AMREX_GPU_DEVICE (int lrow) {
+            amrex::Real s = 0.0_rt;
+            for (int b = 0; b < nrbins; ++b) {
+                s += rband_partial[static_cast<amrex::Long>(b) * nlocal_r + lrow];
+            }
+            psi[row0 + lrow] = s;
+        });
+    }
+#else
+    // CPU: serial per-row contraction in the original summation order
+    amrex::ParallelFor(nlocal_r, [=] AMREX_GPU_DEVICE (int idx) {
         const int row = row0 + idx;
         const int ip = row / psi_nj;
         const int jp = row % psi_nj;
@@ -489,25 +720,109 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
         }
         psi[row] = s;
     });
+#endif
+    BL_PROFILE_VAR_STOP(blp_rband);
+    BL_PROFILE_VAR("GreensOpenBC::gemv_cap", blp_cap);
+    // Cap rows stream the whole dense block from device memory each
+    // application: one thread per row cannot keep the memory system busy
+    // (901 threads reading 70+ MB ran latency-bound at ~4 ms/fill), so the
+    // contraction is chunked over the columns -- a deterministic two-phase
+    // reduction. Phase 1 tiles (row, column-chunk) with the row index
+    // fastest, so adjacent threads read adjacent entries of the
+    // column-major block (coalesced) at full occupancy; phase 2 sums the
+    // per-chunk partials in ascending chunk order (fixed grouping, results
+    // reproducible run to run).
+    const int cap_row0 = std::max(row0, nrows_r) - nrows_r;
+    const int ncap_local =
+        std::max(0, std::min(row0 + nlocal - nrows_r, ncaprows_tot) - cap_row0);
+    if (ncap_local > 0) {
+        constexpr int chunk = 128;
+        const int nchunks = (ncols + chunk - 1) / chunk;
+        if (static_cast<amrex::Long>(m_cap_partial.size()) <
+                static_cast<amrex::Long>(ncap_local) * nchunks) {
+            m_cap_partial.resize(static_cast<amrex::Long>(ncap_local) * nchunks);
+        }
+        amrex::Real* const AMREX_RESTRICT cap_partial = m_cap_partial.data();
+        amrex::ParallelFor(ncap_local * nchunks,
+            [=] AMREX_GPU_DEVICE (int idx) {
+                const int lrow = idx % ncap_local;
+                const int ch = idx / ncap_local;
+                const int crow = cap_row0 + lrow;
+                const amrex::Real* const AMREX_RESTRICT kcol = cap_kernel + crow;
+                const int c_end = amrex::min((ch + 1) * chunk, ncols);
+                amrex::Real s = 0.0_rt;
+                for (int c = ch * chunk; c < c_end; ++c) {
+                    s += kcol[static_cast<amrex::Long>(c) * ncaprows_tot] * src[c];
+                }
+                cap_partial[static_cast<amrex::Long>(ch) * ncap_local + lrow] = s;
+            });
+        amrex::ParallelFor(ncap_local, [=] AMREX_GPU_DEVICE (int lrow) {
+            amrex::Real s = 0.0_rt;
+            for (int ch = 0; ch < nchunks; ++ch) {
+                s += cap_partial[static_cast<amrex::Long>(ch) * ncap_local + lrow];
+            }
+            psi[nrows_r + cap_row0 + lrow] = s;
+        });
+    }
+    BL_PROFILE_VAR_STOP(blp_cap);
 
-    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
-        m_psi.begin(), m_psi.end(), m_psi_host.begin());
-    amrex::Gpu::streamSynchronize();
-    amrex::ParallelDescriptor::ReduceRealSum(m_psi_host.data(), nrows);
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-        m_psi_host.begin(), m_psi_host.end(), m_psi.begin());
-    amrex::Gpu::streamSynchronize();
+    SumOverRanks(m_psi.data(), m_psi_host, nrows);
+    BL_PROFILE_VAR_STOP(blp_gemv);
 
-    // ---- 4. Fill the r_hi ghost values of B ----
-    // psi table lookup (device pointer): nodal point (i, j) with
-    // i in [m_nr, m_nr+m_ngr] maps to psi[(i - nr) * psi_nj + (j + ngz_psi)]
+    if (std::getenv("WARPX_GREENS_DEBUG") != nullptr) {
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            m_src.begin(), m_src.end(), m_src_host.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            m_psi.begin(), m_psi.end(), m_psi_host.begin());
+        amrex::Gpu::streamSynchronize();
+        amrex::Real src_max = 0.0_rt, psi_r = 0.0_rt, psi_lo = 0.0_rt, psi_hi = 0.0_rt;
+        for (int c = 0; c < m_ncols; ++c) {
+            src_max = std::max(src_max, std::abs(m_src_host[c]));
+        }
+        for (int row = 0; row < nrows_r; ++row) {
+            psi_r = std::max(psi_r, std::abs(m_psi_host[row]));
+        }
+        for (int row = nrows_r; row < nrows_r + m_ncaprows_lo; ++row) {
+            psi_lo = std::max(psi_lo, std::abs(m_psi_host[row]));
+        }
+        for (int row = nrows_r + m_ncaprows_lo; row < nrows; ++row) {
+            psi_hi = std::max(psi_hi, std::abs(m_psi_host[row]));
+        }
+        amrex::Vector<amrex::Real> cap_check(m_cap_kernel.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            m_cap_kernel.begin(), m_cap_kernel.end(), cap_check.begin());
+        amrex::Gpu::streamSynchronize();
+        amrex::Real cap_max = 0.0_rt;
+        double cap_sum = 0.0;
+        for (const amrex::Real v : cap_check) {
+            cap_max = std::max(cap_max, std::abs(v));
+            cap_sum += static_cast<double>(v);
+        }
+        amrex::AllPrint() << "GreensDebug: max|src| " << src_max
+                          << " max|psi| r-band " << psi_r
+                          << " cap-lo " << psi_lo << " cap-hi " << psi_hi
+                          << " | cap kernel max " << cap_max
+                          << " sum " << cap_sum << "\n";
+    }
+
+    BL_PROFILE_VAR("GreensOpenBC::fill", blp_fill);
+    // ---- 4. Fill the open-face ghost values of B ----
+    // psi table lookup (device pointer): the r_hi band maps nodal (i, j)
+    // with i in [m_nr, m_nr+m_ngr] to psi[(i - nr) * psi_nj + (j + ngz_psi)];
+    // the cap fills route interior radii through the appended cap rows
+    // (see PsiAt). All fills read only valid B data and the shared psi
+    // table, so they are order-independent and corner-consistent.
     const int ngz_psi = m_ngz;
     const int nz = m_nz;
     const bool periodic_z = m_periodic_z;
+    const bool r_open = m_r_open;
+    const bool z_lo_open = m_z_lo_open;
+    const bool z_hi_open = m_z_hi_open;
+    const int caplo_base = nrows_r;
+    const int caphi_base = nrows_r + m_ncaprows_lo;
 
     for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
         const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
-        if (vbx_cc.bigEnd(0) != nr - 1) { continue; }   // not on the r_hi face
 
         amrex::Array4<amrex::Real> const& Br = Bfield[0]->array(mfi);
         amrex::Array4<amrex::Real> const& Bt = Bfield[1]->array(mfi);
@@ -519,43 +834,112 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
 
         const int jlo_cc = vbx_cc.smallEnd(1);
         const int jhi_cc = vbx_cc.bigEnd(1);
+        const int ilo_cc = vbx_cc.smallEnd(0);
+        const int ihi_cc = vbx_cc.bigEnd(0);
 
-        // Br (nodal r, cc z): ghost nodes i in [m_nr+1, m_nr+ngr],
-        // Br = -(1/r_i) (psi(i,j+1) - psi(i,j)) / dz
-        const amrex::Box br_bx(amrex::IntVect(nr + 1, jlo_cc - ngv_r[1]),
-                               amrex::IntVect(nr + ngv_r[0], jhi_cc + ngv_r[1]));
-        // Bz (cc r, nodal z): ghost cells i in [m_nr, m_nr+ngr-1],
-        // Bz = (psi(i+1,j) - psi(i,j)) / (r_{i+1/2} dr)
-        const amrex::Box bz_bx(amrex::IntVect(nr, jlo_cc - ngv_z[1]),
-                               amrex::IntVect(nr + ngv_z[0] - 1, jhi_cc + ngv_z[1] + 1));
-        // Btheta (cc r, cc z): Ampere continuation r_c Btheta = const
-        const amrex::Box bt_bx(amrex::IntVect(nr, jlo_cc - ngv_t[1]),
-                               amrex::IntVect(nr + ngv_t[0] - 1, jhi_cc + ngv_t[1]));
+        if (r_open && ihi_cc == nr - 1) {
+            // Br (nodal r, cc z): ghost nodes i in [m_nr+1, m_nr+ngr],
+            // Br = -(1/r_i) (psi(i,j+1) - psi(i,j)) / dz
+            const amrex::Box br_bx(amrex::IntVect(nr + 1, jlo_cc - ngv_r[1]),
+                                   amrex::IntVect(nr + ngv_r[0], jhi_cc + ngv_r[1]));
+            // Bz (cc r, nodal z): ghost cells i in [m_nr, m_nr+ngr-1],
+            // Bz = (psi(i+1,j) - psi(i,j)) / (r_{i+1/2} dr)
+            const amrex::Box bz_bx(amrex::IntVect(nr, jlo_cc - ngv_z[1]),
+                                   amrex::IntVect(nr + ngv_z[0] - 1, jhi_cc + ngv_z[1] + 1));
+            // Btheta (cc r, cc z): Ampere continuation r_c Btheta = const
+            const amrex::Box bt_bx(amrex::IntVect(nr, jlo_cc - ngv_t[1]),
+                                   amrex::IntVect(nr + ngv_t[0] - 1, jhi_cc + ngv_t[1]));
 
-        amrex::ParallelFor(br_bx, bz_bx, bt_bx,
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
-                const amrex::Real r = i * dr;
-                const amrex::Real psi_lo = psi[(i - nr) * psi_nj + (j + ngz_psi)];
-                const amrex::Real psi_hi = psi[(i - nr) * psi_nj + (j + 1 + ngz_psi)];
-                Br(i, j, 0) = -(psi_hi - psi_lo) * inv_dz / r;
-            },
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
-                const amrex::Real rc = (i + 0.5_rt) * dr;
-                const amrex::Real psi_lo = psi[(i - nr) * psi_nj + (j + ngz_psi)];
-                const amrex::Real psi_hi = psi[(i + 1 - nr) * psi_nj + (j + ngz_psi)];
-                Bz(i, j, 0) = (psi_hi - psi_lo) * inv_dr / rc;
-            },
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
-                // With no poloidal current beyond the face, r_c B_theta is
-                // constant: continue from the outermost valid cell. For
-                // non-periodic z the row is clamped to the valid range
-                // (periodic ghost rows hold current data via FillBoundary).
-                const int jj = periodic_z ? j : amrex::Clamp(j, 0, nz - 1);
-                const amrex::Real rc_last = (nr - 0.5_rt) * dr;
-                const amrex::Real rc = (i + 0.5_rt) * dr;
-                Bt(i, j, 0) = Bt(nr - 1, jj, 0) * rc_last / rc;
-            });
+            amrex::ParallelFor(br_bx, bz_bx, bt_bx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    const amrex::Real r = i * dr;
+                    const amrex::Real psi_lo = psi[(i - nr) * psi_nj + (j + ngz_psi)];
+                    const amrex::Real psi_hi = psi[(i - nr) * psi_nj + (j + 1 + ngz_psi)];
+                    Br(i, j, 0) = -(psi_hi - psi_lo) * inv_dz / r;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    const amrex::Real rc = (i + 0.5_rt) * dr;
+                    const amrex::Real psi_lo = psi[(i - nr) * psi_nj + (j + ngz_psi)];
+                    const amrex::Real psi_hi = psi[(i + 1 - nr) * psi_nj + (j + ngz_psi)];
+                    Bz(i, j, 0) = (psi_hi - psi_lo) * inv_dr / rc;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    // With no poloidal current beyond the face, r_c B_theta is
+                    // constant: continue from the outermost valid cell. For
+                    // non-periodic z the row is clamped to the valid range
+                    // (periodic ghost rows hold current data via FillBoundary;
+                    // open-cap ghost rows get the same value from the z-cap
+                    // fill's own z-invariant continuation below).
+                    const int jj = periodic_z ? j : amrex::Clamp(j, 0, nz - 1);
+                    const amrex::Real rc_last = (nr - 0.5_rt) * dr;
+                    const amrex::Real rc = (i + 0.5_rt) * dr;
+                    Bt(i, j, 0) = Bt(nr - 1, jj, 0) * rc_last / rc;
+                });
+        }
+
+        // z-cap fills. The poloidal ghost components difference the shared
+        // psi table exactly like the interior Yee stencil (discretely
+        // divergence-free, corner values identical to the r_hi fill); the
+        // toroidal component continues B_theta z-invariantly from the last
+        // valid plane at fixed radius (Ampere: no radial current beyond
+        // the cap, so d(r B_theta)/dz = 0). Radial extents are the box's
+        // own grown range, clipped to the radii the psi table covers when
+        // r_hi is open, or to the valid radii otherwise (the r ghosts then
+        // belong to the radial BC, which is applied after this fill).
+        for (int side = 0; side < 2; ++side) {
+            const bool hi_side = (side == 1);
+            if (hi_side ? !(z_hi_open && jhi_cc == nz - 1)
+                        : !(z_lo_open && jlo_cc == 0)) { continue; }
+
+            const int br_ilo = std::max(0, ilo_cc - ngv_r[0]);
+            const int br_ihi = std::min(ihi_cc + 1 + ngv_r[0],
+                                        r_open ? nr + ngv_r[0] : nr);
+            const int bz_ilo = std::max(0, ilo_cc - ngv_z[0]);
+            const int bz_ihi = std::min(ihi_cc + ngv_z[0],
+                                        r_open ? nr + ngv_z[0] - 1 : nr - 1);
+            const int bt_ilo = std::max(0, ilo_cc - ngv_t[0]);
+            const int bt_ihi = std::min(ihi_cc + ngv_t[0], nr - 1);
+
+            // ghost bands: Br cc-z rows, Bz nodal-z rows, Bt cc-z rows
+            const amrex::Box br_bx(
+                amrex::IntVect(br_ilo, hi_side ? nz : -ngv_r[1]),
+                amrex::IntVect(br_ihi, hi_side ? nz - 1 + ngv_r[1] : -1));
+            const amrex::Box bz_bx(
+                amrex::IntVect(bz_ilo, hi_side ? nz + 1 : -ngv_z[1]),
+                amrex::IntVect(bz_ihi, hi_side ? nz + ngv_z[1] : -1));
+            const amrex::Box bt_bx(
+                amrex::IntVect(bt_ilo, hi_side ? nz : -ngv_t[1]),
+                amrex::IntVect(bt_ihi, hi_side ? nz - 1 + ngv_t[1] : -1));
+            const int jt_valid = hi_side ? nz - 1 : 0;
+
+            amrex::ParallelFor(br_bx, bz_bx, bt_bx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    if (i == 0) {
+                        // on-axis Br vanishes for m = 0 (psi ~ r^2)
+                        Br(i, j, 0) = 0.0_rt;
+                        return;
+                    }
+                    const amrex::Real r = i * dr;
+                    const amrex::Real psi_lo = PsiAt(psi, i, j, nr, psi_nj,
+                                                     ngz_psi, nz, caplo_base, caphi_base);
+                    const amrex::Real psi_hi = PsiAt(psi, i, j + 1, nr, psi_nj,
+                                                     ngz_psi, nz, caplo_base, caphi_base);
+                    Br(i, j, 0) = -(psi_hi - psi_lo) * inv_dz / r;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    const amrex::Real rc = (i + 0.5_rt) * dr;
+                    const amrex::Real psi_lo = PsiAt(psi, i, j, nr, psi_nj,
+                                                     ngz_psi, nz, caplo_base, caphi_base);
+                    const amrex::Real psi_hi = PsiAt(psi, i + 1, j, nr, psi_nj,
+                                                     ngz_psi, nz, caplo_base, caphi_base);
+                    Bz(i, j, 0) = (psi_hi - psi_lo) * inv_dr / rc;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    Bt(i, j, 0) = Bt(i, jt_valid, 0);
+                });
+        }
     }
+    BL_PROFILE_VAR_STOP(blp_fill);
 }
 
 #else  // not WARPX_DIM_RZ

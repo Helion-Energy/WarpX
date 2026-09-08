@@ -14,6 +14,7 @@
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
 #   include "BoundaryConditions/PML_RZ.H"
 #endif
+#include "Circuit/CircuitCoupling.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "EmbeddedBoundary/Enabled.H"
@@ -862,6 +863,13 @@ WarpX::InitData ()
 
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
         m_hybrid_pic_model->InitData(m_fields);
+    }
+
+    // Coil / circuit-coupling subsystem: fills the coils' unit external
+    // fields and computes the discrete inductance table. Must run after
+    // the hybrid model's external-field initialization above.
+    if (m_circuit_coupling) {
+        m_circuit_coupling->InitData();
     }
 
     if (ParallelDescriptor::IOProcessor()) {

@@ -14,6 +14,7 @@
 #include "BoundaryConditions/FieldBoundaries.H"
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
+#include "Circuit/CircuitCoupling.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
@@ -445,6 +446,12 @@ WarpX::WarpX ()
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
     }
 
+    if (CircuitCoupling::IsConfigured())
+    {
+        // Coil / circuit-coupling subsystem (circuit.coils)
+        m_circuit_coupling = std::make_unique<CircuitCoupling>();
+    }
+
     current_buffer_masks.resize(nlevs_max);
     gather_buffer_masks.resize(nlevs_max);
 
@@ -780,15 +787,17 @@ WarpX::ReadParameters ()
 
         if(is_any_boundary_open){
             // In RZ geometry with the hybrid-PIC solver, `open` on the r_hi
-            // face selects the Green's-function free-space boundary for the
-            // B-field advance (see BoundaryConditions/GreensFunctionOpenBC).
+            // face and/or the z_lo/z_hi cap faces selects the Green's-function
+            // free-space boundary for the B-field advance (see
+            // BoundaryConditions/GreensFunctionOpenBC). The r_lo face is the
+            // symmetry axis and can never be open.
 #if defined(WARPX_DIM_RZ)
             const bool open_bc_greens_rz =
                 (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) &&
-                (field_boundary_hi[0] == FieldBoundaryType::Open) &&
                 (field_boundary_lo[0] != FieldBoundaryType::Open) &&
-                (field_boundary_lo[1] != FieldBoundaryType::Open) &&
-                (field_boundary_hi[1] != FieldBoundaryType::Open);
+                ((field_boundary_hi[0] == FieldBoundaryType::Open) ||
+                 (field_boundary_lo[1] == FieldBoundaryType::Open) ||
+                 (field_boundary_hi[1] == FieldBoundaryType::Open));
 #else
             const bool open_bc_greens_rz = false;
 #endif
@@ -797,7 +806,8 @@ WarpX::ReadParameters ()
                 open_bc_greens_rz,
                 "Field open boundary conditions are only implemented for the FFT-based "
                 "Poisson solver, or (in RZ geometry with the hybrid-PIC solver) on the "
-                "r_hi face where they select the Green's-function free-space boundary");
+                "r_hi and z faces where they select the Green's-function free-space "
+                "boundary");
         }
 
 
