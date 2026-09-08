@@ -88,7 +88,10 @@ ABSOLUTE_TOLERANCE = 1.0e-12
 # newton.txt columns
 COL_STEP, COL_ITERS, COL_NORM_ABS, COL_NORM_REL = 0, 2, 4, 5
 COL_FREE_ABS, COL_DEFECT, COL_PINNED, COL_FREE_REL, COL_STATUS = 9, 10, 11, 12, 13
+COL_LEAK, COL_EXCESS = 14, 15
 EXIT_FREE_SUBSPACE = 4
+NUM_COLUMNS = 16
+LEDGER_COLUMNS = 6
 
 
 def get_data(plotfile):
@@ -119,9 +122,10 @@ mid_ds, mid = get_data(sys.argv[2])
 final_ds, final = get_data(sys.argv[3])
 
 history = last_session(np.atleast_2d(np.loadtxt("diags/newton.txt")))
-assert history.shape[1] == 14, (
-    "newton.txt must carry the active-set columns free_norm_rel and "
-    f"exit_status (14 columns), found {history.shape[1]}"
+assert history.shape[1] == NUM_COLUMNS, (
+    "newton.txt must carry the active-set columns free_norm_rel, exit_status, "
+    f"max_pinned_direction, max_bound_excess ({NUM_COLUMNS} columns), found "
+    f"{history.shape[1]}"
 )
 steps = history[:, COL_STEP]
 iters = history[:, COL_ITERS]
@@ -130,10 +134,12 @@ free_abs = history[:, COL_FREE_ABS]
 num_pinned = history[:, COL_PINNED]
 free_rel = history[:, COL_FREE_REL]
 status = history[:, COL_STATUS]
+leak = history[:, COL_LEAK]
+excess = history[:, COL_EXCESS]
 
 ledger = last_session(np.atleast_2d(np.loadtxt("diags/floor_ledger.txt")))
-assert ledger.shape[1] == 5, (
-    f"floor_ledger.txt must carry 5 columns in the active-set mode, found {ledger.shape[1]}"
+assert ledger.shape[1] == LEDGER_COLUMNS, (
+    f"floor_ledger.txt must carry {LEDGER_COLUMNS} columns in the active-set mode, found {ledger.shape[1]}"
 )
 
 # 1. Completion.
@@ -151,7 +157,11 @@ print(
     f"pinned window: {pinned.sum()} solves (steps {steps[pinned].min():.0f}-"
     f"{steps[pinned].max():.0f}), band size {band_size}"
 )
-assert pinned.sum() >= 5, "the engineered active set never formed"
+assert pinned.sum() >= 10, (
+    f"the pinned window is too short ({pinned.sum()} solves; measured 11): an "
+    "identification that misses bound-resident components (e.g. one testing "
+    "the absolute floor instead of the theta image) releases the band early"
+)
 baseline = last_session(
     np.atleast_2d(np.loadtxt(f"{baseline_directory}/diags/newton.txt"))
 )
@@ -199,6 +209,26 @@ assert iters[settled].max() <= 3, (
     f"a settled pinned solve needed {iters[settled].max():.0f} Newton "
     "iterations (the reduced solve should converge in a few)"
 )
+# The settled solves converge the free residual to round-off in one
+# iteration (measured 6.8e-7 relative; an identification that leaves
+# bound-resident members free at iteration 0 measured 1.6e-5).
+assert free_rel[settled].max() <= 5.0e-6, (
+    f"settled pinned solves leave a free residual of {free_rel[settled].max():.3e} "
+    "relative (measured <= 1.0e-6): bound-resident members are not being "
+    "identified at iteration 0"
+)
+# Structural self-checks of the reduced solve: the Newton direction must
+# vanish IDENTICALLY on the active set (masked RHS, identity on the pinned
+# rows, masked preconditioner: every Krylov vector is zero there), and no
+# pinned component may be left above its landing point after the move.
+assert np.all(leak == 0.0), (
+    f"the Newton direction leaks onto the active set (max {leak.max():.3e}): "
+    "the pinned rows of the operator are not the identity"
+)
+assert np.all(excess[pinned] <= 0.5), (
+    f"a pinned component sat {excess[pinned].max():.2f} margins above its bound "
+    "after the move (at most 0.5 by construction)"
+)
 baseline_rel = baseline[:, COL_NORM_REL][baseline_pinned]
 print(
     f"baseline pinned solves: {baseline_pinned.sum()}, min exit rel. norm "
@@ -211,7 +241,10 @@ assert baseline_rel.min() > 1.0e-3, (
 
 # 4./5. Ledger closure.
 supplied_mass, supplied_energy = ledger[:, 1], ledger[:, 2]
-pinned_mass, pinned_energy = ledger[:, 3], ledger[:, 4]
+pinned_mass, pinned_energy, pinned_internal_raw = ledger[:, 3], ledger[:, 4], ledger[:, 5]
+assert np.all(pinned_internal_raw == 0.0), (
+    "the total_energy closure has no U_i block: the raw internal column must be 0"
+)
 assert np.all(supplied_mass == 0.0) and np.all(supplied_energy == 0.0), (
     "no floor-consistency source is armed: the supply columns must be zero"
 )

@@ -460,6 +460,10 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             diagnostic_file << "[" << c++ << "]free_norm_rel";
             diagnostic_file << " ";
             diagnostic_file << "[" << c++ << "]exit_status";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]max_pinned_direction";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]max_bound_excess";
         }
         diagnostic_file << "\n";
         diagnostic_file.close();
@@ -572,6 +576,14 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Long active_num_pinned = 0;
     amrex::Long active_set_moves = 0;
     bool active_set_identified = false;
+    // Self-checks of the mode, recorded per solve in newton.txt: the
+    // largest norm of the Newton direction restricted to the active set
+    // (exactly 0 by construction: masked RHS, masked operator with the
+    // identity on the pinned rows, masked preconditioner) and the largest
+    // distance of a pinned component above its landing point after the
+    // move, in margins (<= 0.5 by construction).
+    amrex::Real active_max_leak = 0.;
+    amrex::Real active_max_excess = 0.;
 
     int iter;
     int linear_solver_iters = 0;
@@ -599,6 +611,13 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 if (moved > 0) {
                     active_set_moves += moved;
                     EvalResidual(m_F, a_U, a_b, a_time, iter, true);
+                }
+                const amrex::Real excess = m_ops->ActiveSetBoundExcess(a_U);
+                active_max_excess = std::max(active_max_excess, excess);
+                if (this->m_verbose && excess > 0.5_rt) {
+                    amrex::Print() << "Newton: WARNING active-set member left "
+                                   << excess << " margins above its bound after "
+                                      "the move\n";
                 }
             }
             if (this->m_verbose && (active_num_pinned > 0 || released > 0)) {
@@ -794,6 +813,16 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             m_F_free.Copy(m_F);
             m_ops->ZeroActiveSetComponents(m_F_free);
             m_linear_solver->solve( m_dU, m_F_free, linsol_rtol, m_linsol_atol );
+            // Self-check: the direction restricted to the active set must
+            // vanish identically (every Krylov vector is zero on A).
+            m_F_split.zero();
+            m_ops->CopyActiveSetComponents(m_F_split, m_dU);
+            const amrex::Real leak = m_F_split.norm2();
+            active_max_leak = std::max(active_max_leak, leak);
+            if (this->m_verbose) {
+                amrex::Print() << "Newton: active-set direction leak = " << leak
+                               << "\n";
+            }
         } else {
             m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         }
@@ -1134,6 +1163,10 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             diagnostic_file << exit_free_norm / active_free_norm0;
             diagnostic_file << " ";
             diagnostic_file << this->m_exit_status;
+            diagnostic_file << " ";
+            diagnostic_file << active_max_leak;
+            diagnostic_file << " ";
+            diagnostic_file << active_max_excess;
         }
         diagnostic_file << "\n";
         diagnostic_file.close();

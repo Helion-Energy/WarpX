@@ -371,12 +371,25 @@ Overall simulation parameters
             iteration 0 of every solve, and the per-iteration changes are
             printed in verbose mode (``Newton: active set at iteration k:
             n pinned (e entered, r released, m moved onto bounds)``).
-            ``newton.diagnostic_file`` gains two columns,
+            ``newton.diagnostic_file`` gains four columns,
             ``free_norm_rel`` (the exit free norm over its iteration-0
-            value) and ``exit_status`` (2 absolute tolerance, 3 relative
+            value), ``exit_status`` (2 absolute tolerance, 3 relative
             tolerance, 4 active-set tolerance on the free subspace, 1
             line-search stagnation accepted, 0 iteration cap accepted,
-            negative = failure). A fully pinned state with no free
+            negative = failure), ``max_pinned_direction`` (the largest
+            norm of the Newton direction restricted to the active set in
+            the solve -- exactly 0 by construction) and
+            ``max_bound_excess`` (the largest distance of a pinned
+            component above its landing point after the move, in
+            projection margins -- at most 0.5 by construction). NOTE on
+            ``newton.require_convergence``: in this mode a status-4 exit
+            counts as converged although the FULL residual (column
+            ``norm_rel``) may be O(1) relative on the pinned rows -- that
+            residual is the booked pinned defect, by design. A strict deck
+            therefore advances with an unconverged full norm; grade runs
+            in this mode by ``exit_status`` and ``free_norm_rel`` (columns
+            12-13), not by column 5. The full-norm ``relative_tolerance``
+            exit (status 3) is still taken when it is met first. A fully pinned state with no free
             dynamics (free residual at round-off) that nothing moved still
             counts as a frozen step for ``newton.max_frozen_steps``. The
             iteration-0 free-subspace rescue is not used in this mode (the
@@ -5206,13 +5219,23 @@ Jacobian probes.
     1D), evaluated at the accepted theta state exactly as the residual
     applied them -- the conservation instrument of the reservoir, the
     floor-side sibling of :pp:param:`implicit_mhd.wall_ledger_file`.
-    With ``newton.active_set = 1`` every row carries two more columns,
-    ``pinned_mass pinned_energy``: the *cumulative* mass and energy the
-    floors created by holding the Newton active set on its bounds
-    against the equations' sub-bound demand (the pinned defect of each
-    Newton exit divided by theta, integrated with the cell measure;
-    conserved blocks only, wall-masked cells excluded). Without a supply
-    source the first two columns are identically zero. The first write
+    With ``newton.active_set = 1`` every row carries three more columns,
+    ``pinned_mass pinned_energy pinned_internal_raw``: the *cumulative*
+    mass and energy the floors created by holding the Newton active set
+    on its bounds against the equations' sub-bound demand (the pinned
+    defect of each Newton exit divided by theta, integrated with the cell
+    measure; wall-masked cells excluded), and the raw defect sum of the
+    dual-energy ``U_i`` block. Under ``ion_closure = dual_energy`` with
+    the step-end sync on, ``pinned_energy`` books the sync-weighted
+    creation :math:`f_k D_{E_i} + (1 - f_k) D_{U_i}` per cell (the sync
+    rewrites :math:`E_i` from the blended pressure, so a floor-held
+    :math:`U_i` reaches the conserved energy with weight :math:`1 - f_k`
+    and an :math:`E_i` pin survives with weight :math:`f_k`); the raw
+    per-block sums are printed at every booking (``MHD pinned-defect
+    ledger``) and the raw ``U_i`` sum is the third column, so the
+    :math:`E_i`-only and :math:`E_i + U_i` readings stay auditable. With
+    the sync off, ``pinned_energy`` is the conserved blocks' own defect.
+    Without a supply source the first two columns are identically zero. The first write
     of a run truncates a stale file; the counters restart at zero on a
     simulation restart.
 

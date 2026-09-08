@@ -301,6 +301,22 @@ public:
     }
 
     /**
+     * \brief Reduced-space Newton self-check: the largest distance of an
+     * active-set component ABOVE its admissibility landing point, in
+     * units of the projection margin: max over pinned i of
+     * (U_i - bound_i - margin_i) / margin_i (global max, 0 when nothing
+     * is pinned). After MoveActiveSetToBounds every member sits within
+     * half a margin of the landing point, so a value above 0.5 means a
+     * pinned component was left off its bound. No-op default.
+     */
+    [[nodiscard]] virtual amrex::Real
+    ActiveSetBoundExcess (const WarpXSolverVec& a_U) const
+    {
+        amrex::ignore_unused(a_U);
+        return 0.0;
+    }
+
+    /**
      * \brief Book the pinned defect of a Newton exit residual -- the
      * residual over the active-set components, i.e. the sub-bound update
      * the floors refused on the returned state -- to the operator's

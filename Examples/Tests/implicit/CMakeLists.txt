@@ -610,6 +610,45 @@ if(TEST test_1d_theta_implicit_mhd_active_set_newton.run)
     )
 endif()
 
+# The engineered deadlock under the DUAL-ENERGY closure in the reduced-space
+# mode (the production population is dual_energy with the auxiliary U_i
+# block in the majority of the pins): the 4-block masks, the E_i/U_i pair
+# under the move, and the sync-weighted booking of the E_i and U_i defects
+# are exercised here; the raw U_i-block defect is its own ledger column
+# the plain projected Newton on the same dual-energy deck: the stagnating
+# control the active-set test reads (107 pinned solves, none converged)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_active_set_dual_plain  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_active_set_rescue implicit_mhd.ion_closure=dual_energy"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_active_set_dual  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_active_set_rescue implicit_mhd.ion_closure=dual_energy newton.active_set=1 newton.active_set_tolerance=1.0e-5 implicit_mhd.floor_ledger_file=diags/floor_ledger.txt diag1.fields_to_plot=Bz\ jz\ implicit_mhd_mass_density\ implicit_mhd_momentum_density\ implicit_mhd_electron_energy\ implicit_mhd_ion_energy\ implicit_mhd_ion_internal_energy"  # inputs
+    "analysis_mhd_active_set_dual.py diags/diag000000 diags/diag000060 diags/diag000120"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_active_set_dual_plain  # dependency
+)
+if(TEST test_1d_theta_implicit_mhd_active_set_dual.run)
+    set_property(
+        TEST test_1d_theta_implicit_mhd_active_set_dual.run
+        PROPERTY PASS_REGULAR_EXPRESSION
+        "Satisfied active-set tolerance"
+    )
+    set_property(
+        TEST test_1d_theta_implicit_mhd_active_set_dual.run
+        PROPERTY FAIL_REGULAR_EXPRESSION
+        "[(]frozen step;accepted free-subspace step"
+    )
+endif()
+
 # The temperature-floor deck (both species held at n kB T_floor under a
 # supersonic rarefaction) under the reduced-space Newton: the physics
 # assertions of the default test must hold unchanged -- the pinned

@@ -170,6 +170,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                   const WarpXSolverVec& a_src) const override;
     void BookPinnedDefect (const WarpXSolverVec& a_residual) override;
     void ReportActiveSet () const override;
+    [[nodiscard]] amrex::Real
+    ActiveSetBoundExcess (const WarpXSolverVec& a_U) const override;
 
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
@@ -724,8 +726,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // floor_ledger_file as two extra columns. The conserved blocks only
     // (the dual-energy U_i block is bookkeeping, like the supply
     // ledger); wall-masked cells excluded like every other source.
+    // Under dual_energy with the step-end sync on, the energy booking is
+    // the sync-weighted creation fk D_Ei + (1 - fk) D_Ui per cell (the
+    // sync rewrites E_i := KE + p_blend/(gamma - 1) with p_blend = fk
+    // p(E_i) + (1 - fk) p(U_i), so a U_i held up by its floor flows into
+    // the conserved E_i with weight 1 - fk and an E_i pin survives with
+    // weight fk); the raw U_i-block defect sum is kept as its own column
+    // so the E_i-only and U_i-only readings stay auditable.
     amrex::Real m_pinned_defect_mass = 0.0;
     amrex::Real m_pinned_defect_energy = 0.0;
+    amrex::Real m_pinned_defect_internal_raw = 0.0;
 
     amrex::Real m_ion_charge_to_mass;
     amrex::Real m_gamma_e = 5.0 / 3.0;

@@ -6744,14 +6744,27 @@ void ThetaImplicitMHD::BookPinnedDefect (const WarpXSolverVec& a_residual)
     // The pinned defect F_i = U_i - U_i^n - theta dt RHS_i at a pinned
     // component is the sub-bound update the floor refused at the theta
     // stage; the end-of-step extrapolation U^{n+1} = U^n + (U^theta -
-    // U^n)/theta turns it into a creation of F_i/theta per unit volume.
-    // Book it with the cell measure -- the supply ledger's conventions:
-    // conserved blocks only (the dual-energy U_i block is bookkeeping),
-    // the frozen ion fluid gets no mass booking, wall-masked cells are
-    // excluded, RZ annulus weight in-kernel; units kg and J (per unit
-    // cross-section in 1D). Signed: a pinned component whose residual
-    // turned inward by the exit was held BELOW where the equations
-    // wanted it and books a removal.
+    // U^n)/theta turns it into a creation D_i = F_i/theta per unit
+    // volume. Booked with the cell measure -- the supply ledger's
+    // conventions: the frozen ion fluid gets no mass booking, wall-masked
+    // cells are excluded, RZ annulus weight in-kernel; units kg and J
+    // (per unit cross-section in 1D). Signed: a pinned component whose
+    // residual turned inward by the exit was held BELOW where the
+    // equations wanted it and books a removal.
+    //
+    // Dual energy: E_i (block 2) and U_i (block 3) are two carriers of the
+    // same ion energy. With the step-end sync on, E_i := KE + p_blend/
+    // (gamma_i - 1) with p_blend = fk p(E_i) + (1 - fk) p(U_i) (fk the
+    // kinetic-fraction weight evaluated exactly as the sync does: from the
+    // exit state's E_i and KE and the step-old U_i), and U_i := E_i - KE
+    // in thermal cells. A U_i pin therefore reaches the conserved energy
+    // with weight (1 - fk) and an E_i pin survives with weight fk, so the
+    // booked creation is fk D_Ei [E_i pinned] + (1 - fk) D_Ui [U_i
+    // pinned]. With the sync off, E_i's own defect is the conserved
+    // quantity's and U_i stays auxiliary (booked raw only). The raw
+    // per-block sums are printed every booking and the raw U_i sum is
+    // written as its own ledger column, so the E_i-only (lower) and
+    // E_i + U_i (upper) readings remain auditable.
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -6763,8 +6776,11 @@ void ThetaImplicitMHD::BookPinnedDefect (const WarpXSolverVec& a_residual)
         MassDensityName, ElectronEnergyName,
         cgl_closure ? IonParallelEnergyName : IonEnergyName,
         dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    const std::array<const char*, 4> block_labels = {
+        "mass", "electron_energy",
+        cgl_closure ? "ion_par_energy" : "ion_energy",
+        dual_energy_closure ? "ion_internal_energy" : "ion_perp_energy"};
     const int first_block = m_evolve_ion_fluid ? 0 : 1;
-    const int num_booked_blocks = dual_energy_closure ? 3 : num_blocks;
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
     amrex::Real cell_volume = 1.0_rt;
     for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
@@ -6782,8 +6798,9 @@ void ThetaImplicitMHD::BookPinnedDefect (const WarpXSolverVec& a_residual)
     const int wall_mask_z_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
 
-    amrex::Real step_totals[2] = {0.0_rt, 0.0_rt}; // mass, energy
-    for (int block = first_block; block < num_booked_blocks; ++block) {
+    // Raw per-block sums sum_A D_i dV_i (no sync weighting).
+    std::array<amrex::Real, 4> raw = {0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+    for (int block = first_block; block < num_blocks; ++block) {
         const amrex::iMultiFab& mask_mf = m_projection_masks[block];
         if (m_projected_per_block[block] == 0 || !mask_mf.ok()) {
             continue;
@@ -6819,21 +6836,120 @@ void ThetaImplicitMHD::BookPinnedDefect (const WarpXSolverVec& a_residual)
                     return {measure * residual(i, j, k)};
                 });
         }
-        const amrex::Real block_total =
-            inverse_theta * cell_volume *
-            amrex::get<0>(reduce_data.value(reduce_op));
-        step_totals[block == 0 ? 0 : 1] += block_total;
+        raw[block] = inverse_theta * cell_volume *
+                     amrex::get<0>(reduce_data.value(reduce_op));
     }
-    amrex::ParallelAllReduce::Sum(step_totals, 2,
+
+    // Dual energy with the sync on: the sync-weighted E_i/U_i creation.
+    amrex::Real weighted_ion = 0.0_rt;
+    const bool sync_weighting = dual_energy_closure && m_dual_energy_sync;
+    if (sync_weighting &&
+        (m_projected_per_block[2] > 0 || m_projected_per_block[3] > 0)) {
+        const theta_implicit_mhd::FluxParameters parameters =
+            MakeFluxParameters();
+        const amrex::Real density_floor = m_mass_density_floor;
+        const amrex::MultiFab& density_mf =
+            m_state.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& momentum_mf =
+            m_state.getMultiFabBlock(MomentumDensityName, 0);
+        const amrex::MultiFab& ion_energy_mf =
+            m_state.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::MultiFab& old_internal_mf =
+            m_state_old.getMultiFabBlock(IonInternalEnergyName, 0);
+        const amrex::MultiFab& residual_e_mf =
+            a_residual.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::MultiFab& residual_u_mf =
+            a_residual.getMultiFabBlock(IonInternalEnergyName, 0);
+        const amrex::iMultiFab& mask_e = m_projection_masks[2];
+        const amrex::iMultiFab& mask_u = m_projection_masks[3];
+        const bool have_e = mask_e.ok() && m_projected_per_block[2] > 0;
+        const bool have_u = mask_u.ok() && m_projected_per_block[3] > 0;
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(residual_e_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto rho = density_mf.const_array(mfi);
+            const auto mom = momentum_mf.const_array(mfi);
+            const auto ion_e = ion_energy_mf.const_array(mfi);
+            const auto internal_old = old_internal_mf.const_array(mfi);
+            const auto residual_e = residual_e_mf.const_array(mfi);
+            const auto residual_u = residual_u_mf.const_array(mfi);
+            const auto me = have_e ? mask_e.const_array(mfi)
+                                   : amrex::Array4<const int>{};
+            const auto mu = have_u ? mask_u.const_array(mfi)
+                                   : amrex::Array4<const int>{};
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    const int pinned_e = have_e ? me(i, j, k) : 0;
+                    const int pinned_u = have_u ? mu(i, j, k) : 0;
+                    if (pinned_e == 0 && pinned_u == 0) {
+                        return {0.0_rt};
+                    }
+                    if (wall_thermal_freeze) {
+                        const int mask_jz = std::max(
+                            wall_mask_z_lo, std::min(wall_mask_z_hi, j));
+                        if (i >= wall_first_masked_cc[mask_jz]) {
+                            return {0.0_rt};
+                        }
+                    }
+                    amrex::Real kinetic_energy = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        kinetic_energy +=
+                            mom(i, j, k, component) * mom(i, j, k, component);
+                    }
+                    kinetic_energy *=
+                        0.5_rt / std::max(rho(i, j, k), density_floor);
+                    const amrex::Real fk =
+                        theta_implicit_mhd::dual_energy_kinetic_fraction(
+                            ion_e(i, j, k), kinetic_energy,
+                            internal_old(i, j, k), parameters);
+                    amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                    measure = 2.0_rt * MathConst::pi *
+                              (radial_lower +
+                               (i + 0.5_rt) * radial_cell_size);
+#endif
+                    return {measure *
+                            (fk * (pinned_e != 0 ? residual_e(i, j, k) : 0.0_rt) +
+                             (1.0_rt - fk) *
+                                 (pinned_u != 0 ? residual_u(i, j, k) : 0.0_rt))};
+                });
+        }
+        weighted_ion = inverse_theta * cell_volume *
+                       amrex::get<0>(reduce_data.value(reduce_op));
+    }
+
+    amrex::Real totals[6] = {raw[0], raw[1], raw[2], raw[3], weighted_ion, 0.0_rt};
+    amrex::ParallelAllReduce::Sum(totals, 5,
                                   amrex::ParallelContext::CommunicatorSub());
-    m_pinned_defect_mass += step_totals[0];
-    m_pinned_defect_energy += step_totals[1];
-    amrex::Print() << "MHD pinned-defect ledger: booked mass "
-                   << step_totals[0] << " energy " << step_totals[1]
+    const amrex::Real step_mass = totals[0];
+    amrex::Real step_energy = totals[1];
+    amrex::Real step_internal_raw = 0.0_rt;
+    if (dual_energy_closure) {
+        step_internal_raw = totals[3];
+        step_energy += sync_weighting ? totals[4] : totals[2];
+    } else {
+        // total_energy: E_i; cgl: U_par and U_perp are both energies.
+        step_energy += totals[2];
+        if (num_blocks > 3) { step_energy += totals[3]; }
+    }
+    m_pinned_defect_mass += step_mass;
+    m_pinned_defect_energy += step_energy;
+    m_pinned_defect_internal_raw += step_internal_raw;
+    amrex::Print() << "MHD pinned-defect ledger: booked mass " << step_mass
+                   << " energy " << step_energy
+                   << (sync_weighting ? " (sync-weighted E_i/U_i)" : "")
                    << " this solve over " << m_projected_components
-                   << " pinned components (cumulative "
-                   << m_pinned_defect_mass << ", " << m_pinned_defect_energy
-                   << ")\n";
+                   << " pinned components; raw per-block";
+    for (int block = first_block; block < num_blocks; ++block) {
+        amrex::Print() << " " << block_labels[block] << " " << totals[block];
+    }
+    amrex::Print() << " (cumulative mass " << m_pinned_defect_mass
+                   << ", energy " << m_pinned_defect_energy
+                   << ", raw ion_internal_energy "
+                   << m_pinned_defect_internal_raw << ")\n";
 }
 
 void ThetaImplicitMHD::ReportActiveSet () const
@@ -6844,6 +6960,77 @@ void ThetaImplicitMHD::ReportActiveSet () const
         m_free_residual_norm_calls++ % 25 == 0) {
         PrintPinnedCells();
     }
+}
+
+amrex::Real
+ThetaImplicitMHD::ActiveSetBoundExcess (const WarpXSolverVec& a_U) const
+{
+    if (m_projected_components == 0) {
+        return 0.0_rt;
+    }
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::Real theta = m_theta;
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
+    amrex::Real excess = 0.0_rt;
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::iMultiFab& mask_mf = m_projection_masks[block];
+        if (m_projected_per_block[block] == 0 || !mask_mf.ok()) {
+            continue;
+        }
+        const amrex::Real floor = bounds.floors[block];
+        const amrex::Real temperature_coefficient =
+            bounds.temperature_coefficients[block];
+        const amrex::MultiFab& value_mf =
+            a_U.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& old_mf =
+            m_state_old.getMultiFabBlock(block_names[block], 0);
+        amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto value = value_mf.const_array(mfi);
+            const auto old_value = old_mf.const_array(mfi);
+            const auto old_density = old_density_mf.const_array(mfi);
+            const auto mask = mask_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    if (mask(i, j, k) == 0) {
+                        return {0.0_rt};
+                    }
+                    const amrex::Real temperature_bound =
+                        temperature_coefficient * old_density(i, j, k);
+                    const amrex::Real cell_floor =
+                        old_value(i, j, k) >= temperature_bound
+                            ? std::max(floor, temperature_bound)
+                            : floor;
+                    const amrex::Real bound =
+                        (1.0 - theta) * old_value(i, j, k) +
+                        theta * cell_floor;
+                    const amrex::Real margin =
+                        1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
+                    return {(value(i, j, k) - bound - margin) / margin};
+                });
+        }
+        excess = std::max(excess,
+                          amrex::get<0>(reduce_data.value(reduce_op)));
+    }
+    amrex::ParallelAllReduce::Max(excess,
+                                  amrex::ParallelContext::CommunicatorSub());
+    return excess;
 }
 
 theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
@@ -11660,8 +11847,10 @@ void ThetaImplicitMHD::WriteFloorLedgerRow (const int step)
            << m_floor_supplied_energy;
     if (m_active_set_mode) {
         // Reduced-space Newton: the cumulative pinned-defect booking
-        // (BookPinnedDefect) as two extra columns.
-        ledger << " " << m_pinned_defect_mass << " " << m_pinned_defect_energy;
+        // (BookPinnedDefect) as three extra columns: mass, energy (the
+        // sync-weighted creation under dual_energy), raw U_i-block sum.
+        ledger << " " << m_pinned_defect_mass << " " << m_pinned_defect_energy
+               << " " << m_pinned_defect_internal_raw;
     }
     ledger << "\n";
 }

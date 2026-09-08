@@ -62,7 +62,14 @@ history = last_session(np.atleast_2d(np.loadtxt("diags/newton.txt")))
 baseline = last_session(
     np.atleast_2d(np.loadtxt(f"{baseline_directory}/diags/newton.txt"))
 )
-assert history.shape[1] == 14, "newton.txt lacks the active-set columns"
+assert history.shape[1] == 16, "newton.txt lacks the active-set columns"
+assert np.all(history[:, 14] == 0.0), (
+    f"the Newton direction leaks onto the active set (max {history[:, 14].max():.3e})"
+)
+pinned_rows = history[:, COL_PINNED] > 0
+assert np.all(history[pinned_rows, 15] <= 0.5), (
+    f"a pinned component sat {history[pinned_rows, 15].max():.2f} margins above its bound after the move"
+)
 assert history[-1, COL_STEP] == MAX_STEP and baseline[-1, COL_STEP] == MAX_STEP
 pinned_solves = int(np.sum(history[:, COL_PINNED] > 0))
 converged = np.isin(history[:, COL_STATUS], (2, 3, 4))
