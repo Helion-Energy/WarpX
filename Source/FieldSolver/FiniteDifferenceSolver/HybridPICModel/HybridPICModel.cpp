@@ -4483,7 +4483,12 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 amrex::Real const rho_val = rho_arr(i,j,k);
-                if (rho_val <= rho_heat_gate) { return; }
+                // Skip only below the solver floor here; cells between the
+                // floor and the (armed) heating gate fall through to the
+                // decline-tally branch below, which books the withheld
+                // source and returns before heating. Unarmed the gate
+                // equals the floor, so this is the same early return.
+                if (rho_val <= rho_floor) { return; }
                 // n_e (m^-3) from the volume-scaled total rho_fp.
                 amrex::Real const ne = rho_val / PhysConst::q_e;
                 // Species charge fraction f_s = rho_fp_s / Sigma_t rho_fp_t
