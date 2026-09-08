@@ -2200,6 +2200,201 @@ class SemiImplicitEMEvolveScheme(picmistandard.base._ClassWithInit):
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
 
+class CircuitCoil(object):
+    """One circular filament coil of the circuit-coupling subsystem
+    (circuit.<name>.*).
+
+    Parameters
+    ----------
+    name: str
+        Unique coil name; by default also the paired entry of
+        external_vector_potential.fields.
+
+    r, z: float
+        Filament radius and axial position [m]; r must be positive.
+
+    n_turns: float, optional
+        Turn count (the filled field and the inductances scale with it).
+
+    I_ref: float, optional
+        Reference current [A]: a drive scale of 1 reproduces the coil at
+        I_ref.
+
+    field_name: str, optional
+        The paired external-field entry (default: the coil name).
+
+    fill_unit_field: bool, optional
+        Fill <field_name>_Aext from the ring kernel at initialization
+        (default true).
+
+    probe: str, optional
+        The coil's plasma flux-linkage measurement: 'default', 'disk',
+        'reciprocity', 'loop' (reciprocity against the analytic loop
+        vector potential of the declared filament, nodes within
+        probe_exclusion_radius masked; the python coupling reference's
+        loop-probe integrand) or 'none'.
+
+    probe_exclusion_radius: float, optional
+        Mask radius [m] of the 'loop' probe around the filament (default:
+        the circuit-wide CircuitCoupling probe_exclusion_radius).
+    """
+
+    def __init__(
+        self,
+        name,
+        r,
+        z,
+        n_turns=None,
+        I_ref=None,
+        field_name=None,
+        fill_unit_field=None,
+        probe=None,
+        probe_exclusion_radius=None,
+    ):
+        self.name = name
+        self.r = r
+        self.z = z
+        self.n_turns = n_turns
+        self.I_ref = I_ref
+        self.field_name = field_name
+        self.fill_unit_field = fill_unit_field
+        self.probe = probe
+        self.probe_exclusion_radius = probe_exclusion_radius
+
+
+class CircuitCoupling(object):
+    """The coil set and coupling engine of the circuit-coupling subsystem
+    (circuit.*), passed to HybridPICSolver as circuit=...
+
+    Parameters
+    ----------
+    coils: list of CircuitCoil
+        The coil set.
+
+    engine: str, optional
+        'none' (default; the coils are static or driven per step from
+        Python), 'callbacks' (the per-substep Python hook contract:
+        circuitbeginstep / circuitpredict / circuitcorrect /
+        circuitfinish), or 'external' (a compiled ExternalCircuit plugin).
+
+    plugin_library: str, optional
+        With engine='external', the plugin's shared-library path.
+
+    plugin_config: str, optional
+        With engine='external', the opaque configuration string handed to
+        the plugin's Define (typically a path to the engine's own
+        configuration file; its format is entirely the engine's business).
+
+    plugin_restart_config: str, optional
+        Optional replacement for plugin_config on restart runs (the
+        restored checkpoint supersedes engine-side boot work such as a
+        pre-roll, which the restart config can skip).
+
+    probe_crosscheck: bool, optional
+        Validation knob: cross-check every batched linkage measurement
+        against the single-coil reference probes and abort on
+        disagreement.
+
+    corrector_iterations: int, optional
+        Predictor-corrector passes per coupling substep (default 1;
+        0 = lagged predictor only).
+
+    corrector_rtol: float, optional
+        Early-exit tolerance of the corrector on the realized coil scales.
+
+    eps_lowpass_tau: float, optional
+        Time constant [s] of a one-pole low-pass (EMA) on every measured
+        coil's port EMF before it reaches a compiled engine (default 0 =
+        off = the raw interval-averaged EMF); the filter memory is
+        committed only by the accepting evaluation of a step.
+
+    probe_exclusion_radius: float, optional
+        Circuit-wide default mask radius [m] of the coils' 'loop' probes
+        (0 = no mask); CircuitCoil(probe_exclusion_radius=...) overrides
+        it per coil.
+
+    linkage_reference: str, optional
+        Newton-scope driving: 'first_iterate' (default; the step's EMF is
+        differenced against the first residual evaluation's linkage) or
+        'accepted' (against the previous step's accepting evaluation;
+        the first step runs open loop -- the python coupling reference's
+        convention).
+
+    residual_advance: str, optional
+        Newton-scope driving: 'theta_stage' (default; in-residual
+        advances target the theta-stage time) or 'full_step' (advance
+        the whole step with the EMF differenced over the theta interval,
+        the python hook's semantics; identical at theta = 1).
+    """
+
+    def __init__(
+        self,
+        coils,
+        engine=None,
+        plugin_library=None,
+        plugin_config=None,
+        plugin_restart_config=None,
+        probe_crosscheck=None,
+        corrector_iterations=None,
+        corrector_rtol=None,
+        eps_lowpass_tau=None,
+        probe_exclusion_radius=None,
+        linkage_reference=None,
+        residual_advance=None,
+    ):
+        self.coils = coils
+        self.engine = engine
+        self.plugin_library = plugin_library
+        self.plugin_config = plugin_config
+        self.plugin_restart_config = plugin_restart_config
+        self.probe_crosscheck = probe_crosscheck
+        self.corrector_iterations = corrector_iterations
+        self.corrector_rtol = corrector_rtol
+        self.eps_lowpass_tau = eps_lowpass_tau
+        self.probe_exclusion_radius = probe_exclusion_radius
+        self.linkage_reference = linkage_reference
+        self.residual_advance = residual_advance
+
+    def coupling_initialize_inputs(self):
+        pywarpx.circuit.coils = [coil.name for coil in self.coils]
+        for coil in self.coils:
+            for attr, key in (
+                (coil.r, "r"),
+                (coil.z, "z"),
+                (coil.n_turns, "n_turns"),
+                (coil.I_ref, "I_ref"),
+                (coil.field_name, "field_name"),
+                (coil.fill_unit_field, "fill_unit_field"),
+                (coil.probe, "probe"),
+                (coil.probe_exclusion_radius, "probe_exclusion_radius"),
+            ):
+                if attr is not None:
+                    pywarpx.circuit.add_new_attr(f"{coil.name}.{key}", attr)
+        if self.engine is not None:
+            pywarpx.circuit.engine = self.engine
+        if self.plugin_library is not None:
+            pywarpx.circuit.plugin_library = self.plugin_library
+        if self.plugin_config is not None:
+            pywarpx.circuit.plugin_config = self.plugin_config
+        if self.plugin_restart_config is not None:
+            pywarpx.circuit.plugin_restart_config = self.plugin_restart_config
+        if self.probe_crosscheck is not None:
+            pywarpx.circuit.probe_crosscheck = self.probe_crosscheck
+        if self.corrector_iterations is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_iterations", self.corrector_iterations
+            )
+        if self.corrector_rtol is not None:
+            pywarpx.circuit.add_new_attr("coupling.corrector_rtol", self.corrector_rtol)
+        if self.eps_lowpass_tau is not None:
+            pywarpx.circuit.eps_lowpass_tau = self.eps_lowpass_tau
+        if self.probe_exclusion_radius is not None:
+            pywarpx.circuit.probe_exclusion_radius = self.probe_exclusion_radius
+        if self.linkage_reference is not None:
+            pywarpx.circuit.linkage_reference = self.linkage_reference
+        if self.residual_advance is not None:
+            pywarpx.circuit.residual_advance = self.residual_advance
+
 class HybridPICSolver(picmistandard.base._ClassWithInit):
     """
     Hybrid-PIC solver based on Ohm's law.
@@ -2457,10 +2652,21 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         field is already contained in the loaded initial B field (e.g. a free-boundary
         equilibrium whose flux includes the confining coils); the first-step state
         assembly then does not add that coil's field on top of the initial condition.
+        Alternatively to a compiled time function, a field entry may set
+        'python_scale': True (optionally with 'initial_scale') to drive the
+        field's scale through piecewise-linear segments pushed at runtime via
+        ``warpx.set_external_vector_potential_scale`` (e.g. from a circuit
+        model in a callback, or by the circuit-coupling engine).
 
     do_external_diva_cleaning: bool (default=True)
         This flag can be used to disable divA cleaning. This may be necessary when using a non-periodic
         external A with periodic field boundary conditions.
+
+    circuit: CircuitCoupling, optional
+        The coil set and coupling engine of the circuit-coupling subsystem
+        (circuit.*); the coils drive the split external fields declared in
+        A_external (each coil pairs with the entry of its name, or its
+        field_name).
 
     Notes
     -----
@@ -2530,6 +2736,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        circuit=None,
         **kw,
     ):
         self.grid = grid
@@ -2594,6 +2801,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.A_external = A_external
 
         self.do_external_diva_cleaning = do_external_diva_cleaning
+
+        self.circuit = circuit
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -2826,6 +3035,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             self.mangle_dict,
                         ),
                     )
+
+        if self.circuit is not None:
+            self.circuit.coupling_initialize_inputs()
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):

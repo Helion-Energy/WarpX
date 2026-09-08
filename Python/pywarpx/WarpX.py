@@ -19,6 +19,7 @@ from .Constants import my_constants
 from .Diagnostics import diagnostics, reduced_diagnostics
 from .EB2 import eb2
 from .Geometry import geometry
+from .Circuit import circuit
 from .HybridPICModel import external_vector_potential, hybridpicmodel
 from .Interpolation import interpolation
 from .Lasers import lasers, lasers_list
@@ -50,6 +51,7 @@ class WarpX(Bucket):
         argv += geometry.attrlist()
         argv += hybridpicmodel.attrlist()
         argv += external_vector_potential.attrlist()
+        argv += circuit.attrlist()
         argv += boundary.attrlist()
         argv += algo.attrlist()
         argv += interpolation.attrlist()
