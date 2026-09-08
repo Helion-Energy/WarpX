@@ -378,8 +378,12 @@ CircuitCoupling::InitData ()
             m_coils, m_probes, m_probe_exclusion, m_coupler_params,
             std::move(plugin));
         // The coupler's own per-step memory (EMF low-pass state) is part
-        // of the checkpoint; restore it with the engine state.
-        if (!m_restart_dir.empty()) {
+        // of the checkpoint; restore it with the engine state. Only a
+        // compiled engine writes it (WriteCheckpointData), so only a
+        // compiled engine reads it back: the Python-callback engine keeps
+        // its memory on the Python side and must not be told a state was
+        // lost.
+        if (!m_restart_dir.empty() && m_coupler->Plugin() != nullptr) {
             m_coupler->ReadMemoryCheckpoint(m_restart_dir);
         }
         amrex::Print() << "Circuit coupling engine: " << m_engine

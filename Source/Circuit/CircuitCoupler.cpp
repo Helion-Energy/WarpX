@@ -258,6 +258,19 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
 void
 CircuitCoupler::BeginStep (const amrex::Real t0, const amrex::Real dt)
 {
+    // The EMF low-pass commits its memory on every accepting evaluation.
+    // Under this (explicit-hybrid) substep protocol the engine accepts once
+    // per SUBSTEP while sigma is formed from the step dt, which would make
+    // the effective time constant tau / n_substeps: the filter is defined
+    // for the measured-step protocol (BeginStepMeasured, one accept per
+    // step) only, and is refused here rather than applied with the wrong
+    // weight.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_params.eps_lowpass_tau <= 0.0_rt,
+        "circuit.eps_lowpass_tau is defined for the measured-step coupling "
+        "protocol (the theta-implicit MHD residual hooks) only; the explicit "
+        "substep protocol accepts once per substep and does not implement "
+        "the filter. Set circuit.eps_lowpass_tau = 0 for this solver.");
     m_interval = Interval{t0, t0 + dt, -1, 0};
     m_substep_count = 0;
     m_step_dt = dt;
