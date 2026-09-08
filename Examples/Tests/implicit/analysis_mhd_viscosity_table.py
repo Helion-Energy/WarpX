@@ -227,7 +227,11 @@ if mode == "identity":
     anchor_history = np.atleast_2d(
         np.loadtxt(f"{baseline_directory}/diags/newton.txt")
     )[-n_steps:]
-    assert staged_history.shape == anchor_history.shape == (n_steps, 9)
+    # Nine columns are the classic layout; instrumented builds append the
+    # free-norm / pinned-defect / pinned-count columns. Compare whatever
+    # both runs wrote, row for row.
+    assert staged_history.shape == anchor_history.shape, (staged_history.shape, anchor_history.shape)
+    assert staged_history.shape[0] == n_steps and staged_history.shape[1] >= 9, staged_history.shape
     assert staged_history[0, 0] == anchor_history[0, 0] == 1
     assert np.array_equal(staged_history, anchor_history), (
         "the Newton iteration history differs from the scalar anchor"
