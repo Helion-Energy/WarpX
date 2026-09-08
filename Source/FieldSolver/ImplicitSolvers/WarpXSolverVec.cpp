@@ -489,39 +489,43 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
     amrex::Real result = 0.0;
     const bool local = true;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        // The weighted branches keep the ORIGINAL arithmetic (a division by
+        // the squared scale; multiplying by a reciprocal differs by an ulp,
+        // which changes the probe epsilon and hence sensitive Krylov paths).
         if (m_array_type != FieldType::None) {
-            const amrex::Real array_weight =
-                a_apply_block_scales ? 1.0 / (m_array_scale * m_array_scale) : 1.0;
             for (int n = 0; n < 3; ++n) {
                 const amrex::iMultiFab* dotMask = m_WarpX->getFieldDotMaskPointer(m_array_type, lev, ablastr::fields::Direction{n});
                 auto rtmp = amrex::MultiFab::Dot( *dotMask,
                                                   *m_array_vec[lev][n], 0,
                                                   *a_X.getArrayVec()[lev][n], 0, 1, 0, local);
-                result += rtmp * array_weight;
+                if (a_apply_block_scales) { result += rtmp / (m_array_scale * m_array_scale); }
+                else { result += rtmp; }
             }
         }
         if (m_scalar_type != FieldType::None) {
-            const amrex::Real scalar_weight =
-                a_apply_block_scales ? 1.0 / (m_scalar_scale * m_scalar_scale) : 1.0;
             const amrex::iMultiFab* dotMask = m_WarpX->getFieldDotMaskPointer(m_scalar_type,lev, ablastr::fields::Direction{0});
             auto rtmp = amrex::MultiFab::Dot( *dotMask,
                                               *m_scalar_vec[lev], 0,
                                               *a_X.getScalarVec()[lev], 0, 1, 0, local);
-            result += rtmp * scalar_weight;
+            if (a_apply_block_scales) { result += rtmp / (m_scalar_scale * m_scalar_scale); }
+            else { result += rtmp; }
         }
         for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
             auto const& block = m_multifab_blocks[iblock];
             auto const& other_block = a_X.m_multifab_blocks[iblock];
             auto const& mask = *m_dofs->m_multifab_blocks[iblock].masks[lev];
             const int ncomp = block.data[lev]->nComp();
-            const amrex::Real inverse_scale =
-                a_apply_block_scales ? 1.0 / block.spec.scale : 1.0;
             const amrex::Real rtmp = amrex::MultiFab::Dot(
                 mask,
                 *block.data[lev], 0,
                 *other_block.data[lev], 0,
                 ncomp, 0, local);
-            result += inverse_scale * inverse_scale * rtmp;
+            if (a_apply_block_scales) {
+                const amrex::Real inverse_scale = 1.0 / block.spec.scale;
+                result += inverse_scale * inverse_scale * rtmp;
+            } else {
+                result += rtmp;
+            }
         }
     }
     amrex::ParallelAllReduce::Sum(result, amrex::ParallelContext::CommunicatorSub());
