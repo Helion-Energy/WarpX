@@ -2089,6 +2089,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     jfnk_component_floors: dict, optional
         Per-block overrides of jfnk_component_floor, {block_name: fraction},
         e.g. {'implicit_mhd_electron_energy': 1.e-4}.
+
+    jfnk_probe_report_file: string, optional
+        Diagnostic file with one row per Newton iteration of the effective
+        relative perturbation statistics of the probe (small vs large
+        components).
     """
 
     def __init__(
@@ -2119,6 +2124,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         jfnk_epsilon_mode=None,
         jfnk_component_floor=None,
         jfnk_component_floors=None,
+        jfnk_probe_report_file=None,
     ):
         self.verbose = verbose
         self.linear_solver = linear_solver
@@ -2146,6 +2152,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.jfnk_epsilon_mode = jfnk_epsilon_mode
         self.jfnk_component_floor = jfnk_component_floor
         self.jfnk_component_floors = jfnk_component_floors
+        self.jfnk_probe_report_file = jfnk_probe_report_file
 
         if jfnk_epsilon_mode is not None:
             assert jfnk_epsilon_mode in ("global", "component"), (
@@ -2188,6 +2195,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.jfnk_epsilon = self.jfnk_epsilon
         newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
         newton.jfnk_component_floor = self.jfnk_component_floor
+        newton.jfnk_probe_report_file = self.jfnk_probe_report_file
         if self.jfnk_component_floors is not None:
             for block_name, fraction in self.jfnk_component_floors.items():
                 setattr(newton, f"jfnk_component_floor_{block_name}", fraction)

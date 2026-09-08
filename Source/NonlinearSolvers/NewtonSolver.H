@@ -103,6 +103,9 @@ public:
                                << " x block scale\n";
             }
         }
+        if (!m_jfnk_probe_report_file.empty()) {
+            amrex::Print() << "JFNK probe report file:     " << m_jfnk_probe_report_file << "\n";
+        }
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -182,6 +185,15 @@ private:
     amrex::Real m_jfnk_component_floor = 1.0e-3;
     std::vector<std::string> m_component_floor_names;
     std::vector<amrex::Real> m_component_floor_fractions;
+
+    /**
+     * \brief Diagnostic file (newton.jfnk_probe_report_file, default none):
+     * one row per Newton iteration with the statistics of the effective
+     * relative perturbation eps |v_i| / (|U_i| + floor) of the probe over
+     * the components the Krylov direction touches, split into small
+     * components (below 1e-2 of their block reference scale) and large.
+     */
+    std::string m_jfnk_probe_report_file;
 
     /**
      * \brief Consecutive zero-progress (frozen) solve counter.
@@ -352,6 +364,7 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             floors.push_back(fraction * block_scales[ib]);
         }
         m_linear_function->setJFNKEpsMode(m_jfnk_epsilon_mode, floors);
+        m_linear_function->setProbeReportFile(m_jfnk_probe_report_file);
     }
     this->m_usePC = m_linear_function->usePreconditioner();
 
@@ -435,6 +448,7 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_jfnk_component_floor > 0.0,
         "newton.jfnk_component_floor must be positive");
+    pp_newton.query("jfnk_probe_report_file", m_jfnk_probe_report_file);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_max_frozen_steps > 0,
         "newton.max_frozen_steps must be positive");

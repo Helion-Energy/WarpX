@@ -97,6 +97,10 @@ newton.diagnostic_file = diags/newton.txt
 # the probe under test (the twins override these on the command line)
 newton.jfnk_epsilon = 1.0e-6
 newton.jfnk_epsilon_mode = global
+# the mechanism: per Newton iteration, the effective relative perturbation
+# eps |v_i|/(|U_i| + floor) of the probe over small (edge) and large (core)
+# components
+newton.jfnk_probe_report_file = diags/probe_report.txt
 
 # tight Krylov tolerance so the Newton counts measure the Jacobian
 # probe, not the inexactness of the linear solves

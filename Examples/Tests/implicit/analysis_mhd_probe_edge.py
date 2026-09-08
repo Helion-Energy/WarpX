@@ -32,6 +32,11 @@ cumulative, [8] last linear residual):
              global one EXACTLY (the constant cancels in
              ||D^-1 U||/||D^-1 dU||) -- an implementation check.
 
+Each run also writes diags/probe_report.txt (newton.jfnk_probe_report_file):
+the effective relative perturbation eps |v_i|/(|U_i| + floor) of the probe
+per Newton iteration over the small (edge) and large (core) components --
+the mechanism behind the counts.
+
 Gates:
 1. Physics: all four runs land on the same state (electron energy fields
    agree to 1e-6 of the field scale: the SAME nonlinear problem is solved
@@ -161,6 +166,39 @@ for name, h in histories.items():
 print("per-step Newton iterations:")
 for name, h in histories.items():
     print(f"  {name:10s} " + " ".join(f"{int(x):2d}" for x in h[:, 2]))
+
+# --- the mechanism: effective relative perturbation of the probe ---
+# probe_report.txt (newton.jfnk_probe_report_file), one row per Newton
+# iteration: [0] time [1] eps [2] n_active [3] rms_all [4] max_all
+# [5] n_small [6] rms_small [7] max_small [8] n_large [9] rms_large
+# [10] max_large; "small" = |U_i| below 1e-2 of the block reference scale
+# (here: the edge cells), "large" = the core. The file appends across
+# reruns: keep the rows of the last run (the last total-Newton-count rows).
+print(
+    f"{'run':10s} {'eps (median)':>13s} {'rel. pert. SMALL rms / max (median over its)':>46s} "
+    f"{'LARGE rms / max':>24s}"
+)
+mechanism = {}
+for name, test_dir in runs.items():
+    rows = np.atleast_2d(np.loadtxt(test_dir / "diags" / "probe_report.txt"))
+    rows = rows[-int(histories[name][-1, 3]) :]
+    assert rows.shape[0] == int(histories[name][-1, 3]), f"{name}: probe_report.txt rows != Newton iterations"
+    med = np.median(rows, axis=0)
+    mechanism[name] = med
+    print(
+        f"{name:10s} {med[1]:13.3e} {med[6]:16.3e} / {med[7]:9.3e} (n {int(med[5]):5d})"
+        f"      {med[9]:9.3e} / {med[10]:9.3e}"
+    )
+# The global 1e-6 probe over-perturbs the edge by orders of magnitude
+# (measured medians: small max ~1e-2 vs the 1e-6 design), the global 1e-8
+# probe by 100x less, and the component probe holds the edge near its
+# design value (small max within a factor ~30 of jfnk_epsilon, the
+# concentration factor sqrt(N_active/N_edge) of a direction living on a
+# few cells). Gates at the measured values with margin.
+assert mechanism["global6"][7] > 1.0e-3, "global 1e-6: edge perturbation not in the secant regime?"
+assert mechanism["global8"][7] < 0.1 * mechanism["global6"][7]
+assert mechanism["component"][7] < 1.0e-4, "component: edge over-perturbed"
+assert mechanism["component"][7] < 0.01 * mechanism["global6"][7]
 
 # --- gate 2: the flat-floor component probe IS the global probe ---
 # Identical Newton and GMRES counts every step, and the same final state

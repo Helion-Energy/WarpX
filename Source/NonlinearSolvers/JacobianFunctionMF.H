@@ -16,7 +16,15 @@
 #include <AMReX_Config.H>
 #include <AMReX_Enum.H>
 
+#include <AMReX_GpuContainers.H>
+#include <AMReX_ParallelReduce.H>
+#include <AMReX_Utility.H>
+
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <string>
 #include <vector>
@@ -105,7 +113,8 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     {
         m_Y0.Copy(a_U);
         m_normY0 = this->norm2(m_Y0);
-        if (m_eps_mode == JFNKEpsilonMode::component) {
+        m_probe_report_pending = !m_probe_report_file.empty();
+        if (m_eps_mode == JFNKEpsilonMode::component || m_probe_report_pending) {
             // Component probe scale of this Newton iteration,
             // D = |U| + floor (per block), and the scaled base-state norm
             // ||D^{-1} U|| (the count of components above their floor, in
@@ -156,6 +165,27 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     [[nodiscard]] inline
     JFNKEpsilonMode jfnkEpsMode () const { return m_eps_mode; }
 
+    /**
+     * \brief Diagnostic: append, once per Newton iteration (the first
+     * Jacobian application of each linear solve), the statistics of the
+     * effective relative perturbation eps |v_i| / (|U_i| + floor_c) of the
+     * probe to a_file, split into small components (|U_i| below 1e-2 of
+     * their block's reference scale) and large ones. Empty = off.
+     * Must be called after define().
+     */
+    inline
+    void setProbeReportFile ( const std::string& a_file )
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            isDefined(),
+            "JacobianFunctionMF::setProbeReportFile() called before define()");
+        m_probe_report_file = a_file;
+        if (!m_probe_report_file.empty()) {
+            if (!m_D.IsDefined()) { m_D.Define(m_Y0); }
+            if (!m_W.IsDefined()) { m_W.Define(m_Y0); }
+        }
+    }
+
     inline
     void setIsLinear ( bool a_isLinear )
     {
@@ -201,6 +231,11 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     JFNKEpsilonMode m_eps_mode = JFNKEpsilonMode::global;
     std::vector<RT> m_component_floors;
     RT m_normY0_scaled = RT(0.0);
+    std::string m_probe_report_file;
+    bool m_probe_report_pending = false;
+    bool m_probe_report_header_written = false;
+
+    void reportProbe ( RT a_eps, const T& a_dU );
     // component mode work vectors: the probe scale D of the current
     // Newton iteration and a scratch vector for D^{-1} x
     T m_D, m_W;
@@ -342,6 +377,10 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
                 "The matrix-free Jacobian perturbation cannot remain in the "
                 "operator's admissible state domain");
         }
+        if (m_probe_report_pending) {
+            m_probe_report_pending = false;
+            reportProbe(eps, a_dU);
+        }
         const RT eps_inv = 1.0_rt/eps;
 
         m_Z.linComb( 1.0, m_Y0, eps, a_dU ); // Z = Y0 + eps*dU
@@ -354,6 +393,70 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
 
     }
 
+}
+
+template <class T, class Ops>
+void JacobianFunctionMF<T,Ops>::reportProbe ( RT a_eps, const T& a_dU )
+{
+    BL_PROFILE("JacobianFunctionMF::reportProbe()");
+    // Serialize the base state, the probe direction and the component scale
+    // (all in block-reference units: copyTo divides by the block scales, so
+    // D_i / s_c = |U_i| / s_c + f_c and the ratios below are unchanged).
+    const amrex::Long n = m_Y0.nDOF_local();
+    amrex::Gpu::DeviceVector<RT> d_u(n), d_v(n), d_d(n);
+    m_Y0.copyTo(d_u.data());
+    a_dU.copyTo(d_v.data());
+    m_D.copyTo(d_d.data());
+    amrex::Gpu::streamSynchronize();
+    std::vector<RT> u(n), v(n), d(n);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, d_u.begin(), d_u.end(), u.begin());
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, d_v.begin(), d_v.end(), v.begin());
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, d_d.begin(), d_d.end(), d.begin());
+
+    // active components: the direction is nonzero there (1e-14 of its max)
+    RT vmax = 0.0;
+    for (amrex::Long i = 0; i < n; ++i) { vmax = std::max(vmax, std::abs(v[i])); }
+    amrex::ParallelAllReduce::Max(vmax, amrex::ParallelContext::CommunicatorSub());
+    const RT v_cut = 1.0e-14 * vmax;
+    constexpr RT small_cut = 1.0e-2; // |U_i| below 1e-2 of the block reference scale
+    // [0] n_active [1] sumsq_all [2] n_small [3] sumsq_small [4] n_large [5] sumsq_large
+    RT sums[6] = {0., 0., 0., 0., 0., 0.};
+    RT maxes[3] = {0., 0., 0.}; // all, small, large
+    for (amrex::Long i = 0; i < n; ++i) {
+        if (std::abs(v[i]) <= v_cut) { continue; }
+        const RT rel = std::abs(a_eps * v[i] / d[i]);
+        sums[0] += 1.0; sums[1] += rel * rel; maxes[0] = std::max(maxes[0], rel);
+        if (std::abs(u[i]) < small_cut) {
+            sums[2] += 1.0; sums[3] += rel * rel; maxes[1] = std::max(maxes[1], rel);
+        } else {
+            sums[4] += 1.0; sums[5] += rel * rel; maxes[2] = std::max(maxes[2], rel);
+        }
+    }
+    amrex::ParallelAllReduce::Sum(sums, 6, amrex::ParallelContext::CommunicatorSub());
+    amrex::ParallelAllReduce::Max(maxes, 3, amrex::ParallelContext::CommunicatorSub());
+
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+    auto rms = [](RT sumsq, RT count) { return count > 0. ? std::sqrt(sumsq / count) : 0.; };
+    if (!m_probe_report_header_written) {
+        m_probe_report_header_written = true;
+        if (!amrex::FileExists(m_probe_report_file)) {
+            std::filesystem::path const path(m_probe_report_file);
+            if (!path.parent_path().empty()) {
+                std::filesystem::create_directories(path.parent_path());
+            }
+            std::ofstream header{m_probe_report_file, std::ofstream::out | std::ofstream::trunc};
+            header << "#[0]time(s) [1]eps [2]n_active [3]rms_all [4]max_all"
+                   << " [5]n_small [6]rms_small [7]max_small"
+                   << " [8]n_large [9]rms_large [10]max_large"
+                   << "   (relative perturbation eps|v_i|/(|U_i|+floor); small: |U_i| < 1e-2 block scale)\n";
+        }
+    }
+    std::ofstream out{m_probe_report_file, std::ofstream::out | std::ofstream::app};
+    out << std::setprecision(8) << std::scientific
+        << m_cur_time << " " << a_eps << " "
+        << static_cast<amrex::Long>(sums[0]) << " " << rms(sums[1], sums[0]) << " " << maxes[0] << " "
+        << static_cast<amrex::Long>(sums[2]) << " " << rms(sums[3], sums[2]) << " " << maxes[1] << " "
+        << static_cast<amrex::Long>(sums[4]) << " " << rms(sums[5], sums[4]) << " " << maxes[2] << "\n";
 }
 
 #endif
