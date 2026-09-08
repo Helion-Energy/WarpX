@@ -576,6 +576,56 @@ if(TEST test_1d_theta_implicit_mhd_active_set_rescue.run)
     )
 endif()
 
+# Reduced-space (active-set) Newton on the engineered deadlock: the SAME
+# deck as the rescue test with newton.active_set = 1 (+ a floor ledger).
+# The pinned band is identified at iteration 0 of every solve, held on
+# its bound, and the Newton system is solved in the free subspace, so
+# every pinned solve converges on the free residual (exit status 4, a
+# few iterations) where the plain projected Newton of the rescue baseline
+# (a dependency: its newton.txt is the stagnating control) never does;
+# the sub-bound drain the floor refused is booked to the floor ledger and
+# closes against the analytic sink demand at the bound
+add_warpx_test(
+    test_1d_theta_implicit_mhd_active_set_newton  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_active_set_rescue newton.active_set=1 newton.active_set_tolerance=1.0e-5 implicit_mhd.floor_ledger_file=diags/floor_ledger.txt"  # inputs
+    "analysis_mhd_active_set_newton.py diags/diag000000 diags/diag000060 diags/diag000120"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_active_set_rescue  # dependency
+)
+if(TEST test_1d_theta_implicit_mhd_active_set_newton.run)
+    # the active-set exit MUST fire (the pinned solves converge on the
+    # free subspace); the iteration-0 rescue is out of the loop in this
+    # mode and no solve may freeze
+    set_property(
+        TEST test_1d_theta_implicit_mhd_active_set_newton.run
+        PROPERTY PASS_REGULAR_EXPRESSION
+        "Satisfied active-set tolerance"
+    )
+    set_property(
+        TEST test_1d_theta_implicit_mhd_active_set_newton.run
+        PROPERTY FAIL_REGULAR_EXPRESSION
+        "[(]frozen step;accepted free-subspace step"
+    )
+endif()
+
+# The temperature-floor deck (both species held at n kB T_floor under a
+# supersonic rarefaction) under the reduced-space Newton: the physics
+# assertions of the default test must hold unchanged -- the pinned
+# components rest on their bounds, nothing drops below the floor, mass is
+# conserved -- and the active-set solve may not need more Newton work
+# than the plain projected one (the default run is the dependency)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_temperature_floor_active_set  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_temperature_floor newton.active_set=1"  # inputs
+    "analysis_mhd_temperature_floor_active_set.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_temperature_floor  # dependency
+)
+
 # Floor-consistency completion of the engineered deadlock (the designed
 # escalation of the rescue, motivated by rr13e_C1w where the pinned
 # defect grew 0.468 -> 1.004 until the freeze guard fired): the SAME

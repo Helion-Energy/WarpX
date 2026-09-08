@@ -48,8 +48,21 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     void precond ( T& a_U, const T& a_X ) override
     {
         if (m_usePreCond) {
-            a_U.zero();
-            m_preCond->Apply(a_U, a_X);
+            if (m_active_set_masking) {
+                // Reduced-space preconditioner P_F M^{-1} P_F + P_A: the
+                // block solves see a zero right-hand side on the pinned
+                // components and their output there is replaced by the
+                // input (identity on the active set, consistent with the
+                // masked operator in apply()).
+                m_X_masked.Copy(a_X);
+                m_ops->ZeroActiveSetComponents(m_X_masked);
+                a_U.zero();
+                m_preCond->Apply(a_U, m_X_masked);
+                m_ops->CopyActiveSetComponents(a_U, a_X);
+            } else {
+                a_U.zero();
+                m_preCond->Apply(a_U, a_X);
+            }
         } else {
             a_U.Copy(a_X);
         }
@@ -101,6 +114,21 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
         m_epsJFNK = a_eps;
     }
 
+    /**
+     * \brief Reduced-space (active-set) Newton mode: apply() computes
+     * (P_F J P_F + P_A) dU -- the Jacobian-vector product with the
+     * operator's active-set components unperturbed (pinned columns) and
+     * the result on them replaced by the input (pinned rows = identity)
+     * -- and precond() the correspondingly masked preconditioner. The
+     * masks are the operator's (ImplicitSolver::Zero/CopyActiveSetComponents);
+     * with an empty active set both reduce to the unmasked operations.
+     */
+    inline
+    void setActiveSetMasking ( bool a_on )
+    {
+        m_active_set_masking = a_on;
+    }
+
     inline
     void setIsLinear ( bool a_isLinear )
     {
@@ -139,6 +167,7 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     bool m_is_defined = false;
     bool m_is_linear = false;
     bool m_usePreCond = false;
+    bool m_active_set_masking = false;
     RT m_epsJFNK = RT(1.0e-6);
     RT m_normY0;
     RT m_cur_time, m_dt;
@@ -146,6 +175,8 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     PreconditionerType m_pc_type = PreconditionerType::none;
 
     T m_Z, m_Y0, m_R0, m_R;
+    // Scratch for the masked preconditioner input (active-set mode).
+    T m_X_masked;
     Ops* m_ops = nullptr;
     std::unique_ptr<Preconditioner<T,Ops>> m_preCond = nullptr;
 };
@@ -160,6 +191,7 @@ void JacobianFunctionMF<T,Ops>::define ( const T& a_U,
     m_Y0.Define(a_U);
     m_R0.Define(a_U);
     m_R.Define(a_U);
+    m_X_masked.Define(a_U);
 
     m_ops = a_ops;
 
@@ -253,12 +285,23 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
         const RT eps_inv = 1.0_rt/eps;
 
         m_Z.linComb( 1.0, m_Y0, eps, a_dU ); // Z = Y0 + eps*dU
+        if (m_active_set_masking) {
+            // Pinned columns: the probe state keeps the base values on
+            // the active set, so R(Z) - R(Y0) responds to the FREE
+            // perturbation only.
+            m_ops->CopyActiveSetComponents(m_Z, m_Y0);
+        }
         m_ops->ComputeRHS(m_R, m_Z, m_cur_time, -1, true );
 
         // F(Y) = Y - b - R(Y) ==> dF = dF/dY*dU = [1 - dR/dY]*dU
         //                            = dU - (R(Z)-R(Y0))/eps
         a_dF.linComb( 1.0, a_dU, eps_inv, m_R0 );
         a_dF.increment(m_R,-eps_inv);
+        if (m_active_set_masking) {
+            // Pinned rows: identity on the active set (replaces the
+            // coupling J_AF dU_F the free perturbation induced there).
+            m_ops->CopyActiveSetComponents(a_dF, a_dU);
+        }
 
     }
 

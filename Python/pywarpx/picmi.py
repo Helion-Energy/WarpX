@@ -2068,6 +2068,23 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
 
     forcing_max: float, default=0.5
         Upper cap on the adaptive linear-solve tolerance.
+
+    active_set: bool, default=False
+        Reduced-space (active-set) Newton for operators with an
+        admissibility projection (the theta-implicit MHD solver): the
+        floored components the projection pins are identified at every
+        iterate, held on their bounds, and the Newton system is solved in
+        the free subspace only (pinned rows and columns of the matrix-free
+        operator and of the preconditioner replaced by the identity, the
+        right-hand side masked). Convergence is declared on the free
+        residual (exit status 4) and the pinned defect -- the sub-bound
+        update the floors refused -- is booked to the floor ledger. Off is
+        bit-identical to the plain projected Newton.
+
+    active_set_tolerance: float, optional
+        Relative tolerance of the free-subspace residual in the active-set
+        mode, against its value at iteration 0 of each solve. Defaults to
+        relative_tolerance.
     """
 
     def __init__(
@@ -2094,6 +2111,8 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         forcing_alpha=None,
         forcing_gamma=None,
         forcing_max=None,
+        active_set=None,
+        active_set_tolerance=None,
     ):
         self.verbose = verbose
         self.linear_solver = linear_solver
@@ -2117,6 +2136,8 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.forcing_alpha = forcing_alpha
         self.forcing_gamma = forcing_gamma
         self.forcing_max = forcing_max
+        self.active_set = active_set
+        self.active_set_tolerance = active_set_tolerance
 
         if linear_solver is not None:
             assert isinstance(linear_solver, LinearSolverBase)
@@ -2150,6 +2171,8 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.forcing_alpha = self.forcing_alpha
         newton.forcing_gamma = self.forcing_gamma
         newton.forcing_max = self.forcing_max
+        newton.active_set = self.active_set
+        newton.active_set_tolerance = self.active_set_tolerance
 
         if self.linear_solver is not None:
             self.linear_solver.linear_solver_initialize_inputs(newton)

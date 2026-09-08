@@ -94,6 +94,10 @@ public:
         amrex::Print()     << "Newton require convergence: " << (m_require_convergence?"true":"false") << "\n";
         amrex::Print()     << "Newton max frozen steps:    " << m_max_frozen_steps << "\n";
         amrex::Print()     << "JFNK probe epsilon:         " << m_jfnk_epsilon << "\n";
+        if (m_active_set) {
+            amrex::Print() << "Newton active set:          true (reduced-space solve on the free subspace)\n";
+            amrex::Print() << "Active-set tolerance:       " << m_active_set_tolerance << "\n";
+        }
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -117,6 +121,31 @@ private:
      * \brief Intermediate Vec containers used by the solver.
      */
     mutable Vec m_dU, m_F, m_R, m_trial_U, m_trial_F;
+    // Active-set mode: the residual restricted to the free subspace (the
+    // reduced system's right-hand side), and a second restriction used to
+    // measure free norms without cancellation.
+    mutable Vec m_F_free, m_F_split;
+
+    /**
+     * \brief Active-set mode: the free/pinned split of a residual with the
+     * free norm computed DIRECTLY as the norm of the residual restricted
+     * to the free subspace. The operator's FreeResidualNorm returns
+     * sqrt(full^2 - pinned^2), which loses the free part entirely once
+     * the pinned defect dominates the norm by more than ~1e-8 (the
+     * difference underflows to exactly zero, which would pass any
+     * convergence test); the pinned defect and the count are taken from
+     * the operator (its pinned sum is a direct sum, hence exact).
+     */
+    amrex::Real ActiveSetResidualSplit (const Vec& a_F,
+                                        amrex::Real& a_pinned_defect,
+                                        amrex::Long& a_num_pinned) const
+    {
+        m_ops->FreeResidualNorm(a_F, a_pinned_defect, a_num_pinned);
+        if (a_num_pinned == 0) { return a_F.norm2(); }
+        m_F_split.Copy(a_F);
+        m_ops->ZeroActiveSetComponents(m_F_split);
+        return m_F_split.norm2();
+    }
 
     /**
      * \brief Pointer to Ops class.
@@ -153,6 +182,61 @@ private:
      * choice is the square root of machine epsilon (~1.5e-8).
      */
     amrex::Real m_jfnk_epsilon = 1.0e-6;
+
+    /**
+     * \brief Reduced-space (active-set) Newton, newton.active_set = 1
+     * (default 0: the plain projected Newton, bit-identical).
+     *
+     * The operator's admissibility projection makes the Newton update a
+     * bound-constrained one: direction components that would leave the
+     * admissible box are clamped onto their bounds. The plain method
+     * computes the UNCONSTRAINED direction first and clamps afterwards,
+     * so every free component's update was computed assuming the clamped
+     * cells move fully -- once a population rides its floor under a
+     * sustained drain (a wall row, a pedestal band) the clamped direction
+     * is inconsistent, the full-norm Armijo test grades rows the
+     * projection just froze, and the iteration degrades to damped linear
+     * convergence or stagnates (measured on the production formation
+     * deck: 100-300 pinned components, 17-57% of the steps within 1e-3,
+     * 100-150 GMRES per solve, 10-80 s per step in the affected window).
+     *
+     * The active-set mode instead solves the complementarity problem the
+     * projection implies, min(U_i - l_i, F_i) = 0: at every iterate the
+     * ACTIVE SET A is identified (IdentifyActiveSet: components resting
+     * on their bound whose residual demands a sub-bound update, F_i > 0,
+     * plus the components the previous iteration clamped that still
+     * demand it; a component whose residual points inward leaves the
+     * set), its members are moved onto their bounds
+     * (MoveActiveSetToBounds, with a residual re-evaluation when anything
+     * moved) and the Newton system is solved in the FREE subspace only:
+     * the matrix-free operator becomes P_F J P_F + P_A (pinned rows and
+     * columns replaced by the identity), the preconditioner
+     * P_F M^{-1} P_F + P_A, the right-hand side P_F F, so the correction
+     * vanishes exactly on A and every free direction component is
+     * computed with the pinned cells held where they are. The Armijo
+     * search grades the FREE residual norm, convergence is declared on it
+     * (newton.active_set_tolerance relative to its iteration-0 value, or
+     * the absolute tolerance; exit status 4), the residual left on A --
+     * the pinned defect, the sub-bound update the floors refused -- is
+     * booked to the operator's floor ledger at every exit
+     * (BookPinnedDefect), and newton.txt gains the columns free_norm_rel
+     * and exit_status. Components the projection clamps DURING a free
+     * solve (new entrants) join the set for that line search and are
+     * held from the next iteration on; the set is rebuilt from the state
+     * at iteration 0 of every solve. The iteration-0 free-subspace rescue
+     * below is not used in this mode (the search already grades the free
+     * norm). A fully pinned state whose free residual is at round-off
+     * and that nothing moved still counts as a frozen step, so the
+     * newton.max_frozen_steps guard keeps its meaning.
+     */
+    bool m_active_set = false;
+
+    /**
+     * \brief Relative tolerance of the free-subspace residual in the
+     * active-set mode, measured against the free norm at iteration 0 of
+     * the solve. Negative (the default) selects newton.relative_tolerance.
+     */
+    amrex::Real m_active_set_tolerance = -1.0;
 
     /**
      * \brief Consecutive zero-progress (frozen) solve counter.
@@ -305,6 +389,16 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
     m_linear_function->define(m_F, m_ops, m_pc_type);
     m_linear_function->setJFNKEps(m_jfnk_epsilon);
     this->m_usePC = m_linear_function->usePreconditioner();
+    if (m_active_set) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ops->HasAdmissibilityProjection() && m_ops->UseNewtonLineSearch(),
+            "newton.active_set = 1 requires an operator with an admissibility "
+            "projection and a Newton line search (the theta-implicit MHD solver)");
+        m_ops->SetActiveSetMode(true);
+        m_linear_function->setActiveSetMasking(true);
+        m_F_free.Define(a_U);
+        m_F_split.Define(a_U);
+    }
 
     if (m_linear_solver_type == LinearSolverType::amrex_gmres) {
         m_linear_solver = std::make_unique<AMReXGMRES<Vec,JacobianFunctionMF<Vec,Ops>>>();
@@ -361,6 +455,12 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
         diagnostic_file << "[" << c++ << "]pinned_defect";
         diagnostic_file << " ";
         diagnostic_file << "[" << c++ << "]num_pinned";
+        if (m_active_set) {
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]free_norm_rel";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]exit_status";
+        }
         diagnostic_file << "\n";
         diagnostic_file.close();
     }
@@ -384,6 +484,13 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_max_frozen_steps > 0,
         "newton.max_frozen_steps must be positive");
+    pp_newton.query("active_set", m_active_set);
+    utils::parser::queryWithParser(pp_newton, "active_set_tolerance",
+                                   m_active_set_tolerance);
+    if (m_active_set_tolerance < 0.0) { m_active_set_tolerance = m_rtol; }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_active_set || m_active_set_tolerance < 1.0,
+        "newton.active_set_tolerance must be below 1");
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
     pp_newton.query("adaptive_forcing",    m_adaptive_forcing);
@@ -456,12 +563,52 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real norm_prev = 0.;
     amrex::Real forcing_prev = m_forcing_max;
 
+    // Reduced-space (active-set) mode bookkeeping (see m_active_set);
+    // inert at the default.
+    amrex::Real free_norm = 0.;
+    amrex::Real active_free_norm0 = 1._rt;
+    amrex::Real free_rel = 0.;
+    amrex::Real active_pinned_defect = 0.;
+    amrex::Long active_num_pinned = 0;
+    amrex::Long active_set_moves = 0;
+    bool active_set_identified = false;
+
     int iter;
     int linear_solver_iters = 0;
     for (iter = 0; iter < m_maxits;) {
 
         // Compute residual: F(U) = U - b - R(U)
         EvalResidual(m_F, a_U, a_b, a_time, iter, true);
+
+        if (m_active_set) {
+            // Reduced-space mode: identify the active set at this iterate
+            // (bound-resident components whose residual demands a
+            // sub-bound update; after iteration 0 also the components the
+            // previous projection clamped, while they still demand it),
+            // move its members onto their bounds, and re-evaluate the
+            // residual there so the free solve below is consistent with
+            // the pinned components held at the bound.
+            amrex::Long entered = 0;
+            amrex::Long released = 0;
+            active_num_pinned = m_ops->IdentifyActiveSet(
+                a_U, m_F, iter > 0, entered, released);
+            active_set_identified = true;
+            amrex::Long moved = 0;
+            if (active_num_pinned > 0) {
+                moved = m_ops->MoveActiveSetToBounds(a_U);
+                if (moved > 0) {
+                    active_set_moves += moved;
+                    EvalResidual(m_F, a_U, a_b, a_time, iter, true);
+                }
+            }
+            if (this->m_verbose && (active_num_pinned > 0 || released > 0)) {
+                amrex::Print() << "Newton: active set at iteration " << iter
+                               << ": " << active_num_pinned << " pinned ("
+                               << entered << " entered, " << released
+                               << " released, " << moved
+                               << " moved onto bounds)\n";
+            }
+        }
 
         // Compute norm of the residual
         norm_abs = m_F.norm2();
@@ -471,11 +618,28 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         }
         norm_rel = norm_abs/norm0;
 
+        if (m_active_set) {
+            free_norm = ActiveSetResidualSplit(m_F, active_pinned_defect,
+                                               active_num_pinned);
+            if (iter == 0) {
+                active_free_norm0 = (free_norm > 0.) ? free_norm : 1._rt;
+            }
+            free_rel = free_norm / active_free_norm0;
+        }
+
         // Check for convergence criteria
         if (this->m_verbose || iter == m_maxits) {
             amrex::Print() << "Newton: iteration = " << std::setw(3) << iter <<  ", norm = "
                            << std::scientific << std::setprecision(5) << norm_abs << " (abs.), "
                            << std::scientific << std::setprecision(5) << norm_rel << " (rel.)" << "\n";
+        }
+        if (m_active_set && active_num_pinned > 0 &&
+            (this->m_verbose || iter == m_maxits)) {
+            amrex::Print() << "Newton: free-subspace norm = "
+                           << std::scientific << std::setprecision(5) << free_norm
+                           << " (abs.), " << free_rel << " (rel.); pinned defect = "
+                           << active_pinned_defect << " over " << active_num_pinned
+                           << " components\n";
         }
 
         // Env-gated residual fingerprint (WARPX_MHD_REPORT_RESIDUAL_BLOCKS):
@@ -505,6 +669,69 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             break;
         }
 
+        if (m_active_set && active_num_pinned > 0) {
+            // Free-subspace convergence (the active-set exit): the residual
+            // over the free components is within the active-set tolerance
+            // of its iteration-0 value, or within the absolute tolerance,
+            // or at round-off relative to the full norm (no free dynamics;
+            // 1e-12, the rescue path's noise gate). The pinned defect is
+            // not part of the test -- it is the sub-bound update the
+            // floors refused and is booked to the ledger at the exit.
+            const amrex::Real free_target = std::max(
+                {m_atol, m_active_set_tolerance * active_free_norm0,
+                 1.0e-12_rt * norm_abs});
+            if (free_norm <= free_target) {
+                this->m_exit_status = 4;
+                amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
+                               << ". Satisfied active-set tolerance " << m_active_set_tolerance
+                               << " on the free subspace (free norm " << free_norm
+                               << " abs., " << free_rel << " rel.; pinned defect "
+                               << active_pinned_defect << " over " << active_num_pinned
+                               << " components; full rel. norm " << norm_rel << ")\n";
+                // Genuine free convergence (absolute or relative
+                // tolerance) is a converged solve. An exit granted by the
+                // round-off gate alone at iteration 0, with nothing moved,
+                // returns the state it was handed: keep the freeze guard's
+                // accounting so a fully pinned domain with no free
+                // dynamics still aborts instead of silently advancing.
+                const bool free_converged =
+                    (free_norm <= m_atol) ||
+                    (free_norm <= m_active_set_tolerance * active_free_norm0);
+                if (iter == 0 && active_set_moves == 0 && !free_converged) {
+                    m_frozen_steps++;
+                    amrex::Print()
+                        << "WARNING: Newton active-set exit at iter = 0 with "
+                        << "the free residual at round-off and nothing moved; "
+                        << "the state is UNCHANGED by this solve (frozen step "
+                        << m_frozen_steps << " of at most " << m_max_frozen_steps
+                        << " consecutive; pinned defect = " << active_pinned_defect
+                        << ", " << active_num_pinned << " pinned)\n";
+                    if (m_frozen_steps >= m_max_frozen_steps) {
+                        std::stringstream freeze_msg;
+                        freeze_msg
+                            << "Newton made zero progress for "
+                            << "newton.max_frozen_steps consecutive solves "
+                            << "(active-set mode: free residual at round-off, "
+                            << active_num_pinned << " pinned components";
+                        const std::string pinned_report =
+                            m_ops->PinnedComponentReport();
+                        if (!pinned_report.empty()) {
+                            freeze_msg << ": " << pinned_report;
+                        }
+                        freeze_msg
+                            << "): the simulation state is frozen and, "
+                               "absent time-dependent drives, cannot "
+                               "recover. Aborting instead of silently "
+                               "advancing time.";
+                        WARPX_ABORT_WITH_MESSAGE(freeze_msg.str());
+                    }
+                } else {
+                    m_frozen_steps = 0;
+                }
+                break;
+            }
+        }
+
         if (norm_abs > 100._rt*norm0) {
             this->m_exit_status = -9;
             amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
@@ -528,25 +755,29 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // oversolved.
         amrex::Real linsol_rtol = m_linsol_rtol;
         if (m_adaptive_forcing) {
+            // In the active-set mode the linear system is the free one:
+            // the forcing history tracks the free norm and its target.
+            const amrex::Real forcing_norm = m_active_set ? free_norm : norm_abs;
+            const amrex::Real convergence_target =
+                m_active_set ? std::max(m_atol, m_active_set_tolerance * active_free_norm0)
+                             : std::max(m_atol, m_rtol * norm0);
             amrex::Real zeta = m_forcing_max;
             if (iter > 0 && norm_prev > 0._rt) {
                 const amrex::Real zeta_a =
                     m_forcing_gamma *
-                    std::pow(norm_abs / norm_prev, m_forcing_alpha);
+                    std::pow(forcing_norm / norm_prev, m_forcing_alpha);
                 const amrex::Real safeguard =
                     m_forcing_gamma * std::pow(forcing_prev, m_forcing_alpha);
                 zeta = std::min(m_forcing_max, std::max(zeta_a, safeguard));
             }
-            const amrex::Real convergence_target =
-                std::max(m_atol, m_rtol * norm0);
-            if (norm_abs > 0._rt) {
+            if (forcing_norm > 0._rt) {
                 zeta = std::min(
                     m_forcing_max,
                     std::max(zeta, m_forcing_gamma * convergence_target /
-                                       norm_abs));
+                                       forcing_norm));
             }
             forcing_prev = zeta;
-            norm_prev = norm_abs;
+            norm_prev = forcing_norm;
             linsol_rtol = zeta;
             if (this->m_verbose) {
                 amrex::Print() << "Newton: forcing term = " << zeta << "\n";
@@ -555,7 +786,17 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         // Solve linear system for Newton step [Jac]*dU = F
         m_dU.zero();
-        m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
+        if (m_active_set && active_num_pinned > 0) {
+            // Reduced system: the right-hand side restricted to the free
+            // subspace; the operator and the preconditioner are masked by
+            // the linear function (identity on the active set), so the
+            // correction is exactly zero on every pinned component.
+            m_F_free.Copy(m_F);
+            m_ops->ZeroActiveSetComponents(m_F_free);
+            m_linear_solver->solve( m_dU, m_F_free, linsol_rtol, m_linsol_atol );
+        } else {
+            m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
+        }
         linear_solver_iters += m_linear_solver->getNumIters();
 
         // Update solution
@@ -575,6 +816,15 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 amrex::Print() << "Newton: admissibility-limited trial step = "
                                << step_length << "\n";
             }
+            // Armijo reference: the full residual norm; in the active-set
+            // mode the FREE norm with respect to the set the projection
+            // may just have enlarged (new entrants are graded as pinned).
+            amrex::Real reference_norm = norm_abs;
+            if (m_active_set) {
+                reference_norm = ActiveSetResidualSplit(
+                    m_F, active_pinned_defect, active_num_pinned);
+                free_norm = reference_norm;
+            }
             bool accepted = false;
             for (int backtrack = 0; backtrack <= max_backtracks; ++backtrack) {
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -584,8 +834,16 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 m_trial_U.increment(m_dU, -step_length);
 
                 EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter, false);
-                const amrex::Real trial_norm = m_trial_F.norm2();
-                if (trial_norm <= (1.0_rt - armijo * step_length) * norm_abs) {
+                amrex::Real trial_norm;
+                if (m_active_set) {
+                    amrex::Real trial_defect = 0.0_rt;
+                    amrex::Long trial_pinned = 0;
+                    trial_norm = ActiveSetResidualSplit(m_trial_F, trial_defect,
+                                                        trial_pinned);
+                } else {
+                    trial_norm = m_trial_F.norm2();
+                }
+                if (trial_norm <= (1.0_rt - armijo * step_length) * reference_norm) {
                     a_U.Copy(m_trial_U);
                     accepted = true;
                     if (this->m_verbose &&
@@ -634,7 +892,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             // temperature-floor CI trajectory).
             amrex::Real pinned_defect = 0.0_rt;
             amrex::Long num_pinned = 0;
-            if (!accepted && iter == 0) {
+            if (!accepted && iter == 0 && !m_active_set) {
                 const amrex::Real free_norm0 =
                     m_ops->FreeResidualNorm(m_F, pinned_defect, num_pinned);
                 // Noise gate: when the free residual sits at round-off
@@ -679,6 +937,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             }
 
             if (!accepted) {
+                // The state is unchanged only when no update was ever
+                // accepted AND (active-set mode) nothing was moved onto
+                // its bound by this solve.
+                const bool state_unchanged =
+                    (iter == 0) && !(m_active_set && active_set_moves > 0);
                 // Not even the free-subspace norm could be decreased.
                 // This is treated like the max-iteration exit (the same
                 // policy that already tolerates a non-converged step):
@@ -692,7 +955,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 // bit-identically and the simulation silently freezes.
                 // Count consecutive frozen solves and abort past
                 // newton.max_frozen_steps.
-                if (iter == 0) {
+                if (state_unchanged) {
                     m_frozen_steps++;
                     amrex::Print()
                         << "WARNING: Newton line search stagnated at iter = 0 "
@@ -748,6 +1011,10 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                     // booking rode this path on the formation ladder).
                     m_ops->ProjectStateToAdmissibleSet(a_U);
                 }
+                if (m_active_set) {
+                    // 1 = stagnation exit: an unconverged iterate returned.
+                    this->m_exit_status = 1;
+                }
                 break;
             }
             m_frozen_steps = 0;
@@ -762,6 +1029,14 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         iter++;
         if (iter >= m_maxits) {
+            if (m_active_set && m_ops->UseNewtonLineSearch()) {
+                // The accepted trial's residual describes the returned
+                // state: report and book from it rather than from the
+                // previous iterate's residual.
+                m_F.Copy(m_trial_F);
+                norm_abs = m_F.norm2();
+                norm_rel = norm_abs / norm0;
+            }
             if (this->m_verbose) {
                 amrex::Print() << "Newton: exiting at iter = " << std::setw(3) << iter
                                << ". Maximum iteration reached: iter = " << m_maxits << "\n";
@@ -792,9 +1067,21 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real exit_free_norm = norm_abs;
     amrex::Real exit_pinned_defect = 0.0_rt;
     amrex::Long exit_num_pinned = 0;
-    if (iter > 0) {
+    if (m_active_set) {
+        if (active_set_identified) {
+            exit_free_norm = ActiveSetResidualSplit(m_F, exit_pinned_defect,
+                                                    exit_num_pinned);
+        }
+    } else if (iter > 0) {
         exit_free_norm =
             m_ops->FreeResidualNorm(m_F, exit_pinned_defect, exit_num_pinned);
+    }
+    if (m_active_set && exit_num_pinned > 0) {
+        // Book the pinned defect -- the sub-bound update the floors
+        // refused on the returned state -- to the operator's floor
+        // ledger, and list the active set (rate-limited).
+        m_ops->BookPinnedDefect(m_F);
+        m_ops->ReportActiveSet();
     }
 
     if (m_rtol > 0. && iter == m_maxits) {
@@ -842,6 +1129,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         diagnostic_file << exit_pinned_defect;
         diagnostic_file << " ";
         diagnostic_file << exit_num_pinned;
+        if (m_active_set) {
+            diagnostic_file << " ";
+            diagnostic_file << exit_free_norm / active_free_norm0;
+            diagnostic_file << " ";
+            diagnostic_file << this->m_exit_status;
+        }
         diagnostic_file << "\n";
         diagnostic_file.close();
     }
