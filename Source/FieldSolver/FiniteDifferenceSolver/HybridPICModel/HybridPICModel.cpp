@@ -25,6 +25,7 @@
 #include <AMReX_MLNodeTensorLaplacian.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
+#include "Circuit/CircuitCoupling.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/ElectrostaticSolvers/PoissonBoundaryHandler.H"
 #include "Python/callbacks.H"
@@ -11474,6 +11475,18 @@ void HybridPICModel::BfieldEvolve (
     int n_accepted = 0;
     bool prev_attempt_failed = false;
 
+    // Circuit coupling: each accepted substep is a coupling interval of
+    // the predictor-corrector exchange with the external circuit engine
+    // (fields here hold the plasma response; the coupled coils' external
+    // fields are refreshed on the engine's scale segments per substep).
+    auto& warpx = WarpX::GetInstance();
+    CircuitCoupler* coupler = nullptr;
+    if (lev == 0 && warpx.get_pointer_CircuitCoupling() != nullptr) {
+        coupler = warpx.get_pointer_CircuitCoupling()->Coupler();
+    }
+    const amrex::Real t_half_start = warpx.gett_old(0)
+        + ((subcycling_half == SubcyclingHalf::SecondHalf) ? dt_half : 0.0_rt);
+
     // Step the magnetic field forward (from t -> t + dt_half) using the user
     // specified integration scheme. The loop is set up such that the timestep
     // for a given step (dt_sub) can be modified within the loop, i.e.,
@@ -11484,6 +11497,15 @@ void HybridPICModel::BfieldEvolve (
         if (t + dt_sub > dt_half) { dt_sub = dt_half - t; }
         bool step_succeeded = true;
         amrex::Real step_change_factor = 1.0_rt;
+
+        // Predictor: the engine advances the circuit over this substep
+        // with its held EMF estimates and pushes the scale segments; the
+        // engine always advances from its interval-entry state, so a
+        // rejected or resized substep simply predicts again.
+        if (coupler) {
+            coupler->PredictSubstep(t_half_start + t,
+                                    t_half_start + t + dt_sub);
+        }
 
         if (use_rkf45) {
             const amrex::Real error = BfieldEvolveRKF45(
@@ -11527,6 +11549,14 @@ void HybridPICModel::BfieldEvolve (
             }
 
             if (!step_succeeded) {
+                // The half-step restart rolls the FIELDS back to t^n, but
+                // the circuit engine has already accepted earlier substeps
+                // of this half and cannot be rolled back with them.
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(coupler == nullptr,
+                    "The RK4 NaN-recovery restart is not supported with an "
+                    "active circuit coupling engine; use more substeps or "
+                    "the RKF45 integrator");
+
                 ablastr::warn_manager::WMRecordWarning(
                     "HybridPIC",
                     "NaN or Inf value encountered in the B-field during RK4 "
@@ -11551,9 +11581,49 @@ void HybridPICModel::BfieldEvolve (
             }
         }
 
+        // Corrector passes of the circuit coupling: measure the linkages
+        // of this iterate, let the engine re-advance with the corrected
+        // EMFs, and re-integrate the substep from its entry state with the
+        // refreshed segments until the realized scales settle.
+        if (step_succeeded && coupler) {
+            for (int kc = 0; kc < coupler->CorrectorIterations(); ++kc) {
+                if (coupler->CorrectSubstep(t_half_start + t,
+                                            t_half_start + t + dt_sub)) {
+                    break;
+                }
+                // reset B to the substep entry state (component 0 of B_old;
+                // one fused pass over the three directions)
+                FusedCopy3(
+                    {Bfield[lev][0], Bfield[lev][1], Bfield[lev][2]},
+                    {&B_old[0], &B_old[1], &B_old[2]},
+                    0, 0, 1, ng);
+                if (use_rkf45) {
+                    const amrex::Real error = BfieldEvolveRKF45(
+                        Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
+                        dt_sub, lev, subcycling_half, ng, nodal_sync
+                    );
+                    step_change_factor =
+                        m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
+                    step_succeeded = (error <= 1._rt);
+                } else {
+                    BfieldEvolveRK4(
+                        Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
+                        dt_sub, lev, subcycling_half, ng, nodal_sync
+                    );
+                    bool ok = true;
+                    for (int idim = 0; idim < 3; ++idim) {
+                        ok = ok && Bfield[lev][idim]->is_finite(/*local=*/true);
+                    }
+                    amrex::ParallelDescriptor::ReduceBoolAnd(ok);
+                    step_succeeded = ok;
+                }
+                if (!step_succeeded) { break; }  // reject; the next attempt re-predicts
+            }
+        }
+
         if (step_succeeded) {
             // Topanga sponge caps (B-side; see ApplySpongeLayerBYee):
-            // damp the accepted B BEFORE any coupling-interval close
+            // damp the accepted B BEFORE the coupling-interval close
             // (an attached circuit engine's next predictor must not
             // see cap-wave content the layer removes) and BEFORE the
             // B_old latch below (the next substep's entry state and
@@ -11563,6 +11633,12 @@ void HybridPICModel::BfieldEvolve (
             // is consistent; do not special-case it.
             if (m_je_sponge_width > 0.0_rt) {
                 ApplySpongeLayerBYee(Bfield, lev, dt_sub);
+            }
+            // Close the coupling interval on the accepted field state (the
+            // engine's next predictor reads these linkages).
+            if (coupler) {
+                coupler->AcceptSubstep(t_half_start + t,
+                                       t_half_start + t + dt_sub);
             }
             // update time tracker and accepted steps number
             t += dt_sub;

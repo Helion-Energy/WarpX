@@ -15,6 +15,7 @@
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
 #    include "BoundaryConditions/PML_RZ.H"
 #endif
+#include "Circuit/CircuitCoupling.H"
 #include "Diagnostics/Diagnostics.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
@@ -508,6 +509,12 @@ WarpX::InitFromCheckpoint ()
     if (EB::enabled()) { InitializeEBGridData(maxLevel()); }
 
     reduced_diags->ReadCheckpointData(restart_chkfile);
+
+    if (m_circuit_coupling) {
+        // restore the live scale segments of the circuit-driven external
+        // fields (rank-replicated state; all ranks read)
+        m_circuit_coupling->ReadCheckpointData(restart_chkfile);
+    }
 
     // Initialize particles
     mypc->Restart(restart_chkfile);
