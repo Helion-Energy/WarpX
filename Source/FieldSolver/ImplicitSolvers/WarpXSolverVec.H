@@ -339,6 +339,49 @@ public:
     }
 
     /**
+     * \brief Inner product with or without the per-block reference scales.
+     * dotProduct(X) weights every block by 1/scale^2 (the solver norm);
+     * with a_apply_block_scales = false the plain, unweighted sum over all
+     * degrees of freedom is returned (same nodal duplicate masks). The
+     * unweighted form is for quantities that are already dimensionless
+     * per component, e.g. a state divided by a component-wise scale.
+     */
+    [[nodiscard]] RT dotProduct ( const WarpXSolverVec&  a_X,
+                                  bool a_apply_block_scales ) const;
+
+    /**
+     * \brief Pointwise absolute value, x_i = |x_i|, over every field block.
+     */
+    void abs ();
+
+    /**
+     * \brief Add a per-block constant to every element of each field block
+     * (in the block's own units). a_block_values is ordered as blockNames():
+     * the array (vector-field) block, the scalar block, then the MultiFab
+     * blocks in specification order; only blocks present in this vector
+     * are listed.
+     */
+    void addBlockConstants (const std::vector<RT>& a_block_values);
+
+    /**
+     * \brief Pointwise division x_i = x_i / d_i by another vector of the
+     * same type (every d_i must be nonzero).
+     */
+    void divideBy (const WarpXSolverVec& a_D);
+
+    /**
+     * \brief Names of the field blocks present in this vector, in the
+     * order the per-block API (addBlockConstants, blockScales) uses.
+     */
+    [[nodiscard]] std::vector<std::string> blockNames () const;
+
+    /**
+     * \brief Reference scales of the field blocks (the 1/scale^2 weights of
+     * the solver norm), ordered as blockNames().
+     */
+    [[nodiscard]] std::vector<RT> blockScales () const;
+
+    /**
      * \brief Print the scaled L2 norm of each field block of this vector
      * (the per-block contributions to norm2()) on the I/O rank, and, for
      * every block whose squared-norm share of the total exceeds
