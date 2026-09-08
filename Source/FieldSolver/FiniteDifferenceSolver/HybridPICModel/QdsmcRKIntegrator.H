@@ -116,12 +116,13 @@ public:
                        amrex::Real rtol, amrex::Real atol,
                        amrex::Real safety, amrex::Real max_growth,
                        int max_attempts, PostStep post_step = {},
-                       amrex::iMultiFab const * err_mask = nullptr)
+                       amrex::iMultiFab const * err_mask = nullptr,
+                       bool post_step_per_stage = true)
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)),
           m_rtol(rtol), m_atol(atol), m_safety(safety),
           m_max_growth(max_growth), m_max_attempts(max_attempts),
-          m_err_mask(err_mask)
+          m_err_mask(err_mask), m_post_step_per_stage(post_step_per_stage)
     {}
 
     /** Advance y in place from t = 0 to t_end. y's ghost refresh is the
@@ -218,7 +219,10 @@ public:
      *  increment (c_j - c_{j-1}) tau, c_j = (j^2+j-2)/(s^2+s-2) and
      *  c_1 = mu_t1; the increments sum to tau exactly, so BC flux
      *  injections scaled by the post-step dt still integrate to the
-     *  full interval. Stage states are built in the caller's y (the
+     *  full interval -- but the recurrence re-extrapolates them (see
+     *  m_post_step_per_stage), so with post_step_per_stage = false it
+     *  runs once per super-step, after stage s, with dt = tau instead.
+     *  Stage states are built in the caller's y (the
      *  ghosted buffer the RHS functor refreshes); Y_{j-1}, Y_{j-2},
      *  M(Y_0) are archived in ghostless temporaries. Stats: n_attempts
      *  and n_accepted count STAGES (one RHS evaluation each, the work
@@ -340,7 +344,9 @@ public:
                     y_arr(i,j,kk,c) = 1.0_rt*yv + c1*my0_arr(i,j,kk,c);
                 });
             }
-            if (m_post_step) { m_post_step(y, mu_t1*tau); }
+            if (m_post_step && m_post_step_per_stage) {
+                m_post_step(y, mu_t1*tau);
+            }
             book(mu_t1*tau);
             amrex::Real c_prev = mu_t1;
             amrex::Real b_jm1 = 1.0_rt/3.0_rt;     // b_1
@@ -389,11 +395,19 @@ public:
                     });
                 }
                 amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
-                if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
+                if (m_post_step && m_post_step_per_stage) {
+                    m_post_step(y, (cj - c_prev)*tau);
+                }
                 book((cj - c_prev)*tau);
                 c_prev = cj;
                 b_jm2 = b_jm1;
                 b_jm1 = bj;
+            }
+            // super-step cadence: the completed Y_s is a consistent
+            // solution at t + tau; apply the constraint hook once with
+            // the full interval (nothing downstream re-extrapolates it)
+            if (m_post_step && !m_post_step_per_stage) {
+                m_post_step(y, tau);
             }
             st.t_done += tau;
         }
@@ -628,6 +642,17 @@ public:
     /** Optional error-norm exclusion set (see the constructor doc);
      *  not owned. */
     amrex::iMultiFab const * m_err_mask = nullptr;
+    /** RKL2 only: run post_step after every stage (true, the original
+     *  cadence) or once per super-step with the full tau (false). The
+     *  stage states are not consistent solutions -- Y_j = mu_j Y_{j-1} +
+     *  nu_j Y_{j-2} + ... re-extrapolates whatever post_step wrote into
+     *  Y_{j-1} -- so a per-stage boundary source or pin is amplified by
+     *  the recurrence (measured 2.1x at s ~ 4 and 13x at s ~ 20 on a
+     *  prescribed-flux plate: the state gained 3.4 J and 21 J per step
+     *  for 1.6 J injected). Per-super-step application keeps the
+     *  boundary exchange exactly what post_step booked. ssprk2/rkf45 are
+     *  unaffected (post_step runs per accepted substep there). */
+    bool m_post_step_per_stage = true;
 };
 
 #endif // WARPX_QDSMCRKINTEGRATOR_H_

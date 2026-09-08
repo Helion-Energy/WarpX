@@ -1800,6 +1800,18 @@ public:
      *  error-adaptive on top of the stability ceiling. Input:
      *  qdsmc_conduction_fd_time = ssprk2 | rkf45 | rkl2. */
     int m_cond_fd_time = 0;
+    /** RKL2 post-step cadence for the conduction constraint hooks
+     *  (domain-face wall BCs, EB ring pin, T_e floor): 0 = after every
+     *  stage (the original behaviour, default), 1 = once per super-step
+     *  with the full tau. Per-stage application inside the RKL2
+     *  recurrence amplifies any boundary source or pin by the stage
+     *  re-extrapolation (2-13x measured on a prescribed-flux plate), so
+     *  the booked wall exchange under-reads the realized drain and the
+     *  wall flux cap bounds only the booked part; 'superstep' makes the
+     *  realized exchange equal to what the hooks book. ssprk2/rkf45
+     *  ignore it. Input: qdsmc_conduction_rkl2_post_step = stage |
+     *  superstep. */
+    int m_cond_rkl2_post_step = 0;
     /** FD adaptive-integrator error tolerances (weighted max-norm,
      *  accept at err <= 1): relative and absolute [K]. Inputs:
      *  qdsmc_conduction_fd_rtol / _atol. */

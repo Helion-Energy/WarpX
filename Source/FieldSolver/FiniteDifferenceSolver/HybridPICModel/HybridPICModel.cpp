@@ -425,6 +425,15 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_fd_time must be "
                 "'ssprk2', 'rkf45' or 'rkl2'");
         }
+        std::string rkl2ps = "stage";
+        pp_hybrid.query("qdsmc_conduction_rkl2_post_step", rkl2ps);
+        if (rkl2ps == "stage") { m_cond_rkl2_post_step = 0; }
+        else if (rkl2ps == "superstep") { m_cond_rkl2_post_step = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_rkl2_post_step must be "
+                "'stage' or 'superstep'");
+        }
         utils::parser::queryWithParser(pp_hybrid,
             "qdsmc_conduction_fd_rtol", m_cond_fd_rtol);
         utils::parser::queryWithParser(pp_hybrid,
@@ -1340,7 +1349,12 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
              "rkf45 (Fehlberg 4(5), NOT SSP)",
              "rkl2 (Runge-Kutta-Legendre super-time-stepping)"};
         amrex::Print() << "[qdsmc] conduction fd integrator: "
-            << fdt_names[m_cond_fd_time] << "\n";
+            << fdt_names[m_cond_fd_time];
+        if (m_cond_fd_time == 2) {
+            amrex::Print() << ", post-step hooks per "
+                << ((m_cond_rkl2_post_step == 1) ? "super-step" : "stage");
+        }
+        amrex::Print() << "\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -7898,7 +7912,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                               : QdsmcRKIntegrator::Scheme::SSPRK2,
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
         m_substep_safety, m_substep_max_growth, max_sub, post_step,
-        mask_err ? &floor_mask : nullptr);
+        mask_err ? &floor_mask : nullptr,
+        /* post_step_per_stage = */ (m_cond_rkl2_post_step == 0));
     QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
 
     // WARPX_QDSMC_COND_STATS: one line per integrator call from the stats

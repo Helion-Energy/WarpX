@@ -4209,6 +4209,28 @@ Maxwell solver: kinetic-fluid hybrid
     multiply by :math:`\Delta r \Delta z` for joules; Cartesian: multiply by the node dual-cell volume),
     positive = into the plasma.
 
+    Under ``qdsmc_conduction_fd_time = rkl2`` the cap bounds the *realized* drain only together with
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_rkl2_post_step` = ``superstep``; with the default per-stage
+    cadence the RKL2 recurrence re-extrapolates the per-stage wall exchange and the state loses several times
+    what the tally books.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_rkl2_post_step
+    :type: ``string``
+    :default: ``stage``
+    :optional:
+
+    Cadence of the conduction constraint hooks (domain-face wall BCs, embedded-boundary ring pin,
+    ``qdsmc_conduction_Te_floor``) inside the RKL2 super-time-stepping integrator. ``stage`` (the original
+    behaviour) runs them after every RKL2 stage with the stage's effective time increment; ``superstep`` runs
+    them once per super-step with the full interval. The RKL2 stage states are not consistent solutions --
+    :math:`Y_j = \mu_j Y_{j-1} + \nu_j Y_{j-2} + \ldots` re-extrapolates whatever a hook wrote into
+    :math:`Y_{j-1}` -- so with ``stage`` any boundary source or pin is amplified by the recurrence (measured on
+    a prescribed-flux plate: the state gained 2.1x the injected energy per step at about four stages and 13x at
+    about twenty), the booked wall tallies under-read the realized drain, and the isothermal pin drains far more
+    than a per-substep bath would. ``superstep`` makes the realized exchange equal to what the hooks book;
+    it does not change ``ssprk2`` or ``rkf45``, whose hooks already run per accepted substep. Off by default so
+    existing decks are unchanged.
+
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
     :default: ``false``
