@@ -6,11 +6,13 @@
  */
 #include "WarpX.H"
 
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Parallelization/GuardCellManager.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/ParticleBoundaryBuffer.H"
@@ -59,6 +61,32 @@ WarpX::SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_ti
     amrex::MultiFab::Copy(*Efield_fp[0][2], *Evec[0][2], 0, 0, ncomps, Evec[0][2]->nGrowVect());
     FillBoundaryE(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
     ApplyEfieldBoundary(0, PatchType::fine, a_time);
+
+#if defined(WARPX_DIM_RZ)
+    // Thin resistive-shell wall (RZ r-max, hybrid_pic_model.resistive_wall):
+    // ApplyEfieldBoundary above zeroed the tangential wall rows of the
+    // iterate copy (hard PEC identity). Restore them from the raw solver
+    // iterate a_E and image the r-hi tangential ghosts odd about that value,
+    // so the Faraday curl and the particle gather of this residual
+    // evaluation see the iterate's wall value -- the map stays a
+    // deterministic function of the iterate (recomputing the shell value
+    // here from Bfield_fp would read the PREVIOUS residual evaluation's
+    // B^{n+theta}: a hidden one-evaluation lag in Jacobian probes). The wall
+    // row converges to the shell value through the residual: the Ohm-solve
+    // wrapper tail (HybridPICModel::HybridPICSolveE -> ApplyResistiveWallE)
+    // imposes E_t(wall) = (eta_w/delta) K_t(B^{n+theta}(iterate)) on the
+    // residual output, making the wall row a relaxation (Robin) equation
+    // E_wall = (eta_w/delta) K(B(E)) at the fixed point. Composition: runs
+    // LAST at this site (after the PEC image); implicit_evolve.
+    // adjoint_gather_ghosts (PreRHSOp) later overwrites only the r-hi GHOST
+    // rows of the gather source (gather-only, wall node untouched), so the
+    // two knobs compose without ordering surprises; E_r keeps the PEC
+    // normal image.
+    if (m_hybrid_pic_model && m_hybrid_pic_model->m_resistive_wall) {
+        m_hybrid_pic_model->ImposeResistiveWallIterateRowsE(
+            Efield_fp[0], Evec[0], 0);
+    }
+#endif
 }
 
 void
@@ -74,6 +102,25 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
         amrex::MultiFab::Copy(*Bfp[1], *a_Bn[lev][1], 0, 0, ncomps, a_Bn[lev][1]->nGrowVect());
         amrex::MultiFab::Copy(*Bfp[2], *a_Bn[lev][2], 0, 0, ncomps, a_Bn[lev][2]->nGrowVect());
     }
+#ifdef AMREX_USE_EB
+    // Conformal (ECT) wall: recompute the per-face EMF circulations
+    // (ECTRhofield) from the current-iterate E before the ECT Faraday
+    // push. This runs inside every residual evaluation, so the Jacobian
+    // sees the wall-consistent B^theta map exactly -- without it the ECT
+    // push integrates stale (initially zero) circulations and B never
+    // advances. E ghosts are fresh here: UpdateElectricFieldAndApplyBCs
+    // filled them, and the ECT circulation reads cross-box ghost E edges.
+    if (UseConformalEBSolve()) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            get_pointer_fdtd_solver_fp(lev)->EvolveECTRho(
+                m_fields.get_alldirs(FieldType::Efield_fp, lev),
+                m_fields.get_alldirs(FieldType::edge_lengths, lev),
+                m_fields.get_alldirs(FieldType::face_areas, lev),
+                m_fields.get_alldirs(FieldType::ECTRhofield, lev),
+                lev);
+        }
+    }
+#endif
     // Use the per-level EvolveB: this runs inside every nonlinear residual
     // evaluation (including Jacobian probes), so the multi-level variant's
     // afterBpush python callback must not fire here. A single afterBpush is
@@ -83,6 +130,26 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
         EvolveB(lev, a_thetadt, SubcyclingHalf::None, start_time);
     }
     FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open boundary: the ghost fill is an instantaneous
+    // linear map of the current-iterate interior currents (open-BC design
+    // Sec. 6), so it runs inside every residual evaluation -- Newton then
+    // converges boundary and interior self-consistently and the matrix-free
+    // Jacobian probes see the coupling exactly. Filling only at the
+    // delivered state would make the open face a lagged, partially
+    // reflecting surface with phantom Jacobian error on the boundary rows.
+    if (GreensFunctionOpenBC::IsActive()) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            m_open_bc_greens->ApplyToBfield(
+                m_fields.get_alldirs(warpx::fields::FieldType::Bfield_fp, lev),
+                Geom(lev), lev);
+        }
+    }
+#endif
 }
 
 void
@@ -281,6 +348,17 @@ WarpX::FinishImplicitField( ablastr::fields::MultiLevelVectorField const& Field_
                 Fz(i,j,k,n) = c0*Fz(i,j,k,n) + c1*Fz_n(i,j,k,n);
             });
         }
+    }
+}
+
+void
+WarpX::ZeroMassMatrices ( )
+{
+    ABLASTR_PROFILE("WarpX::ZeroMassMatrices()");
+
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        mypc->ZeroMassMatrices(m_fields, lev);
     }
 }
 

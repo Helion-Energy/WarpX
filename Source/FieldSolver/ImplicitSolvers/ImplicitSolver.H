@@ -25,6 +25,7 @@
  */
 
 class WarpX;
+class HybridPICModel;
 enum class FieldBoundaryType;
 class ImplicitSolver
 {
@@ -92,6 +93,10 @@ public:
      */
     void PreLinearSolve ();
 
+    /** Nonlinear-solver hook: whether the next residual evaluation should
+     *  deposit the mass matrices (fused path). */
+    void SetMassMatricesWanted (bool a_wanted) { m_mass_matrices_wanted = a_wanted; }
+
     [[nodiscard]] int numAMRLevels () const { return m_num_amr_levels; }
 
     [[nodiscard]] const amrex::Geometry& GetGeometry (int) const;
@@ -133,6 +138,84 @@ public:
     // treatment of light waves in the curl-curl MLMG solver.
     // This function should return zero if light waves are not treated implicitly
     [[nodiscard]] virtual amrex::Real  GetThetaForPC () const = 0;
+
+    /**
+     * \brief Return the hybrid-PIC model for preconditioners that need the
+     * generalized Ohm's-law coefficients (n_floor, resistivity and
+     * hyper-resistivity parsers, Hall flags). Returns nullptr for solvers
+     * that do not carry a hybrid model.
+     */
+    virtual const HybridPICModel* GetHybridPICModel () const { return nullptr; }
+
+    /**
+     * \brief Return per-direction pointers to the theta-midpoint magnetic
+     * field B^{n+theta} on level lev for use in a preconditioner. Valid only
+     * after the first residual evaluation of the current Newton iterate has
+     * refreshed the field registry. Solvers that do not maintain a
+     * theta-midpoint B return nullptrs.
+     */
+    virtual amrex::Array<const amrex::MultiFab*, 3> GetBfieldThetaForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
+     * \brief Return the charge density holding the midpoint deposit
+     * rho^{n+1/2} on level lev for use in a preconditioner (see the override
+     * for the component convention). Valid only after the first residual
+     * evaluation of the current Newton iterate has deposited it. Solvers
+     * that do not maintain a midpoint density return nullptr.
+     */
+    virtual const amrex::MultiFab* GetRhoMidForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return nullptr;
+    }
+
+    /**
+     * \brief Return the per-step-frozen rho^n snapshot the curlcurl_form
+     * poloidal stage reads for its operator content and gates
+     * (hybrid_rho_n_frozen, component 0), for preconditioners that mirror
+     * that stage. Returns nullptr when the snapshot is not in play (e_form
+     * decks, curlcurl_pol_frozen_rho = 0, or before the first capture of a
+     * run) -- callers then fall back to the midpoint density, matching the
+     * solve's own fallback.
+     */
+    virtual const amrex::MultiFab* GetRhoPolFrozenForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return nullptr;
+    }
+
+    /**
+     * \brief Fill and return E-staggered beta coefficients for the
+     * electron-inertia curl-curl preconditioner. The inertia operator in
+     * divided form is beta(x) E + curl curl E = beta(x) b with
+     * beta = 1/d_e^2 = mu0 e^2 n_lim / m_e_eff, so a non-null return puts
+     * CurlCurlMLMGPC into hybrid-inertia mode (unit curl-curl coefficient,
+     * MultiFab beta, RHS scaled by beta). Called by CurlCurlMLMGPC::Update()
+     * at every preconditioner rebuild; solvers without an inertia operator
+     * return nullptr (the default), keeping the electromagnetic behavior.
+     */
+    virtual const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* FillInertiaBetaCoeff ()
+    {
+        return nullptr;
+    }
+
+    /**
+     * \brief Return per-direction pointers to the ion (particle) current
+     * deposit consumed by the Ohm solve on level lev, for preconditioners
+     * that model the frozen motional/drift response (J - J_i) x delta_B.
+     * During Jacobian probes the deposits are frozen, so this is exactly
+     * the coefficient the linear solve sees. Solvers without an ion
+     * current return nullptrs.
+     */
+    virtual amrex::Array<const amrex::MultiFab*, 3> GetIonCurrentForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return {nullptr, nullptr, nullptr};
+    }
 
     /**
      * \brief Apply deposited mass matrices to a vector field.
@@ -208,6 +291,27 @@ protected:
     bool m_particle_suborbits = false;
 
     /**
+     * \brief whether to specularly reflect particles at the r-max domain boundary
+     * inside the implicit per-particle Picard iteration, so that wall-crossing
+     * orbits are reflected during the nonlinear solve rather than only once per
+     * step after it. Only active in RZ geometry with a reflecting particle
+     * boundary at r-hi.
+     */
+    bool m_reflect_particles_at_rmax = false;
+
+    /**
+     * \brief whether to overwrite the r-max guard cells of the particle-gather
+     * electric field with the discrete energy-adjoint of the guard-current fold
+     * applied to the deposited J at a reflecting r-max wall (per-component parity
+     * mirror: E_r odd, E_theta/E_z even). Only active in RZ geometry with a PEC
+     * field boundary and a Reflecting particle boundary at r-hi, where the fold
+     * parity (particle-Reflecting precedence) is otherwise not adjoint to the
+     * PEC-image ghosts the gather reads, making the wall band a standing
+     * discrete energy source: Sum_p q v.E(x_p) != integral J.E there.
+     */
+    bool m_adjoint_gather_ghosts = false;
+
+    /**
      * \brief whether the details of unconverged particles are printed out during
      * the particle evolve loops
      */
@@ -224,6 +328,27 @@ protected:
     bool m_use_mass_matrices = false;
 
     /**
+     * \brief Deposit the mass matrices inside the particle push-and-deposit pass
+     *        (fused with the current deposit: one pass over the particles, the
+     *        gathered fields still resident) instead of the separate
+     *        DepositMassMatrices pass before each linear solve.
+     *        Input: implicit_evolve.fused_mass_matrices_deposit (default false).
+     *        Measured on a 128x512 RZ hybrid deck on one H100: the deposition kernel
+     *        (nine tensor components, in-kernel B gather, atomics) is the cost, so
+     *        fusing the pass saves nothing (31 vs 20 ms per deposit, 0.326 vs 0.307
+     *        s/step); kept for the kernel-level fusion follow-up.
+     */
+    bool m_fused_mass_matrices_deposit = false;
+
+    /** Set by the nonlinear solver before a residual evaluation: true for the
+     *  evaluation whose state the next linear solve linearizes about (the
+     *  fused deposit runs there), false for line-search trials and probes. */
+    bool m_mass_matrices_wanted = true;
+    /** Whether the mass matrices currently held correspond to the particle
+     *  state of the last nonlinear residual evaluation. */
+    bool m_mass_matrices_current = false;
+
+    /**
      * \brief Whether to use mass matrices to compute J during linear stage of JFNK
      */
     bool m_use_mass_matrices_jacobian = false;
@@ -237,6 +362,36 @@ protected:
      * \brief Width for mass matrices in the preconditioner
      */
     int m_mass_matrices_pc_width = -1;
+
+    /**
+     * \brief Whether to fold the physical-boundary response into the mass
+     * matrices themselves. The deposit leaves raw band entries with guard
+     * rows and guard columns at physical boundaries; when enabled, those are
+     * folded into the interior band with the deposit-side guard-current
+     * parities (row fold) and the gather-side ghost-image parities (column
+     * remap), so the stored bands represent the composed interior operator.
+     * Guard rows/columns are zeroed after folding, which leaves the
+     * mass-matrix matvec unchanged (the folded content enters through
+     * interior entries instead of through the vector-side guard fold and
+     * ghost-image fill). Currently implemented for the RZ r-hi boundary with
+     * field PEC + particle Reflecting; see ApplyMassMatricesBoundaryRows.
+     */
+    bool m_mass_matrices_boundary_rows = false;
+
+    /**
+     * \brief One-shot verification of the mass-matrix Jacobian action against
+     * the true (particle) current response: when >= 0, at this step index the
+     * first mass-matrix linear-stage evaluation is compared row-by-row in
+     * radius against a full particle push/deposit at the identical field
+     * state, the per-row relative errors are printed, and the run aborts.
+     * Debug instrumentation; default off (-1).
+     */
+    int m_verify_mm_jvp_step = -1;
+
+    /**
+     * \brief Internal latch so the mass-matrix JVP verification runs once.
+     */
+    bool m_verify_mm_jvp_done = false;
 
     /**
      * \brief Direction-dependent component number of mass matrices elements
@@ -284,6 +439,43 @@ protected:
     void PreRHSOp ( amrex::Real  a_cur_time,
                     int          a_nl_iter,
                     bool         a_from_jacobian );
+
+    // The next two members are public: they contain extended device
+    // lambdas (ParallelFor), which nvcc 13 requires to live in public
+    // member functions (the 2fc85ed9b rule).
+    public:
+    /**
+     * \brief Overwrite the r-max guard cells of Efield_fp (the particle gather
+     * field) with the energy-adjoint ghost fill of the reflecting-wall J fold.
+     * Called from PreRHSOp between the E filter and the particle push; gated on
+     * m_adjoint_gather_ghosts and the RZ PEC/Reflecting r-hi boundary combination.
+     */
+    void ApplyAdjointGatherGhosts ();
+
+    /**
+     * \brief Fold the physical-boundary response into the mass-matrix bands
+     * at the RZ r-hi wall (field PEC + particle Reflecting). Composes the
+     * guard-row current fold (J_r odd, J_theta/J_z even) with the active
+     * gather ghost-image column convention (PEC conductor image, or the
+     * fold-adjoint image when adjoint_gather_ghosts is on), then zeroes the
+     * folded guard rows and columns. The wall-node self-fold doubling of
+     * nodal-in-r rows is deliberately left to the downstream guard-current
+     * fold acting on the matvec result (see the implementation comments), so
+     * the stored wall-node rows keep the raw-deposit half-normalized
+     * convention. Called at the end of FinishMassMatrices when
+     * mass_matrices_boundary_rows is enabled; must run after the band
+     * symmetry completion, which reads the raw guard rows.
+     */
+    void ApplyMassMatricesBoundaryRows ();
+    protected:
+
+    /**
+     * \brief One-shot comparison of the mass-matrix linear-stage current
+     * against a full particle push/deposit at the identical field state,
+     * reported per radial row. Aborts on completion by design (debug
+     * instrumentation, gated by verify_mm_jvp_step).
+     */
+    void VerifyMassMatricesJVP ( amrex::Real a_cur_time );
 
     /**
      * \brief Communicate Mass Matrices used for PC and apply boundary conditions

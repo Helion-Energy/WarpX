@@ -178,6 +178,17 @@ guardCellManager::Init (
             ng_alloc_Rho[i] = nox + particle_max_grid_crossings - 1;
             ng_alloc_J[i]   = nox + particle_max_grid_crossings - 1;
         }
+    } else if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+        // The theta-implicit hybrid deposits rho and J at the midpoint positions inside every
+        // nonlinear residual evaluation and at the extrapolated positions at the end of the step,
+        // without a Redistribute in between: the deposition guard band bounds the particle
+        // displacement per step. Widen both bands by (particles.max_grid_crossings - 1) on top
+        // of the explicit hybrid's bands (J: nox, rho: nox + 1), so the default value 1 leaves
+        // every existing hybrid run bit-identical.
+        for (int i = 0; i < AMREX_SPACEDIM; i++) {
+            ng_alloc_J[i]   = nox + particle_max_grid_crossings - 1;
+            ng_alloc_Rho[i] = ng_alloc_J[i] + 1;
+        }
     }
 
     // Number of guard cells for local deposition of J and rho
@@ -392,7 +403,8 @@ guardCellManager::Init (
 
     if (evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
         evolve_scheme == EvolveScheme::Semi_Implicit_EM ||
-        evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
+        evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM ||
+        (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid && particle_max_grid_crossings > 1)) {
         // For these implicit schemes, the number of ghost cells
         // for EB gather must be consistent with those for J.
         ng_alloc_EB.max( ng_alloc_J );

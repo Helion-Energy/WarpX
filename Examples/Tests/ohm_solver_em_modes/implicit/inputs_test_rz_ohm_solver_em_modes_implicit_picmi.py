@@ -57,10 +57,12 @@ class CylindricalNormalModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, verbose):
+    def __init__(self, test, verbose, pc_bb=False, dt_mult=1.0, steps=None):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.verbose = verbose or self.test
+        self.pc_bb = pc_bb
+        self.dt_mult = dt_mult
 
         # calculate various plasma parameters based on the simulation input
         self.get_plasma_quantities()
@@ -71,7 +73,7 @@ class CylindricalNormalModes(object):
             self.diag_steps = max(10, int(1.0 / 50 / self.DT))
         else:
             # if this is a test case run for only a small number of steps
-            self.total_steps = 50
+            self.total_steps = steps if steps else 50
             # and make the grid and particle count smaller
             self.Nz = 128
             self.Nr = 64
@@ -81,7 +83,7 @@ class CylindricalNormalModes(object):
         self.Lz = self.Nz * self.DZ * self.l_i
         self.Lr = self.Nr * self.DR * self.l_i
 
-        self.dt = self.DT * self.t_ci
+        self.dt = self.DT * self.t_ci * self.dt_mult
 
         # dump all the current attributes to a dill pickle file
         if comm.rank == 0:
@@ -195,16 +197,39 @@ class CylindricalNormalModes(object):
             absolute_tolerance=0.0,
         )
 
+        # Block-banded direct preconditioner arm: the built-in verification
+        # gates (extraction self-check, LU/Apply round-trips, FD-JVP
+        # comparison) run at every rebuild and abort on failure, and Newton
+        # convergence is required rather than best-effort. The operator is
+        # rebuilt every 10 steps: this deck is quasi-static so the frozen
+        # coefficients hold, it exercises the stale-operator amortization
+        # path used in production, and it keeps the rebuild cost (probe +
+        # factor, ~2 s/rebuild at this scale on a full host) inside the CI
+        # budget on a 2-core runner while still running the verification
+        # gates at five distinct states across the run.
+        pc = None
+        if self.pc_bb:
+            pc = picmi.BlockBandedPreconditioner(verify=True, update_interval=10)
+        if self.dt_mult > 1.0:
+            # whistler-stiff arm: the line search rescues the large-dt Newton
+            # basin (without it the unpreconditioned dt x4/x8 solves can
+            # diverge), keeping the arm a pure linear-solver measurement
+            import pywarpx
+
+            pywarpx.warpx.get_bucket("newton").line_search = 1
+
         # Create nonlinear solver using Newton (JFNK)
         nonlinear_solver = picmi.NewtonNonlinearSolver(
             verbose=True,
             max_iterations=20,
             relative_tolerance=1.0e-6,
             absolute_tolerance=0.0,
-            require_convergence=False,
+            require_convergence=self.pc_bb,
             linear_solver=gmres_solver,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
+            pc_type=pc,
+            diagnostic_file="diags/newton_diag.txt" if self.test else None,
         )
 
         # Create the theta-implicit hybrid evolve scheme
@@ -278,8 +303,32 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--pc-bb",
+    help="use the block-banded direct preconditioner (pc_block_banded) "
+    "with its verification gates enabled",
+    action="store_true",
+)
+parser.add_argument(
+    "--dt-mult",
+    help="time-step multiplier (>1 also enables the Newton line search)",
+    type=float,
+    default=1.0,
+)
+parser.add_argument(
+    "--steps",
+    help="override the number of steps in test mode",
+    type=int,
+    default=None,
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = CylindricalNormalModes(test=args.test, verbose=args.verbose)
+run = CylindricalNormalModes(
+    test=args.test,
+    verbose=args.verbose,
+    pc_bb=args.pc_bb,
+    dt_mult=args.dt_mult,
+    steps=args.steps,
+)
 simulation.step()

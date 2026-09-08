@@ -86,6 +86,13 @@ public:
         amrex::Print()     << "Newton relative tolerance:  " << m_rtol << "\n";
         amrex::Print()     << "Newton absolute tolerance:  " << m_atol << "\n";
         amrex::Print()     << "Newton require convergence: " << (m_require_convergence?"true":"false") << "\n";
+        if (m_adaptive_forcing) {
+            amrex::Print() << "Newton adaptive forcing:    true"
+                           << " (gamma = "    << m_forcing_gamma
+                           << ", xi = "       << m_forcing_xi
+                           << ", zeta_max = " << m_forcing_zeta_max
+                           << ", zeta_min = " << m_forcing_zeta_min << ")\n";
+        }
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -124,6 +131,12 @@ private:
      * \brief Absolute tolerance for the Newton solver.
      */
     amrex::Real m_atol = 0.;
+
+    /**
+     * \brief Relative perturbation scale for the finite-difference JVP
+     * (matrix-free Jacobian action) in the linear solve.
+     */
+    amrex::Real m_jfnk_epsilon = 1.0e-6;
 
     /**
      * \brief Maximum iterations for the Newton solver.
@@ -201,6 +214,15 @@ private:
      *  resistivity ramps, flux limiters) and noisy residual landscapes. */
     bool m_use_line_search = false;
     int m_line_search_max_halvings = 6;
+    /** newton.line_search_reuse_residual: when the accepted line-search trial is
+     *  the last state evaluated, reuse its residual at the top of the next
+     *  iteration instead of re-evaluating it (one particle push and deposit per
+     *  Newton iteration on the particle-suppressed schemes). Default off: the
+     *  re-evaluation at the same state agrees only to the deposition roundoff. */
+    bool m_line_search_reuse_residual = false;
+    /** Whether m_F (and the operator's RHS state) hold the residual at the
+     *  current a_U, left by the accepted line-search trial. */
+    mutable bool m_residual_current = false;   // Solve() is const
     /** Cap on the first line-search trial's update max-norm
      *  (newton.line_search_trial_max_norm, same units as the solver
      *  state; 0 = off). The trial state U - alpha*dU is evaluated through
@@ -211,6 +233,22 @@ private:
      *  alpha = cap/|dU|inf instead of 1. */
     amrex::Real m_line_search_trial_max_norm = 0.0;
     mutable Vec m_U_ls;
+
+    /** Eisenstat-Walker adaptive forcing (newton.adaptive_forcing = 1):
+     *  choose the GMRES relative tolerance each Newton iteration from the
+     *  observed nonlinear residual decrease instead of a fixed value
+     *  (Choice 2 with safeguards, Chacon JCP 2025 Eq. 21). Avoids
+     *  oversolving the linear system when far from the root. Off by
+     *  default; the fixed-tolerance path is unchanged. */
+    bool m_adaptive_forcing = false;
+    amrex::Real m_forcing_gamma = 0.9;
+    amrex::Real m_forcing_xi = 1.5;
+    amrex::Real m_forcing_zeta_max = 0.8;
+    amrex::Real m_forcing_zeta_min = 1.0e-4;
+    /** True when the user explicitly set the linear-solver relative
+     *  tolerance; adaptive forcing then starts from that value on the
+     *  first Newton iteration instead of zeta_max. */
+    bool m_linsol_rtol_set = false;
 
     void EvalResidual ( Vec&         a_F,
                   const Vec&         a_U,
@@ -240,6 +278,7 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
 
     m_linear_function = std::make_unique<JacobianFunctionMF<Vec,Ops>>();
     m_linear_function->define(m_F, m_ops, m_pc_type);
+    m_linear_function->setJFNKEps(m_jfnk_epsilon);
     this->m_usePC = m_linear_function->usePreconditioner();
 
     if (m_linear_solver_type == LinearSolverType::amrex_gmres) {
@@ -306,9 +345,16 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("relative_tolerance",  m_rtol);
     pp_newton.query("max_iterations",      m_maxits);
     pp_newton.query("require_convergence", m_require_convergence);
+    pp_newton.query("jfnk_epsilon",        m_jfnk_epsilon);
     pp_newton.query("line_search",          m_use_line_search);
     pp_newton.query("line_search_max_halvings", m_line_search_max_halvings);
+    pp_newton.query("line_search_reuse_residual", m_line_search_reuse_residual);
     pp_newton.query("line_search_trial_max_norm", m_line_search_trial_max_norm);
+    pp_newton.query("adaptive_forcing",    m_adaptive_forcing);
+    pp_newton.query("forcing_gamma",       m_forcing_gamma);
+    pp_newton.query("forcing_xi",          m_forcing_xi);
+    pp_newton.query("forcing_zeta_max",    m_forcing_zeta_max);
+    pp_newton.query("forcing_zeta_min",    m_forcing_zeta_min);
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
 
@@ -316,7 +362,7 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_l.query("verbose_int",         m_linsol_verbose_int);
     pp_l.query("restart_length",      m_linsol_restart_length);
     pp_l.query("absolute_tolerance",  m_linsol_atol);
-    pp_l.query("relative_tolerance",  m_linsol_rtol);
+    if (pp_l.query("relative_tolerance", m_linsol_rtol)) { m_linsol_rtol_set = true; }
     pp_l.query("max_iterations",      m_linsol_maxits);
 
     /* backward compatibility */
@@ -324,7 +370,7 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_gmres.query("verbose_int",         m_linsol_verbose_int);
     pp_gmres.query("restart_length",      m_linsol_restart_length);
     pp_gmres.query("absolute_tolerance",  m_linsol_atol);
-    pp_gmres.query("relative_tolerance",  m_linsol_rtol);
+    if (pp_gmres.query("relative_tolerance", m_linsol_rtol)) { m_linsol_rtol_set = true; }
     pp_gmres.query("max_iterations",      m_linsol_maxits);
 
     const amrex::ParmParse pp_jac("jacobian");
@@ -356,12 +402,28 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real norm0 = 1._rt;
     amrex::Real norm_rel = 0.;
 
+    // Eisenstat-Walker adaptive forcing state: per-iteration GMRES relative
+    // tolerance zeta_k, plus the previous iteration's zeta and residual norm
+    // (Choice 2 with safeguards, Chacon JCP 2025 Eq. 21). With adaptive
+    // forcing off, linsol_rtol stays at the fixed m_linsol_rtol.
+    amrex::Real linsol_rtol = m_linsol_rtol;
+    amrex::Real zeta_prev = m_forcing_zeta_max;
+    amrex::Real norm_prev = 1._rt;
+
     int iter;
     int linear_solver_iters = 0;
+    m_residual_current = false;
     for (iter = 0; iter < m_maxits;) {
 
-        // Compute residual: F(U) = U - b - R(U)
-        EvalResidual(m_F, a_U, a_b, a_time, iter);
+        // Compute residual: F(U) = U - b - R(U). This is the evaluation the
+        // linear solve linearizes about: the operator may deposit its
+        // mass matrices here. Skipped when the accepted line-search trial of
+        // the previous iteration already evaluated this exact state.
+        if (!(m_line_search_reuse_residual && m_residual_current)) {
+            m_ops->SetMassMatricesWanted(true);
+            EvalResidual(m_F, a_U, a_b, a_time, iter);
+        }
+        m_residual_current = false;
 
         // Compute norm of the residual
         norm_abs = m_F.norm2();
@@ -413,9 +475,38 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         m_linear_function->setBaseRHS(m_R);
         m_linear_function->updatePreCondMat(a_U);
 
+        // Eisenstat-Walker Choice-2 forcing: set this iteration's GMRES
+        // relative tolerance from the observed nonlinear residual decrease.
+        if (m_adaptive_forcing) {
+            amrex::Real zeta;
+            if (iter == 0) {
+                // No residual history yet: start from zeta_max, unless the
+                // user pinned a fixed linear-solver relative tolerance (which
+                // is honored exactly, below the zeta_min floor if so pinned).
+                zeta = m_linsol_rtol_set ? m_linsol_rtol : m_forcing_zeta_max;
+            } else {
+                const amrex::Real eps_newton = m_rtol*norm0 + m_atol;
+                const amrex::Real zeta_A = m_forcing_gamma
+                    * std::pow(norm_abs/norm_prev, m_forcing_xi);
+                const amrex::Real zeta_B = std::min( m_forcing_zeta_max,
+                    std::max(zeta_A, m_forcing_gamma*std::pow(zeta_prev, m_forcing_xi)) );
+                zeta = std::min( m_forcing_zeta_max,
+                    std::max(zeta_B, m_forcing_gamma*eps_newton/norm_abs) );
+                zeta = std::max(zeta, m_forcing_zeta_min);
+            }
+            zeta_prev = zeta;
+            norm_prev = norm_abs;
+            linsol_rtol = zeta;
+            if (this->m_verbose) {
+                amrex::Print() << "Newton: adaptive forcing zeta = "
+                               << std::scientific << std::setprecision(5)
+                               << zeta << "\n";
+            }
+        }
+
         // Solve linear system for Newton step [Jac]*dU = F
         m_dU.zero();
-        m_linear_solver->solve( m_dU, m_F, m_linsol_rtol, m_linsol_atol );
+        m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
 
         // Jacobian consistency instrument (WARPX_JAC_CHECK=1): along the
@@ -498,9 +589,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             }
             amrex::Real best_alpha = alpha;
             amrex::Real best_norm = -1._rt;
+            amrex::Real last_alpha = alpha;
+            m_ops->SetMassMatricesWanted(false);   // trials never deposit mass matrices
             for (int ls = 0; ls <= m_line_search_max_halvings; ++ls) {
                 a_U.linComb(1._rt, m_U_ls, -alpha, m_dU);
                 EvalResidual(m_F, a_U, a_b, a_time, iter);
+                last_alpha = alpha;
                 amrex::Real const trial_norm = m_F.norm2();
                 if (best_norm < 0._rt || trial_norm < best_norm) {
                     best_norm = trial_norm;
@@ -510,6 +604,9 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 alpha *= 0.5_rt;
             }
             a_U.linComb(1._rt, m_U_ls, -best_alpha, m_dU);
+            // m_F and the operator's RHS hold F at the last trial; that is the
+            // accepted state exactly when the accepted alpha was the last tried.
+            m_residual_current = (best_alpha == last_alpha);
             if (this->m_verbose && best_alpha < 1._rt) {
                 amrex::Print() << "Newton: line search accepted alpha = "
                                << best_alpha << "\n";

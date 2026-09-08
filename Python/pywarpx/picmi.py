@@ -1802,6 +1802,123 @@ class JacobiPreconditioner(PreconditionerBase):
         pc_jacobi.absolute_tolerance = self.absolute_tolerance
 
 
+class BlockBandedPreconditioner(PreconditionerBase):
+    """
+    Sets up the block-banded direct preconditioner (RZ only) used during the
+    nonlinear solver. The linearized frozen-coefficient Ohm operator is
+    extracted by colored probing into dense 3-component x z-line blocks per
+    radial index and solved with a block-banded LU (or cuDSS on device when
+    compiled with WarpX_CUDSS).
+
+    All parameters are optional; unset parameters keep the solver defaults.
+
+    Parameters
+    ----------
+    verbose: bool, optional
+        Whether there is verbose output from the preconditioner
+
+    update_interval: int, optional
+        Number of steps between operator rebuilds (0 rebuilds every Newton
+        iteration, default 1 rebuilds once per step)
+
+    include_drift: bool, optional
+        Whether the drift/motional (J0 - Ji0) x dB leg is included in the
+        extracted operator
+
+    include_hyper: bool, optional
+        Whether the hyper-resistivity leg is included in the extracted
+        operator
+
+    verify: bool, optional
+        Enable the built-in verification gates on every rebuild: LU and
+        Apply round-trip checks and a finite-difference Jacobian-vector
+        product comparison against the true residual
+
+    max_mem_gb: float, optional
+        Memory budget for the extracted blocks; the setup aborts if the
+        estimate exceeds it
+
+    wall_identity: int, optional
+        Whether tangential-E rows at the outer radial wall are treated as
+        identity (killed columns); -1 (default) auto-detects from a PEC or
+        PEC-insulator field boundary
+
+    overlap: int, optional
+        Restricted-additive-Schwarz overlap (in cells) used when solving
+        per-box local systems
+
+    global_solve: int, optional
+        Whether ranks gather the full system and solve it redundantly;
+        -1 (default) enables global mode whenever the BoxArray is split
+
+    device_solve: bool, optional
+        Whether the factorization/solve runs on GPU via cuDSS (only
+        available when compiled with WarpX_CUDSS; default on in that case)
+    """
+
+    def __init__(
+        self,
+        verbose=None,
+        update_interval=None,
+        include_drift=None,
+        include_hyper=None,
+        verify=None,
+        max_mem_gb=None,
+        wall_identity=None,
+        overlap=None,
+        global_solve=None,
+        device_solve=None,
+    ):
+        self.verbose = verbose
+        self.update_interval = update_interval
+        self.include_drift = include_drift
+        self.include_hyper = include_hyper
+        self.verify = verify
+        self.max_mem_gb = max_mem_gb
+        self.wall_identity = wall_identity
+        self.overlap = overlap
+        self.global_solve = global_solve
+        self.device_solve = device_solve
+
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        if jacobian is not None:
+            jacobian.pc_type = "pc_block_banded"
+        pc_block_banded = pywarpx.warpx.get_bucket("pc_block_banded")
+        pc_block_banded.verbose = self.verbose
+        precond = pywarpx.warpx.get_bucket("precond")
+        precond.bb_update_interval = self.update_interval
+        precond.bb_include_drift = self.include_drift
+        precond.bb_include_hyper = self.include_hyper
+        precond.bb_verify = self.verify
+        precond.bb_max_mem_gb = self.max_mem_gb
+        precond.bb_wall_identity = self.wall_identity
+        precond.bb_overlap = self.overlap
+        precond.bb_global = self.global_solve
+        precond.bb_device_solve = self.device_solve
+
+
+class CurlCurlBandedPreconditioner(BlockBandedPreconditioner):
+    """
+    The form-aware variant of the block-banded direct preconditioner (RZ
+    only): it assembles the Jacobian of the configured
+    hybrid_pic_model.esolve form. With esolve = e_form the assembly is
+    identical to BlockBandedPreconditioner; with esolve = curlcurl_form the
+    outer Jacobian is the composition A^-1 (A - N) of the multiplied-through
+    inner elliptic operator A and the numerator response N, applied as one
+    banded matvec plus one factored banded solve. Not implemented for
+    esolve = tensor_form (which does not need an outer preconditioner; use
+    hybrid_pic_model.esolve_pc = "block_banded" for its inner solve).
+
+    Takes the same optional parameters as BlockBandedPreconditioner (the
+    precond.bb_* knob family is shared).
+    """
+
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        super().preconditioner_type_initialize_inputs(jacobian)
+        if jacobian is not None:
+            jacobian.pc_type = "pc_curlcurl_banded"
+
+
 class PETScPreconditioner(PreconditionerBase):
     """
     Sets up the PETSc preconditioner used during the nonlinear solver
@@ -1914,7 +2031,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         When use_mass_matrices_pc is True, the width of the preconditioner mass matrices
 
     pc_type: preconditioner instance, optional
-        The preconditioner type, An instance of either CurlCurlMLMGPreconditioner, JacobiPreconditioner, or PETScPreconditioner
+        The preconditioner type, An instance of either CurlCurlMLMGPreconditioner, JacobiPreconditioner, BlockBandedPreconditioner, CurlCurlBandedPreconditioner, or PETScPreconditioner
     """
 
     def __init__(
@@ -1936,6 +2053,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         use_mass_matrices_pc=None,
         mass_matrices_pc_width=None,
         pc_type=None,
+        adaptive_forcing=None,
+        forcing_gamma=None,
+        forcing_xi=None,
+        forcing_zeta_max=None,
+        forcing_zeta_min=None,
     ):
         self.verbose = verbose
         self.linear_solver = linear_solver
@@ -1954,6 +2076,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.use_mass_matrices_pc = use_mass_matrices_pc
         self.mass_matrices_pc_width = mass_matrices_pc_width
         self.pc_type = pc_type
+        self.adaptive_forcing = adaptive_forcing
+        self.forcing_gamma = forcing_gamma
+        self.forcing_xi = forcing_xi
+        self.forcing_zeta_max = forcing_zeta_max
+        self.forcing_zeta_min = forcing_zeta_min
 
         if linear_solver is not None:
             assert isinstance(linear_solver, LinearSolverBase)
@@ -1982,6 +2109,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.require_convergence = self.require_convergence
         newton.diagnostic_file = self.diagnostic_file
         newton.diagnostic_interval = self.diagnostic_interval
+        newton.adaptive_forcing = self.adaptive_forcing
+        newton.forcing_gamma = self.forcing_gamma
+        newton.forcing_xi = self.forcing_xi
+        newton.forcing_zeta_max = self.forcing_zeta_max
+        newton.forcing_zeta_min = self.forcing_zeta_min
 
         if self.linear_solver is not None:
             self.linear_solver.linear_solver_initialize_inputs(newton)
@@ -2442,6 +2574,13 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Flag to determine handling of vacuum region (where rho < n_floor*q_e). Setting to True will solve the simplified Generalized Ohm's Law dropping the Hall and pressure terms in the vacuum region. See `Holmstrom (2013) <https://arxiv.org/abs/1301.0272v1>`_.
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
 
+    use_conformal_eb: bool, default=False
+        If True, use the conformal (enlarged-cell technique) embedded-boundary
+        wall for the B push, with a constitutive perfect-conductor closure
+        (Ohm's-law E and the Ampere current are zeroed on covered and cut
+        edges). Requires embedded boundaries, a staggered (Yee) grid, and 3D
+        or 2D Cartesian geometry.
+
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
 
@@ -2525,6 +2664,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         max_substep_attempts=None,
         substep_finite_check_interval=None,
         holmstrom_vacuum_region=None,
+        use_conformal_eb=None,
+        conformal_wall_model=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2586,6 +2727,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.substep_finite_check_interval = substep_finite_check_interval
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
+
+        self.use_conformal_eb = use_conformal_eb
+        self.conformal_wall_model = conformal_wall_model
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2742,6 +2886,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             self.substep_finite_check_interval
         )
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
+        pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
+        pywarpx.hybridpicmodel.conformal_wall_model = self.conformal_wall_model
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(

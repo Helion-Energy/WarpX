@@ -7,6 +7,7 @@
 #include "Fields.H"
 #include "ThetaImplicitHybrid.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Python/callbacks.H"
@@ -95,6 +96,7 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
 
     m_E.Define( m_WarpX, "Efield_fp" );
     m_Eold.Define( m_E );
+    m_Eprev.Define( m_E );
 
     // Set initial values for E and Eold vectors
     m_E.Copy(FieldType::Efield_fp);
@@ -113,8 +115,8 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
-    // Resistive part of the Ohm's-law field, subtracted from the
-    // particle-push field (see ComputeRHS). Only allocated when the opt-in
+    // Scratch for the resistive push-field correction assembled in every
+    // residual evaluation (see ComputeRHS). Only allocated when the opt-in
     // momentum-consistent push field is enabled and a resistive term is
     // configured.
     m_use_resistive_push_correction = m_hybrid_pic_model->HasResistivity()
@@ -130,11 +132,43 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
+    // curlcurl_form: the correction's per-evaluation Ohm-solve pair runs
+    // BEFORE the inertia assembly that used to allocate the elliptic
+    // scratch lazily, so allocate it up front (no-op on e_form). Stale
+    // scratch content cancels exactly in the correction's two-pass
+    // difference; unallocated arrays do not.
+    m_hybrid_pic_model->EnsureCurlCurlScratch();
+
     const amrex::ParmParse pp("implicit_evolve");
     pp.query("theta", m_theta);
+    pp.query("extrapolate_initial_guess", m_extrapolate_initial_guess);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_theta >= 0.5 && m_theta <= 1.0,
         "theta parameter must be between 0.5 and 1.0");
+
+    {
+        // Default: re-evaluate the generalized Ohm's law at the delivered
+        // end-of-step state. The theta extrapolation of the ALGEBRAIC E is
+        // a -(1-theta)/theta recursion on the stored field (marginal at
+        // theta = 1/2) whose error grows linearly under a steady drift.
+        std::string e_finisher = "reevaluate";
+        const bool user_set = pp.query("hybrid_e_finisher", e_finisher);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            e_finisher == "extrapolate" || e_finisher == "reevaluate",
+            "implicit_evolve.hybrid_e_finisher must be 'extrapolate' or "
+            "'reevaluate'");
+        m_e_finisher_reevaluate = (e_finisher == "reevaluate");
+        if (m_darwin && m_e_finisher_reevaluate) {
+            // Not implemented for the Darwin field split (E_L comes from
+            // the ambipolar constraint, E_T from the vector potential);
+            // fall back to the legacy extrapolation unless the user asked
+            // for the re-evaluated finisher explicitly.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!user_set,
+                "implicit_evolve.hybrid_e_finisher = reevaluate is not "
+                "implemented for the Darwin field split");
+            m_e_finisher_reevaluate = false;
+        }
+    }
 
     // Segregated midpoint-iterated solve for the QDSMC electron-energy
     // stage (see the member documentation in the header).
@@ -214,6 +248,43 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     m_dt = a_dt;
 
+    // tensor_form: publish the theta interval and snapshot the step-start
+    // plasma current Jp^n = curl(B^n)/mu0 - J_ext (Bfield_fp holds the
+    // committed B^n here). Both are per-step-frozen inputs of the
+    // stateless Je elimination, constant through every residual
+    // evaluation of the step.
+    if (m_hybrid_pic_model->m_esolve_tensor) {
+        m_hybrid_pic_model->m_tensor_dt_eff = m_theta * m_dt;
+        m_hybrid_pic_model->CaptureTensorStepStart();
+    }
+
+    // curlcurl_form + frozen gates: capture the per-step-frozen rho^n
+    // snapshot HERE, from the committed entry deposit in component 0 of
+    // rho_fp (the tensor/vacmask capture family), BEFORE any residual
+    // evaluation of the step. The resistive push-field correction runs
+    // its Ohm passes before the first midpoint deposit and before the
+    // inertia assembly's lazy capture, so the first elliptic solves of
+    // the run otherwise read an EMPTY midpoint density -- beta = 0
+    // everywhere and every anchored RHS row zeroed against a nonzero
+    // resistive warm start, an unreachable tolerance (measured: seeded
+    // vacuum-column decks cap the toroidal CG at the very first solve).
+    // The inertia assembly's own capture becomes a per-step no-op (latch
+    // already set); the drho/dt leg, the gates, and the toroidal fold all
+    // read this same entry snapshot.
+    if (m_hybrid_pic_model->m_esolve_curlcurl
+        && m_hybrid_pic_model->m_curlcurl_pol_frozen_rho) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const & rho_fp =
+                *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+            amrex::MultiFab & rho_n_frozen =
+                *m_WarpX->m_fields.get("hybrid_rho_n_frozen", lev);
+            amrex::MultiFab::Copy(rho_n_frozen, rho_fp, 0, 0, 1,
+                                  amrex::min(rho_n_frozen.nGrowVect(),
+                                             rho_fp.nGrowVect()));
+        }
+        m_hybrid_pic_model->m_inertia_rho_n_captured = true;
+    }
+
     // External vector-potential drive, split-field form: the solver state
     // carries the PLASMA fields only, so the field boundary conditions act
     // on the plasma response while the imposed external field rides
@@ -287,6 +358,24 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
             rho_n_store[lev] = std::make_unique<amrex::MultiFab>(rho_fp, amrex::make_alias, 0, 1);
             rho_n_alias.push_back(rho_n_store[lev].get());
         }
+        // Frozen vacuum-recovery mask density: snapshot the same committed
+        // entry rho the E_L^n solve below consumes, so the recovery/
+        // Faraday-overwrite partition is constant through every residual
+        // evaluation of the step (rho_fp component 0 is a pre-push deposit
+        // that follows the iterate from the second evaluation on -- see
+        // m_darwin_vacuum_recovery_frozen_mask).
+        if (m_vacuum_recovery
+            && m_hybrid_pic_model->m_darwin_vacuum_recovery_frozen_mask) {
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                amrex::MultiFab const & rho_fp =
+                    *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+                amrex::MultiFab & rho_mask =
+                    *m_WarpX->m_fields.get("hybrid_rho_vacmask_fp", lev);
+                amrex::MultiFab::Copy(rho_mask, rho_fp, 0, 0, 1,
+                                      amrex::min(rho_mask.nGrowVect(),
+                                                 rho_fp.nGrowVect()));
+            }
+        }
         // With electron inertia, the E_L source reads the inertial field
         // at its last converged assembly (t^{n-1+theta}) here -- a
         // half-step staleness of the same order as the ion half-step
@@ -310,9 +399,22 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         DarwinApplyABoundary(start_time);
 
         // The transverse state at t^n (Efield_fp = E^n - E_L^n here).
+        // Keep the previous step's E^n as E^{n-1} for the extrapolated guess.
+        if (m_extrapolate_initial_guess && m_have_Eold) {
+            m_Eprev.Copy(m_Eold);
+            m_have_Eprev = true;
+        }
         m_Eold.Copy(FieldType::Efield_fp);
+        m_have_Eold = true;
     } else {
+        // Non-Darwin path: E^n sits in the E_old register. Same E^{n-1} bookkeeping
+        // (a restart starts with m_have_Eold false, so its first step uses E^n).
+        if (m_extrapolate_initial_guess && m_have_Eold) {
+            m_Eprev.Copy(m_Eold);
+            m_have_Eprev = true;
+        }
         m_Eold.Copy(FieldType::E_old, FieldType::None, true);
+        m_have_Eold = true;
     }
 
     // Save B^n
@@ -335,8 +437,15 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_hybrid_pic_model->QDSMCSaveImplicitStepStart();
     }
 
-    // Initial guess: E^{n+theta} = E^n
-    m_E.Copy(m_Eold);
+    // Initial guess: E^{n+theta} = E^n, or the linear extrapolation of the
+    // field history (1 + theta) E^n - theta E^{n-1} when opted in and E^{n-1}
+    // exists (saves the Newton iteration that otherwise rebuilds the step's
+    // change from scratch; the converged state does not depend on the guess).
+    if (m_extrapolate_initial_guess && m_have_Eprev) {
+        m_E.linComb(1.0_rt + m_theta, m_Eold, -m_theta, m_Eprev);
+    } else {
+        m_E.Copy(m_Eold);
+    }
 
     // Solve nonlinear system for E^{n+theta} (and eventually Pe^{n+theta})
     int exit_status = 0;
@@ -361,10 +470,15 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     FinishFieldUpdate( new_time );
 
     // Opt-in: apply the particle boundary conditions and re-bin before the
-    // end-of-step deposits below (see the member documentation; the guard
-    // range only covers displacements up to ~(nox + max_grid_crossings - 1
-    // - nox/2 - 1) cells, and the full-dt extrapolation above can exceed it
-    // for warm boundary populations).
+    // end-of-step deposits below (see the member documentation). The rho
+    // deposition guard range covers displacements of up to
+    // (nox + particles.max_grid_crossings - nox/2 - 1) cells from the home
+    // tile (GuardCellManager: rho band nox + max_grid_crossings, J band one
+    // less; default max_grid_crossings 1), and the full-dt extrapolation
+    // above can exceed it for warm boundary populations. The midpoint
+    // deposits inside every nonlinear iteration are bound by the same band
+    // and are NOT covered by this knob: widen particles.max_grid_crossings
+    // for large time steps.
     if (m_redistribute_before_end_deposits) {
         m_WarpX->GetPartContainer().Redistribute();
     }
@@ -408,9 +522,19 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // drag (collisions run after OneStep under the implicit schemes),
     // and the displacement-current diagnostic. Runs after
     // QDSMCFinishImplicitStep, which consumes the theta-stage value.
+    // Split-field externals: Bfield_fp holds end-of-step TOTALS here, so
+    // strip the external field around the curl -- the plasma-current
+    // register must stay response-only (the explicit loop's final refresh
+    // runs before its external add-back; a totals-frame curl would leak
+    // the coil field's O(h^2) discrete curl into the circuit flux-linkage
+    // probes and the resistive drag).
+    const bool strip_ext =
+        m_hybrid_pic_model->m_add_external_fields && !m_darwin;
+    if (strip_ext) { AddSplitExternalFields(-1.0_rt); }
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
         m_WarpX->GetEBUpdateEFlag());
+    if (strip_ext) { AddSplitExternalFields(1.0_rt); }
     if (m_darwin) {
         // Darwin retains the longitudinal displacement current in the
         // plasma current, J = curl(B)/mu_0 - eps0 dE_L/dt (Hewett &
@@ -429,6 +553,84 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
                 amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_dt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
             }
         }
+    }
+
+    // Re-evaluated E finisher: overwrite the extrapolated E^{n+1} with the
+    // generalized Ohm's law evaluated at the DELIVERED end-of-step state
+    // (total B^{n+1}, the delivered plasma current refreshed above, the
+    // same ion-deposit family the theta-stage used), as the explicit
+    // hybrid loop finishes its step. The extrapolated finisher is a
+    // -(1-theta)/theta recursion on the stored algebraic field.
+    if (m_e_finisher_reevaluate) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_darwin,
+            "implicit_evolve.hybrid_e_finisher = reevaluate is not "
+            "implemented for the Darwin field split");
+        if (!m_hybrid_pic_model->m_solve_electron_energy_equation) {
+            m_hybrid_pic_model->CalculateElectronPressure();
+        }
+        // per-level variant: the multi-level HybridPICSolveE fires the
+        // afterEpush python callback, which the implicit step already
+        // fires exactly once at the delivered state (WarpX::OneStep) --
+        // the finisher solve must not add a second firing per step
+        {
+            ablastr::fields::MultiLevelVectorField E_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelVectorField J_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelVectorField B_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelScalarField r_fp =
+                m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                m_hybrid_pic_model->HybridPICSolveE(
+                    E_fp[lev], J_fp[lev], B_fp[lev], *r_fp[lev],
+                    m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                    false /* solve_for_Faraday */,
+                    true /* include_resistivity */);
+            }
+        }
+        {
+            using ablastr::fields::Direction;
+            amrex::IntVect const ngE = m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{0}, 0)->nGrowVect();
+            m_WarpX->FillBoundaryE(ngE, true /* sync nodal points */);
+        }
+        // keep the solver vector consistent with the delivered field
+        m_E.Copy(FieldType::Efield_fp);
+    }
+
+    // Density-band statistics feeding (DSMC-style split in depleted
+    // cells): runs at step boundaries only, never inside the residual.
+    // Band limits are configured per species in units of the hybrid
+    // n_floor; the merge relief valve is the stock velocity-coincidence
+    // resampler.
+    {
+        auto& mpc = m_WarpX->GetPartContainer();
+        const amrex::Real rho_floor =
+            m_hybrid_pic_model->m_n_floor * PhysConst::q_e;
+        for (int isp = 0; isp < mpc.nSpecies(); ++isp) {
+            auto* pc = dynamic_cast<PhysicalParticleContainer*>(
+                &mpc.GetParticleContainer(isp));
+            if (pc == nullptr) { continue; }
+            const int interval = pc->HybridSplitInterval();
+            if (interval <= 0 || ((a_step + 1) % interval != 0)) { continue; }
+            const amrex::MultiFab& rho0 =
+                *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+            pc->SplitDepletedBand(rho0,
+                pc->HybridSplitBandLo()*rho_floor,
+                pc->HybridSplitBandHi()*rho_floor, 0);
+            pc->Redistribute();
+        }
+    }
+
+    // Electron inertia: rotate the per-step nodal Je history from the
+    // MEASURED delivered state -- hybrid_current_fp_plasma now holds
+    // J_plasma^{n+1} (including the Darwin displacement piece above), and
+    // current_fp still holds the same ion-deposit family the theta-stage
+    // assemblies used. Runs here (not in FinishFieldUpdate) so the stored
+    // value is a measurement, not an extrapolation of a stored value.
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
     }
 
     return exit_status;
@@ -544,9 +746,9 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // boundary pin) would make the gathered E_ext lag the iterate by one
     // evaluation -- hidden history that shows up as an
     // epsilon-independent noise floor in Jacobian secants once the drive
-    // is active. Reciprocity (J-based) probes see the PREVIOUS
-    // evaluation's plasma current here (refreshed below); the circuit
-    // ports in use are disk-flux based.
+    // is active. Reciprocity (J-based) probes see THIS evaluation's
+    // plasma current (refreshed in UpdateWarpXFields from the response
+    // field); the circuit ports in use are disk-flux based.
     if (m_external_field_iteration && !m_darwin) {
         AddSplitExternalFields(-1.0_rt);
         ExecutePythonCallback("externalcoiltheta");
@@ -560,19 +762,87 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // (Faraday's law needs it), but the resistive friction must not
     // accelerate the ions through E -- the explicit scheme pushes ions with
     // the no-resistivity Ohm field, and the resistive electron-ion friction
-    // is a separate (optional) collision operator. Subtract the resistive
-    // part (refreshed from the previous residual evaluation at the bottom
-    // of this function; exact at convergence). B above already used the
+    // is a separate (optional) collision operator. B above already used the
     // full E.
+    //
+    // The correction is assembled HERE, in every residual evaluation, from
+    // THIS iterate: E_push = E_iterate - (E_full - E_nores), with both Ohm
+    // solves running INTO Efield_fp so the solve wrapper's boundary stack
+    // (PEC image, conformal-EB conductor edges, resistive-shell wall rows)
+    // lands identically on both passes -- every term except eta*J (and the
+    // hyper-resistive term) then cancels exactly in the difference,
+    // including all boundary-controlled rows. Solving the no-resistivity
+    // pass into a scratch field instead would leave those rows untreated
+    // (the wrapper applies the field boundary to the registered Efield_fp,
+    // not to the passed output) and the difference would carry O(1)
+    // boundary-row garbage at any eta. A correction lagged from the
+    // previous residual evaluation is hidden state that shifts the residual
+    // between the base and probe evaluations of the difference Jacobian and
+    // stalls Newton at an O(1) relative norm. The pre-push moments feeding
+    // the two passes enter the difference only through the eta(rho, |J|)
+    // and eta_h(rho, |B|) parametrizations (|J| is the Ampere current, a
+    // pure function of the iterate); constant coefficients make the
+    // correction a pure function of the iterate.
     if (m_use_resistive_push_correction) {
         using ablastr::fields::Direction;
+
+        // The Darwin branch computes the plasma current after the particle
+        // stage; the correction needs it at the iterate's B (already
+        // rebuilt above). The later recomputation sees the same B.
+        if (m_darwin) {
+            m_hybrid_pic_model->CalculatePlasmaCurrent(
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+                m_WarpX->GetEBUpdateEFlag());
+        }
+
+        ablastr::fields::MultiLevelVectorField E_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelVectorField J_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelVectorField B_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelScalarField rho_pre =
+            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
+
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            // Park the assembled push field (iterate + BCs + E_ext).
             for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab& E_push = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
-                amrex::MultiFab const& E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
-                amrex::MultiFab::Subtract(E_push, E_res, 0, 0, E_push.nComp(), E_push.nGrowVect());
+                amrex::MultiFab & E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E = *E_fp[lev][dir];
+                amrex::MultiFab::Copy(E_res, E, 0, 0, E.nComp(), E.nGrowVect());
+            }
+            // Per-level solves: no callback fires inside residual
+            // evaluations (see the RHS Ohm solve below).
+            m_hybrid_pic_model->HybridPICSolveE(
+                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
+                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                false,  // solve_for_Faraday (retain grad(Pe))
+                true    // include_resistivity
+            );
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E = *E_fp[lev][dir];
+                amrex::MultiFab::Subtract(E_res, E, 0, 0, E.nComp(), E.nGrowVect());
+            }
+            m_hybrid_pic_model->HybridPICSolveE(
+                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
+                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                false,  // solve_for_Faraday (retain grad(Pe))
+                false   // include_resistivity: no-resistivity push field
+            );
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & E_push = *E_fp[lev][dir];
+                amrex::MultiFab const& E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab::Add(E_push, E_res, 0, 0, E_push.nComp(), E_push.nGrowVect());
             }
         }
+        // The Ohm kernels write valid cells only, so box-boundary ghosts
+        // still hold the uncorrected iterate; the gather reads those ghosts.
+        amrex::IntVect const ngE = E_fp[0][0]->nGrowVect();
+        m_WarpX->FillBoundaryE(ngE, true /* sync nodal points */);
     }
 
     if (m_darwin && m_hybrid_pic_model->m_darwin_poisson_verbosity > 1) {
@@ -603,8 +873,16 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     ablastr::fields::MultiLevelScalarField rho_fp =
         m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
 
-    // Compute J_plasma = curl(B^{n+theta})/mu_0
-    m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
+    // Compute J_plasma = curl(B^{n+theta})/mu_0. The split-field (non-
+    // darwin) branch computed it in UpdateWarpXFields from the plasma-
+    // response field, BEFORE the external assembly -- recomputing it here
+    // from the total field would re-introduce the spurious O(h^2) external
+    // curl. The darwin branch computes it here from its derived
+    // B = B_static + curl A, whose curl is discretely consistent (the
+    // external flux enters through the evolved A, not a sampled field).
+    if (m_darwin) {
+        m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
+    }
 
     // Darwin: the total current retains the longitudinal displacement
     // current, J = curl(B)/mu_0 - eps0 dE_L/dt, which preserves charge
@@ -728,41 +1006,6 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         );
     }
 
-    // Refresh the resistive push-field correction from this evaluation's
-    // fields: E_res = E_ohm(with resistivity) - E_ohm(without). The
-    // no-resistivity solve writes directly into the E_res fabs, so
-    // Efield_fp (holding the full Ohm field for the RHS below) is never
-    // clobbered. Like the Darwin E_L refresh above, this runs in every
-    // residual evaluation (Jacobian probes included): the correction is a
-    // smooth function of the state and freezing it degrades the Newton
-    // linearization.
-    if (m_use_resistive_push_correction) {
-        using ablastr::fields::Direction;
-        ablastr::fields::MultiLevelVectorField E_res_fp =
-            m_WarpX->m_fields.get_mr_levels_alldirs("hybrid_E_resistive_fp", m_num_amr_levels - 1);
-        // Per-level for the same reason as the full Ohm solve above: no
-        // callback fires inside residual evaluations.
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            m_hybrid_pic_model->HybridPICSolveE(
-                E_res_fp[lev], current_fp[lev], Bfield_fp[lev], *rho_fp[lev],
-                m_WarpX->GetEBUpdateEFlag()[lev], lev,
-                false,  // solve_for_Faraday (retain grad(Pe))
-                false   // include_resistivity: no-resistivity push field
-            );
-        }
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab & E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
-                amrex::MultiFab const & E_full = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
-                amrex::MultiFab::LinComb(E_res, 1.0_rt, E_full, 0, -1.0_rt, E_res, 0,
-                                         0, E_res.nComp(), E_res.nGrowVect());
-                // The push-field subtraction at the top of this function
-                // includes the ghosts the particle gather reads.
-                E_res.FillBoundary(m_WarpX->Geom(lev).periodicity());
-            }
-        }
-    }
-
     // The Ohm kernels above returned the stored (plasma) field convention:
     // E_ohm computed from the total B, with the inductive E_ext subtracted
     // in plasma cells (inside the plasma the generalized Ohm's law IS the
@@ -879,6 +1122,21 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, m_num_amr_levels - 1);
         m_WarpX->UpdateMagneticFieldAndApplyBCs( B_old, m_theta * m_dt, start_time );
+
+        // Plasma current from the RESPONSE field, before the external
+        // assembly below: J_plasma = curl(B_plasma)/mu0, matching the
+        // explicit advance (which computes it from the stripped field).
+        // The discrete curl of the stored external field is only O(h^2)
+        // zero for a spatially varying coil field, so computing the plasma
+        // current from the total field deposits that truncation artifact
+        // as a spurious near-boundary current, proportional to the coil
+        // scale, whose Hall/resistive Ohm response integrates secularly
+        // through Faraday (measured as a linear ride-through drift on the
+        // coil-pair vacuum deck; a uniform external A is blind to the
+        // defect since its discrete curl vanishes identically).
+        m_hybrid_pic_model->CalculatePlasmaCurrent(
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+            m_WarpX->GetEBUpdateEFlag());
     }
 
     if (has_external && !m_darwin) {
@@ -933,6 +1191,215 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
     amrex::IntVect const ngB =
         m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->nGrowVect();
     m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitHybrid::GetBfieldThetaForPC ( const int lev ) const
+{
+    // During the nonlinear solve, UpdateWarpXFields (called from every
+    // residual evaluation) leaves the Bfield_fp registry holding the TOTAL
+    // theta-midpoint field B^{n+theta} of the current iterate: the
+    // Faraday-advanced plasma field with B_ext^{n+theta} assembled on top
+    // (split-field external drive), or B_static + curl A^{n+theta} on the
+    // Darwin path. Valid only after the first residual evaluation of the
+    // current Newton iterate; before that (and between steps) the registry
+    // holds the end-of-step totals B^{n+1} (= B^n at the next entry).
+    using ablastr::fields::Direction;
+    return { m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, lev),
+             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{1}, lev),
+             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, lev) };
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitHybrid::GetIonCurrentForPC ( const int lev ) const
+{
+    // The Ohm solve consumes current_fp as the ion (particle) current
+    // (see the HybridPICSolveE call in ComputeRHS). PreRHSOp deposits it
+    // each residual evaluation and freezes it during Jacobian probes, so
+    // between updatePreCondMat and the GMRES solve it holds exactly the
+    // frozen drift-leg coefficient (J - J_i) x delta_B needs.
+    using ablastr::fields::Direction;
+    return { m_WarpX->m_fields.get(FieldType::current_fp, Direction{0}, lev),
+             m_WarpX->m_fields.get(FieldType::current_fp, Direction{1}, lev),
+             m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev) };
+}
+
+const amrex::MultiFab*
+ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
+{
+    // The rho_fp registry carries two time slots of WarpX::ncomps components
+    // each: component 0 holds the pre-push deposit (rho(x^n) only in the
+    // first evaluation of a step; the previous evaluation's midpoint
+    // positions afterwards), and component nComp()/2 holds the
+    // midpoint-position deposit rho^{n+1/2} of the current iterate, written
+    // by PreRHSOp's PushParticlesandDeposit in every residual evaluation.
+    // Consumers should read component nComp()/2 (the same convention as
+    // rho_mid_comp in HybridPICModel and the Darwin rho_half alias in
+    // ComputeRHS). Valid only after the first residual evaluation of the
+    // current Newton iterate has deposited it.
+    return m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+}
+
+const amrex::MultiFab*
+ThetaImplicitHybrid::GetRhoPolFrozenForPC ( const int lev ) const
+{
+    // Mirror of the poloidal stage's own density-source selection
+    // (HybridPICModel::HybridPICSolveE): the per-step-frozen rho^n
+    // snapshot once captured this step, otherwise nullptr so PC callers
+    // fall back to the midpoint density exactly as the solve does.
+    const HybridPICModel* hybrid = m_hybrid_pic_model;
+    if (hybrid == nullptr
+        || !hybrid->m_esolve_curlcurl
+        || !hybrid->m_curlcurl_pol_frozen_rho
+        || !hybrid->m_inertia_rho_n_captured) {
+        return nullptr;
+    }
+    return m_WarpX->m_fields.get("hybrid_rho_n_frozen", lev);
+}
+
+namespace
+{
+    /** Per-node beta = 1/d_e^2 for the divided electron-inertia curl-curl
+     *  operator, mirroring the E-solve kernel's floor and taper. Rows where
+     *  the kernel zeroes the inertia term (no deposit, or fully tapered)
+     *  are identity rows, approximated with the finite ceiling a_beta_id. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real InertiaBetaNode (amrex::Real a_rho, amrex::Real a_rho_floor,
+                                 amrex::Real a_floor_w, amrex::Real a_taper_w,
+                                 amrex::Real a_beta_fac, amrex::Real a_beta_id)
+    {
+        using amrex::Real;
+        if (a_rho <= Real(0.0)) { return a_beta_id; }
+        const Real rho_lim = HybridSmoothFloor(a_rho, a_rho_floor, a_floor_w);
+        Real b = a_beta_fac*rho_lim;
+        if (a_taper_w > Real(0.0)) {
+            const Real tp = Real(0.5)*(Real(1.0)
+                + std::tanh((a_rho - a_rho_floor)/a_taper_w));
+            b /= amrex::max(tp, Real(1.0e-4));
+        }
+        // the physical branch needs no ceiling (finite rho -> finite beta;
+        // the taper amplification is already capped at 1e4x local); the
+        // identity ceiling a_beta_id applies only to the rho <= 0 rows
+        return b;
+    }
+}
+
+const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>*
+ThetaImplicitHybrid::FillInertiaBetaCoeff ()
+{
+    using namespace amrex;
+
+    const HybridPICModel* hybrid = m_hybrid_pic_model;
+    if (hybrid == nullptr || !hybrid->m_include_electron_inertia) {
+        return nullptr;
+    }
+
+#if defined(WARPX_DIM_RZ)
+    WARPX_ABORT_WITH_MESSAGE(
+        "jacobian.pc_type = pc_curl_curl_mlmg is not available for the "
+        "hybrid solver in RZ (the curl-curl operator carries no cylindrical "
+        "metric) - use jacobian.pc_type = pc_block_banded instead.");
+    return nullptr; // unreachable
+#else
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        hybrid->m_electron_inertia_djedt_only
+            && !hybrid->m_electron_inertia_bdf2,
+        "pc_curl_curl_mlmg with the hybrid solver models the operator form "
+        "of the electron-inertia term: set "
+        "hybrid_pic_model.electron_inertia_djedt_only = 1 and "
+        "hybrid_pic_model.electron_inertia_bdf2 = 0 (the form of Amano et "
+        "al., J. Comput. Phys. 275, 197 (2014)), or use another "
+        "preconditioner.");
+
+    const Real rho_floor = static_cast<Real>(hybrid->m_n_floor)*PhysConst::q_e;
+    const Real floor_w =
+        static_cast<Real>(hybrid->m_n_floor_smooth_width)*rho_floor;
+    const Real taper_w =
+        static_cast<Real>(hybrid->m_electron_inertia_floor_taper)*rho_floor;
+    const Real me_eff = static_cast<Real>(hybrid->m_electron_inertia_mass);
+    // divided operator: beta(x) E + curl curl E = beta(x) b with
+    // beta = 1/d_e^2 = mu0 q_e rho_lim / m_e_eff
+    const Real beta_fac = PhysConst::mu0*PhysConst::q_e/me_eff;
+
+    if (m_inertia_beta.empty()) {
+        m_inertia_beta_owned.resize(m_num_amr_levels);
+        m_inertia_beta.resize(m_num_amr_levels);
+        const auto& e_mfarrvec = m_E.getArrayVec();
+        for (int lev = 0; lev < m_num_amr_levels; lev++) {
+            for (int c = 0; c < 3; c++) {
+                const MultiFab& emf = *e_mfarrvec[lev][c];
+                m_inertia_beta_owned[lev][c] = std::make_unique<MultiFab>(
+                    emf.boxArray(), emf.DistributionMap(), 1, 0);
+                m_inertia_beta[lev][c] = m_inertia_beta_owned[lev][c].get();
+            }
+        }
+    }
+
+    for (int lev = 0; lev < m_num_amr_levels; lev++) {
+        const MultiFab* rho_mf = GetRhoMidForPC(lev);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rho_mf != nullptr,
+            "FillInertiaBetaCoeff: no midpoint density available");
+        const int rho_comp = rho_mf->nComp()/2;
+        // identity-row ceiling: anchored on the LARGEST density present
+        // (anchoring on the floor breaks on decks whose n_floor is tiny
+        // relative to the plasma - the ceiling must sit above every
+        // physical beta on the level)
+        const Real rho_max = rho_mf->max(rho_comp);
+        const Real beta_id =
+            beta_fac*amrex::max(rho_max, rho_floor)*Real(1.0e4);
+
+        // conformal-wall mirror: the residual zeroes E on covered and cut
+        // edges (ZeroConductorEdges inside every Ohm solve), making those
+        // Jacobian rows identity -- mirror them with the identity-row beta
+        const bool eb_mirror = EB::enabled()
+            && hybrid->m_use_conformal_eb
+            && hybrid->m_conformal_wall_conductor;
+        const auto& eb_update_E = m_WarpX->GetEBUpdateEFlag();
+
+        for (int c = 0; c < 3; c++) {
+            MultiFab& bmf = *m_inertia_beta[lev][c];
+            // this E component is cell-centered in at most one direction;
+            // there the edge value is the harmonic mean of the two
+            // neighboring density nodes (harmonic: the depleted node
+            // dominates at the density-contrast edge)
+            const IntVect etype = bmf.ixType().toIntVect();
+            const int ox = (etype[0] == 0) ? 1 : 0;
+            const int oy = (AMREX_SPACEDIM >= 2 && etype[1] == 0) ? 1 : 0;
+            const int oz = (AMREX_SPACEDIM == 3 && etype[2] == 0) ? 1 : 0;
+            const bool has_cc = (ox + oy + oz > 0);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(bmf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box bx = mfi.tilebox();
+                const auto beta_arr = bmf.array(mfi);
+                const auto rho_arr = rho_mf->const_array(mfi, rho_comp);
+                const auto eb_arr = eb_mirror
+                    ? eb_update_E[lev][c]->const_array(mfi)
+                    : amrex::Array4<int const>{};
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    if (eb_mirror && eb_arr(i,j,k) == 0) {
+                        beta_arr(i,j,k) = beta_id;
+                        return;
+                    }
+                    const Real ba = InertiaBetaNode(rho_arr(i,j,k),
+                        rho_floor, floor_w, taper_w, beta_fac, beta_id);
+                    Real bv = ba;
+                    if (has_cc) {
+                        const Real bb = InertiaBetaNode(
+                            rho_arr(i+ox, j+oy, k+oz),
+                            rho_floor, floor_w, taper_w, beta_fac, beta_id);
+                        bv = Real(2.0)*ba*bb/(ba + bb);
+                    }
+                    beta_arr(i,j,k) = bv;
+                });
+            }
+        }
+    }
+    return &m_inertia_beta;
+#endif
 }
 
 void ThetaImplicitHybrid::DarwinDeriveB ()
@@ -1196,13 +1663,13 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         ExtLedgerPrint(m_WarpX, "finish post-extrap");
     }
 
-    // Electron inertia: rotate the per-step nodal Je history via the
-    // theta-extrapolation of the converged theta-stage assembly (one
-    // assembly family end to end -- differencing across assembly
-    // conventions injects deposit-noise derivatives at 1/dt).
-    if (m_hybrid_pic_model->m_include_electron_inertia) {
-        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
-    }
+    // (The electron-inertia Je history rotates in Advance, AFTER the
+    // delivered-state plasma-current refresh: the stored history values
+    // must be MEASURED end-of-step assemblies, never extrapolations --
+    // storing the extrapolation (Je^theta - (1-theta) Je^n)/theta feeds
+    // the stored value back into itself with eigenvalue -(1-theta)/theta,
+    // which is marginal (-1) at theta = 1/2 and rings at period 2 where
+    // the inertia term dominates the Ohm law.)
 
     // Restore end-of-step totals: the analytic external flux advance means
     // Bfield_fp = B_plasma^{n+1} + f(t^{n+1}) curl A_ext exactly, for any

@@ -543,6 +543,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto eta = hybrid_model->m_eta;
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
+    const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
@@ -555,6 +556,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool include_hall_term = hybrid_model->m_include_hall_term;
     const bool include_electron_pressure_term =
         hybrid_model->m_include_electron_pressure_term;
+
+    // Conductor-row treatment of the r-max PEC wall: the wall node plane
+    // carries no plasma Hall/motional force (see the member documentation
+    // of m_pec_conductor_wall_rows).
+    const bool conductor_wall_row = hybrid_model->m_pec_conductor_wall_rows
+        && (WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC);
+    const int iwall_node =
+        WarpX::GetInstance().Geom(lev).Domain().bigEnd(0) + 1;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
@@ -674,7 +683,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // zero and are never read: the kernels skip the one-node ring at
     // non-periodic domain faces, so the operator carries no wall flux.
     const bool use_hyper_cc = hybrid_model->m_hyper_res_curl_curl
-        && include_hyper_resistivity_term && solve_for_Faraday;
+        && include_hyper_resistivity_term && include_resistivity;
     MultiFab Kr_mf, Kt_mf, Kz_mf;
     Box hyper_cc_er_box, hyper_cc_et_box, hyper_cc_ez_box;
     if (use_hyper_cc) {
@@ -776,6 +785,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         hyper_cc_ez_box = interior(Efield[2]->ixType().toIntVect());
     }
 
+    // Exact-operator hyper-resistivity: E_H = +curl(eta_H curl J) with the
+    // coefficient inside the outer curl (energy-sign-definite for varying
+    // eta_H), precomputed by the caller (HybridPICModel::HybridPICSolveE)
+    // from the same plasma current the kernels bind below.
+    const bool hyperres_curlcurl = include_hyper_resistivity_term
+        && hybrid_model->m_hyper_resistivity_curlcurl;
+    ablastr::fields::VectorField eH_mf = {nullptr, nullptr, nullptr};
+    if (hyperres_curlcurl) {
+        eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -848,6 +868,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 jer * Btheta_interp
                 - jet * Br_interp
             );
+
+            if (conductor_wall_row && i == iwall_node) {
+                enE_nodal(i, j, 0, 0) = 0._rt;
+                enE_nodal(i, j, 0, 1) = 0._rt;
+                enE_nodal(i, j, 0, 2) = 0._rt;
+            }
         });
 
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
@@ -880,6 +906,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
+        // curlcurl_form (division-free) toroidal sector: the numerator
+        // capture target and the measured inertia numerator (see
+        // HybridPICModel::SolveEThetaCurlCurlRZ; both nodal). The arrays stay
+        // default-constructed on the e_form path and gate the kernel
+        // branches.
+        Array4<Real> cc_num, cc_num_r, cc_num_z;
+        Array4<Real const> eiCC;
+        if (hybrid_model->m_esolve_curlcurl) {
+            cc_num = hybrid_model->m_num_theta->array(mfi);
+            cc_num_r = hybrid_model->m_num_pol[0]->array(mfi);
+            cc_num_z = hybrid_model->m_num_pol[1]->array(mfi);
+            eiCC = hybrid_model->m_ei_curlcurl_theta->const_array(mfi);
+        }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
@@ -893,6 +932,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             eta_overlay_r = eta_overlay_mf[0]->const_array(mfi);
             eta_overlay_t = eta_overlay_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+        }
+        Array4<Real const> eHr, eHt, eHz;
+        if (hyperres_curlcurl) {
+            eHr = eH_mf[0]->const_array(mfi);
+            eHt = eH_mf[1]->const_array(mfi);
+            eHz = eH_mf[2]->const_array(mfi);
         }
 
         // Curl-curl hyper-resistivity intermediates (default-constructed
@@ -942,10 +987,28 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) { return; }
+                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) {
+                    if (cc_num_r) { cc_num_r(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
+
+                // curlcurl_form poloidal sector: capture the multiplied-through
+                // numerator (division-free) for the grad-div-completed
+                // vector-Helmholtz solve; Er is zeroed so the resistive
+                // blocks accumulate cleanly for the caller's fold.
+                if (cc_num_r) {
+                    const Real grad_Pe_a =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
+                        : 0._rt;
+                    const auto enE_ra = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    cc_num_r(i, j, 0) = enE_ra - grad_Pe_a
+                        + Interp(eiCC, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    Er(i, j, 0) = 0._rt;
+                } else {
 
                 // Axis-confinement mask (1 = gate eligible); Er is
                 // cell-centered in r.
@@ -972,9 +1035,20 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored:
+                    // where the RAW (unfloored) rho at this stencil location
+                    // is not positive -- the wall node row is zeroed by
+                    // convention and its ghosts odd-imaged, so interpolations
+                    // at/beyond the wall land <= 0 -- the Hall/motional and
+                    // grad-Pe force is identically zero instead of the
+                    // 1/rho_floor-amplified enE/max(rho, rho_floor):
+                    // where(rho_raw > 0, enE/max(rho, rho_floor), 0).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
@@ -987,6 +1061,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
+
+                } // end !cc_num_r
 
 
                 // Resistivity: whenever the caller kept eta in this solve
@@ -1010,7 +1086,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
 
-                    if (include_hyper_resistivity_term && solve_for_Faraday) {
+                    if (hyperres_curlcurl && include_resistivity) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (eta_H face-averaged there).
+                        Er(i, j, 0) += eHr(i, j, 0);
+                    } else if (include_hyper_resistivity_term && include_resistivity) {
+                        // Truncated identity (-lap J = curl curl J only at
+                        // div J = 0); trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1041,9 +1124,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Er(i, j, 0) -= Er_ext(i, j, 0);
+                if (include_external_fields && !cc_num_r) {
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Er(i, j, 0) -= w_ext * Er_ext(i, j, 0);
                 }
             },
 
@@ -1051,18 +1136,37 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) { return; }
+                if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) {
+                    if (cc_num) { cc_num(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // r on a nodal grid (Etheta is nodal in r)
                 Real const r = rmin + i*dr;
                 // Mode m=0: // Ensure that Etheta remains 0 on axis
                 if (r < 0.5_rt*dr) {
                     Etheta(i, j, 0, 0) = 0.;
+                    if (cc_num) { cc_num(i, j, 0) = 0._rt; }
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
+
+                // curlcurl_form (division-free) toroidal sector: assemble the
+                // multiplied-through numerator e n E_theta_num = the
+                // (J - J_i) x B numerator plus the measured inertia
+                // numerator (both division-free); Etheta is zeroed so the
+                // resistive/hyper-resistive blocks below accumulate their
+                // E-valued terms cleanly for the caller to fold into the
+                // numerator (times e rho) ahead of the elliptic solve.
+                // No vacuum branch and no floor exist on this path.
+                if (cc_num) {
+                    const auto enE_t = Interp(enE, nodal, Etheta_stag,
+                                              coarsen, i, j, 0, 1);
+                    cc_num(i, j, 0) = enE_t + eiCC(i, j, 0, 1);
+                    Etheta(i, j, 0) = 0._rt;
+                } else {
 
                 // Axis-confinement mask (1 = gate eligible); reuses the
                 // nodal r computed above.
@@ -1084,9 +1188,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored
+                    // (see the Er branch).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
@@ -1099,6 +1208,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
                 }
+
+                } // end !cc_num
 
 
                 // Resistivity: whenever the caller kept eta in this solve
@@ -1120,7 +1231,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
-                    if (include_hyper_resistivity_term && solve_for_Faraday) {
+                    if (hyperres_curlcurl && include_resistivity) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (the axis row returned early above,
+                        // keeping Etheta = 0 there).
+                        Etheta(i, j, 0) += eHt(i, j, 0);
+                    } else if (include_hyper_resistivity_term && include_resistivity) {
+                        // Truncated identity; trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1157,9 +1275,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
+                if (include_external_fields && !cc_num) {
+                    // curlcurl_form defers the (unconditional) E_ext_theta
+                    // subtraction to after the elliptic solve -- there is
+                    // no vacuum branch to gate on.
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Etheta(i, j, 0) -= w_ext * Etheta_ext(i, j, 0);
                 }
             },
 
@@ -1167,10 +1290,26 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) { return; }
+                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) {
+                    if (cc_num_z) { cc_num_z(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
+
+                // curlcurl_form poloidal sector: numerator capture (see the
+                // Er branch).
+                if (cc_num_z) {
+                    const Real grad_Pe_a =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
+                        : 0._rt;
+                    const auto enE_za = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    cc_num_z(i, j, 0) = enE_za - grad_Pe_a
+                        + Interp(eiCC, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    Ez(i, j, 0) = 0._rt;
+                } else {
 
                 // Axis-confinement mask (1 = gate eligible); Ez is nodal
                 // in r.
@@ -1197,9 +1336,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored
+                    // (see the Er branch).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
@@ -1212,6 +1356,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
+
+                } // end !cc_num_z
 
 
                 // Resistivity: whenever the caller kept eta in this solve
@@ -1233,7 +1379,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
-                    if (include_hyper_resistivity_term && solve_for_Faraday) {
+                    if (hyperres_curlcurl && include_resistivity) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (the Ampere-closure stencil owns the
+                        // axis row, with the correct axis limit).
+                        Ez(i, j, 0) += eHz(i, j, 0);
+                    } else if (include_hyper_resistivity_term && include_resistivity) {
+                        // Truncated identity; trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1268,10 +1421,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         if (r > 0.5_rt*dr) {
                             nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
                         } else {
-                            // Special handling of the hyper-resistivity term on axis to avoid division by zero
-                            // and ensure that Jz remains well-behaved on axis for m=0 mode
-                            // This works since there is a symmetry condition on axis that cancels the geometric 1/r term
-                            nabla2Jz += T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
+                            // m = 0 regularity: lim_{r->0} (1/r) d_r(r d_r Jz)
+                            // = 2 d_rr Jz. NOTE: trajectories of eta_H runs
+                            // with on-axis current change relative to the
+                            // historical (factor-2-low) row; the exact
+                            // curl-curl path (hyper_resistivity_curlcurl)
+                            // has this limit by composition.
+                            nabla2Jz += 2.0_rt *
+                                T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
                         }
 
                         Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
@@ -1279,9 +1436,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Ez(i, j, 0) -= Ez_ext(i, j, 0);
+                if (include_external_fields && !cc_num_z) {
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Ez(i, j, 0) -= w_ext * Ez_ext(i, j, 0);
                 }
             }
         );
@@ -1332,6 +1491,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto eta = hybrid_model->m_eta;
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
+    const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
@@ -1437,6 +1597,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     ablastr::fields::VectorField eta_overlay_mf = {nullptr, nullptr, nullptr};
     if (has_eta_overlay) {
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+    }
+
+    // Exact-operator hyper-resistivity: E_H = +curl(eta_H curl J) with the
+    // coefficient inside the outer curl (energy-sign-definite for varying
+    // eta_H), precomputed by the caller (HybridPICModel::HybridPICSolveE)
+    // from the same plasma current the kernels bind below.
+    const bool hyperres_curlcurl = include_hyper_resistivity_term
+        && hybrid_model->m_hyper_resistivity_curlcurl;
+    ablastr::fields::VectorField eH_mf = {nullptr, nullptr, nullptr};
+    if (hyperres_curlcurl) {
+        eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
     }
 
     // Loop through the grids, and over the tiles within each grid for the
@@ -1557,6 +1728,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             eta_overlay_y = eta_overlay_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
         }
+        Array4<Real const> eHx, eHy, eHz;
+        if (hyperres_curlcurl) {
+            eHx = eH_mf[0]->const_array(mfi);
+            eHy = eH_mf[1]->const_array(mfi);
+            eHz = eH_mf[2]->const_array(mfi);
+        }
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries
@@ -1611,7 +1788,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1644,7 +1821,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
-                if (include_hyper_resistivity_term && solve_for_Faraday) {
+                if (hyperres_curlcurl && include_resistivity) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ex(i, j, k) += eHx(i, j, k);
+                } else if (include_hyper_resistivity_term && include_resistivity) {
+                    // Truncated identity (-lap J = curl curl J only at
+                    // div J = 0); trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1663,9 +1847,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ex(i, j, k) -= Ex_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ex(i, j, k) -= w_ext * Ex_ext(i, j, k);
             }
         });
 
@@ -1693,7 +1879,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1726,7 +1912,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
-                if (include_hyper_resistivity_term && solve_for_Faraday) {
+                if (hyperres_curlcurl && include_resistivity) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ey(i, j, k) += eHy(i, j, k);
+                } else if (include_hyper_resistivity_term && include_resistivity) {
+                    // Truncated identity; trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1745,9 +1937,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ey(i, j, k) -= Ey_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ey(i, j, k) -= w_ext * Ey_ext(i, j, k);
             }
         });
 
@@ -1775,7 +1969,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1808,7 +2002,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
-                if (include_hyper_resistivity_term && solve_for_Faraday) {
+                if (hyperres_curlcurl && include_resistivity) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ez(i, j, k) += eHz(i, j, k);
+                } else if (include_hyper_resistivity_term && include_resistivity) {
+                    // Truncated identity; trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1827,9 +2027,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ez(i, j, k) -= Ez_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ez(i, j, k) -= w_ext * Ez_ext(i, j, k);
             }
         });
 

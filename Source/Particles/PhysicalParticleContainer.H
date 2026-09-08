@@ -213,6 +213,34 @@ public:
 
     void SplitParticles (int lev);
 
+    /** Density-band statistics feeding for hybrid-PIC depleted cells:
+     *  tag every particle whose cell-local macroparticle count is below
+     *  hybrid_split_target_ppc AND whose local deposited charge density
+     *  lies in [a_band_lo, a_band_hi] (absolute charge-density units),
+     *  then split the tagged particles with the standard SplitParticles
+     *  machinery (weight-conserving, position-offset children). The
+     *  DSMC-style counterpart merge is the stock velocity-coincidence
+     *  resampler. Knobs: <species>.hybrid_split_band_{lo,hi} (units of
+     *  the hybrid n_floor, converted by the caller),
+     *  hybrid_split_target_ppc, hybrid_split_interval. */
+    void SplitDepletedBand (const amrex::MultiFab& a_rho,
+                            amrex::Real a_band_lo, amrex::Real a_band_hi,
+                            int lev);
+
+    [[nodiscard]] int HybridSplitInterval () const { return m_hybrid_split_interval; }
+    [[nodiscard]] amrex::Real HybridSplitBandLo () const { return m_hybrid_split_band_lo; }
+    [[nodiscard]] amrex::Real HybridSplitBandHi () const { return m_hybrid_split_band_hi; }
+
+protected:
+    /** Density-band split knobs (0 interval disables; band stored in
+     *  units of the hybrid model n_floor). */
+    int m_hybrid_split_interval = 0;
+    amrex::Real m_hybrid_split_band_lo = 0.0;
+    amrex::Real m_hybrid_split_band_hi = 4.0;
+    int m_hybrid_split_target_ppc = 0;
+
+public:
+
     IonizationFilterFunc getIonizationFunc (const WarpXParIter& pti,
                                             int lev,
                                             amrex::IntVect ngEB,

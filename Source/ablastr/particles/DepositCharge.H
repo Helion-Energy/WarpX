@@ -128,10 +128,50 @@ deposit_charge (typename T_PC::ParIterType& pti,
 #else
     const amrex::IntVect range = rho->nGrowVect() - shape_extent;
 #endif
-    amrex::ignore_unused(range); // for release builds
-    ABLASTR_ALWAYS_ASSERT_WITH_MESSAGE(
-        amrex::numParticlesOutOfRange(pti, range) == 0,
-        "Particles shape does not fit within tile (CPU) or guard cells (GPU) used for charge deposition");
+    {
+        const int n_out_of_range = amrex::numParticlesOutOfRange(pti, range);
+        if (n_out_of_range > 0) {
+            // Diagnostic before the abort below: how many particles sit outside the
+            // deposition range of this tile, and how far beyond it (in cells) the worst
+            // one is. Distinguishes a guard band that is one cell too narrow from a
+            // runaway population.
+            const auto& tile = pti.GetParticleTile();
+            const auto np = tile.numParticles();
+            const auto& ptd = tile.getConstParticleTileData();
+            const auto& geom = pti.Geom(pti.GetLevel());
+            const auto& domain = geom.Domain();
+            const auto plo = geom.ProbLoArray();
+            const auto dxi = geom.InvCellSizeArray();
+            amrex::Box grown = pti.tilebox();
+            grown.grow(range);
+            amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+            amrex::ReduceData<int> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            reduce_op.eval(np, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i) -> ReduceTuple
+                {
+                    auto p = ptd[i];
+                    if (!p.id().is_valid()) { return 0; }
+                    using AssignorType = typename T_PC::ParIterType::CellAssignor;
+                    AssignorType assignor;
+                    const amrex::IntVect iv = assignor(p, plo, dxi, domain);
+                    int excursion = 0;
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        excursion = amrex::max(excursion, grown.smallEnd(d) - iv[d]);
+                        excursion = amrex::max(excursion, iv[d] - grown.bigEnd(d));
+                    }
+                    return excursion;
+                });
+            const int worst = amrex::get<0>(reduce_data.value(reduce_op));
+            amrex::AllPrint() << "deposit_charge: " << n_out_of_range << " of " << np
+                << " particles lie outside the deposition range of tile " << pti.tilebox()
+                << " (range " << range << " cells); worst excursion " << worst
+                << " cells beyond the grown tile " << grown << "\n";
+        }
+        ABLASTR_ALWAYS_ASSERT_WITH_MESSAGE(
+            n_out_of_range == 0,
+            "Particles shape does not fit within tile (CPU) or guard cells (GPU) used for charge deposition");
+    }
 
     ABLASTR_PROFILE_VAR_NS("ablastr::particles::deposit_charge::ChargeDeposition", blp_ppc_chd);
     ABLASTR_PROFILE_VAR_NS("ablastr::particles::deposit_charge::Accumulate", blp_accumulate);

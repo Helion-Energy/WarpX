@@ -236,6 +236,13 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     // Initialize splitting
     pp_species_name.query("do_splitting", do_splitting);
     pp_species_name.query("split_type", split_type);
+    // density-band statistics feeding (hybrid depleted cells)
+    pp_species_name.query("hybrid_split_interval", m_hybrid_split_interval);
+    utils::parser::queryWithParser(pp_species_name,
+        "hybrid_split_band_lo", m_hybrid_split_band_lo);
+    utils::parser::queryWithParser(pp_species_name,
+        "hybrid_split_band_hi", m_hybrid_split_band_hi);
+    pp_species_name.query("hybrid_split_target_ppc", m_hybrid_split_target_ppc);
     pp_species_name.query("do_not_deposit", do_not_deposit);
     pp_species_name.query("do_not_gather", do_not_gather);
     pp_species_name.query("do_not_push", do_not_push);
@@ -756,6 +763,28 @@ PhysicalParticleContainer::Evolve (ablastr::fields::MultiFabRegister& fields,
                         DepositCurrent(pti, wp, uxp, uyp, uzp, ion_lev, jx, jy, jz,
                                        0, np_to_deposit, thread_num,
                                        lev, lev, dt, relative_time, push_type);
+
+                        // Fused mass-matrix deposit: the same tile, the same particle
+                        // data and the unfiltered aux B the standalone pass would
+                        // gather again (PhysicalParticleContainer::DepositMassMatrices,
+                        // which deposits every particle of the tile at this level).
+                        if (implicit_options->deposit_mass_matrices) {
+                            FArrayBox const* bx_mm = &Bx[pti];
+                            FArrayBox const* by_mm = &By[pti];
+                            FArrayBox const* bz_mm = &Bz[pti];
+                            amrex::MultiFab * Sxx = fields.get(FieldType::MassMatrices_X, Direction{0}, lev);
+                            amrex::MultiFab * Sxy = fields.get(FieldType::MassMatrices_X, Direction{1}, lev);
+                            amrex::MultiFab * Sxz = fields.get(FieldType::MassMatrices_X, Direction{2}, lev);
+                            amrex::MultiFab * Syx = fields.get(FieldType::MassMatrices_Y, Direction{0}, lev);
+                            amrex::MultiFab * Syy = fields.get(FieldType::MassMatrices_Y, Direction{1}, lev);
+                            amrex::MultiFab * Syz = fields.get(FieldType::MassMatrices_Y, Direction{2}, lev);
+                            amrex::MultiFab * Szx = fields.get(FieldType::MassMatrices_Z, Direction{0}, lev);
+                            amrex::MultiFab * Szy = fields.get(FieldType::MassMatrices_Z, Direction{1}, lev);
+                            amrex::MultiFab * Szz = fields.get(FieldType::MassMatrices_Z, Direction{2}, lev);
+                            WarpXParticleContainer::DepositMassMatrices(pti, wp, uxp, uyp, uzp,
+                                Sxx, Sxy, Sxz, Syx, Syy, Syz, Szx, Szy, Szz,
+                                bx_mm, by_mm, bz_mm, 0, np, thread_num, lev, lev, dt);
+                        }
                     }
                     else {
                         amrex::MultiFab * jx = fields.get(current_fp_string, Direction{0}, lev);
@@ -1003,9 +1032,116 @@ PhysicalParticleContainer::applyNCIFilter (
 // Loop over all particles in the particle container and
 // split particles tagged with p.id()=DoSplitParticleID
 void
+PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
+                                              amrex::Real a_band_lo,
+                                              amrex::Real a_band_hi,
+                                              int lev)
+{
+    using namespace amrex;
+    if (m_hybrid_split_target_ppc <= 0) { return; }
+
+    const auto& geom = Geom(lev);
+    const auto plo = geom.ProbLoArray();
+    const auto dxi = geom.InvCellSizeArray();
+
+    // cell-local macroparticle counts on the rho box layout
+    iMultiFab counts(ParticleBoxArray(lev), ParticleDistributionMap(lev),
+                     1, 1);
+    counts.setVal(0);
+    for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
+    {
+        const auto GetPosition = GetParticlePosition<PIdx>(pti);
+        auto cnt = counts.array(pti);
+        const long np = pti.numParticles();
+        // scatter-add into shared cells: amrex::For, not ParallelFor
+        amrex::For(np, [=] AMREX_GPU_DEVICE (long i)
+        {
+            ParticleReal xp, yp, zp;
+            GetPosition(i, xp, yp, zp);
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ)
+            // GetParticlePosition returns Cartesian x,y — index by radius
+            const ParticleReal rp = std::sqrt(xp*xp + yp*yp);
+#else
+            const ParticleReal rp = xp;
+#endif
+            const int ci = static_cast<int>(Math::floor((rp - plo[0])*dxi[0]));
+            const int cj = static_cast<int>(Math::floor((zp - plo[1])*dxi[1]));
+            Gpu::Atomic::AddNoRet(&cnt(ci, cj, 0), 1);
+#else
+            amrex::ignore_unused(xp, yp, zp, cnt);
+#endif
+        });
+    }
+
+    // tag particles in under-populated band cells for the splitter
+    long n_tagged_local = 0;
+    for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
+    {
+        const auto GetPosition = GetParticlePosition<PIdx>(pti);
+        ParticleTileType& ptile = ParticlesAt(lev, pti);
+        auto& soa = ptile.GetStructOfArrays();
+        uint64_t * const AMREX_RESTRICT idcpu = soa.GetIdCPUData().data();
+        const auto cnt = counts.const_array(pti);
+        const auto rho = a_rho.const_array(pti);
+        const int target = m_hybrid_split_target_ppc;
+        const Real blo = a_band_lo, bhi = a_band_hi;
+        const long np = pti.numParticles();
+        Gpu::DeviceScalar<long> dcount(0);
+        long* dcp = dcount.dataPtr();
+        // shared tag counter: amrex::For, not ParallelFor
+        amrex::For(np, [=] AMREX_GPU_DEVICE (long i)
+        {
+            ParticleReal xp, yp, zp;
+            GetPosition(i, xp, yp, zp);
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ)
+            // GetParticlePosition returns Cartesian x,y — index by radius
+            const ParticleReal rp = std::sqrt(xp*xp + yp*yp);
+#else
+            const ParticleReal rp = xp;
+#endif
+            const int ci = static_cast<int>(Math::floor((rp - plo[0])*dxi[0]));
+            const int cj = static_cast<int>(Math::floor((zp - plo[1])*dxi[1]));
+            if (cnt(ci, cj, 0) >= target) { return; }
+            // rho is nodal: nearest node to the particle
+            const int ni = static_cast<int>(Math::floor((rp - plo[0])*dxi[0] + Real(0.5)));
+            const int nj = static_cast<int>(Math::floor((zp - plo[1])*dxi[1] + Real(0.5)));
+            const Real rv = std::abs(rho(ni, nj, 0));
+            if (rv >= blo && rv <= bhi) {
+                idcpu[i] = LongParticleIds::DoSplitParticleID;
+                Gpu::Atomic::AddNoRet(dcp, static_cast<long>(1));
+            }
+#else
+            amrex::ignore_unused(xp, yp, zp, idcpu, cnt, rho, target,
+                                 blo, bhi, dcp);
+#endif
+        });
+        n_tagged_local += dcount.dataValue();
+    }
+
+    long n_tagged = n_tagged_local;
+    ParallelDescriptor::ReduceLongSum(n_tagged);
+    if (n_tagged > 0) {
+        amrex::Print() << "SplitDepletedBand [" << species_name << "]: "
+            << n_tagged << " particles tagged in the density band\n";
+        SplitParticles(lev);
+    }
+}
+
+void
 PhysicalParticleContainer::SplitParticles (int lev)
 {
     PhysicalParticleContainer pctmp_split(&WarpX::GetInstance());
+    // Mirror this container's runtime components (e.g. the *_n saved-state
+    // attributes registered by the implicit solvers) so that addParticles
+    // below copies tiles with matching SoA widths.
+    for (int ic = 0; ic < NumRuntimeRealComps(); ++ic) {
+        pctmp_split.AddRealComp(false);
+    }
+    for (int ic = 0; ic < NumRuntimeIntComps(); ++ic) {
+        pctmp_split.AddIntComp(false);
+    }
     RealVector psplit_x, psplit_y, psplit_z, psplit_w;
     RealVector psplit_ux, psplit_uy, psplit_uz;
     long np_split_to_add = 0;
@@ -1022,12 +1158,17 @@ PhysicalParticleContainer::SplitParticles (int lev)
     {
         const auto GetPosition = GetParticlePosition<PIdx>(pti);
 
-        const amrex::Vector<int> ppc_nd = plasma_injectors[0]->num_particles_per_cell_each_dim;
+        // num_particles_per_cell_each_dim is only filled for gridded injection
+        // styles; species using random layouts (or no injector at all) keep
+        // the default half-cell offsets.
+        const amrex::Vector<int> ppc_nd = plasma_injectors.empty()
+            ? amrex::Vector<int>{}
+            : plasma_injectors[0]->num_particles_per_cell_each_dim;
         const std::array<Real,3>& dx = WarpX::CellSize(lev);
         amrex::Vector<Real> split_offset = {dx[0]/2._rt,
                                             dx[1]/2._rt,
                                             dx[2]/2._rt};
-        if (ppc_nd[0] > 0){
+        if (ppc_nd.size() >= 3 && ppc_nd[0] > 0){
             // offset for split particles is computed as a function of cell size
             // and number of particles per cell, so that a uniform distribution
             // before splitting results in a uniform distribution after splitting

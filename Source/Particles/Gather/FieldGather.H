@@ -956,9 +956,11 @@ void doGatherShapeNEsirkepovStencilImplicit (
     ParticleUtils::crop_at_boundary(z_old, x_old, z_new, x_new,
                                     domain_double[1][0], domain_double[1][1], do_cropping[1]);
 #elif defined(WARPX_DIM_1D_Z)
-    ParticleUtils::crop_at_boundary(z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+    ParticleUtils::crop_at_boundary(
+        z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    ParticleUtils::crop_at_boundary(x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+    ParticleUtils::crop_at_boundary(
+        x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
 #endif
 
     // Shape factor arrays
@@ -1526,9 +1528,11 @@ void doGatherPicnicShapeN (
     ParticleUtils::crop_at_boundary(x_old, z_old, x_new, z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
     ParticleUtils::crop_at_boundary(z_old, x_old, z_new, x_new, domain_double[1][0], domain_double[1][1], do_cropping[1]);
 #elif defined(WARPX_DIM_1D_Z)
-    ParticleUtils::crop_at_boundary(z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+    ParticleUtils::crop_at_boundary(
+        z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    ParticleUtils::crop_at_boundary(x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+    ParticleUtils::crop_at_boundary(
+        x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
 #endif
 
     // 1) Determine the number of segments.
@@ -2329,23 +2333,146 @@ void doGatherShapeNImplicit (
         }
     }
     else if (depos_type == CurrentDepositionAlgo::Direct) {
+        using namespace amrex::literals;
+
+        // Crop the gather position at the boundaries where orbit cropping is
+        // enabled (absorbing PEC boundaries) so that the fields are never
+        // gathered from beyond such a boundary. This mirrors the cropping done
+        // in the Esirkepov and Villasenor branches above and leaves the
+        // position untouched when do_cropping is false everywhere.
+        amrex::ParticleReal xp_gather = xp_nph;
+        amrex::ParticleReal yp_gather = yp_nph;
+        amrex::ParticleReal zp_gather = zp_nph;
+
+        // Compute the half-time and starting positions in grid units
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        const amrex::ParticleReal rp_nph = std::sqrt(xp_nph*xp_nph + yp_nph*yp_nph);
+        // Keep these double to avoid bug in single precision
+        double x_new = (rp_nph - xyzmin.x)*dinv.x;
+#elif defined(WARPX_DIM_RSPHERE)
+        const amrex::ParticleReal rp_nph = std::sqrt(xp_nph*xp_nph + yp_nph*yp_nph + zp_nph*zp_nph);
+        // Keep these double to avoid bug in single precision
+        double x_new = (rp_nph - xyzmin.x)*dinv.x;
+#elif !defined(WARPX_DIM_1D_Z)
+        // Keep these double to avoid bug in single precision
+        double x_new = (xp_nph - xyzmin.x)*dinv.x;
+#endif
+#if defined(WARPX_DIM_RZ)
+        const amrex::ParticleReal rp_n = std::sqrt(xp_n*xp_n + yp_n*yp_n);
+        double const x_old = (rp_n - xyzmin.x)*dinv.x;
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+        double const x_old = (xp_n - xyzmin.x)*dinv.x;
+#endif
+#if defined(WARPX_DIM_3D)
+        double y_new = (yp_nph - xyzmin.y)*dinv.y;
+        double const y_old = (yp_n - xyzmin.y)*dinv.y;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+        double z_new = (zp_nph - xyzmin.z)*dinv.z;
+#endif
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        double const z_old = (zp_n - xyzmin.z)*dinv.z;
+#endif
+
+        // Save the uncropped positions to detect whether cropping occurred
+#if !defined(WARPX_DIM_1D_Z)
+        double const x_new_save = x_new;
+#endif
+#if defined(WARPX_DIM_3D)
+        double const y_new_save = y_new;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+        double const z_new_save = z_new;
+#endif
+
+        // Crop the particles at the boundaries if it is absorbing.
+#if defined(WARPX_DIM_3D)
+        ParticleUtils::crop_at_boundary(x_old, y_old, z_old, x_new, y_new, z_new,
+                                        domain_double[0][0], domain_double[0][1], do_cropping[0]);
+        ParticleUtils::crop_at_boundary(y_old, z_old, x_old, y_new, z_new, x_new,
+                                        domain_double[1][0], domain_double[1][1], do_cropping[1]);
+        ParticleUtils::crop_at_boundary(z_old, x_old, y_old, z_new, x_new, y_new,
+                                        domain_double[2][0], domain_double[2][1], do_cropping[2]);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        ParticleUtils::crop_at_boundary(x_old, z_old, x_new, z_new,
+                                        domain_double[0][0], domain_double[0][1], do_cropping[0]);
+        ParticleUtils::crop_at_boundary(z_old, x_old, z_new, x_new,
+                                        domain_double[1][0], domain_double[1][1], do_cropping[1]);
+#elif defined(WARPX_DIM_1D_Z)
+        ParticleUtils::crop_at_boundary(
+        z_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        ParticleUtils::crop_at_boundary(
+        x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
+#endif
+
+        // If the position was cropped, convert it back to physical coordinates.
+        // Positions of particles that were not cropped are left bit-identical.
+#if defined(WARPX_DIM_3D)
+        if (x_new != x_new_save || y_new != y_new_save || z_new != z_new_save) {
+            xp_gather = static_cast<amrex::ParticleReal>(x_new/dinv.x + xyzmin.x);
+            yp_gather = static_cast<amrex::ParticleReal>(y_new/dinv.y + xyzmin.y);
+            zp_gather = static_cast<amrex::ParticleReal>(z_new/dinv.z + xyzmin.z);
+        }
+#elif defined(WARPX_DIM_XZ)
+        if (x_new != x_new_save || z_new != z_new_save) {
+            xp_gather = static_cast<amrex::ParticleReal>(x_new/dinv.x + xyzmin.x);
+            zp_gather = static_cast<amrex::ParticleReal>(z_new/dinv.z + xyzmin.z);
+        }
+#elif defined(WARPX_DIM_RZ)
+        if (x_new != x_new_save || z_new != z_new_save) {
+            // The radial bound applies to r = sqrt(x*x + y*y); rescale the
+            // Cartesian coordinates to the cropped radius at fixed theta.
+            const auto rp_crop = static_cast<amrex::ParticleReal>(x_new/dinv.x + xyzmin.x);
+            if (rp_nph > 0._prt) {
+                xp_gather = xp_nph*(rp_crop/rp_nph);
+                yp_gather = yp_nph*(rp_crop/rp_nph);
+            } else {
+                xp_gather = rp_crop;
+                yp_gather = 0._prt;
+            }
+            zp_gather = static_cast<amrex::ParticleReal>(z_new/dinv.z + xyzmin.z);
+        }
+#elif defined(WARPX_DIM_1D_Z)
+        if (z_new != z_new_save) {
+            zp_gather = static_cast<amrex::ParticleReal>(z_new/dinv.z + xyzmin.z);
+        }
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        if (x_new != x_new_save) {
+            const auto rp_crop = static_cast<amrex::ParticleReal>(x_new/dinv.x + xyzmin.x);
+            if (rp_nph > 0._prt) {
+                xp_gather = xp_nph*(rp_crop/rp_nph);
+                yp_gather = yp_nph*(rp_crop/rp_nph);
+#if defined(WARPX_DIM_RSPHERE)
+                zp_gather = zp_nph*(rp_crop/rp_nph);
+#endif
+            } else {
+                xp_gather = rp_crop;
+                yp_gather = 0._prt;
+#if defined(WARPX_DIM_RSPHERE)
+                zp_gather = 0._prt;
+#endif
+            }
+        }
+#endif
+
         if (nox == 1) {
-            doGatherShapeN<1,0>(xp_nph, yp_nph, zp_nph, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+            doGatherShapeN<1,0>(xp_gather, yp_gather, zp_gather, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                 ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
                                 ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
                                 dinv, xyzmin, lo, n_rz_azimuthal_modes);
         } else if (nox == 2) {
-            doGatherShapeN<2,0>(xp_nph, yp_nph, zp_nph, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+            doGatherShapeN<2,0>(xp_gather, yp_gather, zp_gather, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                 ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
                                 ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
                                 dinv, xyzmin, lo, n_rz_azimuthal_modes);
         } else if (nox == 3) {
-            doGatherShapeN<3,0>(xp_nph, yp_nph, zp_nph, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+            doGatherShapeN<3,0>(xp_gather, yp_gather, zp_gather, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                 ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
                                 ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
                                 dinv, xyzmin, lo, n_rz_azimuthal_modes);
         } else if (nox == 4) {
-            doGatherShapeN<4,0>(xp_nph, yp_nph, zp_nph, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+            doGatherShapeN<4,0>(xp_gather, yp_gather, zp_gather, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                 ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
                                 ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
                                 dinv, xyzmin, lo, n_rz_azimuthal_modes);

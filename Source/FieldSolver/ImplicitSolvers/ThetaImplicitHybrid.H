@@ -101,6 +101,40 @@ public:
     // Hybrid model has no light waves, so return 0 for the PC theta parameter
     [[nodiscard]] amrex::Real GetThetaForPC () const override { return amrex::Real(0.0); }
 
+    /** The hybrid-PIC model (owned by WarpX, cached in Define): n_floor,
+     *  the resistivity and hyper-resistivity parsers, and the Hall flags
+     *  a Hall-aware preconditioner needs. */
+    const HybridPICModel* GetHybridPICModel () const override { return m_hybrid_pic_model; }
+
+    /** The theta-midpoint magnetic field B^{n+theta} (Bfield_fp registry;
+     *  see the implementation for the time-level bookkeeping). Valid only
+     *  after the first residual evaluation of the current Newton iterate. */
+    amrex::Array<const amrex::MultiFab*, 3> GetBfieldThetaForPC (int lev) const override;
+
+    /** The charge density holding the midpoint deposit rho^{n+1/2} in
+     *  component nComp()/2 (rho_fp registry; see the implementation for the
+     *  component convention). Valid only after the first residual evaluation
+     *  of the current Newton iterate. */
+    const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
+
+    /** The per-step-frozen rho^n snapshot consumed by the curlcurl_form
+     *  poloidal stage (hybrid_rho_n_frozen, component 0); nullptr whenever
+     *  the solve itself would fall back to the midpoint density. */
+    const amrex::MultiFab* GetRhoPolFrozenForPC (int lev) const override;
+
+    /** E-staggered beta = 1/d_e^2 coefficients for the electron-inertia
+     *  curl-curl preconditioner (the divided curl-curl operator form of
+     *  Amano et al., J. Comput. Phys. 275, 197 (2014)), assembled
+     *  from the midpoint density with the Ohm floor and taper mirrored
+     *  from the E-solve kernel. Non-null only with electron inertia in the
+     *  two-point dJe/dt-only (operator) form; aborts in RZ. */
+    const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* FillInertiaBetaCoeff () override;
+
+    /** The ion current deposit consumed by the Ohm solve (current_fp
+     *  registry) -- frozen during Jacobian probes, so it is the exact
+     *  drift-leg coefficient of the linear solve. */
+    amrex::Array<const amrex::MultiFab*, 3> GetIonCurrentForPC (int lev) const override;
+
 private:
 
     /**
@@ -108,6 +142,12 @@ private:
      * This is owned by WarpX, not by this class.
      */
     HybridPICModel* m_hybrid_pic_model = nullptr;
+
+    /** Owned storage and pointer view for the electron-inertia beta
+     *  coefficients served by FillInertiaBetaCoeff (E-staggered, one
+     *  component each, no ghosts; allocated lazily on first fill). */
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,3>> m_inertia_beta_owned;
+    amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_beta;
 
     /**
      * \brief Solver vectors for the electric field.
@@ -121,6 +161,18 @@ private:
      */
     WarpXSolverVec m_E;
     WarpXSolverVec m_Eold;
+    /** E^{n-1} (the previous step's E^n) for the extrapolated initial guess. */
+    WarpXSolverVec m_Eprev;
+    /** Whether m_Eold holds a completed step's E^n (false until the first step
+     *  has stored it), so m_Eprev is only formed from real data. */
+    bool m_have_Eold = false;
+    /** Whether m_Eprev holds E^{n-1}. */
+    bool m_have_Eprev = false;
+    /** Opt-in (implicit_evolve.extrapolate_initial_guess): start Newton from
+     *  E^{n+theta} = (1 + theta) E^n - theta E^{n-1} (linear extrapolation of
+     *  the field history) instead of E^n. Default off: bit-identical. The first
+     *  step of a run and the first step after a restart use E^n. */
+    bool m_extrapolate_initial_guess = false;
 
     /**
      * \brief Update the E and B fields owned by WarpX. Updates B^{n+theta}
@@ -145,6 +197,15 @@ private:
      *  ambipolar constraint (HybridPICModel::ComputeDarwinELong), refreshed
      *  once per nonlinear iteration. */
     bool m_darwin = false;
+
+    /** End-of-step E finisher: false (default) extrapolates the algebraic
+     *  field, E^{n+1} = (E^theta - (1-theta) E^n)/theta -- a -(1-theta)/
+     *  theta recursion on the stored E (marginal at theta = 1/2; its error
+     *  grows linearly under a steady drift and pollutes the delivered
+     *  field). True re-evaluates the generalized Ohm's law at the
+     *  delivered end-of-step state instead, as the explicit hybrid loop
+     *  does (implicit_evolve.hybrid_e_finisher = reevaluate). */
+    bool m_e_finisher_reevaluate = false;
 
     /** One-time Darwin state capture (B_static = B(t=0), A = 0), performed
      *  at the top of the first OneStep when all fields are initialized. */

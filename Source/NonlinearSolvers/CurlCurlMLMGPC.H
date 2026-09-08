@@ -25,6 +25,8 @@
 #include <AMReX_MLMG.H>
 #include <AMReX_GMRES_MLMG.H>
 
+#include <array>
+
 /**
  * \brief Curl-curl Preconditioner
  *
@@ -121,6 +123,11 @@ class CurlCurlMLMGPC : public Preconditioner<T,Ops>
         int m_max_coarsening_level = 30;
 
         bool m_beta_scalar = true;
+
+        //! non-null in hybrid electron-inertia mode: E-staggered
+        //! beta = 1/d_e^2 of the divided operator beta E + curl curl E
+        //! = beta b (served by Ops::FillInertiaBetaCoeff each Update)
+        const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* m_inertia_bcoefs = nullptr;
 
         RT m_atol = 1.0e-16;
         RT m_rtol = 1.0e-4;
@@ -278,6 +285,44 @@ void CurlCurlMLMGPC<T,Ops>::Update (const T& a_U)
     // a_U is not needed for a linear operator
     amrex::ignore_unused(a_U);
 
+    // Hybrid electron-inertia mode: the solver supplies E-staggered
+    // beta = 1/d_e^2 coefficients of the divided operator
+    // beta E + curl curl E = beta b (unit curl-curl coefficient); the
+    // RHS scaling by beta happens in Apply().
+    m_inertia_bcoefs = m_ops->FillInertiaBetaCoeff();
+    if (m_inertia_bcoefs != nullptr) {
+        m_curl_curl->setScalars(RT(1.0), RT(1.0));
+        for (int n = 0; n < m_num_amr_levels; n++) {
+#if defined(WARPX_DIM_1D_Z)
+            // Missing dimensions is x,y in WarpX and y,z in AMReX
+            m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_inertia_bcoefs)[n][2],
+                                                            (*m_inertia_bcoefs)[n][1],
+                                                            (*m_inertia_bcoefs)[n][0]}});
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            // Missing dimensions is y,z in WarpX and y,z in AMReX
+            m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_inertia_bcoefs)[n][0],
+                                                            (*m_inertia_bcoefs)[n][1],
+                                                            (*m_inertia_bcoefs)[n][2]}});
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            // Missing dimension is y in WarpX and z in AMReX
+            m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_inertia_bcoefs)[n][0],
+                                                            (*m_inertia_bcoefs)[n][2],
+                                                            (*m_inertia_bcoefs)[n][1]}});
+#elif defined(WARPX_DIM_3D)
+            m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_inertia_bcoefs)[n][0],
+                                                            (*m_inertia_bcoefs)[n][1],
+                                                            (*m_inertia_bcoefs)[n][2]}});
+#endif
+        }
+        if (m_verbose) {
+            amrex::Print() << "Updating "
+                << amrex::getEnumNameString(PreconditionerType::pc_curl_curl_mlmg)
+                << ": hybrid electron-inertia mode (alpha = 1, "
+                << "beta = mu0 e^2 n_lim / m_e_eff)\n";
+        }
+        return;
+    }
+
     // set the alpha coefficient for the curl-curl op
     const RT thetaDt = m_ops->GetThetaForPC()*this->m_dt;
     if (thetaDt==0.) {
@@ -354,38 +399,58 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
 
     for (int n = 0; n < m_num_amr_levels; n++) {
 
+        // Hybrid electron-inertia mode: the divided operator solves
+        // beta E + curl curl E = beta b, so scale the RHS by beta into
+        // owned scratch (a_b is const and its storage is reused by the
+        // outer Krylov solver -- never scale it in place).
+        std::array<MultiFab,3> b_scaled;
+        if (m_inertia_bcoefs != nullptr) {
+            for (int c = 0; c < 3; c++) {
+                const MultiFab& bsrc = *b_mfarrvec[n][c];
+                b_scaled[c].define(bsrc.boxArray(), bsrc.DistributionMap(),
+                                   1, 0);
+                MultiFab::Copy(b_scaled[c], bsrc, 0, 0, 1, 0);
+                MultiFab::Multiply(b_scaled[c], *(*m_inertia_bcoefs)[n][c],
+                                   0, 0, 1, 0);
+            }
+        }
+        auto bptr = [&] (int c) -> MultiFab* {
+            return (m_inertia_bcoefs != nullptr) ? &b_scaled[c]
+                                                 : b_mfarrvec[n][c];
+        };
+
         // Copy initial guess to local object
 #if defined(WARPX_DIM_1D_Z)
         // Missing dimensions are x,y in WarpX and y,z in AMReX
         Array<MultiFab,3> solution { MultiFab(*x_mfarrvec[n][2], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][1], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][0], make_alias, 0, 1) };
-        Array<MultiFab,3> rhs      { MultiFab(*b_mfarrvec[n][2], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][1], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][0], make_alias, 0, 1) };
+        Array<MultiFab,3> rhs      { MultiFab(*bptr(2), make_alias, 0, 1),
+                                     MultiFab(*bptr(1), make_alias, 0, 1),
+                                     MultiFab(*bptr(0), make_alias, 0, 1) };
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         // Missing dimensions are y,z in WarpX and y,z in AMReX
         Array<MultiFab,3> solution { MultiFab(*x_mfarrvec[n][0], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][1], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][2], make_alias, 0, 1) };
-        Array<MultiFab,3> rhs      { MultiFab(*b_mfarrvec[n][0], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][1], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][2], make_alias, 0, 1) };
+        Array<MultiFab,3> rhs      { MultiFab(*bptr(0), make_alias, 0, 1),
+                                     MultiFab(*bptr(1), make_alias, 0, 1),
+                                     MultiFab(*bptr(2), make_alias, 0, 1) };
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
         // Missing dimension is y in WarpX and z in AMReX
         Array<MultiFab,3> solution { MultiFab(*x_mfarrvec[n][0], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][2], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][1], make_alias, 0, 1) };
-        Array<MultiFab,3> rhs      { MultiFab(*b_mfarrvec[n][0], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][2], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][1], make_alias, 0, 1) };
+        Array<MultiFab,3> rhs      { MultiFab(*bptr(0), make_alias, 0, 1),
+                                     MultiFab(*bptr(2), make_alias, 0, 1),
+                                     MultiFab(*bptr(1), make_alias, 0, 1) };
 #elif defined(WARPX_DIM_3D)
         Array<MultiFab,3> solution { MultiFab(*x_mfarrvec[n][0], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][1], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][2], make_alias, 0, 1) };
-        Array<MultiFab,3> rhs      { MultiFab(*b_mfarrvec[n][0], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][1], make_alias, 0, 1),
-                                     MultiFab(*b_mfarrvec[n][2], make_alias, 0, 1) };
+        Array<MultiFab,3> rhs      { MultiFab(*bptr(0), make_alias, 0, 1),
+                                     MultiFab(*bptr(1), make_alias, 0, 1),
+                                     MultiFab(*bptr(2), make_alias, 0, 1) };
 #endif
 
         m_curl_curl->prepareRHS({&rhs});

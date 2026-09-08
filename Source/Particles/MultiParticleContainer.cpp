@@ -539,8 +539,7 @@ MultiParticleContainer::Evolve (ablastr::fields::MultiFabRegister& fields,
 }
 
 void
-MultiParticleContainer::DepositMassMatrices (ablastr::fields::MultiFabRegister& fields,
-                                             int lev, amrex::Real dt)
+MultiParticleContainer::ZeroMassMatrices (ablastr::fields::MultiFabRegister& fields, int lev)
 {
     using ablastr::fields::Direction;
 
@@ -549,6 +548,13 @@ MultiParticleContainer::DepositMassMatrices (ablastr::fields::MultiFabRegister& 
         fields.get(FieldType::MassMatrices_Y, Direction{n}, lev)->setVal(0.0);
         fields.get(FieldType::MassMatrices_Z, Direction{n}, lev)->setVal(0.0);
     }
+}
+
+void
+MultiParticleContainer::DepositMassMatrices (ablastr::fields::MultiFabRegister& fields,
+                                             int lev, amrex::Real dt)
+{
+    ZeroMassMatrices(fields, lev);
 
     for (auto& pc : allcontainers) {
         pc->DepositMassMatrices(fields, lev, dt);

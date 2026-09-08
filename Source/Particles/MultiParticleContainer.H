@@ -123,6 +123,9 @@ public:
     /**
      * \brief Deposit mass matrices.
     */
+    /** Zero the nine mass-matrix MultiFabs on level lev. */
+    void ZeroMassMatrices (ablastr::fields::MultiFabRegister& fields, int lev);
+
     void DepositMassMatrices (ablastr::fields::MultiFabRegister& fields,
                               int lev, amrex::Real dt);
 

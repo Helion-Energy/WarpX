@@ -233,6 +233,11 @@ Overall simulation parameters
         - ``implicit_evolve.theta`` (``float``, default: 0.5)
         - :math:`\theta = 0.5`: Exact energy conservation.
         - :math:`\theta = 1.0`: Maximal damping of high-k modes.
+        - ``implicit_evolve.extrapolate_initial_guess`` (``bool``, default: false; theta-implicit hybrid only).
+          Start the nonlinear solve of each step from the linear extrapolation of the field history,
+          :math:`E^{n+\theta} = (1+\theta) E^n - \theta E^{n-1}`, instead of :math:`E^n`. The converged state
+          does not depend on the guess; a better guess saves Newton iterations. The first step of a run and the
+          first step after a restart start from :math:`E^n`.
 
       - **Field gather and current depositions:**
         Exact energy conservation requires matching gather and deposition.
@@ -271,8 +276,22 @@ Overall simulation parameters
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
+          - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6) Relative perturbation scale for the finite-difference JVP in the matrix-free linear solve.
           - ``newton.diagnostic_file`` (``string``, default: None)
           - ``newton.diagnostic_interval`` (``int``, default: 1)
+          - ``newton.adaptive_forcing`` (``bool``, default: false)
+            When ``true``, the GMRES relative tolerance is chosen adaptively each Newton iteration from the observed nonlinear residual decrease (Eisenstat-Walker Choice 2 with safeguards, as in `Chacón, J. Comput. Phys. 526 (2025) 113789 <https://doi.org/10.1016/j.jcp.2025.113789>`__, Eq. 21):
+            :math:`\zeta_A = \gamma\,(\|G_k\|/\|G_{k-1}\|)^\xi`,
+            :math:`\zeta_B = \min[\zeta_\mathrm{max}, \max(\zeta_A, \gamma \zeta_{k-1}^\xi)]`,
+            :math:`\zeta_k = \min[\zeta_\mathrm{max}, \max(\zeta_B, \gamma\,\epsilon_\mathrm{Newton}/\|G_k\|)]`,
+            floored at :math:`\zeta_\mathrm{min}`, where :math:`\epsilon_\mathrm{Newton}` is the Newton convergence target.
+            The first iteration uses :math:`\zeta_\mathrm{max}`, unless the user explicitly set ``gmres.relative_tolerance``, in which case that value is used.
+            This avoids over-solving the linear system far from the nonlinear root; with it off, the fixed ``gmres.relative_tolerance`` is used every iteration (exact prior behavior).
+
+            - ``newton.forcing_gamma`` (``float``, default: 0.9)
+            - ``newton.forcing_xi`` (``float``, default: 1.5)
+            - ``newton.forcing_zeta_max`` (``float``, default: 0.8)
+            - ``newton.forcing_zeta_min`` (``float``, default: 1.0e-4)
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
@@ -295,20 +314,46 @@ Overall simulation parameters
         - ``implicit_evolve.use_mass_matrices_jacobian`` (``bool``, default: false).
           When ``true``, the plasma current density is computed using the mass matrices during the linear stage of PS-JFNK, replacing direct particle calculations. This can enable large speed ups for simulations with many particles.
 
+          - ``implicit_evolve.fused_mass_matrices_deposit`` (``bool``, default: false).
+            When mass matrices are in use (Jacobian or preconditioner), deposit them inside the particle
+            push-and-deposit pass of the nonlinear residual evaluation the linear solve linearizes about, in the
+            same tile loop as the current deposit and from the same particle data and gathered magnetic field,
+            instead of a separate pass over all particles before each linear solve. The summation order of the
+            deposits differs from the separate pass at roundoff. Measured on a GPU the deposition kernel itself
+            is the cost and the fused pass saves nothing, so the separate pass stays the default.
+            The fused deposit runs only on the residual evaluation the linear solve linearizes about
+            (line-search trials and Jacobian probes never deposit); when that evaluation is reused from
+            the accepted trial (``newton.line_search_reuse_residual``), the separate pass runs instead.
+
+          - ``newton.line_search_reuse_residual`` (``bool``, default: false).
+            With ``newton.line_search = 1``: when the accepted line-search trial is the last state that
+            was evaluated, reuse its residual at the top of the next Newton iteration instead of
+            re-evaluating the same state (one particle push and deposit saved per Newton iteration on
+            the particle-suppressed schemes). Off by default because the re-evaluation agrees with the
+            reused residual only to the deposition roundoff.
+
           - ``implicit_evolve.skip_particle_picard_init`` (``bool``, default: false).
             When ``true`` and ``implicit_evolve.use_mass_matrices_jacobian = true``, the full Picard update of the particles is skipped on the initial Newton step, and only a single iteration is performed.
             This can enhance the overall efficiency of the Newton solver.
             Default is true if ``implicit_evolve.particle_suborbits = true``.
 
+          - ``implicit_evolve.mass_matrices_boundary_rows`` (``bool``, default: false).
+            When ``true`` and ``implicit_evolve.use_mass_matrices_jacobian = true``, the physical-boundary response is folded into the mass-matrix bands themselves:
+            band entries with rows or columns in the guard region of a reflecting wall are folded onto their interior mirrors with the same parities the deposited current fold and the field-gather ghost image apply
+            (currently implemented for RZ geometry at the r-max boundary with ``boundary.field_hi = pec`` and ``boundary.particle_hi = reflecting``).
+            The mass-matrix Jacobian *action* is unchanged (the guard-current fold and ghost-image fill already act on the mass-matrix matvec), but the stored bands then represent the true interior operator,
+            which is required by any consumer that reads band entries directly rather than acting through the folded matvec.
+            The wall-node row of components nodal in *r* is stored half-normalized, in the same convention as a raw current deposit before its guard fold; see the comments in ``ImplicitSolver::ApplyMassMatricesBoundaryRows``.
+
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
-          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, or ``pc_jacobi``).
+          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, ``pc_block_banded``, or ``pc_curlcurl_banded``).
 
         - ``implicit_evolve.mass_matrices_pc_width`` (``integer``, default: 0).
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
           In most cases, a width of 1 is sufficient for good GMRES performance.
 
-        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are three options:
+        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are five options:
 
           - ``jacobian.pc_type = pc_curl_curl_mlmg``: Use the AMReX MLMG solver for the curl curl formulation of Maxwell's equations. This preconditioner solves the following equation:
 
@@ -320,6 +365,7 @@ Overall simulation parameters
 
               - Default: :math:`\boldsymbol\beta = \mathbb{I}`, giving implicit Maxwell equations, suitable for time steps that under-resolve light waves (:math:`c\Delta t > 1/\sqrt{\left(\sum_i1/\Delta x_i^2\right)}`).
               - ``implicit_evolve.use_mass_matrices_pc = true``: :math:`\boldsymbol\beta` also includes plasma response via the diagonal mass matrices, enabling time steps that under-resolve the plasma period (:math:`\omega_{pe}\Delta t > 1`).
+              - With the hybrid-PIC (Ohm's law) solver and the electron-inertia operator form (``hybrid_pic_model.electron_inertia_djedt_only = 1`` with ``electron_inertia_bdf2 = 0``), the preconditioner switches automatically to the divided inertia operator :math:`\beta(\textbf{x})\,\textbf{E} + \nabla\times\nabla\times\textbf{E} = \beta(\textbf{x})\,\textbf{b}` with :math:`\beta = 1/d_e^2 = \mu_0 e^2 n_\mathrm{lim}/m_e` assembled on the E-field staggering from the midpoint density (harmonic averaging at density-contrast edges; the Ohm floor and inertia taper are mirrored from the E-solve kernel). This is the elliptic part of the operator form of Amano et al., J. Comput. Phys. **275**, 197 (2014), whose preconditioning is essential to the implicit solve. Not available in RZ (use ``pc_block_banded``).
 
             - ``pc_curl_curl_mlmg.verbose`` (``bool``, default: true)
             - ``pc_curl_curl_mlmg.bottom_verbose`` (``bool``, default: false)
@@ -336,6 +382,51 @@ Overall simulation parameters
             - ``pc_jacobi.max_iter`` (``int``, default: 10)
             - ``pc_jacobi.relative_tolerance`` (``float``, default: 1.0e-4)
             - ``pc_jacobi.absolute_tolerance`` (``float``, default: 1.0e-16)
+
+          - ``jacobian.pc_type = pc_hall_jacobi``: Point-block analytic Hall/whistler preconditioner for the theta-implicit hybrid (generalized Ohm's law) solver.
+            Per cell, the stiff Hall (whistler) leg of the Jacobian is approximated by the 3x3 block :math:`P = a\,I + \beta\,X(\hat{b}_0)`, where :math:`X(\hat{b}_0)\,r = r\times\hat{b}_0`,
+
+            .. math::
+
+               \beta = \frac{\theta \Delta t\, k_g^2\, |B_0|}{\mu_0 e n_0}, \qquad
+               a = 1 + M_\mathrm{diag} + \frac{\theta \Delta t\, k_g^2}{\mu_0}\left(\eta_0 + \eta_{H,0} k_g^2\right),
+
+            with :math:`k_g^2 = \sum_i 4/\Delta x_i^2` the grid-scale surrogate of the curl-curl operator, :math:`e n_0` the (floored) midpoint charge density, :math:`B_0` the theta-midpoint magnetic field, and :math:`M_\mathrm{diag}` the mass-matrix diagonal when ``implicit_evolve.use_mass_matrices_pc = true``.
+            The block is inverted per cell in closed form (a rotation inverse that decays like :math:`1/\beta`, so density-floored regions are handled robustly).
+            No boundary-condition information is used, so this preconditioner is usable with open (free-space) boundaries.
+            The frozen coefficients are refreshed once per Newton iteration.
+            :math:`\eta_0` and :math:`\eta_{H,0}` are evaluated per cell from the ``hybrid_pic_model`` resistivity parser at :math:`(\rho_0, |J|{=}0, t)` and the hyper-resistivity parser at :math:`(\rho_0, |B_0|)`, unless overridden by the knobs below.
+            The solver time-centering is read from ``implicit_evolve.theta``.
+
+            - ``pc_hall_jacobi.verbose`` (``bool``, default: false)
+            - ``precond.hall_eta0`` (``float``, optional): constant resistivity used in :math:`a` instead of the parser evaluation.
+            - ``precond.hall_etah0`` (``float``, optional): constant hyper-resistivity used in :math:`a` instead of the parser evaluation.
+            - ``precond.hall_jacobi_sweeps`` (``int``, default: 0): reserved for future defect-correction sweeps; currently parsed and ignored.
+
+          - ``jacobian.pc_type = pc_block_banded``: Direct block-banded solve of the frozen-coefficient linearized Ohm operator for the theta-implicit hybrid (generalized Ohm's law) solver. RZ geometry only.
+            The linearized operator (theta-Faraday advance of :math:`\delta B`, Ampere response :math:`\delta J`, the whistler :math:`\delta J\times B_0` and drift :math:`(J_0-J_{i,0})\times\delta B` legs, resistive and hyper-resistive legs, RZ metrics with :math:`m=0` axis parity, and the PEC-wall column treatment) is extracted exactly by colored probing of a frozen-coefficient operator application, assembled into dense blocks coupling the three electric-field components along each z-line, and the block-banded system (banded in the radial block index) is factorized and solved directly.
+            An extraction self-check against the frozen apply runs at every rebuild and aborts on disagreement.
+            Unlike the point-block ``pc_hall_jacobi``, this removes the long-wavelength whistler cluster as well, holding GMRES iteration counts flat as the time step is raised into the whistler-stiff regime.
+            With multiple boxes the domain-wide system is gathered and solved redundantly on every rank (replicated-global mode); a Dirichlet-truncated additive-Schwarz per-box mode exists as a research knob but stalls at large whistler CFL because the wave operator does not localize.
+            When compiled with ``WarpX_CUDSS=ON``, the factorization and solve run on GPU through NVIDIA cuDSS.
+
+            - ``pc_block_banded.verbose`` (``bool``, default: false)
+            - ``precond.bb_update_interval`` (``int``, default: 1): number of steps between operator rebuilds; 0 rebuilds every Newton iteration.
+            - ``precond.bb_include_drift`` (``bool``, default: true): include the drift/motional :math:`(J_0-J_{i,0})\times\delta B` leg.
+            - ``precond.bb_include_hyper`` (``bool``, default: true): include the hyper-resistive leg.
+            - ``precond.bb_verify`` (``bool``, default: false): run verification gates at every rebuild (LU and Apply round-trip checks, and a finite-difference Jacobian-vector-product comparison against the true residual).
+            - ``precond.bb_max_mem_gb`` (``float``, default: 8): memory budget for the extracted blocks; setup aborts if the estimate exceeds it.
+            - ``precond.bb_wall_identity`` (``int``, default: -1): tangential-E identity rows at the outer radial wall; -1 auto-detects from a PEC or PEC-insulator field boundary, 0 off, 1 force on.
+            - ``precond.bb_overlap`` (``int``, default: 8): restricted-additive-Schwarz overlap depth in cells (per-box mode only).
+            - ``precond.bb_global`` (``int``, default: -1): replicated-global mode; -1 auto-enables whenever the BoxArray has more than one box, 0 per-box Schwarz, 1 force global.
+            - ``precond.bb_device_solve`` (``bool``, default: true when compiled with ``WarpX_CUDSS``): factorize and solve on GPU via cuDSS.
+
+          - ``jacobian.pc_type = pc_curlcurl_banded``: The form-aware variant of ``pc_block_banded`` for the theta-implicit hybrid solver: it assembles the Jacobian of the configured ``hybrid_pic_model.esolve`` form. RZ geometry only.
+            With ``esolve = e_form`` the assembly (and behavior) is identical to ``pc_block_banded``.
+            With ``esolve = curlcurl_form`` the outer residual is :math:`F(E) = E - A^{-1}\,\mathrm{RHS}(E)` — :math:`A` the multiplied-through inner elliptic operator (screening :math:`\beta` rows plus the volume-scaled composed curl-curl and the gated vacuum-Gauss closure) and :math:`\mathrm{RHS}` the numerator, whose :math:`E`-dependence runs through the same :math:`\delta B \to \delta J \to \delta[(J-J_i)\times B]` chain as ``e_form`` (plus density-weighted resistive legs) but with no density division — so the Jacobian is :math:`J = A^{-1}(A-N)` and the preconditioner applies :math:`P^{-1}r = (A-N)^{-1}(A\,r)`: one banded matvec of the probed (unfactored) :math:`A` plus one factored block-banded solve of :math:`A-N`.
+            Both operators are extracted by the same colored probing with per-operator extraction self-checks; ``precond.bb_verify`` compares the pure applies :math:`A\,(J_\mathrm{fd}\,du)` against :math:`(A-N)\,du` (algebraically the FD-Jacobian gate without factoring :math:`A`).
+            Not implemented for ``esolve = tensor_form`` (whose point-implicit gyration internalizes the whistler response; use ``hybrid_pic_model.esolve_pc`` for its inner solve).
+            Shares the ``precond.bb_*`` knob family with ``pc_block_banded``; ``curlcurl_form`` always runs the replicated-global system.
 
           - ``jacobian.pc_type = pc_petsc``: Use the PETSc solver.
 
@@ -1074,6 +1165,20 @@ additionally define the electric potential at the embedded boundary with an anal
 
     Width of the insulating wall's standoff band, in cells (measured with the largest cell size
     of the level). Only used with ``boundary.eb_type = insulating``.
+
+.. pp:param:: warpx.eb_ect_balanced_borrow
+    :type: ``integer``
+    :default: ``0``
+
+    Only used with the ECT (enlarged cell technique) Maxwell solver
+    (:pp:param:`algo.maxwell_solver = ect`). When nonzero, the one-way
+    face-extension pass is skipped and every unstable cut face is enlarged with
+    the symmetric, area-proportional eight-way split. The one-way pass borrows
+    the entire area deficit from the first stable cardinal neighbor in a fixed
+    lattice order, which is not wall-normal aware and displaces the enlarged-face
+    area centroid off the wall normal (a :math:`\cos(4\theta)` symmetry-breaking
+    seed on curved walls). The default (``0``) keeps the historical one-way pass
+    and is bit-identical to previous behavior.
 
 .. _param-particle-thermalizer:
 
@@ -1914,6 +2019,41 @@ Particle initialization
     Splitting technique. When ``0``, particles are split along the simulation
     axes (4 particles in 2D, 6 particles in 3D). When ``1``, particles are split
     along the diagonals (4 particles in 2D, 8 particles in 3D).
+
+.. pp:param:: <species_name>.hybrid_split_interval
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    With the hybrid-PIC (Ohm's law) solver: every ``hybrid_split_interval`` steps, split
+    particles (via the ``split_type`` scheme) in cells whose macroparticle count has dropped
+    below ``hybrid_split_target_ppc`` and whose charge density lies inside the band
+    ``[hybrid_split_band_lo, hybrid_split_band_hi]`` (in units of the Ohm's-law density floor).
+    Restores deposition statistics in transport-depleted low-density cells, where hybrid-PIC
+    field noise is largest. ``0`` disables. The trigger is self-limiting (cells at or above the
+    target count stop splitting), but the band must exclude true vacuum: a band reaching density
+    zero pumps the entire floored exterior toward the target count.
+
+.. pp:param:: <species_name>.hybrid_split_target_ppc
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    Macroparticle count per cell below which in-band cells are eligible for splitting.
+
+.. pp:param:: <species_name>.hybrid_split_band_lo
+    :type: ``float``
+    :default: ``0.0``
+    :optional:
+
+    Lower edge of the splitting density band, in units of the Ohm's-law density floor.
+
+.. pp:param:: <species_name>.hybrid_split_band_hi
+    :type: ``float``
+    :default: ``4.0``
+    :optional:
+
+    Upper edge of the splitting density band, in units of the Ohm's-law density floor.
 
 .. pp:param:: <species_name>.do_not_deposit
     :type: ``0`` or ``1``
@@ -3568,6 +3708,15 @@ Filtering
     Number of passes along each direction for the bilinear filter.
     In 2D simulations, only the first two values are read.
 
+    .. warning::
+
+       In RZ geometry with the FDTD/hybrid solvers, the default single pass
+       (``1 1``) is currently a silent no-op: ``warpx.use_filter = 1`` with
+       the default ``filter_npass_each_dir`` leaves every deposit and field
+       bit-identical to the unfiltered run. Set
+       ``warpx.filter_npass_each_dir = 2 2`` (or higher) for the filter to
+       engage in RZ.
+
 .. pp:param:: warpx.use_filter_compensation
     :type: ``0`` or ``1``
     :default: ``0``
@@ -3666,6 +3815,12 @@ Particle push, charge and current deposition, field gathering
 
     Maximum number of grid crossings the particles can do per time step.
     This is only used with the Strang and theta-implicit schemes since they allow the speed of light Courant limit to be violated.
+    With the theta-implicit hybrid scheme (``algo.evolve_scheme = theta_implicit_hybrid``) it widens the
+    deposition guard bands by ``max_grid_crossings - 1`` on top of the explicit hybrid's bands (current: ``nox``,
+    charge: ``nox + 1``), and the field-gather and embedded-boundary guards follow the current band whenever the value
+    exceeds 1. The default 1 keeps every hybrid run unchanged. Both the midpoint deposits inside every nonlinear
+    iteration and the end-of-step deposits are bound by this band, so runs at time steps where warm particles cross
+    more than about one cell per step need a larger value (the deposition range check aborts otherwise).
 
 Maxwell solver
 ^^^^^^^^^^^^^^
@@ -4012,6 +4167,24 @@ Maxwell solver: kinetic-fluid hybrid
     needs physical viscous dissipation booked into the electron energy
     equation, enable the viscosity model; do not route :math:`\eta_H` into
     the energy equation.
+
+.. pp:param:: hybrid_pic_model.hyper_resistivity_curlcurl
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Apply the hyper-resistive term in its exact operator form
+    :math:`+\nabla \times (\eta_H \nabla \times \vec{J})`, with the two curls composed
+    from the discrete staggered curl stencils and the (face-averaged) coefficient inside
+    the outer curl, instead of the truncated component Laplacian
+    :math:`-\eta_H \nabla^2 \vec{J}`. The two agree only for constant :math:`\eta_H` and
+    :math:`\nabla \cdot \vec{J} = 0`; deposited and Ampere-closure currents carry discrete
+    divergence, and the truncated form's :math:`\nabla (\nabla \cdot \vec{J})` remainder is
+    non-dissipative, while the exact form is energy-sign-definite
+    (:math:`\int \vec{E}_H \cdot \vec{J} = \int \eta_H |\nabla \times \vec{J}|^2 \geq 0`).
+    Off by default to preserve existing trajectories; the exact form is intended to become
+    the default. The truncated RZ form also carries a factor-2 on-axis defect in its
+    :math:`E_z` row that the composed form does not.
 
 .. pp:param:: hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)
     :type: ``float`` or ``str``
@@ -4641,6 +4814,42 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
 
+.. pp:param:: hybrid_pic_model.n_floor_smooth_width
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Width, in units of :pp:param:`hybrid_pic_model.n_floor`, of a :math:`C^1` smooth-max blend of the density-floor guard (0 keeps the exact hard ``max(rho, rho_floor)``).
+    The blend stays bounded below by the floor everywhere (the halo response remains floored -- this is not a response mask), but removes the kink that deposit noise chatters across when cells sit near the floor threshold.
+    The same width smooths the conditional external-``E`` subtraction across the floor.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_floor_taper
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Width, in units of :pp:param:`hybrid_pic_model.n_floor`, of a taper that fades the electron-inertia term to zero through the floor band (0 keeps the term active in all density-floored cells).
+    The inertia term is the electron-fluid momentum response, which has no meaning at deposit granularity; in floored cells holding few macroparticles it couples a particle's own current back onto itself.
+
+.. pp:param:: implicit_evolve.hybrid_e_finisher
+    :type: ``string``
+    :default: ``reevaluate`` (``extrapolate`` with the Darwin field split)
+    :optional:
+
+    How the theta-implicit hybrid scheme forms the delivered end-of-step electric field.
+    ``reevaluate`` (default) recomputes the generalized Ohm's law at the delivered end-of-step state, as the explicit hybrid loop does (one extra Ohm solve per step).
+    ``extrapolate`` (legacy) uses :math:`E^{n+1} = (E^{\theta} - (1-\theta) E^n)/\theta`; because the hybrid :math:`E` is algebraic (not evolved), this is a :math:`-(1-\theta)/\theta` recursion on the stored field -- marginal at :math:`\theta = 1/2` -- whose error grows linearly under a steady drift and pollutes the delivered field.
+    The Darwin field split falls back to ``extrapolate`` (the re-evaluated finisher is not implemented there).
+
+.. pp:param:: hybrid_pic_model.electron_inertia_extrapolated_history
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Opt-in legacy behavior of the electron-inertia time history: store the theta-extrapolated end-of-step electron current instead of the measured delivered-state assembly.
+    The extrapolated store makes each stored value a function of the previously stored value with amplification :math:`-(1-\theta)/\theta` -- marginal at :math:`\theta = 1/2` -- and rings at period 2 where the inertia term dominates the Ohm law.
+    Comparison knob only; the measured store is the default.
+
 .. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
     :type: ``bool``
     :default: ``false``
@@ -4730,6 +4939,175 @@ Maxwell solver: kinetic-fluid hybrid
     difference at :math:`\theta = 1/2` (an endpoint-BDF2 stencil at :math:`\theta < 1` would be
     mis-centered and pumps reactive modes). When off, always use the two-point form.
 
+.. pp:param:: hybrid_pic_model.electron_inertia_djedt_only
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Retain only the :math:`\partial\mathbf{J}_e/\partial t` leg of the electron-inertia
+    term, dropping the advective and :math:`\partial\rho/\partial t` legs. Combined with
+    ``electron_inertia_bdf2 = false``, the two-point stencil with measured current history is
+    algebraically identical to the operator form :math:`-d_e^2\,\nabla\times\nabla\times
+    \mathbf{E}` (Amano et al., J. Comput. Phys. **275**, 197 (2014)) — the **curl-curl form**
+    of the generalized Ohm's law, as opposed to the legacy algebraic **E-form** with its
+    density division — which regularizes the Ohm solve in depleted and vacuum regions without
+    any bare density division. The added
+    elliptic character makes preconditioning of the implicit solve essential:
+    ``jacobian.pc_type = pc_block_banded`` in RZ, or ``pc_curl_curl_mlmg`` (which switches
+    automatically to the divided inertia operator with this form) elsewhere.
+
+.. pp:param:: hybrid_pic_model.esolve
+    :type: ``string``
+    :default: ``e_form``
+    :optional:
+
+    Form of the generalized Ohm's law solve. ``e_form`` (default) is the legacy algebraic
+    solve: every term is divided by the (floored) density, so a density pedestal
+    (``n_floor``) regularizes depleted regions and the fields there follow the floored
+    vacuum branch. ``curlcurl_form`` (renamed from ``amano_form``, which is now a hard
+    error) is the division-free multiplied-through solve (Amano,
+    J. Comput. Phys. **275**, 197 (2014); the transverse Darwin solve of Hewett & Nielson,
+    J. Comput. Phys. **29**, 219 (1978)): the equation is multiplied by :math:`en` and the
+    :math:`\partial\mathbf{J}_e/\partial t` leg's dependence on :math:`\mathbf{E}` becomes
+    the elliptic operator :math:`(\mu_0 e^2 n(\mathbf{x})/m_e +
+    \nabla\times\nabla\times)\,\mathbf{E} = \mu_0 (e/m_e)\,\mathrm{num}` with the
+    **unfloored** density — no pedestal exists anywhere in the E assembly, and depleted
+    regions are regularized by the electron-inertia screening instead (:math:`d_e \to
+    \infty` as :math:`n \to 0`). The measured part of :math:`\partial\mathbf{J}_e/\partial
+    t` is differenced against the step-start plasma current
+    (:math:`\nabla\times\mathbf{B}^n/\mu_0`), which keeps the iterate's curl-curl content
+    on the operator side of the solve. Currently implemented in RZ :math:`m = 0`: the
+    toroidal (:math:`E_\theta`) sector is a scalar nodal Helmholtz solve, and the poloidal
+    (:math:`E_r`, :math:`E_z`) sector is one coupled solve with the true poloidal
+    curl-curl operator composed from the discrete curls (a component Laplacian equals it
+    only where the discrete divergence vanishes and otherwise spuriously screens the
+    longitudinal field at density-contrast edges), each handled by Jacobi-preconditioned
+    CG per residual evaluation; on strictly zero-density rows — where the
+    multiplied-through equation is empty — the poloidal system is closed with the vacuum
+    Gauss constraint (an energy-form :math:`-\nabla(\gamma\,\nabla\cdot\,.)` completion
+    gated to zero-density nodes, making deep vacuum the full vector Laplacian), and the
+    longitudinal (:math:`E_L`) recovery stage follows.
+    Requires
+    ``algo.evolve_scheme = theta_implicit_hybrid`` (the elliptic solve is amortized over
+    the large implicit step) and ``include_electron_inertia = 1`` with
+    ``electron_inertia_djedt_only = 1`` and ``electron_inertia_bdf2 = 0``. With external
+    vector-potential coils the inductive :math:`\mathbf{E}_\mathrm{ext}` subtraction is
+    unconditional on this path (no vacuum branch exists to gate it). Recommended solver
+    stack: ``curlcurl_n_min`` at the one-count density (removes the deposit-tail
+    conditioning floor) with ``jacobian.pc_type = pc_curlcurl_banded`` (the form-aware
+    outer preconditioner; measured 2 Newton / 3-4 GMRES per step flat through
+    sharp-column cold starts that saturate budgets unpreconditioned). The
+    ``e_form``-assembled ``pc_block_banded`` does not model this residual — measured
+    convergence is identical to the unpreconditioned solve while paying the factorization
+    cost (a boot-time warning is recorded). ``hybrid_pic_model.esolve_pc = block_banded``
+    additionally collapses the inner CG counts on screening-dominated (uniform-plasma)
+    decks; keep the default ``jacobi`` on vacuum-column decks (see its entry).
+
+.. pp:param:: hybrid_pic_model.esolve_pol_verify
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    With ``esolve = curlcurl_form``, run a one-shot discrete verification of the poloidal
+    curl-curl assembly on the first poloidal solve: the fused operator rows applied to a
+    deterministic pseudo-random poloidal field are compared against the directly composed
+    :math:`\nabla\times(\nabla\times\,.)` through a stored cell-centered
+    :math:`(\nabla\times\mathbf{E})_\theta` field, and the maximum relative row error is
+    printed per sector (roundoff on interior and natural-boundary rows; Dirichlet rows are
+    identity by construction). Debug/verification aid; the run then continues normally.
+
+.. pp:param:: hybrid_pic_model.curlcurl_pol_frozen_rho
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    With ``esolve = curlcurl_form``, evaluate both elliptic stages' density-derived operator
+    content — the toroidal fold and screening coefficient, the poloidal screening
+    (:math:`\beta`) rows, the RHS membership tests, the vacuum-closure :math:`\gamma` gate,
+    and the numerator fold weights — from the per-step-frozen :math:`\rho^n` snapshot
+    (captured at step entry from the committed component-0 deposit, before any residual
+    evaluation — this also covers the resistive push-field correction's Ohm passes, which
+    run before the step's first midpoint deposit; the same latch as the inertia
+    :math:`\partial\rho/\partial t` leg) instead of the live per-evaluation midpoint
+    deposit. The binary gates are otherwise
+    re-decided from a fresh particle deposit in every residual evaluation, so near-threshold
+    cells flip membership under finite-difference Jacobian probe deposits and between
+    Newton/line-search evaluations — an :math:`O(1)` operator-row change at probe amplitude
+    that poisons the Jacobian-vector products and compounds near-tolerance misses on
+    sharp-edge cold starts. The screening rows and fold weights freeze together with the
+    gates (a frozen-plasma gate over a live-zero screening row would reopen the curl-curl
+    gradient null family on edge cells whose deposit tail vacates mid-step). ``0`` restores
+    the legacy live-density coupling for A/B comparison.
+
+.. pp:param:: hybrid_pic_model.curlcurl_staggered_sources
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Registration-correct density consumption for the ``esolve = curlcurl_form`` elliptic
+    stages. The charge density is nodal in RZ, but the elliptic-side consumers — the
+    toroidal numerator fold and screening coefficient, the poloidal screening rows,
+    RHS-membership gates and fold weights, and the vacuum-closure :math:`\gamma` gate —
+    read it with cell-centered-source index conventions, landing every screening
+    coefficient half a cell off its row point (the Ohm kernel's own numerator capture and
+    :math:`\eta(\rho)` reads use proper staggered interpolation and are already correct).
+    At the marginal one-count band this is an :math:`O(1)` numerator-vs-screening
+    self-inconsistency on edge rows. With this knob on, all elliptic-side consumers use the
+    proper staggered/nodal interpolation of the same frozen-family density (direct nodal
+    read at nodal points, the r-pair average at :math:`E_r` points, the z-pair average at
+    :math:`E_z` points); ``pc_curlcurl_banded`` mirrors the convention. Default off
+    preserves the landed conventions bit-for-bit.
+
+.. pp:param:: hybrid_pic_model.curlcurl_n_min
+    :type: ``float`` (number density, m\ :sup:`-3`)
+    :default: ``0``
+    :optional:
+
+    One-count membership anchor of the ``esolve = curlcurl_form`` gates
+    (:math:`\rho_{1c} = e\,n_\mathrm{min}`), the ``tensor_n_min`` recipe ported to the
+    identity-form solves. With the default strictly-zero gating, deposit-tail rows with
+    tiny-but-positive staggered density keep the multiplied-through row
+    :math:`a = \beta \rho_p V` against an interpolation-bleed RHS — the unfloored
+    :math:`E = \mathrm{num}/\rho_p` division resurfacing as near-null gradient directions
+    excluded from the vacuum-Gauss :math:`\gamma` closure (measured as radial-Nyquist
+    :math:`E_r` striping in the vacuum region, integrated by Faraday into secularly growing
+    :math:`B_\theta` checkering). With the anchor set to the one-macroparticle-per-cell
+    density, sub-one-count rows keep their (tiny, sign-definite) screening in the operator
+    but take a zeroed RHS and the :math:`\nabla\cdot\mathbf{E} = 0` completion as their
+    content; the toroidal solve zeroes the analogous sub-anchor RHS rows (no :math:`\gamma`
+    family there). A statistics guard in the anchor taxonomy — never a density
+    modification; physics features must not anchor here. All gates keep reading the
+    per-step-frozen density snapshot. ``pc_curlcurl_banded`` mirrors the anchored gates
+    identically.
+
+.. pp:param:: hybrid_pic_model.esolve_pc
+    :type: ``string``
+    :default: ``jacobi``
+    :optional:
+
+    Preconditioner of the inner elliptic E-solves run per residual evaluation by
+    ``esolve = curlcurl_form`` (the toroidal Helmholtz CG and the coupled poloidal
+    curl-curl CG) and ``esolve = tensor_form`` in RZ (the coupled 3-component BiCGStab).
+    ``jacobi`` is the legacy point-diagonal path (bit-identical). ``block_banded``
+    assembles a screened metric component-Laplacian model of the inner operator
+    analytically from the same frozen coefficient fields the solve builds (the toroidal
+    row is its exact ABec stencil; the tensor rows keep the pointwise 3×3 screening
+    tensor exact; the poloidal pair uses the per-component vector-Laplacian form, exact
+    on vacuum-Gauss-completed rows and spectrally equivalent where the screening
+    dominates), packs it with one dense block per radial index and factors it by
+    block-banded LU across the radius once per time step, with a factor/solve
+    round-trip gate at every rebuild. Applied strictly as the Krylov preconditioner
+    (tolerances and convergence checks unchanged; staleness or model error can only
+    cost iterations; SPD by construction, so CG stays legal). Measured: on
+    screening-dominated (uniform-plasma) decks the inner counts collapse (toroidal
+    ~250 → 1-2, poloidal → ~6); on cold-start column decks the anchored operator's
+    intermediate edge band breaks the spectral equivalence on gradient-family modes
+    and point-Jacobi is the better default — set ``curlcurl_n_min`` (which removes the
+    conditioning floor itself) and prefer ``jacobian.pc_type = pc_curlcurl_banded``
+    for the outer solve there. RZ only; single MPI rank (any box layout) in this
+    version — multi-rank runs must keep ``jacobi``. The environment variable
+    ``WARPX_ESOLVE_STATS=1`` prints per-solve iteration counts for either path.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
     :default: ``false``
@@ -4796,6 +5174,71 @@ Maxwell solver: kinetic-fluid hybrid
     ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
     ``darwin_vacuum_recovery_max_iterations`` (default 200) and
     ``darwin_vacuum_recovery_verbosity`` (default 0).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_operator
+    :type: ``string``
+    :default: ``poisson``
+    :optional:
+
+    Iteration operator of the recovery correction solve. ``poisson`` (default) is the
+    nodal finite-difference vector-Poisson map; the recovery defect is measured with
+    composed discrete curls either way, so the converged recovery (masked
+    :math:`\nabla \times (\nabla \times \vec{A}) = 0`) is identical. ``curlcurl`` solves
+    the correction with the native edge-staggered ``amrex::MLCurlCurl`` operator,
+    :math:`(\nabla \times \nabla \times{} + \beta)\, \delta\vec{A} = -\mu_0 \vec{J}_{imp}`,
+    which cancels the measured defect in a single solve and needs no nodal-edge
+    interpolation of the correction. :math:`\beta` (set by
+    ``darwin_vacuum_recovery_curlcurl_beta``, default ``1e-8``, relative to the grid-scale
+    curl-curl diagonal :math:`\sum_d 4/\Delta x_d^2`) is a Tikhonov closure of the
+    curl-curl null space; it shapes the iteration only, not the fixed point, and its
+    gradient-family content in :math:`\delta\vec{A}` never reaches
+    :math:`\vec{B} = \nabla \times \vec{A}`. Cartesian (3D / 2D-XZ) only, no embedded
+    boundaries: ``amrex::MLCurlCurl`` carries no cylindrical metric, so RZ stays on
+    ``poisson``.
+
+.. pp:param:: hybrid_pic_model.tensor_mass_alpha
+    :type: ``float``
+    :default: ``0.5``
+
+    With ``hybrid_pic_model.esolve = tensor_form``: CFL fraction :math:`\alpha` of the
+    effective-electron-mass regularization (Amano et al., J. Comput. Phys. 275, 197 (2014),
+    Eq. (27) class), :math:`m_e' = \max(m_e, B^2 q_e/(\mu_0 \rho_g)\,
+    (\Delta t_\theta/(2\alpha\,\Delta x))^2)`. The inflation is inert wherever the electron
+    physics is resolved and regularizes the tensor coefficients in near-vacuum.
+    ``tensor_n_min`` (default 0 = fall back to ``n_floor``) is the one-count density anchor
+    of the :math:`\rho_g` guard in the same formula (a statistics anchor: set it to the
+    one-macroparticle-per-cell density). In RZ it also anchors the tensor solve's
+    membership gates (the vacuum-closure :math:`\gamma` gate and the RHS test): sub-one-count
+    rows keep their screening in the operator but take the :math:`\nabla\cdot\mathbf{E} = 0`
+    continuation as their content — a strictly-zero gate would leave epsilon deposit-tail
+    rows as near-null gradient directions and the unfloored division would reappear as a
+    solver conditioning floor.
+    The ``tensor_form`` E-solve eliminates the electron momentum equation in closed form on
+    the curl-curl base (stateless Je elimination): every coefficient scales with density
+    moments, the vacuum limit is pure curl-curl, and no density floor or vacuum resistivity
+    enters the E assembly. Requires ``algo.evolve_scheme = theta_implicit_hybrid`` and
+    ``include_electron_inertia = 0`` (the elimination is the inertia treatment). Supported
+    in 1D_Z (periodic) and RZ :math:`m = 0` (periodic z, axis-inclusive domain, non-Darwin).
+    The RZ assembly solves all three components as one coupled system on the native Yee
+    staggerings: the poloidal curl-curl rows are the composed identity-form rows (completed
+    in vacuum by the same energy-form :math:`-\nabla(\gamma\,\nabla\cdot\,.)` closure as
+    ``curlcurl_form``), the toroidal row composes the native curls with the axis regularity
+    carried by the :math:`r = 0` metric, and every density-derived coefficient and gate
+    reads a per-step-frozen snapshot of the committed entry density (bit-stable through all
+    residual evaluations of a step -- the frozen-gates rule). One-shot discrete row
+    verification via ``hybrid_pic_model.tensor_verify``.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_frozen_mask
+    :type: ``bool``
+    :default: ``1``
+
+    Freeze the recovery/Faraday-overwrite mask density per step: the masks read a snapshot
+    of the committed step-entry density instead of the live deposit, so the vacuum/plasma
+    partition is constant through every residual evaluation of the implicit step and
+    refreshes between steps. With a live read the partition follows the nonlinear iterate
+    (the deposit refreshes per evaluation), which makes the residual map non-smooth and can
+    stall the Newton solver at a tolerance-independent level. ``0`` restores the legacy
+    live-density masks.
 
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
@@ -4915,6 +5358,34 @@ Maxwell solver: kinetic-fluid hybrid
     growing grid-scale mode at the plasma edge under the theta-implicit
     solver; the smooth blend restores differentiability. ``0`` (default)
     keeps the legacy hard branch.
+
+.. pp:param:: hybrid_pic_model.use_conformal_eb
+    :type: ``0`` or ``1``
+    :default: ``0``
+
+    Use the conformal (enlarged-cell technique) embedded-boundary wall for the
+    hybrid-PIC B push instead of the stair-step approximation, with a
+    constitutive perfect-conductor closure: the Ohm's-law E and the Ampere
+    current are zeroed on every covered and cut edge, and cut faces evolve
+    through their fully-open edges. Second-order at curved walls where the
+    stair-step degrades to first order. Requires embedded boundaries, a
+    staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry. With the
+    theta-implicit hybrid solver the projection is applied inside every
+    residual evaluation (it lives in the per-level Ohm solve), so the JFNK
+    Jacobian sees the wall exactly; the electron-inertia curl-curl
+    preconditioner mirrors the projected edges as identity rows.
+
+.. pp:param:: hybrid_pic_model.conformal_wall_model
+    :type: ``string``
+    :default: ``conductor``
+    :optional:
+
+    Constitutive model of the conformal wall: ``conductor`` (the
+    perfect-conductor closure above) or ``transparent`` (an EM-transparent
+    standoff: the embedded-boundary geometry and particle handling are
+    unchanged but the fields ignore the wall entirely). The transparent mode
+    is a validation instrument -- comparing the two separates wall-plasma
+    interaction effects from wall-field (shorting) effects.
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``

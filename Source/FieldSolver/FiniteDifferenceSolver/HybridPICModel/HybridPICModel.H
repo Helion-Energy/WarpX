@@ -17,6 +17,8 @@
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
 
+#include "EBJBoundary.H"
+#include "ESolveBandedPC.H"
 #include "ExternalVectorPotential.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -34,12 +36,48 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
 
+#include <AMReX_GpuQualifiers.H>
+
 #include <array>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+/** C1 smooth-max blend of the density-floor guard: exact max(rho,
+ *  rho_floor) at w_abs = 0 (legacy hard floor, bit-compatible), the
+ *  smooth-max 0.5*(rho + rho_floor + sqrt((rho-rho_floor)^2 + w_abs^2))
+ *  otherwise. Bounded below by rho_floor everywhere like the hard max
+ *  (the halo response stays floored -- this is not a response mask),
+ *  but infinitely differentiable, so deposit noise chattering across
+ *  the threshold no longer kinks the Ohm residual. w_abs is the
+ *  absolute (charge-density) blend width. */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real HybridSmoothFloor (amrex::Real rho, amrex::Real rho_floor,
+                               amrex::Real w_abs)
+{
+    if (w_abs <= amrex::Real(0.)) { return amrex::max(rho, rho_floor); }
+    const amrex::Real d = rho - rho_floor;
+    return amrex::Real(0.5)*(rho + rho_floor + std::sqrt(d*d + w_abs*w_abs));
+}
+
+/** Weight of the conditional external-E subtraction across the density
+ *  floor: the legacy step (rho >= rho_floor) at w_abs = 0, a tanh blend
+ *  of the same width as the smooth floor otherwise (the two share the
+ *  hybrid_pic_model.n_floor_smooth_width knob -- they are the same
+ *  crossing and must smooth together). */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real HybridExtSubWeight (amrex::Real rho, amrex::Real rho_floor,
+                                amrex::Real w_abs)
+{
+    if (w_abs <= amrex::Real(0.)) {
+        return (rho >= rho_floor) ? amrex::Real(1.) : amrex::Real(0.);
+    }
+    return amrex::Real(0.5)*(amrex::Real(1.)
+        + std::tanh((rho - rho_floor)/w_abs));
+}
 
 class PoissonBoundaryHandler;
 
@@ -154,6 +192,56 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, PatchType patch_type, bool solve_for_Faraday,
         std::optional<bool> include_resistivity = std::nullopt) const;
+
+    /** Constitutive-PEC zeroing of an edge-staggered field on the conformal
+     *  (ECT) wall: zero every masked (fully covered) edge and every cut edge.
+     *  Applied to the Ohm's-law E and the Ampere current. */
+    void ZeroConductorEdges (
+        ablastr::fields::VectorField const& field,
+        std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
+        int lev) const;
+
+    /** Zero fully covered faces (open area = 0) of a face-staggered field on
+     *  the conformal (ECT) wall; cut faces keep their open-part flux. Applied
+     *  to the external B so the conductor excludes the time-varying flux. */
+    void ZeroCoveredFaces (
+        ablastr::fields::VectorField const& field,
+        int lev) const;
+
+    /** Thin resistive-shell wall (RZ r-max, see m_resistive_wall): overwrite
+     *  the tangential wall-node rows of Efield with the shell value computed
+     *  from the CURRENT Bfield iterate,
+     *      E_theta(wall) = (eta_w/delta) * K_theta
+     *                    = (eta_w/delta) * (B_z(inside) - B_z,ext) / mu0,
+     *      E_z(wall)     = (eta_w/delta) * K_z
+     *                    = -(eta_w/delta) * B_theta(inside) / mu0,
+     *  with B(inside) read at the last interior cell-centered-in-r row, and
+     *  image the r-hi tangential ghosts odd ABOUT that value
+     *  (ghost = 2*E_wall - interior mirror: the nonzero-Dirichlet image).
+     *  E_r (normal) is left with its PEC treatment. Must run AFTER
+     *  ApplyEfieldBoundary (it owns the wall row + tangential r-hi ghosts;
+     *  composition order is stated at the call sites). No-op unless
+     *  m_resistive_wall is set and the r-hi field boundary is PEC. */
+    void ApplyResistiveWallE (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& Bfield,
+        int lev) const;
+
+    /** Thin resistive-shell wall, iterate-conditioning leg (RZ r-max, see
+     *  m_resistive_wall): restore the tangential wall-node rows of Efield
+     *  from the unconditioned source Esrc (the nonlinear-solver iterate,
+     *  which ApplyEfieldBoundary's PEC kernel has just zeroed) and image the
+     *  r-hi tangential ghosts odd about that value. Keeping the ITERATE's
+     *  wall value -- rather than recomputing the shell value from the stale
+     *  Bfield_fp of the previous residual evaluation -- makes the residual
+     *  map a deterministic function of the iterate (no hidden one-evaluation
+     *  B lag in Jacobian probes); the wall row converges to the shell value
+     *  through the residual, whose Ohm output imposes it via
+     *  ApplyResistiveWallE. E_r (normal) unchanged. */
+    void ImposeResistiveWallIterateRowsE (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& Esrc,
+        int lev) const;
 
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
@@ -1054,6 +1142,86 @@ public:
     bool m_include_hall_term = true;
     bool m_include_electron_pressure_term = true;
 
+    /** Treat the r-max PEC wall node row as a conductor row in the Ohm
+     *  solve (RZ): the conductor row carries no plasma moments -- ne,
+     *  tangential J, and the Hall force are all zero there. The full
+     *  wall-moment closure stack applied under this knob is
+     *   (a) the nodal (J - J_i) x B force is zeroed on the wall node plane
+     *       (HybridPICSolveECylindrical pass 1), so the last interior
+     *       half-cell of E_r receives no Hall/motional contribution
+     *       interpolated from the conductor surface;
+     *   (b) the tangential (theta, z) components of BOTH the Ampere and
+     *       ion currents are zeroed on the wall node plane and its ghost
+     *       rows (HybridPICSolveE wrapper, after the SyncCurrentAndRho
+     *       guard folds), removing the spurious electron current sheet
+     *       J_e = J - J_i built from the deposit-fold / one-sided-curl
+     *       parity mismatch;
+     *   (c) ne-Dirichlet wall moment: the deposited charge density the
+     *       Ohm divide consumes is zeroed on the wall node plane with
+     *       odd-imaged ghost rows (ghost = -interior mirror), in the same
+     *       wrapper, immediately before the Ohm solve;
+     *   (d) gate-on-raw / divide-by-floored Hall (HybridPICSolveE Yee
+     *       pass): where the raw (unfloored) rho at the E stencil location
+     *       is not positive, the Hall/motional term is identically zero --
+     *       where(rho_raw > 0, enE/max(rho, rho_floor), 0) -- so with (c)
+     *       the wall row's zeroed numerator is NOT amplified into an
+     *       enE/rho_floor response by the floored divide, at and beyond
+     *       the wall row.
+     *  Without the stack, the tangential Ampere current's cylindrical
+     *  curvature remnant at the wall (J_z = B_theta/(mu0 r), a genuine
+     *  surface current) and the reflecting-fold ion-deposit parity combine
+     *  into a spurious electron-current sheet whose Hall response the
+     *  theta = 1/2 advance integrates without damping - a secularly
+     *  growing whistler-polarized wall layer whenever plasma touches the
+     *  wall. Conductor-surface rows are not plasma Ohm unknowns and carry
+     *  no plasma moments or Hall force. */
+    bool m_pec_conductor_wall_rows = false;
+
+    /** Thin resistive-shell wall at the RZ r-max PEC boundary. The hard PEC
+     *  identity row E_t(wall) = 0 responds instantaneously within each
+     *  implicit solve; this knob replaces it with a finite-response-time
+     *  conducting shell of resistivity eta_w (m_wall_resistivity) and
+     *  thickness delta (m_wall_thickness), carrying surface current K
+     *  determined by the tangential-B jump across the shell,
+     *      r_hat x (B_out - B_in) = mu0 K, with
+     *      B_out = B_z,ext z_hat (the shell is the flux boundary:
+     *              B_theta(outside) = 0, B_z(outside) = the applied uniform
+     *              field, m_wall_bz_ext), giving
+     *      K_z     = -B_theta(inside) / mu0,
+     *      K_theta = +(B_z(inside) - B_z,ext) / mu0,
+     *  and Ohm's law in the shell sets the tangential electric field there,
+     *      E_t(wall) = (eta_w / delta) * K_t.
+     *  This is a relaxation (Robin) row computed from the B iterate inside
+     *  every residual evaluation of the theta-implicit hybrid -- in-residual
+     *  by construction -- instead of the hard Dirichlet identity row. The
+     *  shell L/R decay time for a mode of wavenumber k is
+     *      tau = mu0 * delta / (2 * k * eta_w);
+     *  at copper resistivity (the default, 1.68e-8 Ohm m) and delta = dr the
+     *  grid-scale-mode tau is ~1e4 ion-cyclotron periods on typical hybrid
+     *  decks: physically near-PEC but structurally relaxational. Ghost rows
+     *  beyond the wall are imaged odd about the wall value
+     *  (ghost = 2*E_wall - interior mirror). E_r (normal) keeps the PEC
+     *  treatment. Independent of (and composable with)
+     *  m_pec_conductor_wall_rows, which edits the Ohm-solve INPUT moments,
+     *  not the wall E row. Only implemented for RZ r-max with a PEC r-hi
+     *  field boundary; applied at both E boundary-application sites of the
+     *  theta-implicit residual (see ApplyResistiveWallE /
+     *  ImposeResistiveWallIterateRowsE). */
+    bool m_resistive_wall = false;
+    /** Shell resistivity eta_w [Ohm m]; default = copper (1.68e-8). */
+    amrex::Real m_wall_resistivity = 1.68e-8;
+    /** Shell thickness delta [m]; <= 0 (default) means use the radial cell
+     *  size dr of the level the wall row is applied on. */
+    amrex::Real m_wall_thickness = -1.0;
+    /** Applied uniform external B_z [T] outside the shell, subtracted in
+     *  K_theta = (B_z(inside) - B_z,ext)/mu0. The applied field of this
+     *  class of decks is loaded directly into Bfield_fp (grid init style),
+     *  not into the hybrid external-field registry, so it is not
+     *  recoverable from m_add_external_fields here; decks must pass their
+     *  applied B0 explicitly (default 0: the shell then relaxes the TOTAL
+     *  enclosed B_z flux). */
+    amrex::Real m_wall_bz_ext = 0.0;
+
     /** Electron temperature: read from the input in eV, converted to
      * k_B T_e in J at the end of ReadParameters. */
     amrex::Real m_elec_temp;
@@ -1114,9 +1282,59 @@ public:
      *  with the theta-extrapolated iterate Je^{n+1}; the term is zeroed
      *  only where rho <= 0 (density-floored cells keep their inertia --
      *  that is what regularizes the floored-halo response). */
+    /** E-solve form: false = legacy algebraic solve with the floored
+     *  density division ("e_form"); true = the division-free
+     *  multiplied-through solve ("curlcurl_form"): the dJe/dt leg's
+     *  E-dependence becomes the elliptic operator (beta + curl curl) with
+     *  beta = mu0 e^2 n / m_e_eff unfloored, solved per residual
+     *  evaluation (theta-implicit only). Toroidal RZ m=0 sector first. */
+    bool m_esolve_curlcurl = false;
+
+    /** \brief Division-free (curlcurl_form) toroidal E-solve, RZ m = 0.
+     *
+     * Solves the multiplied-through generalized Ohm's law for E_theta:
+     *
+     *     (beta(x) + curlcurl_theta) E_theta = (mu0 e / m_e_eff) num_theta,
+     *
+     * with beta = mu0 e^2 n / m_e_eff evaluated from the UNfloored
+     * frozen-family density (see m_curlcurl_pol_frozen_rho) and curlcurl_theta = -(1/r) d_r (r d_r .) - d_z^2 .
+     * + 1/r^2 (the theta component of the vector curl-curl). The RZ
+     * metric is absorbed into a Cartesian-form nodal ABec operator by
+     * multiplying the equation by r:
+     *
+     *     [r beta + 1/r] E - div( r grad E ) = r * rhs,
+     *
+     * i.e. MLNodeABecLaplacian with nodal acoef = r beta + 1/r (>= 1/r,
+     * never singular; the axis row is a Dirichlet regularity boundary)
+     * and cell-centered bcoef = r. E_theta's RZ Yee staggering is nodal
+     * in (r, z), so the solve operates on the field's native staggering.
+     *
+     * \param[in,out] Etheta   E_theta MultiFab (nodal); solution in place
+     * \param[in]     num      multiplied-through numerator (nodal, no
+     *                         density division anywhere)
+     * \param[in]     rho      charge density (cell-centered) for beta
+     * \param[in]     rho_comp component of rho to use (midpoint)
+     * \param[in]     lev      level (must be 0)
+     */
+    void SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
+                                amrex::MultiFab const& num,
+                                amrex::MultiFab const& rho,
+                                int rho_comp, int lev) const;
+
     bool m_include_electron_inertia = false;
     amrex::Real m_reduced_electron_mass_ratio = 0.0;
     bool m_electron_inertia_bdf2 = true;
+
+    /** Drop the advective (Je.grad)u and u drho/dt legs of the inertia
+     *  term, keeping only the dJe/dt leg. With electron_inertia_bdf2 = 0
+     *  and the measured history store, the remaining term is algebraically
+     *  the operator form -d_e^2 curl curl E (the two-point dJe/dt with the
+     *  measured Je^n equals (Je^theta - Je^n)/(theta dt), which is exactly
+     *  the theta-stage Faraday-Ampere identity): the generalized Ohm's law
+     *  then rolls the whistler over at the electron skin depth with no
+     *  bare 1/n on a deposit [Amano, Higashimori & Shirakawa, J. Comput.
+     *  Phys. 275, 197 (2014)]. */
+    bool m_electron_inertia_djedt_only = false;
     /** Effective electron mass, resolved lazily on first use (needs the
      *  ion species list). */
     amrex::Real m_electron_inertia_mass = 0.0;
@@ -1146,6 +1364,337 @@ public:
      *  and cleared by RotateElectronInertiaHistory at the end of the
      *  step, alongside the equally per-step-frozen Je histories. */
     bool m_inertia_rho_n_captured = false;
+
+    /** Resolve (once) the effective electron inertia mass m_e_eff from the
+     *  lightest charged ion species and reduced_electron_mass_ratio
+     *  (physical m_e when the ratio is unset); no-op once resolved. */
+    void ResolveElectronInertiaMass ();
+
+    /** Allocate (once) the curlcurl_form scratch MultiFabs consumed by the
+     *  Ohm kernel and the elliptic solves; no-op on e_form. Must run before
+     *  ANY HybridPICSolveE call on the curlcurl path: the resistive
+     *  push-field correction solves in every residual evaluation BEFORE the
+     *  inertia assembly that used to allocate these lazily (stale scratch
+     *  content cancels exactly in the correction's two-pass difference;
+     *  unallocated arrays do not). */
+    void EnsureCurlCurlScratch ();
+
+    /** curlcurl_form scratch (see m_esolve_curlcurl): the step-start plasma
+     *  current (staggered, from curl B_old) and its nodal theta component
+     *  -- the "measured" reference the dJe/dt leg differences against so
+     *  that the current iterate's curl-curl-E content stays on the
+     *  operator side of the solve (differencing against the iterate's own
+     *  B(theta) would cancel the operator at the fixed point and
+     *  degenerate the solve to an unfloored pointwise division). Captured
+     *  once per step (same latch discipline as the frozen rho^n). */
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_jp_old_stag;
+    std::unique_ptr<amrex::MultiFab> m_jp_old_nodal;
+    /** curlcurl_form: the division-free measured inertia numerator for the
+     *  toroidal solve, (m_e/e) dJe_meas/dt (nodal, one component). */
+    std::unique_ptr<amrex::MultiFab> m_ei_curlcurl_theta;
+    /** curlcurl_form: the multiplied-through toroidal numerator captured by
+     *  the Ohm kernel (nodal, one component; the elliptic solve's RHS). */
+    std::unique_ptr<amrex::MultiFab> m_num_theta;
+    /** curlcurl_form stage 2: the poloidal numerators on the E_r and E_z
+     *  staggerings (the poloidal curl-curl system's RHS). */
+    std::array<std::unique_ptr<amrex::MultiFab>, 2> m_num_pol;
+
+    /** \brief curlcurl_form stage 2: coupled poloidal (E_r, E_z) solve,
+     *  RZ m = 0, on the fields' native staggerings (E_r: cc in r / nodal
+     *  in z; E_z: nodal in r / cc in z).
+     *
+     * Solves the multiplied-through system
+     *
+     *     beta(x) E + (curlcurl E)|_pol = (mu0 e/m_e_eff) num
+     *
+     * with the TRUE poloidal curl-curl composed from the discrete curls:
+     * W = (curl E)_theta = d_z E_r - d_r E_z lands on cell centers, then
+     * (curlcurl E)_r = -d_z W and (curlcurl E)_z = (1/r) d_r (r W). A
+     * component Laplacian equals this only where the discrete div E
+     * vanishes -- at machine-level nonzero div it spuriously screens the
+     * longitudinal field at density-contrast edges (curlcurl = grad div
+     * - lap_vec: the old component solves are the div-free limit of this
+     * operator).
+     *
+     * Rows are scaled by the control volumes V_r = r_c dr and V_z = r_n
+     * dr (E_z axis node: dr^2/8): the curl-curl block is then the exact
+     * gradient of (1/2) sum_cells r_c dr dz W^2 -- symmetric positive
+     * semi-definite by construction -- and beta >= 0 stays unfloored (no
+     * pedestal). Where the unfloored density vanishes exactly, the
+     * multiplied-through equation is 0 = 0: those RHS rows are zeroed (a
+     * nonzero numerator there is stencil-support bleed from the wider
+     * nodal interpolations) and the operator is closed with the vacuum
+     * Gauss constraint div E = 0, imposed as the energy-form
+     * -grad(gamma div .) completion with gamma = 1 on strictly-vacuum
+     * NODES only (nodal unfloored density <= 0; axis, wall, and
+     * non-periodic cap nodes stay ungated). Deep vacuum then carries the
+     * full vector Laplacian (curlcurl - grad div), eliminating the bare
+     * curl-curl's gradient null space (which otherwise makes CG grind),
+     * and the system is SPD on the free rows. Every row that carries
+     * plasma keeps the pure identity form: the closure lives on
+     * strictly-vacuum nodes, so density-sheet rows -- whose spurious E_L
+     * screening under the component Laplacian motivated this operator --
+     * couple to it only as boundary data of the vacuum region.
+     *
+     * Boundary rows follow the toroidal solve's conventions: the E_r
+     * z-cap nodes and the E_z wall node (r_hi) are Dirichlet identity
+     * rows (PEC tangential E); the E_r wall row and the E_z axis row are
+     * natural energy-form rows (the W cell beyond the wall / inside the
+     * axis does not exist); z periodic through ghosts. Solved by
+     * Jacobi-preconditioned CG on the two-field block system.
+     *
+     * hybrid_pic_model.esolve_pol_verify = 1 runs a one-shot discrete
+     * verification on the first call: the fused operator applied to a
+     * deterministic pseudo-random poloidal field is compared against the
+     * directly composed curl(curl .) through a stored W field, printing
+     * the max relative row error per sector (roundoff on interior and
+     * natural-boundary rows; Dirichlet rows identity by construction).
+     */
+    void SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
+                              amrex::MultiFab& Ez,
+                              amrex::MultiFab const& num_r,
+                              amrex::MultiFab const& num_z,
+                              amrex::MultiFab const& rho,
+                              int rho_comp, int lev) const;
+
+    /** One-shot discrete verification of the poloidal curl-curl assembly
+     *  (see SolveEPolCurlCurlRZ). */
+    bool m_esolve_pol_verify = false;
+    mutable bool m_esolve_pol_verified = false;
+    bool m_inertia_jpold_captured = false;
+
+    /** curlcurl_form: evaluate BOTH elliptic stages' density-derived
+     *  operator content -- the toroidal fold and acoef, the poloidal beta
+     *  rows, the RHS membership tests, the vacuum-closure gamma gate, and
+     *  the numerator fold weights -- from the per-step-frozen rho^n
+     *  snapshot ("hybrid_rho_n_frozen", captured at STEP ENTRY from the
+     *  committed component-0 deposit -- the tensor/vacmask capture family
+     *  -- before any residual evaluation; the inertia assembly's lazy
+     *  capture is then a per-step no-op on the same latch) instead of the
+     *  live per-evaluation midpoint deposit. The entry capture also covers
+     *  the resistive push-field correction's Ohm passes, which run BEFORE
+     *  the first midpoint deposit of the step (an EMPTY density there
+     *  degenerates the operators; measured as a first-solve CG cap on
+     *  seeded vacuum-column decks). The binary gates are otherwise
+     *  re-decided from a fresh deposit in EVERY residual evaluation, so
+     *  near-threshold cells flip membership under finite-difference
+     *  Jacobian probe deposits (an O(1) operator-row change at probe
+     *  amplitude poisons the JVP secants) and between Newton/line-search
+     *  evaluations (compounding near-tolerance misses on sharp-edge cold
+     *  starts). The beta rows and fold weights freeze TOGETHER with the
+     *  gates: a frozen-plasma gate over a live-zero beta row would reopen
+     *  the curl-curl gradient null family (gamma stays off exactly where
+     *  beta no longer covers the row) on edge cells whose shape-function
+     *  tail vacates mid-step. Consumers fall back to the live density
+     *  until the first capture of a run (initialization solves) and when
+     *  the knob is off (= 0, the legacy per-evaluation coupling, A/B
+     *  only). */
+    bool m_curlcurl_pol_frozen_rho = true;
+
+    /** One-count membership anchor [m^-3] of the curlcurl_form gates
+     *  (hybrid_pic_model.curlcurl_n_min; rho_1c = q_e * curlcurl_n_min).
+     *  Strictly-zero gating (the default, 0 = the legacy behavior) leaves
+     *  epsilon deposit-tail rows -- tiny-but-positive staggered density --
+     *  as near-null gradient directions: their screening is
+     *  a = beta rho_p V with an RHS of interpolation bleed, i.e. the
+     *  unfloored E = num/rho_p division resurfacing (measured as
+     *  radial-Nyquist E_r striping in the vacuum region integrated into
+     *  secular B_theta checkering), and they are excluded from the gamma
+     *  closure. With the anchor set to the one-macroparticle-per-cell
+     *  density (a STATISTICS guard in the anchor taxonomy -- never a
+     *  physics floor, no density is modified), sub-one-count rows keep
+     *  their (tiny, sign-definite) screening in the operator but take the
+     *  vacuum div E = 0 completion as their content and a zeroed RHS --
+     *  the SolveETensorRZ recipe. Gates keep reading the per-step-frozen
+     *  snapshot; the anchor is a constant (iron rule). */
+    amrex::Real m_curlcurl_n_min = 0.0;
+
+    /** Registration-correct density consumption for the curlcurl_form
+     *  elliptic stages (hybrid_pic_model.curlcurl_staggered_sources;
+     *  default false = the landed conventions, bit-preserved). The rho
+     *  field is NODAL in RZ, but the elliptic-side consumers -- the
+     *  toroidal fold and acoef/anchor, the poloidal acoefs, RHS-membership
+     *  gates and fold weights, and the vacuum-closure gamma gate -- read
+     *  it with cell-centered-source conventions, landing every screening
+     *  coefficient half a cell off its row point (the kernel-side
+     *  numerator capture and eta/Holmstrom reads use proper staggered
+     *  Interp and are already correct). At the marginal one-count band
+     *  this is an O(1) numerator-vs-screening self-inconsistency on edge
+     *  rows. With the knob on, all four consumers use the proper
+     *  staggered/nodal Interp forms of the SAME frozen-family density:
+     *  direct rho(i,j) at nodal points (theta, gamma), the r-pair average
+     *  at Er points, the z-pair average at Ez points.
+     *  pc_curlcurl_banded's row mirrors follow the knob. */
+    bool m_curlcurl_staggered_sources = false;
+
+    /** E-solve form "tensor_form": the stateless Je elimination on the
+     *  curl-curl base. The theta-level electron momentum equation
+     *  (backward Euler over dt_eff = theta dt, division-free, Amano,
+     *  J. Comput. Phys. 275, 197 (2014) class) is solved for Je' in
+     *  closed form, (a I - [beta]x) Je' = r with a = 1 + dt_eff kE eta,
+     *  beta = dt_eff qm' B_tot, kE = qm' rho (qm' = e/m_e' with the
+     *  Eq-(27)-class effective mass), and Je' is eliminated through the
+     *  theta-stage Ampere/Faraday identity into the E-only operator
+     *
+     *      (1/mu0) curlcurl E + kE M^{-1} E
+     *          = M^{-1} [ kE eta Jp^n - qm' B x Je_meas - qm' grad Pe ],
+     *
+     *  M^{-1} = (a^2 I + a [beta]x + beta beta^T) / (a (a^2 + |beta|^2)),
+     *  Jp^n the step-start plasma current (frozen per step), Je_meas =
+     *  Jp^n - Ji the measured electron current. T(x) = kE M^{-1} is the
+     *  pointwise 3x3 screening tensor: |beta|-magnitude = the d_e^-2
+     *  coefficient, the [beta]x part the (now point-implicit) gyration
+     *  that e_form/curlcurl_form carry as the lagged Hall numerator, the
+     *  diagonal the resistive friction. Every coefficient scales with
+     *  density moments: T -> 0 smoothly in vacuum and the operator tends
+     *  to pure curl-curl (Laplace-class continuation) -- no floor, no
+     *  eta_vac, no pedestal in the E assembly. Stateless by construction:
+     *  Je is derived from the iterate, never stored (nothing to roll back
+     *  in rejected iterates/line search, nothing new to checkpoint).
+     *  v1: 1D_Z transverse sector (the RZ m = 0 assembly on the landed
+     *  curlcurl_form elliptic base follows). Theta-implicit hybrid only. */
+    bool m_esolve_tensor = false;
+    /** Eq-(27)-class CFL fraction of the tensor_form effective electron
+     *  mass (alpha in m_e' = max(m_e, B^2 q_e/(mu0 rho_g)
+     *  (dt_eff/(2 alpha dx_min))^2)). */
+    amrex::Real m_tensor_alpha = 0.5;
+    /** One-count density anchor [m^-3] of the effective-mass guard (a
+     *  STATISTICS anchor: it guards the rho division in the Eq-27 formula
+     *  at deposit-starved cells and must be the one-macroparticle-per-cell
+     *  density; physics features must never anchor here). 0 falls back to
+     *  n_floor. */
+    amrex::Real m_tensor_n_min = 0.0;
+    /** Effective theta-interval dt_eff = theta dt of the tensor
+     *  elimination; published once per step by the theta-implicit solver
+     *  (a committed per-step scalar, constant through all residual
+     *  evaluations). */
+    amrex::Real m_tensor_dt_eff = 0.0;
+    /** tensor_form scratch: the step-start plasma current Jp^n on the E
+     *  staggerings, captured once per step from the entry B^n (frozen --
+     *  committed pre-step state, per-step constant through all residual
+     *  evaluations). Zero init = the exact quiescent pre-history for
+     *  solves that run before the first capture. Mutable: allocated
+     *  lazily inside the const solve path. */
+    mutable std::array<std::unique_ptr<amrex::MultiFab>, 3> m_tensor_jp_old;
+    /** tensor_form (RZ) scratch: the per-step-frozen density snapshot
+     *  (rho_fp component 0 at step entry -- the committed-entry family the
+     *  darwin vacuum-recovery mask freezes). The RZ assembly derives EVERY
+     *  rho-dependent quantity from this one bit-frozen field -- the kE
+     *  screening rows, the Eq-(27) effective-mass guard, eta(rho), the
+     *  vacuum-closure gamma gate, and the RHS membership test -- so gate
+     *  membership and screening coefficients cannot flip between residual
+     *  evaluations (the frozen-rho-gates iron rule; a frozen gate over a
+     *  live-zero screening row would reopen the poloidal curl-curl
+     *  gradient null family). The 1D solve keeps its validated live
+     *  comp-0 convention. */
+    mutable std::unique_ptr<amrex::MultiFab> m_tensor_rho_old;
+    /** Set by the first CaptureTensorStepStart of the run; solves before
+     *  it (initialization) fall back to the live density. */
+    bool m_tensor_rho_captured = false;
+
+    /** Inner-solve preconditioner selection for the elliptic E-solves
+     *  (hybrid_pic_model.esolve_pc): "jacobi" (default; the legacy
+     *  point-diagonal path, bit-identical) or "block_banded" -- a z-line
+     *  block-banded direct factorization of the inner operator, extracted
+     *  from the solve's own apply by probing and used as the Krylov
+     *  preconditioner (tolerances and convergence checks unchanged; the
+     *  poloidal operator's exact SPD inverse keeps CG legal). Fixes the
+     *  cold-start transient budget wall: the unpreconditioned coupled
+     *  vacuum block grinds Jacobi-CG/BiCGStab into the 25000-iteration
+     *  caps on sharp-column decks. RZ + single MPI rank (v1). */
+    bool m_esolve_pc_banded = false;
+    /** Per-step rebuild stamp for the inner factorizations, bumped by the
+     *  end-of-step / step-entry hooks (RotateElectronInertiaHistory,
+     *  CaptureTensorStepStart). Within a step the factorization is
+     *  bit-stable across all residual evaluations (iron rule; staleness
+     *  costs Krylov iterations only, never correctness). */
+    int m_esolve_pc_stamp = 0;
+#if defined(WARPX_DIM_RZ)
+    /** Lazily built per-solver factorizations (mutable: the solves are
+     *  const; rebuilt when the stamp advances). */
+    mutable std::unique_ptr<ESolveBandedPC> m_theta_bpc;
+    mutable std::unique_ptr<ESolveBandedPC> m_pol_bpc;
+    mutable std::unique_ptr<ESolveBandedPC> m_tensor_bpc;
+#endif
+
+    /** One-shot discrete verification of the tensor-Helmholtz assembly
+     *  (hybrid_pic_model.tensor_verify, the esolve_pol_verify pattern):
+     *  the fused operator on a deterministic multi-mode field vs the
+     *  independently composed (1/mu0) curl(curl F) (two staggered curls
+     *  through a stored cell-centered intermediate) plus kE M^{-1} F with
+     *  M inverted by a general 3x3 adjugate; prints the max row error per
+     *  component normalized by the row magnitude (roundoff interior). */
+    bool m_esolve_tensor_verify = false;
+    mutable bool m_esolve_tensor_verified = false;
+
+    /** Allocate the tensor_form scratch (lazy, first use). */
+    void EnsureTensorScratch () const;
+    /** Capture the step-start plasma current Jp^n = curl B^n / mu0 - J_ext
+     *  into m_tensor_jp_old (called once per step by the theta-implicit
+     *  solver at step entry, when Bfield_fp still holds B^n). */
+    void CaptureTensorStepStart ();
+    /** \brief tensor_form E-solve, 1D_Z (see m_esolve_tensor). Transverse
+     *  (E_x, E_y) rows carry the staggered curl-curl (-d2/dz2 on the
+     *  shared z-nodal stagger, the discrete curl composed with itself)
+     *  plus the pointwise tensor; the E_z row is pointwise (curl-curl
+     *  annihilates the 1D longitudinal component) with the tensor
+     *  couplings interpolated across staggers. Point-block-Jacobi
+     *  preconditioned BiCGStab (the gyration part of T is antisymmetric,
+     *  so the operator is non-symmetric). Periodic z only (v1). */
+    void SolveETensor1D (ablastr::fields::VectorField const& Efield,
+                         ablastr::fields::VectorField const& Jifield,
+                         ablastr::fields::VectorField const& Bfield,
+                         amrex::MultiFab const& rho,
+                         amrex::MultiFab const& Pe,
+                         int lev, bool solve_for_Faraday,
+                         bool include_resistivity) const;
+
+    /** \brief tensor_form E-solve, RZ m = 0 (see m_esolve_tensor): the
+     *  stateless Je elimination on the RZ curl-curl base, solved as one
+     *  coupled 3-component system on the native Yee staggerings.
+     *
+     * Rows are scaled by the poloidal identity form's control volumes
+     * (V_r = r_c dr, V_z = r_n dr with the exact axis half cell, V_t =
+     * r_n dr), making the curl-curl block the energy-form gradient:
+     *
+     *   V_c [ (1/mu0) (curlcurl E)_c + kE (M^{-1} E)_c ] = V_c (M^{-1} w)_c
+     *
+     * with w = kE eta Jp^n - qm B x Je_meas - qm grad Pe (all division-
+     * free). The poloidal (E_r, E_z) curl-curl rows are the composed
+     * identity-form rows of SolveEPolCurlCurlRZ (W = d_z E_r - d_r E_z
+     * through cell centers), completed in vacuum by the same energy-form
+     * -grad(gamma div .) closure; the toroidal row composes the native
+     * curls w_r = -d_z E_t (B_r stagger) and w_z = (1/r_c) d_r (r E_t)
+     * (B_z stagger), whose energy gradient carries the axis regularity
+     * naturally (r_0 = 0 removes the axis flux -- no hand-built branch).
+     * Dirichlet identity rows: E_theta axis (regularity) and wall (PEC),
+     * E_z wall (PEC). Periodic z only (v1); non-darwin only (the
+     * transverse-state split makes curlcurl E_L != 0 discretely in RZ --
+     * the sector caveat).
+     *
+     * EVERY rho-derived coefficient and binary gate (kE, effective mass,
+     * eta(rho), gamma, RHS membership) reads the per-step-frozen
+     * m_tensor_rho_old snapshot -- nodal rho consumed by proper staggered
+     * Interp (nodal source), unlike the identity form's cell-centered-
+     * convention averages. B, Ji, and E follow the iterate (smooth).
+     * Membership (gamma and the RHS test) thresholds at the ONE-COUNT
+     * anchor rho_1c = q_e (tensor_n_min | n_floor) -- a statistics guard,
+     * never a density modification: strictly-zero gating leaves epsilon
+     * deposit-tail rows as near-null gradient directions driven by
+     * non-rho-scaled numerator bleed, i.e. the unfloored division
+     * reappears as a solver conditioning floor. Sub-one-count rows keep
+     * their (tiny) screening in the operator and take the div E = 0
+     * continuation as their content.
+     * Point-Jacobi preconditioned BiCGStab on the composite (the gyration
+     * part of the tensor is antisymmetric). hybrid_pic_model.tensor_verify
+     * runs the one-shot fused-vs-composed row verification. */
+    void SolveETensorRZ (ablastr::fields::VectorField const& Efield,
+                         ablastr::fields::VectorField const& Jifield,
+                         ablastr::fields::VectorField const& Bfield,
+                         amrex::MultiFab const& rho,
+                         amrex::MultiFab const& Pe,
+                         int lev, bool solve_for_Faraday,
+                         bool include_resistivity) const;
 
     /** Assemble E_inertial on the nodal scratch "hybrid_E_inertial_nodal"
      *  from the current theta-stage state (see m_include_electron_inertia).
@@ -1211,9 +1760,50 @@ public:
      *  response time that the instantaneous elliptic limit idealizes away.
      *  Slow drives (ramp time >> tau) are delivered unchanged. */
     amrex::Real m_darwin_vacrec_relax_time = 0.0;
+    /** Freeze the recovery/Faraday-overwrite mask density per step. The
+     *  masks were written against "component 0 of rho_fp = the step-entry
+     *  rho^n", but under the implicit scheme that component is a PRE-push
+     *  deposit: only the first evaluation of a step sees rho(x^n) there,
+     *  and afterwards it holds the previous evaluation's midpoint
+     *  positions (see hybrid_rho_n_frozen, which exists for the same
+     *  reason). A live read therefore lets mask MEMBERSHIP follow the
+     *  iterate: near-threshold cells swap between Ohm rows and
+     *  band-overwrite rows across residual evaluations -- a non-smooth
+     *  hidden state in the residual map that floors Newton at the flicker
+     *  amplitude independently of tolerance. It also splits within one
+     *  evaluation (the A recovery runs before the deposit, the Faraday
+     *  overwrite after it). With this on (default), all masks read a
+     *  per-step copy of the committed entry density, captured in the
+     *  implicit step entry alongside the E_L^n entry solve (the same
+     *  density snapshot that solve consumes); the partition is constant
+     *  through every base/probe/line-search evaluation of the step and
+     *  refreshes between steps. 0 restores the legacy live-density
+     *  masks. */
+    bool m_darwin_vacuum_recovery_frozen_mask = true;
     amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
+    /** Iteration operator of the recovery correction solve.
+     *  "poisson" (default): the nodal FD vector-Poisson map (truncated
+     *  identity -lap dA = mu0 J_imp; the defect J_imp is still measured
+     *  by composed curls, so the recovery FIXED POINT -- masked
+     *  curl(curl A) = 0 -- is exact either way; a nonzero div dA along
+     *  the iteration never reaches B, since B = curl A).
+     *  "curlcurl": the native amrex::MLCurlCurl operator on the edge (A)
+     *  staggering -- (curlcurl + beta) dA = -mu0 J_imp -- which cancels
+     *  the measured defect in a single solve instead of asymptotically
+     *  and needs no nodal-edge interpolation of dA. beta is a small
+     *  Tikhonov regularization of the curl-curl null space (the discrete
+     *  gradient family; the masked rhs is not orthogonal to it): it
+     *  shapes the iteration only, not the fixed point, and its gradient-
+     *  family content in dA is invisible to B. Cartesian (3D / 2D-XZ)
+     *  only: amrex::MLCurlCurl carries no RZ metric (the in-tree fused RZ
+     *  curl-curl of SolveEPolCurlCurlRZ is the future native-RZ path);
+     *  RZ and embedded boundaries stay on "poisson". */
+    std::string m_darwin_vacuum_recovery_operator = "poisson";
+    /** Tikhonov beta for the "curlcurl" recovery operator, relative to
+     *  the grid-scale curl-curl diagonal sum_d 4/dx_d^2. */
+    amrex::Real m_darwin_vacrec_cc_beta_rel = 1.0e-8;
     int m_darwin_vacrec_verbosity = 0;
     /** Recompute the recovery (and evaluate the band field from the live
      *  recovered A) inside matrix-free Jacobian probe evaluations, instead
@@ -1232,6 +1822,18 @@ public:
      */
     void ComputeVacuumARecovery (bool a_from_jacobian,
                                  amrex::Real a_dt_eff);
+
+    /** "curlcurl" backend of the recovery correction solve (see
+     *  m_darwin_vacuum_recovery_operator): edge-staggered
+     *  (curlcurl + beta) dA = -mu0 J_imp through amrex::MLCurlCurl, then
+     *  A += omega dA in the mask. Cartesian-only (parse-guarded), no EB.
+     */
+    void VacuumRecoveryCurlCurlSolve (bool a_frozen_probe,
+                                      amrex::Real a_omega,
+                                      amrex::MultiFab const& a_rho,
+                                      amrex::Real a_rho_floor,
+                                      int a_mask_mode,
+                                      bool a_flux_only);
 
     /** Overwrite the recovered components of Efield_fp in masked (vacuum)
      *  cells with the Faraday-consistent field of the recovered vector
@@ -2307,6 +2909,30 @@ public:
     /** Plasma density floor - if n < n_floor it will be set to n_floor */
     amrex::Real m_n_floor = 1.0;
 
+    /** Width of the C1 smooth-max blend of the density floor, in units of
+     *  n_floor (0 = exact hard max, bit-compatible legacy behavior). The
+     *  hard max(rho, rho_floor) is a C0 kink in the Ohm residual at the
+     *  floor crossing (and the conditional external-E subtraction a jump);
+     *  cells whose deposit chatters across the threshold stall a sharp
+     *  Newton iteration on it. The blend keeps the halo response FLOORED
+     *  (bounded exactly like the hard max -- this is NOT the Holmstrom
+     *  vacuum mask, which suppresses the halo response) but makes the
+     *  residual smooth. */
+    amrex::Real m_n_floor_smooth_width = 0.0;
+
+    /** Opt-in legacy behavior: store the theta-extrapolated Je^{n+1} in
+     *  the inertia history instead of the measured delivered-state
+     *  assembly. The extrapolated store is a -(1-theta)/theta recursion
+     *  on the stored values -- marginal (-1) at theta = 1/2 -- and rings
+     *  at period 2 with the E_inertial feedback. Comparison knob only. */
+    bool m_electron_inertia_extrapolated_history = false;
+
+    /** Width (in units of n_floor) of the electron-inertia fluid-validity
+     *  taper: the inertia term fades to zero through the floor band, so
+     *  density-floored cells holding O(1) particles cannot self-force
+     *  runaway through (m_e/e) dJe/dt / rho_lim. 0 disables (legacy). */
+    amrex::Real m_electron_inertia_floor_taper = 0.0;
+
     /** Plasma resistivity */
     std::string m_eta_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
@@ -2320,15 +2946,21 @@ public:
      *  because it is a lazily-set cache flag inside a const call chain. */
     mutable bool m_qdsmc_J_plasma_valid = false;
 
-    /** Opt-in momentum-consistent particle push field for the
-     *  theta-implicit hybrid solver: subtract the resistive part of the
-     *  Ohm field from the field gathered by the ions (the explicit scheme
-     *  pushes ions with the no-resistivity Ohm field; ion-side resistive
-     *  friction is the separate drag operator). Off by default: the
-     *  correction couples the resistive field into the particle response
-     *  and can destabilize the Newton iteration in whistler-marginal
-     *  configurations. */
-    bool m_implicit_push_excludes_resistive_field = false;
+    /** Momentum-consistent particle push field for the theta-implicit
+     *  hybrid solver: subtract the resistive part of the Ohm field from
+     *  the field gathered by the ions (the explicit scheme pushes ions
+     *  with the no-resistivity Ohm field; ion-side resistive friction is
+     *  the separate drag operator). Default ON: with the full Ohm field
+     *  in the push, eta*J does net positive work on the deposited ion
+     *  current and the resistive term becomes an energy source of the
+     *  advance rather than a sink (1D periodic energy-ledger campaign,
+     *  2026-08-25). Default ON: the correction is assembled per residual
+     *  evaluation with both Ohm passes through the identical boundary
+     *  stack (see ThetaImplicitHybrid::ComputeRHS); the old opt-in
+     *  default's Newton-stability caution traced to a boundary-asymmetric,
+     *  lagged assembly, fixed alongside this flip. Set false to reproduce
+     *  pre-fix trajectories. */
+    bool m_implicit_push_excludes_resistive_field = true;
 
     /** True when any resistive term is configured: a non-trivial global
      *  resistivity parser, per-species overlays, or hyper-resistivity. */
@@ -2444,6 +3076,18 @@ public:
      *  Default off (the Laplacian path is bit-identical legacy).
      *  Input: hyper_resistivity_curl_curl. */
     bool m_hyper_res_curl_curl = false;
+    /** Exact-operator hyper-resistivity: apply E_H = +curl(eta_H curl J)
+     *  with the curls composed discretely (edge -> face -> edge, the
+     *  Ampere-closure stencils) and the coefficient INSIDE the outer curl,
+     *  face-averaged -- the energy-sign-definite form for spatially
+     *  varying eta_H (E_H.J integrates to eta_H |curl J|^2 >= 0) --
+     *  instead of the truncated -eta_H lap J, which equals it only at
+     *  zero discrete div J. Deposited and Ampere-closure currents carry
+     *  machine-level-plus divergence, and the truncated form's
+     *  grad(div J) remainder is non-dissipative. Default off to keep
+     *  existing trajectories bit-identical; intended to become the
+     *  default with the next validated chain. */
+    bool m_hyper_resistivity_curlcurl = false;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";
@@ -2484,6 +3128,26 @@ public:
      * sub-floor vacuum regions freely. Not a user input. */
     bool m_external_e_subtraction_unconditional = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
+
+    /** Opt-in conformal embedded-boundary wall: the enlarged-cell (ECT)
+     *  Faraday update on cut faces with a constitutive-PEC closure (E and J
+     *  zeroed on covered and cut edges). Requires embedded boundaries, a
+     *  staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry. */
+    bool m_use_conformal_eb = false;
+
+    /** Wall constitutive model for the conformal EB wall: "conductor"
+     *  (default; E and J zeroed on covered and cut edges, Dirichlet Pe)
+     *  or "transparent" (EM-transparent standoff: the fields ignore the
+     *  wall entirely while the EB geometry and particle handling stay
+     *  identical -- a validation mode that separates "wall eats plasma"
+     *  from "wall shorts fields"). */
+    std::string m_conformal_wall_model = "conductor";
+    bool m_conformal_wall_conductor = true;
+
+    /** Cached EB fill classification for the deposited edge fields (ion
+     *  current fill + deposit fold), one entry per level; reset on regrid.
+     *  Mutable: (re)built inside const solver calls. */
+    mutable amrex::Vector<warpx::hybrid::EBFillStatus> m_eb_bc_status_E;
 
     /** Gpu Vector with index type of the Jx multifab */
     amrex::GpuArray<int, 3> Jx_IndexType;
