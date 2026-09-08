@@ -394,6 +394,15 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // and the FULL ion diffusivity in the total slot.
         bool m_conduction_pair_active = false;
         const amrex::MultiFab* m_conduction_blend = nullptr;
+        // Frozen copy of the blend for this preconditioner update: the
+        // solver refills its blend register in every residual evaluation
+        // (ComputeFaceFluxes inside ComputeRHS: JFNK probes and line-search
+        // trials included) from the live density, momentum and ion energy,
+        // so reading the solver's pointer at apply time would make the pair
+        // inverse a different operator in every GMRES iteration of one
+        // Newton solve. Copied at Update, read at apply, like the density
+        // weight's m_conduction_density_frozen.
+        std::unique_ptr<amrex::MultiFab> m_conduction_blend_frozen;
         std::unique_ptr<amrex::MultiFab> m_pair_blended_rhs;
 
         int m_field_iterations = 2;
@@ -1017,6 +1026,8 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
     m_cross_solution = std::make_unique<amrex::MultiFab>(
         density.boxArray(), density.DistributionMap(), m_signal_components, 1);
     m_pair_blended_rhs =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
+    m_conduction_blend_frozen =
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
     m_momentum_solution =
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 3, 1);
@@ -1768,6 +1779,11 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
                                m_wall_conduction_component[1] >= 0 &&
                                m_wall_conduction_component[2] >= 0 &&
                                m_conduction_blend != nullptr;
+    if (m_conduction_pair_active)
+    {
+        // Freeze the pair's blend weight for this update (see the member).
+        amrex::MultiFab::Copy(*m_conduction_blend_frozen, *m_conduction_blend, 0, 0, 1, 0);
+    }
     const bool add_conduction = m_conduction_block_active;
     // Density weighting (see the members): needs the face density
     // component of the registers and the cell density, and identity rows
@@ -2242,7 +2258,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         {
             const auto signal_rhs = m_signal_rhs->array(mfi);
             const auto blended = m_pair_blended_rhs->array(mfi);
-            const auto blend = m_conduction_blend->const_array(mfi);
+            const auto blend = m_conduction_blend_frozen->const_array(mfi);
             amrex::ParallelFor(
                 mfi.validbox(),
                 [=] AMREX_GPU_DEVICE(int i, int j, int k)
