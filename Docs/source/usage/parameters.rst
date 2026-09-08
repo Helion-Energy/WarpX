@@ -4184,6 +4184,31 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` to be positive. Costs one extra pass and two
     ghost exchanges per right-hand-side evaluation. With the bound inactive the result is unchanged.
 
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_limit
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Free-streaming cap on the ``isothermal`` domain-face conduction boundary condition
+    (``hybrid_pic_model.qdsmc_conduction_bc_lo`` / ``_hi`` = ``isothermal`` with the wall temperature from
+    ``qdsmc_conduction_bc_Te_lo`` / ``_hi`` in eV). At ``0`` the boundary node row is reset to the wall
+    temperature after every accepted conduction substep: a bath of infinite conductance whose drain along every
+    field line ending on the wall is set by the interior conduction alone. With a positive factor :math:`f` the
+    energy a boundary node may lose to the wall in a substep :math:`\Delta t_s` is bounded by the free-streaming
+    heat flux through its dual-cell face, :math:`q_\max A \Delta t_s` with
+    :math:`q_\max = f\, n_e v_{te} k_B T_e` and :math:`v_{te} = \sqrt{k_B T_e / m_e}`, both evaluated at the node's
+    interior (pre-reset) state; the node temperature is lowered by at most that much toward the wall temperature
+    and never below it. A wall hotter than the node still pins it to the wall temperature. :math:`f = 1` is the
+    kinetic free-streaming bound; a sheath-limited wall corresponds to :math:`f` of order the electron sheath
+    transmission factor. The ``flux`` boundary type is unaffected.
+
+    The applied exchange is booked in the per-wall tallies exactly as for the plain reset. Their sum is printed as
+    ``wall_pin`` on the ``[qdsmc] step N joule_dropped_J:`` line (cadence
+    ``hybrid_pic_model.joule_dropped_energy_print_interval``, armed whenever any domain-face conduction BC is
+    set), as stored: node-u units summed over boundary nodes (RZ weighted by :math:`2\pi r/\Delta r`, so
+    multiply by :math:`\Delta r \Delta z` for joules; Cartesian: multiply by the node dual-cell volume),
+    positive = into the plasma.
+
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
     :default: ``false``

@@ -2085,6 +2085,21 @@ public:
     amrex::Real m_cond_bc_Te[AMREX_SPACEDIM][2] = {};
     amrex::Real m_cond_bc_q[AMREX_SPACEDIM][2] = {};
 
+    /** Free-streaming cap on the isothermal domain-face pin (bc == 1).
+     *  0 (the default) keeps the Dirichlet reset: the whole boundary
+     *  node row is set to Te_wall after every accepted conduction
+     *  substep, a bath of infinite conductance. f > 0 bounds the energy
+     *  a boundary node may LOSE to the wall per substep dt_sub at
+     *  q_max A dt_sub, q_max = f n_e v_te kB Te with v_te =
+     *  sqrt(kB Te/m_e), both at the node's interior (pre-reset) state,
+     *  and lowers Te toward Te_wall by at most that much (never below
+     *  it); A/V = 1/dx_d for the boundary node's dual cell, the same
+     *  convention as the prescribed-flux BC. A wall hotter than the
+     *  node still pins it to Te_wall. The applied exchange is booked in
+     *  m_cond_wall_tally exactly as for the plain pin. Input:
+     *  qdsmc_conduction_wall_flux_limit. */
+    amrex::Real m_cond_wall_flux_limit = 0.0;
+
     /** Cumulative wall-BC energy tallies per (grid dim, side 0=lo/
      *  1=hi), in node-u units [J/m^3] summed over boundary nodes
      *  (multiply by the node dual-cell volume for Joules; positive =

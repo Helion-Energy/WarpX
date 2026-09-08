@@ -739,6 +739,11 @@ void HybridPICModel::ReadParameters ()
                 }
             }
         }
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_wall_flux_limit", m_cond_wall_flux_limit);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_wall_flux_limit >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_wall_flux_limit must be "
+            ">= 0 (0 = plain isothermal reset)");
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -6354,10 +6359,16 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
 
     // Dropped-energy tally print (rank 0), for the deck-side energy audit:
     // fires only when a decline channel is armed and the cadence input is on.
+    bool any_wall_bc = false;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        any_wall_bc = any_wall_bc ||
+            (m_cond_bc[d][0] != 0) || (m_cond_bc[d][1] != 0);
+    }
     bool const any_decline_armed =
         (m_joule_heating_n_min > m_n_floor) ||
         (m_te_shunt_eV > 0._rt) ||
         (m_cond_eb_bc == 1) ||
+        any_wall_bc ||
         m_has_energy_sink ||
         m_has_electron_stopping ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
@@ -6365,6 +6376,14 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
           m_joule_redirect_kick_cap_vth_frac > 0._rt));
     if (any_decline_armed && m_joule_dropped_print_interval > 0 &&
         warpx.getistep(0) % m_joule_dropped_print_interval == 0) {
+        // domain-face wall pins (isothermal / flux BCs), summed over dims
+        // and sides, AS STORED: node-u [J/m^3] summed over boundary nodes
+        // (RZ: weighted by 2 pi r/dr, so x dr dz gives Joules; Cartesian:
+        // x the node dual-cell volume). Positive = into the plasma.
+        amrex::Real wall_pin = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            wall_pin += m_cond_wall_tally[d][0] + m_cond_wall_tally[d][1];
+        }
         amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
             << " joule_dropped_J: heat_gate=" << m_joule_dropped_heat_gate_J
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
@@ -6373,7 +6392,9 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " sink_floor=" << m_energy_sink_declined_J
             << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
-            << " (cumulative; wall_bath > 0 = into plasma)\n";
+            << " wall_pin=" << wall_pin
+            << " (cumulative; wall_bath > 0 = into plasma; wall_pin as "
+               "stored, node-u x dual-cell volume for J)\n";
     }
 
     // Contamination tally print (same cadence; the conduction channels are
@@ -6661,6 +6682,7 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     auto const dx_arr = geom.CellSizeArray();
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
+    amrex::Real const me = PhysConst::m_e;
 #ifdef WARPX_DIM_RZ
     amrex::Real const r_edge0 = geom.ProbLo(0);
     amrex::Real const dr_rz = geom.CellSize(0);
@@ -6687,6 +6709,11 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
         // prescribed flux: u injected per substep into the boundary
         // row's dual cells, q A dt / V = q dt / dx  [J/m^3]
         amrex::Real const du_flux = m_cond_bc_q[d][s] * dt_c / dx_arr[d];
+        // isothermal pin, free-streaming cap: the node may lose at most
+        // q_max A dt_c per substep with q_max = f n_e v_te kB Te at the
+        // interior state; as node-u that is q_max dt_c / dx (same A/V =
+        // 1/dx convention as du_flux). 0 = plain Dirichlet reset.
+        amrex::Real const cap_dt_dx = m_cond_wall_flux_limit * dt_c / dx_arr[d];
 
         amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
         amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
@@ -6733,9 +6760,23 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
 #endif
                 if (bc == 1) {
                     // thermal bath: pin the row, tally the exchange
-                    amrex::Real const du =
-                        1.5_rt * kb * ne * (Te_wall_K - Te_arr(i,j,k));
-                    Te_arr(i,j,k) = Te_wall_K;
+                    amrex::Real const T0 = Te_arr(i,j,k);
+                    amrex::Real du = 1.5_rt * kb * ne * (Te_wall_K - T0);
+                    if (cap_dt_dx > 0.0_rt && T0 > Te_wall_K) {
+                        // cooling toward the wall: cap the drain at the
+                        // free-streaming flux through the dual-cell face,
+                        // du_max = f n_e v_te kB T0 dt/dx; as a temperature
+                        // drop (n_e cancels against 1.5 n_e kB) that is
+                        // dT_max = f v_te T0 dt / (1.5 dx). Never below
+                        // Te_wall; the tally books the applied change.
+                        amrex::Real const vte = std::sqrt(kb * T0 / me);
+                        amrex::Real const T1 = amrex::max(Te_wall_K,
+                            T0 - cap_dt_dx * vte * T0 / 1.5_rt);
+                        du = 1.5_rt * kb * ne * (T1 - T0);
+                        Te_arr(i,j,k) = T1;
+                    } else {
+                        Te_arr(i,j,k) = Te_wall_K;
+                    }
                     return {w_v*du};
                 }
                 // prescribed flux: inject, clamp cooling at Te = 0,
