@@ -12,3 +12,7 @@ FILE = inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly
 # backend relies on).
 implicit_mhd.resistive_direct_dump_prefix = diags/resistive_direct
 implicit_mhd.resistive_direct_dump_assembly = 2
+# the cuDSS option list in its ParmParse form (one quoted name=value token
+# each): parsed and validated at Define on every build, applied only where
+# cuDSS factorizes (the CPU path ignores it after validation)
+implicit_mhd.resistive_direct_cudss_options = "pivot_type=none" "nd_nlevels=16"

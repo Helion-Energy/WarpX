@@ -2569,6 +2569,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# PICMI emission of implicit_mhd.resistive_direct_cudss_options (pure
+# Python, no compiled bindings): the list, string and space-separated
+# string forms must reach the input deck as double-quoted name=value
+# tokens (an unquoted a=b token is misread by ParmParse); the unset kwarg
+# emits nothing
+add_test(
+    NAME test_picmi_resistive_direct_cudss_options
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_picmi_resistive_direct_cudss_options.py
+)
+set_tests_properties(test_picmi_resistive_direct_cudss_options PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${WarpX_SOURCE_DIR}/Python"
+    LABELS "picmi"
+)
+
 # matrix-dump twin (single rank): the assembled rows of the direct
 # resistive block are written as the binary CSR file of the offline solver
 # benchmark and checked against the operator's structure -- one unknown per
@@ -2596,7 +2610,24 @@ add_warpx_test(
     RZ  # dims
     1  # nprocs
     inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_reduced  # inputs
-    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.03"  # analysis
+    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.03 0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# reduced-solve partition with FROZEN WALL FACES (single rank): the live
+# fluid wall deck with implicit_mhd.wall_field_freeze = 1 -- frozen faces
+# are identity rows that live faces still read (307 one-sided entries on
+# this deck), so 69 of its 408 rows are kept by the column criterion ALONE
+# and must stay in the factorized sub-system for the trivial rows to be
+# exact; the analysis requires the column-only count and rejects any kept
+# row referencing a dropped one (a row-only rule fails three checks)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze_reduced  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1 implicit_mhd.resistive_direct_dump_prefix=diags/resistive_direct implicit_mhd.resistive_direct_dump_assembly=2 implicit_mhd.resistive_direct_row_threshold=0"  # inputs
+    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.3 60"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -2614,7 +2645,7 @@ add_warpx_test(
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_band_eta my_constants.D=0.02 implicit_mhd.resistive_direct_dump_prefix=diags/resistive_direct implicit_mhd.resistive_direct_dump_assembly=2 implicit_mhd.resistive_direct_row_threshold=1e-2"  # inputs
-    "analysis_mhd_resistive_direct_reduced.py 1e-2 10 0.5"  # analysis
+    "analysis_mhd_resistive_direct_reduced.py 1e-2 10 0.5 0"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
