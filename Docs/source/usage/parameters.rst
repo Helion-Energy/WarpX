@@ -472,6 +472,30 @@ Overall simulation parameters
             line reports the held count; the diagnostic file gains the
             columns below.
 
+          - ``newton.active_set_hold_defect_bound`` (``float``, default: -1 = unbounded; requires ``newton.active_set_hysteresis > 0``).
+            Debt bound of the release hysteresis. A held member sits on its
+            bound while its equations want to lift it, so the hold books an
+            inward (negative) defect at the exit; the whole-solve hold
+            (``hysteresis >= max_iterations``) measured on the production
+            formation deck kept ~27 electron-energy wall components the
+            iteration-0 projection had just clamped, with an inward defect
+            of 3.2 against a full residual of ~5 and -16 J booked in one
+            step, from which the run never recovered, while the wall-row
+            churn the hold is meant to suppress carries a held defect of
+            order 1e-3 of the full norm. With a non-negative bound, at
+            every identification after iteration 0 the norm of the
+            residual over the held members (the solver norm) is compared
+            with the larger of ``newton.active_set_tolerance`` times the
+            iteration-0 free norm and the bound times the iteration-0 full
+            norm; above it every held member is released for that
+            identification (counters cleared, the plain rule decides) and
+            the solve continues on the enlarged free set -- the
+            free-subspace exit is never granted while a held defect above
+            the bound hides in the pinned part. 0 releases the held
+            members at every identification (the plain rule, for testing
+            the release pass). The diagnostic file gains the column
+            ``hold_releases`` (release passes per solve).
+
           - ``newton.line_search_resolve`` (``bool``, default: false; requires ``newton.active_set = 1``).
             Entrant re-solve. When the projection clamps NEW components into
             the active set at a Newton iteration and the full step then
@@ -515,16 +539,31 @@ Overall simulation parameters
             the search is declared failed (the same floor the 12-rung
             halving ladder reaches).
 
+          - ``newton.line_search_report`` (``bool``, default: false).
+            Report every line-search trial: the Jacobian-vector product
+            :math:`J\,dU` is formed once per Newton iteration (one more
+            matrix-free application with the operator and masks the solve
+            used) and each trial prints its Armijo grade, the nonlinear
+            defect :math:`d = F(U - \lambda dU) - F(U) + \lambda J dU` --
+            the part of the trial residual the linear model did not
+            predict -- by state block and region in the layout of the
+            ``pc_mhd_block.residual_block_norms`` report (with :math:`F(U)`
+            as the reference), and a floor-band census of the floored
+            fluid blocks (cells on their admissibility bound, within 1.2
+            and within 2 times it, for the base and the trial state, and
+            the cells that change band). Off is bit-identical.
+
           - ``newton.globalization_diagnostics`` (``bool``, default: false).
             Record the globalization counters below in the Newton
             diagnostic file without changing any arithmetic (for a control
             run of the plain rules).
 
             With any of ``newton.active_set_hysteresis``,
+            ``newton.active_set_hold_defect_bound``,
             ``newton.line_search_resolve``, ``newton.line_search`` or
             ``newton.line_search_min_step`` at a non-default value, or with
             ``newton.globalization_diagnostics``, the Newton diagnostic file
-            carries seven more columns per solve:
+            carries eight more columns per solve:
             ``entrants`` (components the projection clamped into the set
             during the solve), ``released`` and ``held`` (at the
             identifications), ``resolves`` (entrant re-solves),
@@ -533,7 +572,8 @@ Overall simulation parameters
             (components the identification moved down onto their bounds; a
             member held while off its bound would show up here, which makes
             it the witness of the hold's bound-resident guard -- the
-            ``max_bound_excess`` column is measured after the move and is not).
+            ``max_bound_excess`` column is measured after the move and is not)
+            and ``hold_releases`` (release passes of the debt-bounded hold).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 

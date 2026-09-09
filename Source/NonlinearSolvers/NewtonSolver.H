@@ -122,12 +122,22 @@ public:
                            << (m_active_set_hysteresis > 0
                                    ? " (members whose residual turned inward are held this many identifications)\n"
                                    : " (released on the sign of their residual)\n");
+            if (m_active_set_hysteresis > 0) {
+                amrex::Print() << "Active-set hold debt bound:  ";
+                if (m_active_set_hold_defect_bound >= 0.0) {
+                    amrex::Print() << m_active_set_hold_defect_bound
+                                   << " x the iteration-0 residual norm (held members are released above it)\n";
+                } else {
+                    amrex::Print() << "none (unbounded hold)\n";
+                }
+            }
             amrex::Print() << "Line-search entrant re-solve: "
                            << (m_line_search_resolve ? "true" : "false") << "\n";
         }
         amrex::Print()     << "Newton line search:         "
                            << amrex::getEnumNameString(m_line_search)
-                           << ", min step " << m_line_search_min_step << "\n";
+                           << ", min step " << m_line_search_min_step
+                           << (m_report_line_search ? ", trial report on" : "") << "\n";
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -318,6 +328,30 @@ private:
     int m_active_set_hysteresis = 0;
 
     /**
+     * \brief Debt bound of the release hysteresis
+     * (newton.active_set_hold_defect_bound, default -1 = unbounded, the
+     * plain hysteresis; requires newton.active_set_hysteresis > 0). At
+     * every identification after iteration 0 the norm of the residual
+     * over the HELD members -- their inward defect, in the solver norm --
+     * is compared with max(active_set_tolerance x free_norm0, bound x
+     * norm0): the free-subspace convergence target and this fraction of
+     * the iteration-0 full residual. When it exceeds the bound every held
+     * member is released for that identification (hold counters cleared,
+     * the plain release rule decides) and the iteration continues on the
+     * enlarged free set; the free-subspace exit is therefore never granted
+     * while a held defect above the bound is hidden in the pinned part. A
+     * bound of exactly 0 releases the held members at every identification
+     * (the plain rule through the release pass, for tests).
+     * Measured on the production formation deck (19.16 us): the
+     * whole-solve hold kept ~27 electron-energy wall components the
+     * iteration-0 projection had just clamped, with an inward defect of
+     * 3.2 against a full norm of ~5 and -16 J booked in one step, from
+     * which the run never recovered; the wall-row churn the hold is meant
+     * to suppress carries a held defect of order 1e-3 of the full norm.
+     */
+    amrex::Real m_active_set_hold_defect_bound = -1.0;
+
+    /**
      * \brief Entrant re-solve (newton.line_search_resolve, default
      * false; requires newton.active_set = 1). When the projection clamps
      * NEW components into the active set at a Newton iteration and the
@@ -389,6 +423,23 @@ private:
     int m_report_linear_residual_min_iters = 30;
     int m_report_linear_residual_interval = 1;
     mutable Vec m_linear_residual;
+
+    /**
+     * \brief Line-search report (newton.line_search_report, default off =
+     * no extra work, bit-identical): with the knob on, J dU is formed once
+     * per Newton iteration (one more matrix-free Jacobian application,
+     * the operator and masks the solve used) and every line-search trial
+     * hands the operator the NONLINEAR defect of the trial,
+     * d = F(U - l dU) - F(U) + l J dU -- the part of the trial residual the
+     * linear model did not predict -- together with F(U), the base and
+     * trial states and the Armijo grade, for the per-block, per-region
+     * report and the floor-band census (ReportNonlinearDefectBlocks). The
+     * datum behind "which projection or limiter causes the damped
+     * iterations": the trial norm splits into the inexactness of the
+     * linear solve, (1 - l) F + l r_lin, and d.
+     */
+    bool m_report_line_search = false;
+    mutable Vec m_jacobian_direction, m_nonlinear_defect;
 
     /**
      * \brief Relative tolerance for the Newton solver.
@@ -620,6 +671,10 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
     m_trial_U.Define(a_U);
     m_trial_F.Define(a_U);
     if (m_report_linear_residual_blocks) { m_linear_residual.Define(a_U); }
+    if (m_report_line_search) {
+        m_jacobian_direction.Define(a_U);
+        m_nonlinear_defect.Define(a_U);
+    }
 
     m_ops = a_ops;
 
@@ -742,6 +797,8 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             diagnostic_file << "[" << c++ << "]rejected_trials";
             diagnostic_file << " ";
             diagnostic_file << "[" << c++ << "]moved";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]hold_releases";
         }
         diagnostic_file << "\n";
         diagnostic_file.close();
@@ -791,6 +848,11 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_active_set || m_active_set_hysteresis == 0,
         "newton.active_set_hysteresis requires newton.active_set = 1");
+    utils::parser::queryWithParser(pp_newton, "active_set_hold_defect_bound",
+                                   m_active_set_hold_defect_bound);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_active_set_hold_defect_bound < 0.0 || m_active_set_hysteresis > 0,
+        "newton.active_set_hold_defect_bound requires newton.active_set_hysteresis > 0");
     pp_newton.query("line_search_resolve", m_line_search_resolve);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_active_set || !m_line_search_resolve,
@@ -802,8 +864,10 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
         m_line_search_min_step > 0.0 && m_line_search_min_step < 1.0,
         "newton.line_search_min_step must be in (0, 1)");
     pp_newton.query("globalization_diagnostics", m_globalization_diagnostics);
+    pp_newton.query("line_search_report", m_report_line_search);
     m_globalization_knobs =
         (m_active_set_hysteresis > 0) || m_line_search_resolve ||
+        (m_active_set_hold_defect_bound >= 0.0) ||
         (m_line_search != NewtonLineSearchType::backtrack) ||
         (m_line_search_min_step != 1.0 / 4096.0) || m_globalization_diagnostics;
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
@@ -932,6 +996,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     int solve_resolves = 0;
     int solve_damped = 0;
     int solve_rejected = 0;
+    int solve_hold_releases = 0;
 
     int iter;
     int linear_solver_iters = 0;
@@ -953,6 +1018,48 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             amrex::Long held = 0;
             active_num_pinned = m_ops->IdentifyActiveSet(
                 a_U, m_F, iter > 0, entered, released, held);
+            if (iter > 0 && held > 0 && m_active_set_hold_defect_bound >= 0.0_rt) {
+                // Debt-bounded hold (m_active_set_hold_defect_bound): the
+                // inward defect of the held members against the larger of
+                // the free-subspace convergence target and the bound's
+                // fraction of the iteration-0 full residual. Above it the
+                // hold has become a physics debt, not an anti-cycling
+                // device: release every held member now (the plain rule
+                // decides, counters cleared) and continue on the enlarged
+                // free set -- the convergence test below then sees their
+                // residual.
+                const amrex::Real held_defect = m_ops->HeldDefectNorm(m_F);
+                const amrex::Real hold_bound = std::max(
+                    m_active_set_tolerance * active_free_norm0,
+                    m_active_set_hold_defect_bound * norm0);
+                if (this->m_verbose) {
+                    // Calibration datum for the bound: the held defect
+                    // relative to the iteration-0 residual at every
+                    // holding identification, released or not.
+                    amrex::Print()
+                        << "Newton: held-member defect " << held_defect
+                        << " (" << held_defect / norm0
+                        << " of the iteration-0 norm; bound " << hold_bound
+                        << ") over " << held << " held at iteration " << iter
+                        << "\n";
+                }
+                if (held_defect > hold_bound ||
+                    m_active_set_hold_defect_bound == 0.0_rt) {
+                    const amrex::Long freed = m_ops->ReleaseHeldMembers();
+                    active_num_pinned = m_ops->ActiveSetSize();
+                    released += freed;
+                    held -= freed;
+                    solve_hold_releases++;
+                    if (this->m_verbose) {
+                        amrex::Print()
+                            << "Newton: held-member defect " << held_defect
+                            << " above the hold bound " << hold_bound
+                            << " at iteration " << iter << ": released "
+                            << freed << " held members (active set now "
+                            << active_num_pinned << ")\n";
+                    }
+                }
+            }
             solve_released += released;
             solve_held += held;
             active_set_identified = true;
@@ -1166,6 +1273,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 m_linear_solver->getResidualNorm(), iter, a_step, a_time);
         }
 
+        if (m_report_line_search) {
+            // J dU with the operator (and masks) the solve used, for the
+            // nonlinear-defect report of every trial below.
+            m_linear_function->apply(m_jacobian_direction, m_dU);
+        }
+
         // Update solution
         // Update solution, allowing the operator to enforce its admissible
         // state domain (for example, positive fluid density and energy).
@@ -1220,6 +1333,17 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                                                         trial_pinned);
                 } else {
                     trial_norm = m_trial_F.norm2();
+                }
+                if (m_report_line_search) {
+                    // d = F(U - l dU) - F(U) + l J dU: the trial residual the
+                    // linear model did not predict, by block and region.
+                    m_nonlinear_defect.Copy(m_trial_F);
+                    m_nonlinear_defect -= m_F;
+                    m_nonlinear_defect.increment(m_jacobian_direction, step_length);
+                    m_ops->ReportNonlinearDefectBlocks(
+                        m_nonlinear_defect, m_F, a_U, m_trial_U, step_length,
+                        backtrack, trial_norm, reference_norm, iter, a_step,
+                        a_time);
                 }
                 if (trial_norm <= (1.0_rt - armijo * step_length) * reference_norm) {
                     a_U.Copy(m_trial_U);
@@ -1637,6 +1761,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             diagnostic_file << " " << solve_damped;
             diagnostic_file << " " << solve_rejected;
             diagnostic_file << " " << active_set_moves;
+            diagnostic_file << " " << solve_hold_releases;
         }
         diagnostic_file << "\n";
         diagnostic_file.close();

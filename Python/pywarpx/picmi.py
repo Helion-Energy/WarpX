@@ -2225,6 +2225,14 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         consecutive identifications before it is released (anti-cycling;
         0 = released on the sign of its residual, the plain rule).
 
+    active_set_hold_defect_bound: float, default=-1 (unbounded)
+        Debt bound of the release hysteresis (requires active_set_hysteresis
+        > 0): at every identification after iteration 0, when the residual
+        norm over the held members exceeds the larger of active_set_tolerance
+        times the iteration-0 free norm and this fraction of the iteration-0
+        full norm, every held member is released (0 = release at every
+        identification, the plain rule).
+
     line_search_resolve: bool, default=False
         Entrant re-solve (requires active_set): when the projection clamps
         new components into the set and the full step then fails the
@@ -2241,10 +2249,16 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     line_search_min_step: float, default=2**-12
         Smallest step the polynomial line-search rules may try.
 
+    line_search_report: bool, default=False
+        Report every Newton line-search trial (Armijo grade, the nonlinear
+        defect of the trial by state block and region, a floor-band census
+        of the floored fluid blocks); one more Jacobian application per
+        Newton iteration when on, bit-identical when off.
+
     globalization_diagnostics: bool, default=False
         Record the globalization counters (entrants, released, held,
-        re-solves, damped steps, rejected trials) in the Newton diagnostic
-        file without changing any arithmetic.
+        re-solves, damped steps, rejected trials, moved, hold releases) in
+        the Newton diagnostic file without changing any arithmetic.
 
     jfnk_epsilon: float, default=1.e-6
         Relative size of the matrix-free Jacobian probe (the state is
@@ -2308,10 +2322,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         active_set=None,
         active_set_tolerance=None,
         active_set_hysteresis=None,
+        active_set_hold_defect_bound=None,
         line_search_resolve=None,
         line_search=None,
         line_search_min_step=None,
         globalization_diagnostics=None,
+        line_search_report=None,
         jfnk_epsilon=None,
         jfnk_epsilon_mode=None,
         jfnk_component_floor=None,
@@ -2343,10 +2359,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.active_set = active_set
         self.active_set_tolerance = active_set_tolerance
         self.active_set_hysteresis = active_set_hysteresis
+        self.active_set_hold_defect_bound = active_set_hold_defect_bound
         self.line_search_resolve = line_search_resolve
         self.line_search = line_search
         self.line_search_min_step = line_search_min_step
         self.globalization_diagnostics = globalization_diagnostics
+        self.line_search_report = line_search_report
         self.jfnk_epsilon = jfnk_epsilon
         self.jfnk_epsilon_mode = jfnk_epsilon_mode
         self.jfnk_component_floor = jfnk_component_floor
@@ -2398,10 +2416,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.active_set = self.active_set
         newton.active_set_tolerance = self.active_set_tolerance
         newton.active_set_hysteresis = self.active_set_hysteresis
+        newton.active_set_hold_defect_bound = self.active_set_hold_defect_bound
         newton.line_search_resolve = self.line_search_resolve
         newton.line_search = self.line_search
         newton.line_search_min_step = self.line_search_min_step
         newton.globalization_diagnostics = self.globalization_diagnostics
+        newton.line_search_report = self.line_search_report
         newton.jfnk_epsilon = self.jfnk_epsilon
         newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
         newton.jfnk_component_floor = self.jfnk_component_floor

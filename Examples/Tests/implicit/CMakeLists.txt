@@ -3758,6 +3758,44 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # dependency
 )
 
+# The debt-bounded hold (newton.active_set_hold_defect_bound) on the churn
+# deck, gated at its two exactness limits against the sibling arms: bound 0
+# releases every held member at every identification, so the solve must
+# reproduce the plain-rule control exactly (first 16 newton.txt columns and
+# the plotfile identical; the release pass reported on every holding solve);
+# bound 1e9 is never reached, so the whole-solve hold (sticky arm) must be
+# untouched (columns, counters and plotfile identical, zero release passes).
+# The production combination -- the bounded hold with the fused residual
+# bookkeeping -- must be bit-identical to the bounded hold alone.
+# analysis_mhd_active_set_debt_bound.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0"  # inputs
+    "analysis_mhd_active_set_debt_bound.py release diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_hold  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=1e9"  # inputs
+    "analysis_mhd_active_set_debt_bound.py hold diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release_fused  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_debt_release/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release  # dependency
+)
+
 # The conduction block with the conductive z-end exchange, at 200x the
 # resolved step (bulk conduction number 100, end-face exchange diagonal
 # 200): the preconditioner must own the end exchange through its Dirichlet
