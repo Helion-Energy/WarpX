@@ -2569,6 +2569,22 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# matrix-dump twin (single rank): the assembled rows of the direct
+# resistive block are written as the binary CSR file of the offline solver
+# benchmark and checked against the operator's structure -- one unknown per
+# face, the axis identity rows, the poloidal/azimuthal decoupling, and the
+# exact symmetry under the cylindrical face-volume row scaling (the raw
+# matrix is asymmetric); physics assertions are the baseline's
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly_dump  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_dump  # inputs
+    "analysis_mhd_resistive_direct_dump.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # banded twin: the same preconditioned physics with the resistive block
 # inverted by the block-banded LU along z (dense radial blocks treat the
 # axis/wall/halo coupling exactly; periodic-z wraps PC-grade dropped); one
