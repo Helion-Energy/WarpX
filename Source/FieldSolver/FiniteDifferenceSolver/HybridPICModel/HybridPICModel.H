@@ -34,6 +34,7 @@
 #include <AMReX_BoxArray.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
+#include <AMReX_iMultiFab.H>
 
 #include <array>
 #include <map>
@@ -2385,6 +2386,55 @@ public:
     mutable amrex::Real m_cond_eb_tally = 0.0;
 
     amrex::Real GetQdsmcEbTally () const { return m_cond_eb_tally; }
+
+    /** MHD staircase-corner temperature pin, ported to the insulating-EB
+     *  staircase of the nodal FD conduction grid (the MHD lane's
+     *  implicit_mhd.wall_corner_temperature_pin_rate: "a cell with wall on
+     *  two sides sits in the wall's pocket and should be within a hair of
+     *  T_wall anyway"). Every formation twin parks its hottest electron
+     *  node at such a corner (the washer corners of the formation
+     *  section). A CORNER node is a live node (level set > 0) with a wall
+     *  on two or more distinct axes, a wall on axis d being an EB-covered
+     *  axis neighbour (either side, inside the domain) or a domain face of
+     *  axis d whose conduction BC is not adiabatic (the MHD corner
+     *  contract's second family, the EB-meets-domain-face corner; an
+     *  adiabatic face is not a wall, exactly as the MHD gates its z-end
+     *  family on the z-end exchange). Static geometry: the nodal mask is
+     *  built once per level on first use (rebuilt if the T_e grid changes)
+     *  and its counts are printed then. Applied in the FD conduction
+     *  post-step chain AFTER the capped domain-face and EB ring pins and
+     *  BEFORE the positivity floor (the MHD order: cap first, corner rule
+     *  on the capped state): T_e at every corner node relaxes toward
+     *  T_wall from either side (the MHD source is two-sided) by the exact
+     *  decay T_wall + (T - T_wall) exp(-rate dt_s) per accepted substep,
+     *  or a hard reset for rate <= 0. The exchange is booked with the
+     *  node's floored capacity 1.5 n_eff kB in m_cond_corner_tally
+     *  (ledger class corner_pin; wall_bath units and sign, positive =
+     *  into the plasma). FD operator only (the wall-pin family's home).
+     *  Default off = bit-identical. Inputs: qdsmc_eb_corner_pin,
+     *  qdsmc_eb_corner_pin_Te [eV] (default -1 = reuse the isothermal EB
+     *  parser qdsmc_conduction_eb_Te(x,y,z), which then must be armed),
+     *  qdsmc_eb_corner_pin_rate [1/s] (default -1 = hard pin). */
+    bool m_qdsmc_eb_corner_pin = false;
+    amrex::Real m_qdsmc_eb_corner_pin_Te = -1.0;
+    amrex::Real m_qdsmc_eb_corner_pin_rate = -1.0;
+    /** Cumulative corner-pin exchange, m_cond_eb_tally units and sign. */
+    mutable amrex::Real m_cond_corner_tally = 0.0;
+    amrex::Real GetQdsmcCornerTally () const { return m_cond_corner_tally; }
+    /** Last post-step diagnostics [K] of the corner pin: the pre-pin
+     *  maximum T_e over the corner nodes and the maximum over their live
+     *  non-corner axis neighbours (both on the joule_dropped_J line in eV,
+     *  -1 when the pin is off). */
+    mutable amrex::Real m_corner_pin_last_max_K = 0.0;
+    mutable amrex::Real m_corner_pin_last_nbr_max_K = 0.0;
+    /** Per-level nodal corner mask (0 = none, 1 = stair inside corner,
+     *  2 = EB-meets-domain-face corner), one ghost; see EbCornerMask. */
+    mutable amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_eb_corner_mask;
+    /** The corner mask of level lev on the grid of `like` (the T_e field),
+     *  built on first use and whenever that grid changes; prints the corner
+     *  counts (stair, pinned domain-face, geometric domain-face) when built. */
+    [[nodiscard]] amrex::iMultiFab const & EbCornerMask (
+        int lev, amrex::MultiFab const & like) const;
 
     /** Positivity floor on T_e, applied after every ACCEPTED conduction
      *  substep of the FD operator, in eV; 0 (the default) disables it

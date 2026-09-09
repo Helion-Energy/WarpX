@@ -4351,6 +4351,44 @@ Maxwell solver: kinetic-fluid hybrid
     is taken as the largest cell size (the strongest-cap choice). ``0`` = plain reset of the ring (the earlier behaviour).
     Inert unless the EB conduction BC is isothermal.
 
+.. pp:param:: hybrid_pic_model.qdsmc_eb_corner_pin
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    MHD staircase-corner temperature pin, ported to the insulating embedded-boundary staircase of the nodal
+    finite-difference conduction grid (the MHD lane's ``implicit_mhd.wall_corner_temperature_pin_rate``: a cell with
+    wall on two sides sits in the wall's pocket and is at the wall temperature to well within the error of interest).
+    A corner node is a live node (level set > 0) with a wall on two or more distinct axes; a wall on an axis is an
+    EB-covered axis neighbour (either side, inside the domain) or a domain face of that axis whose conduction BC is not
+    adiabatic (the EB-meets-domain-face corner; an adiabatic face is not a wall). The mask is static geometry, built
+    once per level at the first conduction call, and its counts are printed then. In the finite-difference conduction
+    post-step chain -- after the capped domain-face pins and the capped EB ring pin, before the positivity floor, i.e.
+    the MHD order (cap first, corner rule on the capped state) -- every corner node's :math:`T_e` relaxes toward the
+    wall temperature from either side by the exact decay :math:`T_w + (T_e - T_w)\,e^{-r \Delta t_s}` per accepted
+    substep (:pp:param:`hybrid_pic_model.qdsmc_eb_corner_pin_rate`), or is reset to it for a non-positive rate. The
+    exchange, booked with the node's floored capacity :math:`1.5\, n_\mathrm{eff} k_B`, is printed as ``corner_pin``
+    on the ``[qdsmc] step N joule_dropped_J:`` line together with the pre-pin maximum :math:`T_e` over the corner nodes
+    (``corner_Te_max_eV``) and the maximum over their live non-corner axis neighbours (``corner_nbr_Te_max_eV``).
+    Finite-difference conduction operator only. Off = bit-identical.
+
+.. pp:param:: hybrid_pic_model.qdsmc_eb_corner_pin_Te
+    :type: ``float``
+    :default: ``-1`` (= the isothermal EB temperature)
+    :optional:
+
+    Wall temperature of the corner pin in eV. Unset, the pin reuses ``qdsmc_conduction_eb_Te(x,y,z)`` and then requires
+    ``qdsmc_conduction_eb_bc = isothermal``; under an adiabatic EB the value must be given.
+
+.. pp:param:: hybrid_pic_model.qdsmc_eb_corner_pin_rate
+    :type: ``float``
+    :default: ``-1`` (hard pin)
+    :optional:
+
+    Relaxation rate of the corner pin in 1/s (the MHD tunable). Positive = linear relaxation toward the wall temperature,
+    applied as the exact decay per accepted conduction substep; non-positive = the corner node is reset to the wall
+    temperature after every accepted substep.
+
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_limit
     :type: ``float``
     :default: ``0`` (off)
