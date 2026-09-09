@@ -327,8 +327,9 @@ private:
      * ladder backtracks: the truncated direction is replaced by one
      * consistent with the entrants held at their bounds. A ladder that
      * still fails with the free residual (with respect to the enlarged
-     * set) already within the active-set tolerance exits as converged
-     * (status 4) instead of as a stagnation-accept (status 1).
+     * set) already within the active-set tolerance exits as converged on
+     * that set with its own status, 5 (the entrants were not moved onto
+     * their bounds), instead of as a stagnation-accept (status 1).
      */
     bool m_line_search_resolve = false;
 
@@ -344,8 +345,10 @@ private:
     /**
      * \brief Any of the globalization knobs above is non-default, or
      * newton.globalization_diagnostics is set: the diagnostic file then
-     * carries six more columns per solve (entrants, released, held,
-     * re-solves, damped steps, rejected trials). The diagnostics flag
+     * carries seven more columns per solve (entrants, released, held,
+     * re-solves, damped steps, rejected trials, components moved onto
+     * their bounds by the identification -- the witness of a member held
+     * off its bound). The diagnostics flag
      * alone changes no arithmetic (a control run can record the counters
      * of the plain rules).
      */
@@ -518,6 +521,54 @@ private:
     }
 
     /**
+     * \brief Freeze-guard accounting shared by the two free-subspace exits
+     * of the active-set mode (the pre-ladder status-4 exit and the
+     * post-ladder status-5 exit): genuine free convergence (absolute or
+     * active-set tolerance) is a converged solve; an exit granted by the
+     * round-off gate alone at iteration 0, with nothing moved onto its
+     * bound, returns the state it was handed -- count it as a frozen step
+     * and abort past newton.max_frozen_steps, so a fully pinned domain
+     * with no free dynamics cannot silently advance time.
+     */
+    void AccountFreeSubspaceExit (int a_iter, amrex::Long a_moves,
+                                  bool a_free_converged,
+                                  amrex::Real a_pinned_defect,
+                                  amrex::Long a_num_pinned) const
+    {
+        if (a_iter == 0 && a_moves == 0 && !a_free_converged) {
+            m_frozen_steps++;
+            amrex::Print()
+                << "WARNING: Newton active-set exit at iter = 0 with "
+                << "the free residual at round-off and nothing moved; "
+                << "the state is UNCHANGED by this solve (frozen step "
+                << m_frozen_steps << " of at most " << m_max_frozen_steps
+                << " consecutive; pinned defect = " << a_pinned_defect
+                << ", " << a_num_pinned << " pinned)\n";
+            if (m_frozen_steps >= m_max_frozen_steps) {
+                std::stringstream freeze_msg;
+                freeze_msg
+                    << "Newton made zero progress for "
+                    << "newton.max_frozen_steps consecutive solves "
+                    << "(active-set mode: free residual at round-off, "
+                    << a_num_pinned << " pinned components";
+                const std::string pinned_report =
+                    m_ops->PinnedComponentReport();
+                if (!pinned_report.empty()) {
+                    freeze_msg << ": " << pinned_report;
+                }
+                freeze_msg
+                    << "): the simulation state is frozen and, "
+                       "absent time-dependent drives, cannot "
+                       "recover. Aborting instead of silently "
+                       "advancing time.";
+                WARPX_ABORT_WITH_MESSAGE(freeze_msg.str());
+            }
+        } else {
+            m_frozen_steps = 0;
+        }
+    }
+
+    /**
      * \brief Compute the nonlinear residual: F(U) = U - b - R(U).
      * a_is_iterate distinguishes the evaluation at an accepted Newton
      * iterate (the F(U_k) driving the convergence test) from a
@@ -669,6 +720,8 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             diagnostic_file << "[" << c++ << "]damped_steps";
             diagnostic_file << " ";
             diagnostic_file << "[" << c++ << "]rejected_trials";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]moved";
         }
         diagnostic_file << "\n";
         diagnostic_file.close();
@@ -980,37 +1033,8 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 const bool free_converged =
                     (free_norm <= m_atol) ||
                     (free_norm <= m_active_set_tolerance * active_free_norm0);
-                if (iter == 0 && active_set_moves == 0 && !free_converged) {
-                    m_frozen_steps++;
-                    amrex::Print()
-                        << "WARNING: Newton active-set exit at iter = 0 with "
-                        << "the free residual at round-off and nothing moved; "
-                        << "the state is UNCHANGED by this solve (frozen step "
-                        << m_frozen_steps << " of at most " << m_max_frozen_steps
-                        << " consecutive; pinned defect = " << active_pinned_defect
-                        << ", " << active_num_pinned << " pinned)\n";
-                    if (m_frozen_steps >= m_max_frozen_steps) {
-                        std::stringstream freeze_msg;
-                        freeze_msg
-                            << "Newton made zero progress for "
-                            << "newton.max_frozen_steps consecutive solves "
-                            << "(active-set mode: free residual at round-off, "
-                            << active_num_pinned << " pinned components";
-                        const std::string pinned_report =
-                            m_ops->PinnedComponentReport();
-                        if (!pinned_report.empty()) {
-                            freeze_msg << ": " << pinned_report;
-                        }
-                        freeze_msg
-                            << "): the simulation state is frozen and, "
-                               "absent time-dependent drives, cannot "
-                               "recover. Aborting instead of silently "
-                               "advancing time.";
-                        WARPX_ABORT_WITH_MESSAGE(freeze_msg.str());
-                    }
-                } else {
-                    m_frozen_steps = 0;
-                }
+                AccountFreeSubspaceExit(iter, active_set_moves, free_converged,
+                                        active_pinned_defect, active_num_pinned);
                 break;
             }
         }
@@ -1233,27 +1257,42 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 }
             }
             // A ladder that failed although the free residual with respect
-            // to the set enlarged by this iteration's projection is within
-            // the active-set tolerance is a converged reduced solve, not a
-            // stagnation (newton.line_search_resolve): exit as status 4.
+            // to the set ENLARGED by this iteration's projection is within
+            // the active-set tolerance is a converged reduced solve on that
+            // set, not a stagnation (newton.line_search_resolve). It gets
+            // its own exit status, 5: unlike status 4 the entrants of this
+            // iteration were never moved onto their bounds (they sit at or
+            // above the projection's landing point with a demanding
+            // residual, which BookPinnedDefect books in full), and the
+            // returned state is the last accepted iterate. The freeze
+            // accounting is the same as for status 4 (a round-off-gated
+            // exit at iteration 0 with nothing moved is a frozen step).
             if (!accepted && m_active_set && m_line_search_resolve &&
                 active_num_pinned > 0) {
                 const amrex::Real free_target = std::max(
                     {m_atol, m_active_set_tolerance * active_free_norm0,
                      1.0e-12_rt * norm_abs});
                 if (reference_norm <= free_target) {
-                    this->m_exit_status = 4;
+                    this->m_exit_status = 5;
                     free_norm = reference_norm;
                     amrex::Print()
                         << "Newton: exiting at iteration = " << std::setw(3) << iter
                         << ". Satisfied active-set tolerance " << m_active_set_tolerance
-                        << " on the free subspace after a failed line search (free norm "
+                        << " on the free subspace of the set enlarged by this "
+                           "iteration's projection, after a failed line search "
+                           "(status 5; free norm "
                         << reference_norm << " abs., "
                         << reference_norm / active_free_norm0
                         << " rel.; pinned defect " << active_pinned_defect
                         << " over " << active_num_pinned
                         << " components; full rel. norm " << norm_rel << ")\n";
-                    m_frozen_steps = 0;
+                    const bool union_converged =
+                        (reference_norm <= m_atol) ||
+                        (reference_norm <=
+                         m_active_set_tolerance * active_free_norm0);
+                    AccountFreeSubspaceExit(iter, active_set_moves, union_converged,
+                                            active_pinned_defect,
+                                            active_num_pinned);
                     break;
                 }
             }
@@ -1547,6 +1586,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             diagnostic_file << " " << solve_resolves;
             diagnostic_file << " " << solve_damped;
             diagnostic_file << " " << solve_rejected;
+            diagnostic_file << " " << active_set_moves;
         }
         diagnostic_file << "\n";
         diagnostic_file.close();

@@ -387,8 +387,10 @@ Overall simulation parameters
             ``newton.diagnostic_file`` gains four columns,
             ``free_norm_rel`` (the exit free norm over its iteration-0
             value), ``exit_status`` (2 absolute tolerance, 3 relative
-            tolerance, 4 active-set tolerance on the free subspace, 1
-            line-search stagnation accepted, 0 iteration cap accepted,
+            tolerance, 4 active-set tolerance on the free subspace, 5
+            active-set tolerance on the set enlarged by the last projection
+            after a failed line search -- ``newton.line_search_resolve``
+            only, 1 line-search stagnation accepted, 0 iteration cap accepted,
             negative = failure), ``max_pinned_direction`` (the largest
             norm of the Newton direction restricted to the active set in
             the solve -- exactly 0 by construction) and
@@ -454,8 +456,15 @@ Overall simulation parameters
             re-solve per Newton iteration; its linear iterations count in
             the step's total. Also: a ladder that fails while the free
             residual with respect to the enlarged set is already within
-            ``newton.active_set_tolerance`` exits as converged (status 4)
-            instead of as a stagnation-accept (status 1).
+            ``newton.active_set_tolerance`` exits as converged on that set
+            with its own exit status, 5, instead of as a stagnation-accept
+            (status 1): unlike a status-4 exit the entrants of that iteration
+            were not moved onto their bounds (they sit at or above the
+            projection's landing point with a demanding residual, which the
+            pinned-defect ledger books in full) and the returned state is the
+            last accepted iterate. The freeze-guard accounting is the same as
+            for status 4 (an exit granted by the round-off gate alone at
+            iteration 0 with nothing moved counts as a frozen step).
 
           - ``newton.line_search`` (``backtrack``, ``quadratic`` or ``cubic``, default: ``backtrack``).
             Step-length rule of the Newton line search. ``backtrack`` halves
@@ -488,13 +497,16 @@ Overall simulation parameters
             ``newton.line_search_resolve``, ``newton.line_search`` or
             ``newton.line_search_min_step`` at a non-default value, or with
             ``newton.globalization_diagnostics``, the Newton diagnostic file
-            carries six more columns per solve:
+            carries seven more columns per solve:
             ``entrants`` (components the projection clamped into the set
             during the solve), ``released`` and ``held`` (at the
             identifications), ``resolves`` (entrant re-solves),
-            ``damped_steps`` (accepted steps below 1) and
-            ``rejected_trials`` (line-search trials that failed the Armijo
-            test).
+            ``damped_steps`` (accepted steps below 1), ``rejected_trials``
+            (line-search trials that failed the Armijo test) and ``moved``
+            (components the identification moved down onto their bounds; a
+            member held while off its bound would show up here, which makes
+            it the witness of the hold's bound-resident guard -- the
+            ``max_bound_excess`` column is measured after the move and is not).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
