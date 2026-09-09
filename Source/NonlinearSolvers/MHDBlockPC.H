@@ -257,6 +257,13 @@ class MHDBlockPC : public Preconditioner<T, Ops>
          * registers' chi_nt (and rho_f under the density weight). */
         void ApplyConductionCrossCorrection ();
         void ApplyFaradayCorrector (T& solution);
+        /** Momentum recovery of the Alfven-Schur coupling block
+         * (pc_mhd_block.coupling_block = alfven_schur), applied after the
+         * B block inverse: dM = bM/(1 + h d) + h w/((1 + h d) mu0)
+         * (curl dB) x B_cc with the cell-centered curl of the solved
+         * face dB (clamped reads at the physical boundaries) and the
+         * frozen cell-centered field; wall-frozen fluid rows untouched. */
+        void ApplyAlfvenMomentumRecovery (T& solution);
         void UpdateResistiveBlock ();
         void ApplyResistiveBlock (T& solution);
         void ApplyResistiveCurlCurl ();
@@ -317,6 +324,42 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         std::string m_coupling_block = "none";
         RT m_coupling_threshold = 1.0;
         bool m_coupling_include_current = false;
+        // v1 (implemented): the LOW-BETA form of the Schur term -- the fast
+        // wave at beta -> 0 has the Alfven speed in every direction, so the
+        // tensor (B^2 I - B B^T)/(mu0 rho) is replaced by its isotropic part
+        // B^2/(mu0 rho) and the term becomes an "Alfven resistivity"
+        //     eta_A = (theta/theta_r) h w/(1 + h d) |B|^2/rho
+        // FOLDED INTO the resistive rows (eta_edge + eta_A on every
+        // electric-field staggering): one emission, the direct/banded/
+        // Chebyshev inverses and the assembly gate unchanged. Exact for a
+        // 1D Alfven wave (curl dB is perpendicular to B), the fast-wave
+        // Schur where beta is small (the stiff halo), an over-damping of the
+        // compressive channel in the core (where the coupling number is
+        // 0.3 and the error is a bounded perturbation). The anisotropic
+        // tensor rows are the documented follow-up. The momentum row is
+        // then recovered from the solved dB (ApplyAlfvenMomentumRecovery):
+        // dM = bM/(1 + h d) + h w/((1 + h d) mu0) (curl dB) x B_cc, and the
+        // Faraday corrector uses the LOCAL coefficient h/((1 + h d) rho)
+        // instead of h/rho_ref. Frozen coefficients from the operator
+        // (ImplicitSolver::FillMHDAlfvenSchurCoefficientsForPC); the grid
+        // Alfven-Schur number theta_r dt max(eta_A)/mu0 / dx^2 joins the B
+        // block's activation gate, engaging it when it reaches
+        // coupling_threshold even where eta alone would not.
+        bool m_coupling_active = false;
+        RT m_coupling_number = 0.0;
+        // TEST-ONLY knobs of the coupling block (pc_mhd_block.coupling_debug_scale,
+        // default 1: multiplies eta_A -- 0 isolates the corrector + recovery, a
+        // negative value is the wrong-sign sabotage, 0.1/10 the wrong-scaling
+        // sabotage; pc_mhd_block.coupling_debug_recovery, default true: false
+        // skips the momentum recovery). Never for production.
+        RT m_coupling_debug_scale = 1.0;
+        bool m_coupling_debug_recovery = true;
+        bool m_coupling_debug_corrector = true; // false: no Faraday right-hand-side correction (test only)
+        amrex::Array<const amrex::MultiFab*, 3> m_coupling_eta_alfven_edge = {
+            nullptr, nullptr, nullptr};
+        const amrex::MultiFab* m_coupling_cell_factors = nullptr;
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> m_coupling_eta_total;
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> m_coupling_face_scratch;
         bool m_signal_diffusion_active = false;
         bool m_faraday_active = false;
         bool m_resistive_active = false;
@@ -760,15 +803,34 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("coupling_block", m_coupling_block);
     utils::parser::queryWithParser(pp, "coupling_threshold", m_coupling_threshold);
     pp.query("coupling_include_current", m_coupling_include_current);
+    utils::parser::queryWithParser(pp, "coupling_debug_scale", m_coupling_debug_scale);
+    pp.query("coupling_debug_recovery", m_coupling_debug_recovery);
+    pp.query("coupling_debug_corrector", m_coupling_debug_corrector);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_coupling_block == "none" || m_coupling_block == "alfven_schur",
         "pc_mhd_block.coupling_block must be 'none' or 'alfven_schur'");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupling_threshold >= 0.0,
                                      "pc_mhd_block.coupling_threshold cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_coupling_block == "none",
-        "pc_mhd_block.coupling_block = alfven_schur is not implemented yet (design stage: "
-        "the knob, documentation and PICMI plumbing precede the block)");
+        !m_coupling_include_current,
+        "pc_mhd_block.coupling_include_current is reserved (the frozen-current "
+        "piece of the coupling linearization is not implemented; set it false)");
+    if (m_coupling_block == "alfven_schur")
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_include_ideal_mhd_coupling,
+            "pc_mhd_block.coupling_block = alfven_schur requires "
+            "pc_mhd_block.include_ideal_mhd_coupling = true (the block is the Schur "
+            "complement of that coupling)");
+        if (m_include_wave_schur)
+        {
+            // The constant-coefficient wave Schur on the momentum block would
+            // double-count the coupling the B-block Schur term now carries.
+            amrex::Print() << "pc_mhd_block: coupling_block = alfven_schur switches the "
+                              "momentum wave Schur off (include_wave_schur = false)\n";
+            m_include_wave_schur = false;
+        }
+    }
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
     utils::parser::queryWithParser(pp, "resistive_iterations", m_resistive_iterations);
@@ -1475,12 +1537,40 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         m_resistive_inertia_scale = stencil_scale / RT(PhysConst::mu0);
     }
 
+    // Alfven-Schur coupling block (see m_coupling_block): the frozen
+    // "Alfven resistivity" on the electric-field staggerings and the
+    // cell factors, and the grid Alfven-Schur number for the gate.
+    m_coupling_active = false;
+    m_coupling_number = 0.0;
+    RT eta_alfven_maximum = 0.0;
+    if (m_coupling_block == "alfven_schur")
+    {
+        m_coupling_active = m_ops->FillMHDAlfvenSchurCoefficientsForPC(
+            m_h, m_coupling_eta_alfven_edge, m_coupling_cell_factors);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_coupling_active && m_coupling_cell_factors != nullptr,
+            "pc_mhd_block.coupling_block = alfven_schur: the operator does not "
+            "provide the Alfven-Schur coefficients (conservative-form recast only)");
+        for (int component = 0; component < 3; ++component)
+        {
+            if (m_coupling_eta_alfven_edge[component] != nullptr)
+            {
+                eta_alfven_maximum = amrex::max(
+                    eta_alfven_maximum, std::abs(m_coupling_debug_scale) *
+                                            m_coupling_eta_alfven_edge[component]->max(0));
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(eta_alfven_maximum) && eta_alfven_maximum >= 0.0,
+            "pc_mhd_block requires a finite non-negative Alfven resistivity");
+    }
+
     // Gate on the grid-scale resistive diffusion number of the stiffest
     // cell: below the threshold the unpreconditioned rows are benign and
     // the block stands down to the exact identity at zero cost. The
     // cell-centered maximum also bounds the edge values (eta_field is
     // monotone decreasing in the interpolated density).
-    const RT eta_maximum = eta_field->max(0);
+    const RT eta_maximum = eta_field->max(0) + eta_alfven_maximum;
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         std::isfinite(eta_maximum) && eta_maximum >= 0.0,
         "pc_mhd_block requires a finite non-negative field resistivity");
@@ -1492,6 +1582,13 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         m_resistive_diffusion_number = amrex::max(
             m_resistive_diffusion_number,
             m_resistive_h * eta_maximum / RT(PhysConst::mu0) *
+                inverse_cell_size[direction] * inverse_cell_size[direction]);
+        // Grid Alfven-Schur number theta_r dt (eta_A/mu0)/dx^2 =
+        // (theta dt)^2 w v_A^2/((1 + h d) dx^2): the coupling block's
+        // own gate contribution (coupling_threshold).
+        m_coupling_number = amrex::max(
+            m_coupling_number,
+            m_resistive_h * eta_alfven_maximum / RT(PhysConst::mu0) *
                 inverse_cell_size[direction] * inverse_cell_size[direction]);
         // Grid whistler number theta dt D_H / dx^2 with D_H = |Hb|/mu0:
         // the same first-order-in-k^2 stiffness scale as the resistive
@@ -1516,7 +1613,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         m_resistive_diffusion_number, m_resistive_h * eta_h_maximum /
                                           RT(PhysConst::mu0) * laplacian_bound *
                                           laplacian_bound / RT(16.0));
-    m_resistive_active = m_resistive_diffusion_number >= m_resistive_threshold;
+    m_resistive_active = m_resistive_diffusion_number >= m_resistive_threshold ||
+                         (m_coupling_active && m_coupling_number >= m_coupling_threshold);
     if (m_verbose)
     {
         amrex::Print() << "Updating pc_mhd_block (recast B block): "
@@ -1524,6 +1622,11 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                        << ", grid number = " << m_resistive_diffusion_number
                        << " (threshold " << m_resistive_threshold << "), block = "
                        << (m_resistive_active ? m_resistive_solver : std::string("identity"))
+                       << ", coupling = "
+                       << (m_coupling_active
+                               ? "alfven_schur (grid number " + std::to_string(m_coupling_number) +
+                                     ", threshold " + std::to_string(m_coupling_threshold) + ")"
+                               : std::string("none"))
                        << ", Hall rows = "
                        << (m_resistive_hall_active ? "active" : "inactive")
                        << ", inertia rows = "
@@ -1565,6 +1668,36 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                 m_resistive_eta_edge[component] != nullptr,
             "pc_mhd_block requires the solver's edge field resistivity "
             "for the resistive block");
+    }
+    if (m_coupling_active)
+    {
+        // Fold the Alfven resistivity into the rows: eta_total = eta + eta_A on
+        // every staggering, held in PC-owned registers whose addresses are
+        // stable across updates (the direct assembly caches its coefficient
+        // sources), and consumed by every path below through
+        // m_resistive_eta_edge.
+        for (int component = 0; component < 3; ++component)
+        {
+            if (m_resistive_eta_edge[component] == nullptr)
+            {
+                continue;
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_coupling_eta_alfven_edge[component] != nullptr,
+                "pc_mhd_block: the Alfven resistivity is missing on an active "
+                "electric-field staggering");
+            const amrex::MultiFab& eta = *m_resistive_eta_edge[component];
+            if (!m_coupling_eta_total[component])
+            {
+                m_coupling_eta_total[component] = std::make_unique<amrex::MultiFab>(
+                    eta.boxArray(), eta.DistributionMap(), 1, eta.nGrowVect());
+            }
+            amrex::MultiFab::Copy(*m_coupling_eta_total[component], eta, 0, 0, 1,
+                                  eta.nGrowVect());
+            amrex::MultiFab::Saxpy(*m_coupling_eta_total[component], m_coupling_debug_scale,
+                                   *m_coupling_eta_alfven_edge[component], 0, 0, 1, 0);
+            m_resistive_eta_edge[component] = m_coupling_eta_total[component].get();
+        }
     }
 
     warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
@@ -2160,8 +2293,11 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     {
         alfven_wave_cfl = amrex::max(alfven_wave_cfl, m_h * alfven_speed / cell_size[direction]);
     }
+    // With the Alfven-Schur coupling block the corrector is consistent at
+    // any Alfven CFL (the neglected product is inside the B block).
     m_faraday_active = m_evolve_ion_fluid && m_include_ideal_mhd_coupling &&
-                       (m_wave_schur_active || alfven_wave_cfl < 1.0);
+                       (m_wave_schur_active || alfven_wave_cfl < 1.0 ||
+                        (m_coupling_active && m_coupling_debug_corrector));
     if (m_faraday_active)
     {
         // Freeze the cell-centered magnetic field (including any external
@@ -2538,6 +2674,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
                        << (m_conduction_cross_terms_active ? ", cross-term correction" : "")
                        << (m_conduction_pair_active ? ", dual-energy pair)" : ")");
         amrex::Print() << ", Faraday = " << (m_faraday_active ? "active" : "inactive")
+                       << (m_coupling_active ? " (local coefficient, alfven_schur)" : "")
                        << ", wave Schur = " << (m_wave_schur_active ? "active" : "inactive")
                        << ", resistive = " << (m_resistive_active ? "active" : "inactive")
                        << " (solver = " << m_resistive_solver
@@ -3117,6 +3254,161 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         ApplyResistiveBlock(solution);
         restore_frozen_faces();
     }
+    if (m_coupling_active && m_coupling_debug_recovery)
+    {
+        // Alfven-Schur coupling block: the momentum row recovered from the
+        // solved dB (the second half of the 2x2 elimination).
+        ApplyAlfvenMomentumRecovery(solution);
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplyAlfvenMomentumRecovery (T& solution)
+{
+    BL_PROFILE("MHDBlockPC::ApplyAlfvenMomentumRecovery()");
+    // dM = c0 bM + c2 (curl dB) x B_cc with c0 = 1/(1 + h d), c2 = h w/((1 + h d) mu0)
+    // (cell factors [0], [2]); the momentum block holds bM here (identity
+    // rows). The cell-centered curl of the solved face dB uses periodicity-
+    // filled copies and clamps its reads at the physical boundaries
+    // (one-sided differences: a preconditioner-only approximation).
+    auto const& solution_fields = solution.getArrayVec();
+    for (int component = 0; component < 3; ++component)
+    {
+        const amrex::MultiFab& face = *solution_fields[0][component];
+        if (!m_coupling_face_scratch[component])
+        {
+            m_coupling_face_scratch[component] = std::make_unique<amrex::MultiFab>(
+                face.boxArray(), face.DistributionMap(), 1, 1);
+            m_coupling_face_scratch[component]->setVal(0.0);
+        }
+        amrex::MultiFab::Copy(*m_coupling_face_scratch[component], face, 0, 0, 1, 0);
+        m_coupling_face_scratch[component]->FillBoundary(m_geometry.periodicity());
+    }
+    amrex::MultiFab& momentum = solution.getMultiFabBlock(MomentumDensityName, 0);
+    const amrex::Box domain = m_geometry.Domain();
+    const auto inverse_cell_size = m_geometry.InvCellSizeArray();
+    const auto fluid_freeze = m_ops->GetMHDWallFluidFreezeForPC();
+    amrex::ignore_unused(fluid_freeze);
+#if defined(WARPX_DIM_1D_Z)
+    const int lo = domain.smallEnd(0);
+    const int hi = domain.bigEnd(0);
+    const bool periodic = m_geometry.isPeriodic(0);
+    const RT inverse_dz = inverse_cell_size[0];
+    for (amrex::MFIter mfi(momentum); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box box = mfi.validbox();
+        const auto mom = momentum.array(mfi);
+        const auto cf = m_coupling_cell_factors->const_array(mfi);
+        const auto bcc = m_faraday_field->const_array(mfi);
+        const auto bx = m_coupling_face_scratch[0]->const_array(mfi);
+        const auto by = m_coupling_face_scratch[1]->const_array(mfi);
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                const int im = periodic ? i - 1 : amrex::max(i - 1, lo);
+                const int ip = periodic ? i + 1 : amrex::min(i + 1, hi);
+                const RT span = static_cast<RT>(ip - im);
+                RT g[3] = {RT(0.0), RT(0.0), RT(0.0)};
+                if (span > RT(0.0))
+                {
+                    g[0] = -(by(ip, j, k) - by(im, j, k)) * inverse_dz / span;
+                    g[1] = (bx(ip, j, k) - bx(im, j, k)) * inverse_dz / span;
+                }
+                const RT b0 = bcc(i, j, k, 0), b1 = bcc(i, j, k, 1), b2 = bcc(i, j, k, 2);
+                const RT force[3] = {g[1] * b2 - g[2] * b1, g[2] * b0 - g[0] * b2,
+                                     g[0] * b1 - g[1] * b0};
+                const RT c0 = cf(i, j, k, 0), c2 = cf(i, j, k, 2);
+                for (int n = 0; n < 3; ++n)
+                {
+                    mom(i, j, k, n) = c0 * mom(i, j, k, n) + c2 * force[n];
+                }
+            });
+    }
+#elif defined(WARPX_DIM_RZ)
+    const int ilo = domain.smallEnd(0);
+    const int ihi = domain.bigEnd(0);
+    const int jlo = domain.smallEnd(1);
+    const int jhi = domain.bigEnd(1);
+    const bool axial_periodic = m_geometry.isPeriodic(1);
+    const RT inverse_dr = inverse_cell_size[0];
+    const RT inverse_dz = inverse_cell_size[1];
+    const RT radial_lower = static_cast<RT>(m_geometry.ProbLo(0));
+    const RT dr = static_cast<RT>(m_geometry.CellSize(0));
+    for (amrex::MFIter mfi(momentum); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box box = mfi.validbox();
+        const auto mom = momentum.array(mfi);
+        const auto cf = m_coupling_cell_factors->const_array(mfi);
+        const auto bcc = m_faraday_field->const_array(mfi);
+        const auto br = m_coupling_face_scratch[0]->const_array(mfi); // (r-node, z-cell)
+        const auto bt = m_coupling_face_scratch[1]->const_array(mfi); // (r-cell, z-cell)
+        const auto bz = m_coupling_face_scratch[2]->const_array(mfi); // (r-cell, z-node)
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                if (fluid_freeze.active)
+                {
+                    const int jc = amrex::min(amrex::max(j, fluid_freeze.z_lo), fluid_freeze.z_hi);
+                    if (i >= fluid_freeze.first_masked_cc[jc])
+                    {
+                        return; // wall-frozen fluid row: identity
+                    }
+                }
+                const int im = amrex::max(i - 1, ilo);
+                const int ip = amrex::min(i + 1, ihi);
+                const int jm = axial_periodic ? j - 1 : amrex::max(j - 1, jlo);
+                const int jp = axial_periodic ? j + 1 : amrex::min(j + 1, jhi);
+                const RT rspan = static_cast<RT>(ip - im);
+                const RT zspan = static_cast<RT>(jp - jm);
+                const RT r_cell = radial_lower + (static_cast<RT>(i) + RT(0.5)) * dr;
+                RT g[3] = {RT(0.0), RT(0.0), RT(0.0)};
+                if (zspan > RT(0.0))
+                {
+                    // (curl dB)_r = -d_z dB_theta; the axial derivative part of
+                    // (curl dB)_theta = d_z dB_r averaged over the two r-nodes
+                    g[0] = -(bt(i, jp, k) - bt(i, jm, k)) * inverse_dz / zspan;
+                    g[1] += RT(0.5) * ((br(i, jp, k) - br(i, jm, k)) +
+                                       (br(i + 1, jp, k) - br(i + 1, jm, k))) *
+                            inverse_dz / zspan;
+                }
+                if (rspan > RT(0.0))
+                {
+                    // -d_r dB_z averaged over the two z-nodes of the cell
+                    g[1] -= RT(0.5) * ((bz(ip, j, k) - bz(im, j, k)) +
+                                       (bz(ip, j + 1, k) - bz(im, j + 1, k))) *
+                            inverse_dr / rspan;
+                }
+                // (curl dB)_z = (1/r) d_r(r dB_theta): node values of r dB_theta
+                // (zero on the axis node, the m = 0 parity), differenced across
+                // the cell
+                const RT r_low_node = radial_lower + static_cast<RT>(i) * dr;
+                const RT r_high_node = r_low_node + dr;
+                const RT r_low_cell = r_cell - dr;
+                const RT r_high_cell = r_cell + dr;
+                const RT rbt_low = (r_low_node <= RT(0.5) * dr)
+                                       ? RT(0.0)
+                                       : RT(0.5) * (r_low_cell * bt(im, j, k) + r_cell * bt(i, j, k));
+                const RT rbt_high = (i + 1 > ihi)
+                                        ? r_cell * bt(i, j, k)
+                                        : RT(0.5) * (r_cell * bt(i, j, k) + r_high_cell * bt(ip, j, k));
+                amrex::ignore_unused(r_high_node);
+                g[2] = (rbt_high - rbt_low) * inverse_dr / r_cell;
+                const RT b0 = bcc(i, j, k, 0), b1 = bcc(i, j, k, 1), b2 = bcc(i, j, k, 2);
+                const RT force[3] = {g[1] * b2 - g[2] * b1, g[2] * b0 - g[0] * b2,
+                                     g[0] * b1 - g[1] * b0};
+                const RT c0 = cf(i, j, k, 0), c2 = cf(i, j, k, 2);
+                for (int n = 0; n < 3; ++n)
+                {
+                    mom(i, j, k, n) = c0 * mom(i, j, k, n) + c2 * force[n];
+                }
+            });
+    }
+#else
+    amrex::ignore_unused(momentum, domain, inverse_cell_size);
+    WARPX_ABORT_WITH_MESSAGE(
+        "pc_mhd_block: the Alfven-Schur momentum recovery supports 1D and RZ only");
+#endif
 }
 
 template <class T, class Ops>
@@ -3136,10 +3428,28 @@ MHDBlockPC<T, Ops>::ApplyFaradayCorrector (T& solution)
     // boundaries (interior and periodic ghosts are filled).
     amrex::MultiFab::Copy(*m_momentum_solution,
                           solution.getMultiFabBlock(MomentumDensityName, 0), 0, 0, 3, 0);
+    if (m_coupling_active)
+    {
+        // Alfven-Schur coupling block: the right-hand-side term
+        // J_BM J_MM^{-1} bM uses the LOCAL coefficient h/((1 + h d) rho)
+        // (cell factor [1]) instead of h/rho_ref -- folded into the momentum
+        // copy so the edge averages below carry it.
+        for (amrex::MFIter mfi(*m_momentum_solution); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box box = mfi.validbox();
+            const auto dm = m_momentum_solution->array(mfi);
+            const auto cf = m_coupling_cell_factors->const_array(mfi);
+            amrex::ParallelFor(box, 3,
+                               [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+                               {
+                                   dm(i, j, k, n) *= cf(i, j, k, 1);
+                               });
+        }
+    }
     m_momentum_solution->FillBoundary(m_geometry.periodicity());
 
     auto const& solution_fields = solution.getArrayVec();
-    const RT coefficient = m_h / m_reference_mass_density;
+    const RT coefficient = m_coupling_active ? RT(1.0) : m_h / m_reference_mass_density;
     const amrex::Box domain = m_geometry.Domain();
     const auto inverse_cell_size = m_geometry.InvCellSizeArray();
 

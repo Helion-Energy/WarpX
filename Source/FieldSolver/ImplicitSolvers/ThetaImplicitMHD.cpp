@@ -1825,6 +1825,10 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HallCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenCellFactorsName, lev, ba, dm, 3, amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(InertiaCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
@@ -1856,6 +1860,16 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HallCoefficientE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenCellFactorsName, lev, ba, dm, 3, amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(InertiaCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
@@ -3103,6 +3117,186 @@ ThetaImplicitMHD::GetMHDMagneticFieldCCForPC () const
     // the residual evaluation at the preconditioner's update state; includes
     // the external contribution under the split-field scheme.
     return m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+}
+
+namespace
+{
+    // Alfven-Schur coefficient of the block preconditioner at one point: the
+    // residual's Holmstrom vacuum weight w(rho) and drag d(rho), then
+    //     eta_A = stage_ratio h w/(1 + h d) |B|^2 / max(rho, guard)
+    // (an "Alfven resistivity": eta_A/mu0 = (theta/theta_r) h w v_A^2/(1 + h d)).
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+    alfven_weight_and_drag (const amrex::Real rho, const bool vacuum_gate,
+                            const amrex::Real rho_vac, const amrex::Real drag_rate,
+                            const amrex::Real h, amrex::Real& w, amrex::Real& inverse_one_plus_hd)
+    {
+        w = vacuum_gate ? 0.5_rt * (1.0_rt + std::tanh((rho - rho_vac) / (0.3_rt * rho_vac)))
+                        : 1.0_rt;
+        inverse_one_plus_hd = 1.0_rt / (1.0_rt + h * drag_rate * (1.0_rt - w));
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+    alfven_resistivity (const amrex::Real rho, const amrex::Real b2, const amrex::Real h,
+                        const amrex::Real stage_ratio, const bool vacuum_gate,
+                        const amrex::Real rho_vac, const amrex::Real drag_rate,
+                        const amrex::Real density_guard)
+    {
+        amrex::Real w = 1.0_rt;
+        amrex::Real inverse_one_plus_hd = 1.0_rt;
+        alfven_weight_and_drag(rho, vacuum_gate, rho_vac, drag_rate, h, w, inverse_one_plus_hd);
+        return stage_ratio * h * w * inverse_one_plus_hd * b2 /
+               amrex::max(rho, density_guard);
+    }
+}
+
+bool
+ThetaImplicitMHD::FillMHDAlfvenSchurCoefficientsForPC (
+    const amrex::Real a_h, amrex::Array<const amrex::MultiFab*, 3>& a_eta_alfven_edge,
+    const amrex::MultiFab*& a_cell_factors) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD Alfven-Schur coefficients requested before Define()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_use_recast,
+        "pc_mhd_block.coupling_block = alfven_schur requires the conservative-form "
+        "recast (implicit_mhd.fluid_flux = hlld or central)");
+    // Frozen at the update state, with the Ohm assembly's own interpolations
+    // (the Hall coefficient's stencils): cell-centered TOTAL B averaged to
+    // the electric-field staggerings, the density averaged the same way.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const amrex::Real h = a_h;
+    const amrex::Real stage_ratio = m_theta / m_resistive_theta;
+    const bool vacuum_gate = m_vacuum_mass_density > 0.0_rt;
+    const amrex::Real rho_vac = m_vacuum_mass_density;
+    const amrex::Real drag_rate = m_vacuum_drag_rate;
+    const amrex::Real density_guard =
+        (m_mass_density_floor > 0.0_rt) ? m_mass_density_floor
+                                         : 1.0e-12_rt * m_reference_mass_density;
+    const amrex::Real inverse_mu0 = 1.0_rt / PhysConst::mu0;
+
+    amrex::MultiFab& cell_factors = *m_WarpX->m_fields.get(AlfvenCellFactorsName, 0);
+    for (amrex::MFIter mfi(cell_factors); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto factors = cell_factors.array(mfi);
+        const auto rho = density.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real w = 1.0_rt;
+            amrex::Real inverse_one_plus_hd = 1.0_rt;
+            alfven_weight_and_drag(rho(i, j, k), vacuum_gate, rho_vac, drag_rate, h,
+                                   w, inverse_one_plus_hd);
+            factors(i, j, k, 0) = inverse_one_plus_hd;
+            factors(i, j, k, 1) =
+                h * inverse_one_plus_hd / amrex::max(rho(i, j, k), density_guard);
+            factors(i, j, k, 2) = h * w * inverse_one_plus_hd * inverse_mu0;
+        });
+    }
+    a_cell_factors = &cell_factors;
+
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_eta =
+        *m_WarpX->m_fields.get(AlfvenResistivityE0Name, 0);
+    for (amrex::MFIter mfi(node_eta); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto eta_a = node_eta.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real rho_node = 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
+            amrex::Real b2 = 0.0_rt;
+            for (int component = 0; component < 3; ++component) {
+                const amrex::Real b = 0.5_rt * (b_cc(i - 1, j, k, component) +
+                                                b_cc(i, j, k, component));
+                b2 += b * b;
+            }
+            eta_a(i, j, k) = alfven_resistivity(rho_node, b2, h, stage_ratio, vacuum_gate,
+                                                rho_vac, drag_rate, density_guard);
+        });
+    }
+    // Ex and Ey share the z-nodal staggering; the cell-centered Ez never
+    // enters the 1D curl.
+    a_eta_alfven_edge = {&node_eta, &node_eta, nullptr};
+    return true;
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_eta = *m_WarpX->m_fields.get(AlfvenResistivityE0Name, 0);
+    amrex::MultiFab& azimuthal_eta =
+        *m_WarpX->m_fields.get(AlfvenResistivityE1Name, 0);
+    amrex::MultiFab& axial_eta = *m_WarpX->m_fields.get(AlfvenResistivityE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_eta); mfi.isValid(); ++mfi) {
+        const auto eta_radial = radial_eta.array(mfi);
+        const auto eta_azimuthal = azimuthal_eta.array(mfi);
+        const auto eta_axial = axial_eta.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        // E_theta corners: the nodal density and the four-cell field average.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const amrex::Real rho_node =
+                    0.25_rt * (rho(i - 1, j - 1, k) + rho(i, j - 1, k) +
+                               rho(i - 1, j, k) + rho(i, j, k));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b =
+                        0.25_rt * (b_cc(i - 1, j - 1, k, component) +
+                                   b_cc(i, j - 1, k, component) +
+                                   b_cc(i - 1, j, k, component) +
+                                   b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_azimuthal(i, j, k) = alfven_resistivity(
+                    rho_node, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+        // Er z-faces: nodes averaged in r; B from the two axially adjacent cells.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real rho_face =
+                    0.5_rt * (node_density(i, j) + node_density(i + 1, j));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b = 0.5_rt * (b_cc(i, j - 1, k, component) +
+                                                    b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_radial(i, j, k) = alfven_resistivity(
+                    rho_face, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+        // Ez r-faces: nodes averaged in z; B from the two radially adjacent cells.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real rho_face =
+                    0.5_rt * (node_density(i, j) + node_density(i, j + 1));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b = 0.5_rt * (b_cc(i - 1, j, k, component) +
+                                                    b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_axial(i, j, k) = alfven_resistivity(
+                    rho_face, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+    }
+    a_eta_alfven_edge = {&radial_eta, &azimuthal_eta, &axial_eta};
+    return true;
+#else
+    amrex::ignore_unused(magnetic_cc, stage_ratio, a_eta_alfven_edge);
+    return false;
+#endif
 }
 
 bool

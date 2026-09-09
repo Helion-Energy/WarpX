@@ -1064,31 +1064,49 @@ Overall simulation parameters
             - ``pc_mhd_block.coupling_block`` (``string``, default: ``none``),
               ``pc_mhd_block.coupling_threshold`` (``real``, default: 1.0),
               ``pc_mhd_block.coupling_include_current`` (``bool``, default:
-              false): the ideal momentum-field coupling block of the recast
-              path. ``none`` keeps today's composition (identity fluid rows,
-              the one-sided Faraday corrector from the reference density).
-              ``alfven_schur`` (DESIGN STAGE: requesting it aborts until the
-              block lands) takes the Schur complement of the ideal
-              momentum <-> B coupling on the exactly inverted B block with
-              LOCAL frozen coefficients,
+              false, reserved): the ideal momentum-field coupling block of the
+              recast path. ``none`` keeps today's composition (identity fluid
+              rows, the one-sided Faraday corrector from the reference density,
+              standing down at reference Alfven CFL >= 1). ``alfven_schur``
+              eliminates the momentum row from the momentum <-> B system on the
+              exactly inverted B block: with the momentum row
+              :math:`J_{MM} \approx I + h d` (the residual's vacuum drag d) and
+              the Lorentz force weighted by the residual's vacuum weight
+              :math:`w(\rho)`, the Schur complement is
               :math:`S_B = J_{BB} + h^2\,\nabla\times(T\,\nabla\times\delta B)`,
-              :math:`T = \frac{w}{1 + h d}\,\frac{B^2 I - B B^T}{\mu_0\rho}`
-              on the electric-field staggerings (an anisotropic "Alfven
-              resistivity" :math:`h v_A^2` perpendicular to :math:`B`; w and
-              d the residual's vacuum weight and drag), emitted with the Hall
-              rows into the direct/banded assembly, followed by the momentum
-              recovery from :math:`\delta B`; the Faraday corrector stands
-              down. Engaged when the largest local coupling number
-              :math:`4 h^2 |T| / \Delta x^2` reaches ``coupling_threshold``.
-              ``coupling_include_current`` adds the :math:`J_0 \times \delta B`
-              piece of the linearization (off: the frozen-current
-              approximation, exact where the current vanishes). Motivation:
-              on the production formation state, with the linear model made
-              consistent by ``newton.jfnk_epsilon_mode = component``, the
-              Krylov solve reduces the B rows 2-4x less than every fluid row
-              and leaves their residual on the open low-density field lines,
-              where the grid Alfven coupling number is 30-60 against the
-              reference number 0.17 the block gates on.
+              :math:`T = \frac{w}{1 + h d}\,\frac{B^2 I - B B^T}{\mu_0\rho}`.
+              This first version takes the LOW-BETA form: the fast wave at
+              :math:`\beta \to 0` has the Alfven speed in every direction, so
+              :math:`T` is replaced by its isotropic part and the term becomes an
+              "Alfven resistivity"
+              :math:`\eta_A = \frac{\theta}{\theta_r}\,\frac{h\,w}{1 + h d}\,\frac{B^2}{\rho}`
+              folded into the resistive rows on every electric-field
+              staggering (frozen at the update with the Ohm assembly's own
+              interpolations): one emission, the direct/banded/Chebyshev
+              inverses and ``resistive_validate_assembly`` unchanged; exact for
+              a 1D Alfven wave, the fast-wave Schur where :math:`\beta` is small
+              (the stiff open-line halo), an over-damping of the compressive
+              channel in the core (where the coupling number is small). The
+              Faraday corrector then uses the local coefficient
+              :math:`h/((1 + h d)\rho)` at any Alfven CFL, and after the B
+              solve the momentum row is recovered,
+              :math:`\delta M = \frac{b_M}{1 + h d} + \frac{h w}{(1 + h d)\mu_0}\,(\nabla\times\delta B)\times B`
+              (cell-centered curl of the solved faces; wall-frozen rows
+              untouched). The grid Alfven-Schur number
+              :math:`\theta_r\Delta t\,\max(\eta_A)/\mu_0/\Delta x^2` joins the
+              B block's activation gate and engages it when it reaches
+              ``coupling_threshold`` even where :math:`\eta` alone would not;
+              the momentum wave Schur is switched off with this block (it would
+              double-count the coupling). Requires ``include_ideal_mhd_coupling``.
+              Motivation: on the production formation state, with the linear
+              model made consistent, the Krylov solve reduces the B rows 2-4x
+              less than every fluid row and leaves their residual on the open
+              low-density field lines, where the grid Alfven coupling number is
+              30-60 against the reference number 0.17 the block gates on. The
+              anisotropic tensor rows and the frozen-current piece are the
+              documented follow-ups. Test: the recast stiff Alfven deck
+              (``stiff_alfven_recast``: 320 GMRES per solve with today's block,
+              which is the identity there).
             - ``pc_mhd_block.residual_block_norms`` (``bool``, default: false),
               ``pc_mhd_block.residual_block_norms_min_iters`` (``int``,
               default: 30), ``pc_mhd_block.residual_block_norms_interval``

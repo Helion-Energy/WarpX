@@ -470,6 +470,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
     GetMHDHallCoefficientEdgeForPC () const override;
 
+    /** Alfven-Schur coefficients of the block PC (see ImplicitSolver):
+     * eta_A on the electric-field staggerings with the Ohm assembly's own
+     * density/field interpolations (the Hall coefficient's stencils), and
+     * the cell-centered factors; w and d from the residual's Holmstrom
+     * vacuum gate (vacuum_mass_density, vacuum_drag_rate). */
+    [[nodiscard]] bool
+    FillMHDAlfvenSchurCoefficientsForPC (
+        amrex::Real a_h,
+        amrex::Array<const amrex::MultiFab*, 3>& a_eta_alfven_edge,
+        const amrex::MultiFab*& a_cell_factors) const override;
+
     [[nodiscard]] bool GetMHDIncludeElectronInertiaForPC () const override;
 
     [[nodiscard]] amrex::Real
@@ -634,6 +645,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // preconditioner's whistler-rotation coefficients (zeroed and unused
     // when the Ohm law runs without the Hall term). In 1D the transverse
     // components share the z-nodal register.
+    inline static constexpr char AlfvenResistivityE0Name[] =
+        "implicit_mhd_alfven_resistivity_e0";
+    inline static constexpr char AlfvenResistivityE1Name[] =
+        "implicit_mhd_alfven_resistivity_e1";
+    inline static constexpr char AlfvenResistivityE2Name[] =
+        "implicit_mhd_alfven_resistivity_e2";
+    inline static constexpr char AlfvenCellFactorsName[] =
+        "implicit_mhd_alfven_cell_factors";
     inline static constexpr char HallCoefficientE0Name[] =
         "implicit_mhd_hall_coefficient_e0";
     inline static constexpr char HallCoefficientE1Name[] =

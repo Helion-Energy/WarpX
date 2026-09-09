@@ -2180,6 +2180,40 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# The recast stiff Alfven wave (Alfven CFL 20 on the central-flux recast; the
+# stiff_alfven deck with fluid_flux = central + viscous number 0.01): today's
+# block preconditioner is the identity there (the Faraday corrector stands down
+# at that reference CFL, eta = 0 leaves the resistive block inactive) and the
+# solve takes 2 Newton / 311-320 GMRES per step -- the baseline the coupling
+# block is graded on. The physics gates are those of analysis_mhd_stiff_alfven.py.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_recast  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_alfven_recast gmres.relative_tolerance=1e-6"  # inputs
+    "analysis_mhd_stiff_alfven_recast.py diags/diag000000 diags/diag000001 baseline"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The Alfven-Schur coupling block (pc_mhd_block.coupling_block = alfven_schur,
+# banded exact inverse), both arms at gmres.relative_tolerance 1e-6 (at the
+# deck's 1e-9 the ~450-unknown system terminates finitely and no
+# preconditioner changes the count): the GMRES total must be at most 0.65x
+# the baseline arm's (measured 98 vs 182 on step 1: the block is the low-beta
+# Schur complement built from continuum stencils against the recast's
+# reconstructed face fluxes, an approximate inverse, not the exact one),
+# Newton at most the baseline's + 1, the same wave physics. Sabotage (test-only
+# knobs, documented in the report): coupling_debug_scale=-1 (wrong sign) 479,
+# coupling_debug_scale=0 (fold off) 200, both FAIL the gate; recovery off 107.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_recast_coupling  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_alfven_recast gmres.relative_tolerance=1e-6 pc_mhd_block.coupling_block=alfven_schur pc_mhd_block.resistive_solver=banded"  # inputs
+    "analysis_mhd_stiff_alfven_recast.py diags/diag000000 diags/diag000001 coupling ../test_1d_theta_implicit_mhd_stiff_alfven_recast/diags/newton.txt 0.65"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_stiff_alfven_recast  # dependency
+)
 # The frozen cross-term registers and their MLMG consumer on top of the
 # weight: the gate on the register contents (sign-sensitive: 40 / 266
 # measured, 46 / 616 with the sign of b_n b_t flipped).

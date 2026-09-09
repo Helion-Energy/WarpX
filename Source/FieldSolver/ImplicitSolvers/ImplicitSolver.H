@@ -584,6 +584,29 @@ public:
     }
 
     /**
+     * \brief Alfven-Schur coefficients of the MHD block preconditioner
+     * (pc_mhd_block.coupling_block = alfven_schur), frozen at the update
+     * state. On the electric-field staggerings the "Alfven resistivity"
+     *     eta_A = (theta/theta_r) h w/(1 + h d) |B|^2/rho
+     * (the low-beta fast-wave Schur complement of the ideal momentum <->
+     * field coupling folded into the resistive rows, with the residual's
+     * vacuum weight w and drag d; theta/theta_r converts the reactive
+     * staging to the resistive rows' scale), and per cell the factors
+     * [0] 1/(1 + h d), [1] h/((1 + h d) rho) (the Faraday right-hand-side
+     * coefficient) and [2] h w/((1 + h d) mu0) (the momentum recovery's
+     * Lorentz factor). a_h = theta dt. Returns false when the operator
+     * does not provide them (the block then aborts).
+     */
+    [[nodiscard]] virtual bool
+    FillMHDAlfvenSchurCoefficientsForPC (
+        amrex::Real /*a_h*/,
+        amrex::Array<const amrex::MultiFab*, 3>& /*a_eta_alfven_edge*/,
+        const amrex::MultiFab*& /*a_cell_factors*/) const
+    {
+        return false;
+    }
+
+    /**
      * \brief Return whether the generalized Ohm law includes the
      * electron-inertia term for the MHD block preconditioner.
      */
