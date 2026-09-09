@@ -2123,6 +2123,33 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         Relative tolerance of the free-subspace residual in the active-set
         mode, against its value at iteration 0 of each solve. Defaults to
         relative_tolerance.
+
+    jfnk_epsilon: float, default=1.e-6
+        Relative size of the matrix-free Jacobian probe (the state is
+        perturbed by eps*dU with eps = jfnk_epsilon ||U||/||dU|| in the
+        global mode). The classic choice is the square root of machine
+        epsilon, about 1.5e-8.
+
+    jfnk_epsilon_mode: string, default='global'
+        Probe sizing rule: 'global' (one relative perturbation of the global
+        state norm along the Krylov direction) or 'component' (every
+        component perturbed by jfnk_epsilon of its own magnitude in the
+        root-mean-square sense, realized as a column scaling of the Jacobian
+        that leaves the right-preconditioned GMRES iteration unchanged).
+
+    jfnk_component_floor: float, default=1.e-3
+        Additive floor of the component probe scale, as a fraction of each
+        state block's reference scale (component mode only).
+
+    jfnk_component_floors: dict, optional
+        Per-block overrides of jfnk_component_floor, {block_name: fraction},
+        e.g. {'implicit_mhd_electron_energy': 1.e-4}.
+
+    jfnk_probe_report_file: string, optional
+        Diagnostic file with one row per Newton iteration of the effective
+        relative perturbation statistics of the probe (small vs large
+        components); 'none' or 'off' disables it. Costs three host copies
+        of the state per Newton iteration when enabled.
     """
 
     def __init__(
@@ -2151,6 +2178,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         forcing_max=None,
         active_set=None,
         active_set_tolerance=None,
+        jfnk_epsilon=None,
+        jfnk_epsilon_mode=None,
+        jfnk_component_floor=None,
+        jfnk_component_floors=None,
+        jfnk_probe_report_file=None,
     ):
         self.verbose = verbose
         self.linear_solver = linear_solver
@@ -2176,7 +2208,18 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.forcing_max = forcing_max
         self.active_set = active_set
         self.active_set_tolerance = active_set_tolerance
+        self.jfnk_epsilon = jfnk_epsilon
+        self.jfnk_epsilon_mode = jfnk_epsilon_mode
+        self.jfnk_component_floor = jfnk_component_floor
+        self.jfnk_component_floors = jfnk_component_floors
+        self.jfnk_probe_report_file = jfnk_probe_report_file
 
+        if jfnk_epsilon_mode is not None:
+            assert jfnk_epsilon_mode in ("global", "component"), (
+                "jfnk_epsilon_mode must be 'global' or 'component'"
+            )
+        if jfnk_component_floors is not None:
+            assert isinstance(jfnk_component_floors, dict)
         if linear_solver is not None:
             assert isinstance(linear_solver, LinearSolverBase)
         if pc_type is not None:
@@ -2211,6 +2254,13 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.forcing_max = self.forcing_max
         newton.active_set = self.active_set
         newton.active_set_tolerance = self.active_set_tolerance
+        newton.jfnk_epsilon = self.jfnk_epsilon
+        newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
+        newton.jfnk_component_floor = self.jfnk_component_floor
+        newton.jfnk_probe_report_file = self.jfnk_probe_report_file
+        if self.jfnk_component_floors is not None:
+            for block_name, fraction in self.jfnk_component_floors.items():
+                setattr(newton, f"jfnk_component_floor_{block_name}", fraction)
 
         if self.linear_solver is not None:
             self.linear_solver.linear_solver_initialize_inputs(newton)

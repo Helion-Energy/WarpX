@@ -94,6 +94,18 @@ public:
         amrex::Print()     << "Newton require convergence: " << (m_require_convergence?"true":"false") << "\n";
         amrex::Print()     << "Newton max frozen steps:    " << m_max_frozen_steps << "\n";
         amrex::Print()     << "JFNK probe epsilon:         " << m_jfnk_epsilon << "\n";
+        amrex::Print()     << "JFNK probe epsilon mode:    "
+                           << amrex::getEnumNameString(m_jfnk_epsilon_mode) << "\n";
+        if (m_jfnk_epsilon_mode == JFNKEpsilonMode::component) {
+            for (std::size_t ib = 0; ib < m_component_floor_names.size(); ++ib) {
+                amrex::Print() << "  component floor [" << m_component_floor_names[ib]
+                               << "] = " << m_component_floor_fractions[ib]
+                               << " x block scale\n";
+            }
+        }
+        if (!m_jfnk_probe_report_file.empty()) {
+            amrex::Print() << "JFNK probe report file:     " << m_jfnk_probe_report_file << "\n";
+        }
         if (m_active_set) {
             amrex::Print() << "Newton active set:          true (reduced-space solve on the free subspace)\n";
             amrex::Print() << "Active-set tolerance:       " << m_active_set_tolerance << "\n";
@@ -182,6 +194,38 @@ private:
      * choice is the square root of machine epsilon (~1.5e-8).
      */
     amrex::Real m_jfnk_epsilon = 1.0e-6;
+
+    /**
+     * \brief Sizing rule of the probe (newton.jfnk_epsilon_mode): global
+     * (the above, default) or component, where eps is sized so that every
+     * component is perturbed by jfnk_epsilon of its own magnitude
+     * |U_i| + floor in the root-mean-square sense (see JacobianFunctionMF).
+     */
+    JFNKEpsilonMode m_jfnk_epsilon_mode = JFNKEpsilonMode::global;
+
+    /**
+     * \brief Additive floor of the component probe scale, as a fraction of
+     * each field block's reference scale (newton.jfnk_component_floor, all
+     * blocks) with per-block overrides newton.jfnk_component_floor_<block>.
+     * The floor keeps components at or near zero from demanding a vanishing
+     * absolute perturbation (and from dominating the scaled direction norm):
+     * below the floor the perturbation is relative to the floor instead.
+     */
+    amrex::Real m_jfnk_component_floor = 1.0e-3;
+    std::vector<std::string> m_component_floor_names;
+    std::vector<amrex::Real> m_component_floor_fractions;
+
+    /**
+     * \brief Diagnostic file (newton.jfnk_probe_report_file, default none;
+     * "none"/"off" disable): one row per Newton iteration with the
+     * statistics of the effective relative perturbation
+     * eps |v_i| / (|U_i| + floor) of the probe over the components the
+     * Krylov direction touches, split into small components (below 1e-2 of
+     * their block reference scale) and large. Costs three host copies of
+     * the state and three reductions per Newton iteration when enabled;
+     * a no-op (bit-identical) when unset.
+     */
+    std::string m_jfnk_probe_report_file;
 
     /**
      * \brief Reduced-space (active-set) Newton, newton.active_set = 1
@@ -388,6 +432,27 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
     m_linear_function = std::make_unique<JacobianFunctionMF<Vec,Ops>>();
     m_linear_function->define(m_F, m_ops, m_pc_type);
     m_linear_function->setJFNKEps(m_jfnk_epsilon);
+    {
+        // Component probe floors: fraction x block reference scale per
+        // field block of the state vector (names/scales from the vector).
+        const amrex::ParmParse pp_newton("newton");
+        m_component_floor_names = a_U.blockNames();
+        const std::vector<amrex::Real> block_scales = a_U.blockScales();
+        std::vector<amrex::Real> floors;
+        m_component_floor_fractions.clear();
+        for (std::size_t ib = 0; ib < m_component_floor_names.size(); ++ib) {
+            amrex::Real fraction = m_jfnk_component_floor;
+            utils::parser::queryWithParser(
+                pp_newton, ("jfnk_component_floor_" + m_component_floor_names[ib]).c_str(), fraction);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                fraction > 0.0,
+                "newton.jfnk_component_floor[_<block>] must be positive");
+            m_component_floor_fractions.push_back(fraction);
+            floors.push_back(fraction * block_scales[ib]);
+        }
+        m_linear_function->setJFNKEpsMode(m_jfnk_epsilon_mode, floors);
+        m_linear_function->setProbeReportFile(m_jfnk_probe_report_file);
+    }
     this->m_usePC = m_linear_function->usePreconditioner();
     if (m_active_set) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -485,6 +550,17 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_jfnk_epsilon > 0.0,
         "newton.jfnk_epsilon must be positive");
+    pp_newton.query("jfnk_epsilon_mode", m_jfnk_epsilon_mode);
+    utils::parser::queryWithParser(pp_newton, "jfnk_component_floor", m_jfnk_component_floor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_jfnk_component_floor > 0.0,
+        "newton.jfnk_component_floor must be positive");
+    pp_newton.query("jfnk_probe_report_file", m_jfnk_probe_report_file);
+    // "none" (or "off") switches the diagnostic off, so a deck that sets a
+    // file can be overridden from the command line.
+    if (m_jfnk_probe_report_file == "none" || m_jfnk_probe_report_file == "off") {
+        m_jfnk_probe_report_file.clear();
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_max_frozen_steps > 0,
         "newton.max_frozen_steps must be positive");
