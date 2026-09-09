@@ -2166,8 +2166,10 @@ add_warpx_test(
 # engages from step 14 on, so the pinned-column gate is exercised where it
 # matters (every row with a floor mask must carry r2_pinned = b2_pinned = 0
 # exactly; a wrong right-hand side in the reduced mode would fail it; at least
-# 50 such rows are required), and the first 13 steps converge to round-off,
-# which exercises the absolute floor of the explicit-vs-reported gate.
+# 50 such rows are required). Every linear solve of this small deck converges
+# to round-off (210 of 210 reports below 1e-8 |b|), which exercises the
+# absolute floor of the explicit-vs-reported gate; its ratio branch is covered
+# by the RZ test above.
 add_warpx_test(
     test_1d_theta_implicit_mhd_linear_residual_blocks_active_set  # name
     1  # dims
