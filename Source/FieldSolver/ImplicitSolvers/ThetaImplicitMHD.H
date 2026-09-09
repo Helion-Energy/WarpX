@@ -11,6 +11,8 @@
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 
+namespace warpx::fused_residual { struct Op; }
+
 #include <AMReX_Array.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_Parser.H>
@@ -21,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 class CircuitCoupler;
 class HybridPICModel;
@@ -275,6 +278,33 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void ApplyMirrorZLoDomainGhosts (amrex::MultiFab& mf,
                                      const amrex::GpuArray<int, 3>& a_component_parity) const;
     void ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const;
+    /** Fused-residual builders (m_fused_residual): append the ghost fill
+     * of every FAB of mf to a wave of independent ops (one launch per
+     * wave, see FusedResidualOps.H). AppendZGhostOp composes the Neumann
+     * pass (a_open_face_keep_rows as in ApplyNeumannZDomainGhosts) with
+     * the z_lo mirror of parity a_mirror_parity (nullptr: no mirror
+     * pass), the mirror having the last word exactly as in sequence. */
+    void AppendZGhostOp (std::vector<warpx::fused_residual::Op>& a_ops,
+                         amrex::MultiFab& mf, int a_open_face_keep_rows,
+                         const amrex::GpuArray<int, 3>* a_mirror_parity) const;
+    /** ApplyMirrorZLoDomainGhosts alone as a fused op (its Neumann
+     * companion ran in an earlier wave). */
+    void AppendMirrorOnlyOp (std::vector<warpx::fused_residual::Op>& a_ops,
+                             amrex::MultiFab& mf,
+                             const amrex::GpuArray<int, 3>& a_parity) const;
+    /** ApplyScalarRadialDomainGhosts as a fused op. */
+    void AppendScalarRadialOp (std::vector<warpx::fused_residual::Op>& a_ops,
+                               amrex::MultiFab& mf) const;
+    /** ApplyMagneticCCDomainGhosts as a fused op. */
+    void AppendMagneticCCRadialOp (std::vector<warpx::fused_residual::Op>& a_ops,
+                                   amrex::MultiFab& mf) const;
+    /** WarpX::SetMagneticFieldAndApplyBCs with the three ghosted copies
+     * as one launch and the ghost exchange skipped where it cannot move
+     * data (single box, non-periodic). */
+    void SetMagneticFieldFused (const WarpXSolverVec& state, amrex::Real a_time);
+    /** WarpX::UpdateMagneticFieldAndApplyBCs (B_old copy, theta-dt Faraday
+     * update with its boundary application), likewise. */
+    void UpdateMagneticFieldFused (amrex::Real a_thetadt, amrex::Real a_start_time);
     /** Copy the three momentum-density components into their
      * single-component diagnostic views (MomentumDiag*Name). */
     void PublishMomentumComponents () const;
@@ -1687,6 +1717,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     bool m_use_central = false;
     // Either recast flux (hlld or central): gates all recast plumbing.
     bool m_use_recast = false;
+    // ---- implicit_evolve.fused_residual (see FusedResidualOps.H): the
+    // residual/preconditioner bookkeeping (block copies, ghost-row fills,
+    // staggered interpolations, zero fills, and the ghost exchanges that
+    // cannot move data on a single box) as one launch per stage instead of
+    // one launch per MultiFab; RZ recast path only, bit-identical to the
+    // sequence it replaces (same per-element expressions). Set in Define.
+    bool m_fused_residual = false;
     // ---- TVD reconstruction of the recast face states
     // (implicit_mhd.fluid_reconstruction; default "none" = the
     // bit-identical donor-cell path). The recast otherwise hands

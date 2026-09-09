@@ -7,6 +7,7 @@
 #ifndef MHD_RESISTIVE_DIRECT_H_
 #define MHD_RESISTIVE_DIRECT_H_
 
+#include "FieldSolver/ImplicitSolvers/FusedResidualOps.H"
 #include "MHDResistiveStencil.H"
 #include "Utils/TextMsg.H"
 
@@ -1325,7 +1326,44 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
         // Single-rank device path: pack the right-hand side on the
         // device; every canonical element is owned locally, so the
         // gather writes each element exactly once (no zero fill).
-        for (int component = 0; component < 3; ++component)
+        if (warpx::fused_residual::Enabled())
+        {
+            // the three component gathers as one launch (inactive
+            // components contribute an empty box)
+            amrex::Real* const rhs_data = m_device_rhs.data();
+            const DirectIndexView view = m_index_view;
+            for (amrex::MFIter mfi(*a_faces[0]); mfi.isValid(); ++mfi)
+            {
+                amrex::GpuArray<amrex::Box, 3> boxes;
+                amrex::GpuArray<amrex::Array4<int const>, 3> entry;
+                amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> faces;
+                for (int component = 0; component < 3; ++component)
+                {
+                    const bool active = m_component_map[component].active;
+                    boxes[component] = active ? m_entry_base_device[component]->box(mfi.index())
+                                              : amrex::Box();
+                    entry[component] = active ? m_entry_base_device[component]->const_array(mfi)
+                                              : amrex::Array4<int const>{};
+                    faces[component] = active ? a_faces[component]->const_array(mfi)
+                                              : amrex::Array4<amrex::Real const>{};
+                }
+                amrex::ParallelFor(
+                    boxes[0], boxes[1], boxes[2],
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        if (entry[0](i, j, k, 0) >= 0) { rhs_data[view.Index(0, i, j, k)] = faces[0](i, j, k); }
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        if (entry[1](i, j, k, 0) >= 0) { rhs_data[view.Index(1, i, j, k)] = faces[1](i, j, k); }
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        if (entry[2](i, j, k, 0) >= 0) { rhs_data[view.Index(2, i, j, k)] = faces[2](i, j, k); }
+                    });
+            }
+        }
+        for (int component = 0; component < 3 && !warpx::fused_residual::Enabled(); ++component)
         {
             if (!m_component_map[component].active)
             {
@@ -1406,7 +1444,30 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
     {
         // Unpack the device solution to every stored face (duplicated
         // faces read the same canonical unknown).
-        for (int component = 0; component < 3; ++component)
+        if (warpx::fused_residual::Enabled())
+        {
+            // the three component scatters as one launch
+            const amrex::Real* const solution_data = m_device_solution.data();
+            const DirectIndexView view = m_index_view;
+            for (amrex::MFIter mfi(*a_faces[0]); mfi.isValid(); ++mfi)
+            {
+                amrex::GpuArray<amrex::Box, 3> boxes;
+                amrex::GpuArray<amrex::Array4<amrex::Real>, 3> faces;
+                for (int component = 0; component < 3; ++component)
+                {
+                    const bool active = m_component_map[component].active;
+                    boxes[component] = active ? a_faces[component]->box(mfi.index()) : amrex::Box();
+                    faces[component] = active ? a_faces[component]->array(mfi)
+                                              : amrex::Array4<amrex::Real>{};
+                }
+                amrex::ParallelFor(
+                    boxes[0], boxes[1], boxes[2],
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) { faces[0](i, j, k) = solution_data[view.Index(0, i, j, k)]; },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) { faces[1](i, j, k) = solution_data[view.Index(1, i, j, k)]; },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) { faces[2](i, j, k) = solution_data[view.Index(2, i, j, k)]; });
+            }
+        }
+        for (int component = 0; component < 3 && !warpx::fused_residual::Enabled(); ++component)
         {
             if (!m_component_map[component].active)
             {

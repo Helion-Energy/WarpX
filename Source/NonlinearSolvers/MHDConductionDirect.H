@@ -7,6 +7,7 @@
 #ifndef MHD_CONDUCTION_DIRECT_H_
 #define MHD_CONDUCTION_DIRECT_H_
 
+#include "FieldSolver/ImplicitSolvers/FusedResidualOps.H"
 #include "MHDConductionStencil.H"
 #include "MHDResistiveDirect.H"
 #include "Utils/TextMsg.H"
@@ -992,7 +993,29 @@ ConductionDirectSolver::Solve (const amrex::MultiFab& a_rhs, amrex::MultiFab& a_
 
     if (m_use_device_assembly)
     {
-        for (int channel = 0; channel < 3; ++channel)
+        if (warpx::fused_residual::Enabled())
+        {
+            // the three channel gathers as one launch (per cell the same
+            // assignments as GatherChannelRhs; absent channels skipped)
+            amrex::Real* const rhs_data = m_device_rhs.data();
+            const ConductionIndexView view = m_view;
+            const amrex::GpuArray<int, 3> component = m_component;
+            for (amrex::MFIter mfi(a_rhs); mfi.isValid(); ++mfi)
+            {
+                const auto values = a_rhs.const_array(mfi);
+                amrex::ParallelFor(mfi.validbox(),
+                                   [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                                   {
+                                       for (int channel = 0; channel < 3; ++channel)
+                                       {
+                                           if (component[channel] < 0) { continue; }
+                                           rhs_data[view.Index(channel, i, j, k)] =
+                                               values(i, j, k, component[channel]);
+                                       }
+                                   });
+            }
+        }
+        for (int channel = 0; channel < 3 && !warpx::fused_residual::Enabled(); ++channel)
         {
             if (m_component[channel] < 0)
             {
@@ -1060,7 +1083,28 @@ ConductionDirectSolver::Solve (const amrex::MultiFab& a_rhs, amrex::MultiFab& a_
 
     if (m_use_device_assembly)
     {
-        for (int channel = 0; channel < 3; ++channel)
+        if (warpx::fused_residual::Enabled())
+        {
+            // the three channel scatters as one launch
+            const amrex::Real* const solution_data = m_device_solution.data();
+            const ConductionIndexView view = m_view;
+            const amrex::GpuArray<int, 3> component = m_component;
+            for (amrex::MFIter mfi(a_solution); mfi.isValid(); ++mfi)
+            {
+                const auto values = a_solution.array(mfi);
+                amrex::ParallelFor(mfi.validbox(),
+                                   [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                                   {
+                                       for (int channel = 0; channel < 3; ++channel)
+                                       {
+                                           if (component[channel] < 0) { continue; }
+                                           values(i, j, k, component[channel]) =
+                                               solution_data[view.Index(channel, i, j, k)];
+                                       }
+                                   });
+            }
+        }
+        for (int channel = 0; channel < 3 && !warpx::fused_residual::Enabled(); ++channel)
         {
             if (m_component[channel] < 0)
             {

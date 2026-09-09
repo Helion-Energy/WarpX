@@ -7,6 +7,7 @@
 #ifndef MHD_BLOCK_PC_H_
 #define MHD_BLOCK_PC_H_
 
+#include "FieldSolver/ImplicitSolvers/FusedResidualOps.H"
 #include "Fields.H"
 #include "MHDConductionBanded.H"
 #include "MHDConductionDirect.H"
@@ -282,6 +283,9 @@ class MHDBlockPC : public Preconditioner<T, Ops>
 
         bool m_is_defined = false;
         bool m_hlld_state = false;
+        //! implicit_evolve.fused_residual: the block copies, frozen-row restores
+        //! and no-op ghost exchanges of Apply() as one launch per stage
+        bool m_fused = false;
         bool m_verbose = false;
         bool m_bottom_verbose = false;
         bool m_agglomeration = true;
@@ -895,6 +899,7 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
             array_type == warpx::fields::FieldType::Bfield_fp,
         "pc_mhd_block requires Efield_fp or Bfield_fp as its vector block");
     m_hlld_state = (array_type == warpx::fields::FieldType::Bfield_fp);
+    m_fused = warpx::fused_residual::Enabled();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(state.numAMRLevels() == 1 && ops->numAMRLevels() == 1,
                                      "pc_mhd_block currently supports one AMR level");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -2669,8 +2674,19 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     // the gated resistive Helmholtz then smooths the assembled B content.
     auto const& rhs_fields = rhs.getArrayVec();
     auto const& solution_fields = solution.getArrayVec();
+    std::vector<warpx::fused_residual::Op> fused_ops; // m_fused: the copies below in one launch
     for (int component = 0; component < 3; ++component)
     {
+        if (m_fused)
+        {
+            for (amrex::MFIter mfi(*solution_fields[0][component]); mfi.isValid(); ++mfi)
+            {
+                fused_ops.push_back(warpx::fused_residual::CopyOp(
+                    *solution_fields[0][component], *rhs_fields[0][component], mfi,
+                    mfi.validbox(), 1));
+            }
+            continue;
+        }
         amrex::MultiFab::Copy(*solution_fields[0][component], *rhs_fields[0][component], 0, 0, 1,
                               0);
     }
@@ -2682,10 +2698,24 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     for (const auto& spec : rhs.getMultiFabBlockSpecs())
     {
         const amrex::MultiFab& block_rhs = rhs.getMultiFabBlock(spec.name, 0);
-        amrex::MultiFab::Copy(*m_signal_rhs, block_rhs, 0, stacked_component,
-                              block_rhs.nComp(), 0);
+        if (m_fused)
+        {
+            for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+            {
+                fused_ops.push_back(warpx::fused_residual::CopyOp(
+                    *m_signal_rhs, block_rhs, mfi, mfi.validbox(), block_rhs.nComp(),
+                    stacked_component, 0));
+            }
+        }
+        else
+        {
+            amrex::MultiFab::Copy(*m_signal_rhs, block_rhs, 0, stacked_component,
+                                  block_rhs.nComp(), 0);
+        }
         stacked_component += block_rhs.nComp();
     }
+    warpx::fused_residual::Run(fused_ops);
+    fused_ops.clear();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(stacked_component == m_signal_components,
                                      "pc_mhd_block state block layout changed after Define()");
 
@@ -2965,7 +2995,39 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             !subtract_z_end || wall_conduction->nComp() >= 7,
             "pc_mhd_block: the wall-conduction register lacks the z-end components");
         constexpr int z_end_channel_offset = 4;
-        for (int channel = 0; channel < 3; ++channel)
+        if (m_fused)
+        {
+            // the three channel divisions in one launch (each cell of each
+            // channel: the same row and the same division as below)
+            const amrex::GpuArray<int, 3> channel_component = m_wall_conduction_component;
+            for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
+            {
+                const auto signal_solution = m_signal_solution->array(mfi);
+                const auto diagonal = wall_conduction->const_array(mfi);
+                amrex::ParallelFor(
+                    mfi.validbox(),
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                    {
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            const int component = channel_component[channel];
+                            if (component < 0)
+                            {
+                                continue;
+                            }
+                            RT row = static_cast<RT>(diagonal(i, j, k, channel));
+                            if (subtract_z_end)
+                            {
+                                row -= static_cast<RT>(
+                                    diagonal(i, j, k, channel + z_end_channel_offset));
+                            }
+                            signal_solution(i, j, k, component) /=
+                                RT(1.0) + wall_conduction_h * row;
+                        }
+                    });
+            }
+        }
+        for (int channel = 0; channel < 3 && !m_fused; ++channel)
         {
             const int component = m_wall_conduction_component[channel];
             if (component < 0)
@@ -2994,9 +3056,28 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     }
 
     stacked_component = 0;
+    std::vector<warpx::fused_residual::Op> restore_ops; // m_fused: the band restores in one launch
     for (const auto& spec : rhs.getMultiFabBlockSpecs())
     {
         amrex::MultiFab& block_solution = solution.getMultiFabBlock(spec.name, 0);
+        if (m_fused)
+        {
+            for (amrex::MFIter mfi(block_solution); mfi.isValid(); ++mfi)
+            {
+                fused_ops.push_back(warpx::fused_residual::CopyOp(
+                    block_solution, *m_signal_solution, mfi, mfi.validbox(),
+                    block_solution.nComp(), 0, stacked_component));
+                if (wall_band_freeze)
+                {
+                    restore_ops.push_back(warpx::fused_residual::RowsCopyOp(
+                        block_solution, rhs.getMultiFabBlock(spec.name, 0), mfi,
+                        mfi.validbox(), block_solution.nComp(), wall_freeze.first_masked_cc,
+                        wall_freeze.z_lo, wall_freeze.z_hi));
+                }
+            }
+            stacked_component += block_solution.nComp();
+            continue;
+        }
         amrex::MultiFab::Copy(block_solution, *m_signal_solution, stacked_component, 0,
                               block_solution.nComp(), 0);
         if (wall_band_freeze)
@@ -3029,6 +3110,8 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         }
         stacked_component += block_solution.nComp();
     }
+    warpx::fused_residual::Run(fused_ops);
+    warpx::fused_residual::Run(restore_ops);
 
     // Shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze): the
     // residual's frozen magnetic-field faces are exact identity rows
@@ -3051,6 +3134,21 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         const amrex::Array<const int*, 3> first_frozen = {
             field_freeze.first_frozen_br, field_freeze.first_frozen_bt,
             field_freeze.first_frozen_bz};
+        if (m_fused)
+        {
+            std::vector<warpx::fused_residual::Op> face_ops;
+            for (int component = 0; component < 3; ++component)
+            {
+                for (amrex::MFIter mfi(*solution_fields[0][component]); mfi.isValid(); ++mfi)
+                {
+                    face_ops.push_back(warpx::fused_residual::RowsCopyOp(
+                        *solution_fields[0][component], *rhs_fields[0][component], mfi,
+                        mfi.validbox(), 1, first_frozen[component]));
+                }
+            }
+            warpx::fused_residual::Run(face_ops);
+            return;
+        }
         for (int component = 0; component < 3; ++component)
         {
             const int* const AMREX_RESTRICT first = first_frozen[component];
@@ -3103,7 +3201,7 @@ MHDBlockPC<T, Ops>::ApplyFaradayCorrector (T& solution)
     // boundaries (interior and periodic ghosts are filled).
     amrex::MultiFab::Copy(*m_momentum_solution,
                           solution.getMultiFabBlock(MomentumDensityName, 0), 0, 0, 3, 0);
-    m_momentum_solution->FillBoundary(m_geometry.periodicity());
+    warpx::fused_residual::FillBoundary(*m_momentum_solution, m_geometry.periodicity(), m_fused);
 
     auto const& solution_fields = solution.getArrayVec();
     const RT coefficient = m_h / m_reference_mass_density;

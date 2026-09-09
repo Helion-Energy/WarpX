@@ -148,6 +148,16 @@ public:
     void SetMagneticFieldAndApplyBCs ( const WarpXSolverVec& a_B, amrex::Real a_time );
     void UpdateMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_thetadt, amrex::Real start_time );
+    /** The boundary part of SetMagneticFieldAndApplyBCs for a caller that
+     * wrote Bfield_fp itself: the ghost exchange (only if a_exchange_ghosts;
+     * a single box in a non-periodic domain has nothing to exchange) and
+     * the B-field boundary application. */
+    void ApplyMagneticFieldBoundaryAfterSet ( amrex::Real a_time, bool a_exchange_ghosts );
+    /** The Faraday part of UpdateMagneticFieldAndApplyBCs for a caller that
+     * wrote B^n into Bfield_fp itself: EvolveB (with its boundary
+     * application) and the ghost exchange only if a_exchange_ghosts. */
+    void EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
+                                          bool a_exchange_ghosts );
     void SpectralSourceFreeFieldAdvance ( amrex::Real start_time);
     void FinishMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_theta, amrex::Real a_time );

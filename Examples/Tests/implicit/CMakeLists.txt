@@ -2273,6 +2273,33 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_conduction_pc  # dependency
 )
 
+# implicit_evolve.fused_residual = 1 (one launch per stage for the residual and
+# preconditioner bookkeeping) must be bit-identical to the unfused sequence:
+# Newton diagnostic file byte-equal, plotfile fields identical, on the
+# multi-box layout (2 ranks: the ghost exchanges are real) and on the
+# single-box layout (1 rank: the exchanges are skipped) of decks with the
+# z_lo mirror + z_hi outflow, and the shaped-wall fluid/field freeze rows
+# of the block preconditioner.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_mirror  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_half jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=true pc_mhd_block.resistive_threshold=1.0e-6 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000032 ../test_rz_theta_implicit_mhd_mirror_half_pc/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_half_pc  # dependency
+)
+
 add_warpx_test(
     test_rz_theta_implicit_mhd_fused_vector_ops  # name
     RZ  # dims
@@ -3398,6 +3425,16 @@ add_warpx_test(
     "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 pc ../test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc/diags/diag000005"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_wall  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000005 ../test_rz_theta_implicit_mhd_wall_field_freeze_live_pc/diags/diag000005"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_field_freeze_live_pc  # dependency
 )
 
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
