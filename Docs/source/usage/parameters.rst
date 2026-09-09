@@ -319,7 +319,7 @@ Overall simulation parameters
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
           - ``newton.diagnostic_file`` (``string``, default: None).
-            One row per recorded step: step, time, Newton iterations, cumulative Newton iterations, exit residual norm (absolute, relative), linear iterations (per step, cumulative), last linear residual, then the free-subspace split of the exit residual -- the norm over the components the admissibility projection did not clamp, the pinned defect (norm over the clamped components; free² + pinned² = norm²) and the number of clamped components. A non-converged exit whose residual is all pinned defect is a bound-resident population the solve cannot act on; one whose free norm exceeds the tolerance is genuinely unconverged dynamics.
+            One row per recorded step: step, time, Newton iterations, cumulative Newton iterations, exit residual norm (absolute, relative), linear iterations (per step, cumulative), last linear residual, then the free-subspace split of the exit residual -- the norm over the components the admissibility projection did not clamp, the pinned defect (norm over the clamped components; free² + pinned² = norm²) and the number of clamped components. A non-converged exit whose residual is all pinned defect is a bound-resident population the solve cannot act on; one whose free norm exceeds the tolerance is genuinely unconverged dynamics. With ``newton.active_set = 1`` two more columns follow: the exit free norm relative to its iteration-0 value and the exit status (see ``newton.active_set``).
           - ``newton.diagnostic_interval`` (``int``, default: 1)
           - ``newton.adaptive_forcing`` (``bool``, default: false).
             When ``true``, the linear-solve relative tolerance of each Newton iteration is set adaptively by the inexact-Newton forcing prescription of Chacón & Knoll, JCP 188 (2003) 577: :math:`\zeta_A = \gamma\,(\|F_k\|/\|F_{k-1}\|)^\alpha`, safeguarded from volatile decreases by :math:`\gamma \zeta_{k-1}^\alpha`, capped at ``newton.forcing_max``, and floored at :math:`\gamma\,\epsilon_t/\|F_k\|` so the final iteration is not oversolved. Loose tolerances far from the solution cut linear iterations while preserving superlinear Newton convergence.
@@ -328,6 +328,79 @@ Overall simulation parameters
           - ``newton.forcing_max`` (``float``, default: 0.5)
           - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6).
             Relative size of the matrix-free Jacobian probe: the state is perturbed by :math:`\epsilon\,\delta U` with :math:`\epsilon = \texttt{jfnk\_epsilon}\,\|U\|/\|\delta U\|` (Pernice-Walker). Because the global state norm is set by the large blocks, the same probe is a large relative perturbation at cells whose state is orders of magnitude smaller (a plasma-vacuum edge), where the difference quotient then averages strongly nonlinear terms instead of differentiating them; the classic choice is the square root of machine epsilon, about 1.5e-8. The default reproduces the historical hard-coded value.
+          - ``newton.active_set`` (``bool``, default: false).
+            Reduced-space (active-set) Newton for operators that project
+            Newton directions onto an admissibility set (currently the
+            theta-implicit MHD solver; refused at start-up for others).
+            The plain projected Newton computes the *unconstrained*
+            direction and clamps it afterwards, so every free component's
+            update was computed assuming the clamped cells move fully: a
+            floor-riding population under a sustained drain (a wall row,
+            a pedestal band) leaves the direction inconsistent and the
+            full-norm Armijo search damping or stagnating. With
+            ``active_set = 1`` each Newton iteration first identifies the
+            *active set* -- floored fluid components resting on their
+            admissibility bound (within twice the projection margin) whose
+            residual demands a sub-bound update (:math:`F_i > 0`), plus
+            the components the previous iteration clamped while they
+            still demand it; a pinned component whose residual points
+            inward is released -- moves its members onto their bounds
+            (re-evaluating the residual when anything moved), and solves
+            the Newton system in the *free* subspace: the matrix-free
+            operator becomes :math:`P_F J P_F + P_A` (pinned rows and
+            columns replaced by the identity), the preconditioner
+            :math:`P_F M^{-1} P_F + P_A`, the right-hand side
+            :math:`P_F F`, so the correction is exactly zero on the pinned
+            components and every free direction is consistent with them
+            held at the bound. The Armijo search grades the free residual
+            norm; convergence is declared when the free norm is within
+            ``newton.active_set_tolerance`` of its iteration-0 value (or
+            below ``newton.absolute_tolerance``, or at round-off,
+            :math:`10^{-12}`, relative to the full norm), printed as
+            ``Satisfied active-set tolerance`` with exit status 4. The
+            residual left on the pinned components -- the *pinned
+            defect*, the sub-bound update the floors refused -- is booked
+            at every exit as created mass and energy (defect divided by
+            theta, the end-of-step extrapolation, times the cell measure)
+            to the floor ledger (:pp:param:`implicit_mhd.floor_ledger_file`,
+            which this mode admits without a floor-consistency source;
+            two extra columns), and printed as ``MHD pinned-defect
+            ledger``. Components the projection clamps *during* a free
+            solve join the set for that line search and are held from the
+            next iteration on; the set is rebuilt from the state at
+            iteration 0 of every solve, and the per-iteration changes are
+            printed in verbose mode (``Newton: active set at iteration k:
+            n pinned (e entered, r released, m moved onto bounds)``).
+            ``newton.diagnostic_file`` gains four columns,
+            ``free_norm_rel`` (the exit free norm over its iteration-0
+            value), ``exit_status`` (2 absolute tolerance, 3 relative
+            tolerance, 4 active-set tolerance on the free subspace, 1
+            line-search stagnation accepted, 0 iteration cap accepted,
+            negative = failure), ``max_pinned_direction`` (the largest
+            norm of the Newton direction restricted to the active set in
+            the solve -- exactly 0 by construction) and
+            ``max_bound_excess`` (the largest distance of a pinned
+            component above its landing point after the move, in
+            projection margins -- at most 0.5 by construction). NOTE on
+            ``newton.require_convergence``: in this mode a status-4 exit
+            counts as converged although the FULL residual (column
+            ``norm_rel``) may be O(1) relative on the pinned rows -- that
+            residual is the booked pinned defect, by design. A strict deck
+            therefore advances with an unconverged full norm; grade runs
+            in this mode by ``exit_status`` and ``free_norm_rel`` (columns
+            12-13), not by column 5. The full-norm ``relative_tolerance``
+            exit (status 3) is still taken when it is met first. A fully pinned state with no free
+            dynamics (free residual at round-off) that nothing moved still
+            counts as a frozen step for ``newton.max_frozen_steps``. The
+            iteration-0 free-subspace rescue is not used in this mode (the
+            search already grades the free norm). The preconditioner is
+            masked, not reduced: its block solves still couple through the
+            pinned cells internally. Off is bit-identical to the plain
+            projected Newton.
+          - ``newton.active_set_tolerance`` (``float``, default: ``newton.relative_tolerance``).
+            Relative tolerance of the free-subspace residual in the
+            active-set mode, measured against the free norm at iteration 0
+            of the solve (the pinned defect is excluded from both).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
@@ -5265,14 +5338,32 @@ Jacobian probes.
     :default: none (no file)
 
     File for the floor-consistency supply ledger (requires a positive
-    :pp:param:`implicit_mhd.floor_consistency_rate`): rows of
+    :pp:param:`implicit_mhd.floor_consistency_rate`, or
+    ``newton.active_set = 1``): rows of
     ``step mass energy`` appended every step, holding the *cumulative*
     supplied mass [kg] and fluid energy [J] (per unit cross-section in
     1D), evaluated at the accepted theta state exactly as the residual
     applied them -- the conservation instrument of the reservoir, the
     floor-side sibling of :pp:param:`implicit_mhd.wall_ledger_file`.
-    The first write of a run truncates a stale file; the counters
-    restart at zero on a simulation restart.
+    With ``newton.active_set = 1`` every row carries three more columns,
+    ``pinned_mass pinned_energy pinned_internal_raw``: the *cumulative*
+    mass and energy the floors created by holding the Newton active set
+    on its bounds against the equations' sub-bound demand (the pinned
+    defect of each Newton exit divided by theta, integrated with the cell
+    measure; wall-masked cells excluded), and the raw defect sum of the
+    dual-energy ``U_i`` block. Under ``ion_closure = dual_energy`` with
+    the step-end sync on, ``pinned_energy`` books the sync-weighted
+    creation :math:`f_k D_{E_i} + (1 - f_k) D_{U_i}` per cell (the sync
+    rewrites :math:`E_i` from the blended pressure, so a floor-held
+    :math:`U_i` reaches the conserved energy with weight :math:`1 - f_k`
+    and an :math:`E_i` pin survives with weight :math:`f_k`); the raw
+    per-block sums are printed at every booking (``MHD pinned-defect
+    ledger``) and the raw ``U_i`` sum is the third column, so the
+    :math:`E_i`-only and :math:`E_i + U_i` readings stay auditable. With
+    the sync off, ``pinned_energy`` is the conserved blocks' own defect.
+    Without a supply source the first two columns are identically zero. The first write
+    of a run truncates a stale file; the counters restart at zero on a
+    simulation restart.
 
 .. pp:param:: implicit_mhd.density_eater_rate
     :type: ``float``

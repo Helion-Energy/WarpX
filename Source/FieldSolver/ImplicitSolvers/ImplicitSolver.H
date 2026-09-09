@@ -211,6 +211,131 @@ public:
     }
 
     /**
+     * \brief Whether the operator projects Newton directions onto an
+     * admissible set (positivity/temperature floors) and records the
+     * clamp masks the reduced-space (active-set) Newton mode of
+     * NewtonSolver consumes (newton.active_set = 1). Operators without a
+     * projection return false and the mode is refused at Define, so a
+     * deck cannot silently run a no-op active set.
+     */
+    [[nodiscard]] virtual bool HasAdmissibilityProjection () const
+    {
+        return false;
+    }
+
+    /**
+     * \brief Switch the operator into the reduced-space (active-set)
+     * Newton mode: ProjectAndLimitSolverStep then ADDS the components it
+     * clamps to the current active set instead of replacing the set, and
+     * FreeResidualNorm no longer lists pinned cells on every call
+     * (ReportActiveSet does, once per solve exit). No-op default.
+     */
+    virtual void SetActiveSetMode (bool a_on)
+    {
+        amrex::ignore_unused(a_on);
+    }
+
+    /**
+     * \brief Reduced-space Newton: identify the active set at the iterate
+     * a_U with residual a_F = F(a_U). A component is pinned when its
+     * residual demands a sub-bound update (F_i > 0 in the F = U - b -
+     * R(U) convention, whose Newton update U - J^{-1} F lowers U_i for
+     * the identity-dominated rows the floors act on) AND it rests on its
+     * admissibility bound (within twice the projection margin) -- or,
+     * with a_keep_clamped, it was pinned or clamped by the previous
+     * iteration of this solve and still demands the sub-bound update (a
+     * damped line-search step can leave a clamped component above its
+     * bound; MoveActiveSetToBounds then completes the move). A pinned
+     * component whose residual points inward (F_i < 0) leaves the set:
+     * the free solve is allowed to lift it. Records the masks and counts
+     * that FreeResidualNorm, Zero/CopyActiveSetComponents and
+     * PinnedComponentReport consume; returns the global pinned count and
+     * the global counts of components that entered and left the set
+     * relative to the previous masks. The base has no bounds: empty set.
+     */
+    virtual amrex::Long IdentifyActiveSet (const WarpXSolverVec& a_U,
+                                           const WarpXSolverVec& a_F,
+                                           bool a_keep_clamped,
+                                           amrex::Long& a_entered,
+                                           amrex::Long& a_released) const
+    {
+        amrex::ignore_unused(a_U, a_F, a_keep_clamped);
+        a_entered = 0;
+        a_released = 0;
+        return 0;
+    }
+
+    /**
+     * \brief Reduced-space Newton: move every active-set component
+     * resting ABOVE its admissibility bound down onto it (the
+     * projection's landing point, one margin above the bound; never
+     * lifted). Returns the global count moved; the caller re-evaluates
+     * the residual when it is nonzero. No-op default.
+     */
+    virtual amrex::Long MoveActiveSetToBounds (WarpXSolverVec& a_U) const
+    {
+        amrex::ignore_unused(a_U);
+        return 0;
+    }
+
+    /**
+     * \brief Zero the active-set (pinned) components of a_v: the
+     * restriction P_F v onto the free subspace. No-op default.
+     */
+    virtual void ZeroActiveSetComponents (WarpXSolverVec& a_v) const
+    {
+        amrex::ignore_unused(a_v);
+    }
+
+    /**
+     * \brief Overwrite the active-set components of a_dst with those of
+     * a_src (a_dst = P_F a_dst + P_A a_src). With a_src the operand of a
+     * matrix-free Jacobian product this makes the operator the identity
+     * on the pinned rows; with a_src the base state it keeps the probe
+     * state unperturbed on the pinned columns. No-op default.
+     */
+    virtual void CopyActiveSetComponents (WarpXSolverVec& a_dst,
+                                          const WarpXSolverVec& a_src) const
+    {
+        amrex::ignore_unused(a_dst, a_src);
+    }
+
+    /**
+     * \brief Reduced-space Newton self-check: the largest distance of an
+     * active-set component ABOVE its admissibility landing point, in
+     * units of the projection margin: max over pinned i of
+     * (U_i - bound_i - margin_i) / margin_i (global max, 0 when nothing
+     * is pinned). After MoveActiveSetToBounds every member sits within
+     * half a margin of the landing point, so a value above 0.5 means a
+     * pinned component was left off its bound. No-op default.
+     */
+    [[nodiscard]] virtual amrex::Real
+    ActiveSetBoundExcess (const WarpXSolverVec& a_U) const
+    {
+        amrex::ignore_unused(a_U);
+        return 0.0;
+    }
+
+    /**
+     * \brief Book the pinned defect of a Newton exit residual -- the
+     * residual over the active-set components, i.e. the sub-bound update
+     * the floors refused on the returned state -- to the operator's
+     * floor ledger as created mass and energy. No-op default.
+     */
+    virtual void BookPinnedDefect (const WarpXSolverVec& a_residual)
+    {
+        amrex::ignore_unused(a_residual);
+    }
+
+    /**
+     * \brief Rate-limited listing of the current active set, called once
+     * per Newton exit in the active-set mode. No-op default.
+     */
+    virtual void ReportActiveSet () const
+    {
+    }
+
+    /**
      * \brief Localize a non-converged Newton residual: print per-block
      * norms and the largest-|F| cells with physical coordinates. Base
      * implementation is a no-op; solvers with block structure override.

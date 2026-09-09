@@ -147,6 +147,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * NEGATIVE 6e17 J wall ledger from garbage accepted states. */
     void ProjectStateToAdmissibleSet (WarpXSolverVec& a_U) const override;
 
+    /** The fluid blocks carry positivity/temperature floors and the
+     * projection above records their clamp masks: the reduced-space
+     * Newton mode (newton.active_set) is supported. */
+    [[nodiscard]] bool HasAdmissibilityProjection () const override
+    {
+        return true;
+    }
+
+    void SetActiveSetMode (bool a_on) override { m_active_set_mode = a_on; }
+
+    /** Reduced-space (active-set) Newton hooks -- see the base
+     * declarations and m_active_set_mode. Public for the NVCC
+     * extended-lambda requirement. */
+    [[nodiscard]] amrex::Long
+    IdentifyActiveSet (const WarpXSolverVec& a_U, const WarpXSolverVec& a_F,
+                       bool a_keep_clamped, amrex::Long& a_entered,
+                       amrex::Long& a_released) const override;
+    amrex::Long MoveActiveSetToBounds (WarpXSolverVec& a_U) const override;
+    void ZeroActiveSetComponents (WarpXSolverVec& a_v) const override;
+    void CopyActiveSetComponents (WarpXSolverVec& a_dst,
+                                  const WarpXSolverVec& a_src) const override;
+    void BookPinnedDefect (const WarpXSolverVec& a_residual) override;
+    void ReportActiveSet () const override;
+    [[nodiscard]] amrex::Real
+    ActiveSetBoundExcess (const WarpXSolverVec& a_U) const override;
+
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
      * construction: densities are max-floored, pressures and energies go
@@ -296,6 +322,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * residual kernels. Must be called after the nonlinear solve and
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
+
+    /** Append this step's row to implicit_mhd.floor_ledger_file (rank 0;
+     * the first write of a run truncates a stale file): the cumulative
+     * floor-consistency supply "step mass energy", followed in the
+     * reduced-space Newton mode by the cumulative pinned-defect booking
+     * "pinned_mass pinned_energy". */
+    void WriteFloorLedgerRow (int step);
     /** Halo temperature-relaxation bookkeeping (halo_relaxation_rate > 0):
      * the windowed outlet drains fluid energy into the prescribed cold
      * medium by design, so the conservation ledger tracks it explicitly.
@@ -687,6 +720,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // failure-path call counter driving the rate limit.
     int m_pinned_cell_report_max = 16;
     mutable amrex::Long m_free_residual_norm_calls = 0;
+    // Reduced-space (active-set) Newton mode (newton.active_set = 1, set
+    // by the Newton solver at Define): the masks above are then the
+    // ACTIVE SET of the running solve -- rebuilt by IdentifyActiveSet at
+    // every iterate and enlarged (not replaced) by
+    // ProjectAndLimitSolverStep; the Jacobian-vector products and the
+    // preconditioner are masked through Zero/CopyActiveSetComponents.
+    mutable bool m_active_set_mode = false;
+    // Pinned-defect ledger (active-set mode): cumulative mass [kg] and
+    // fluid energy [J] ([kg/m^2], [J/m^2] in 1D) the floors CREATED by
+    // holding pinned components on their bounds against the equations'
+    // sub-bound demand -- the Newton exit residual over the active set
+    // divided by theta (the end-of-step extrapolation), integrated with
+    // the cell measure (BookPinnedDefect) -- appended to
+    // floor_ledger_file as two extra columns. The conserved blocks only
+    // (the dual-energy U_i block is bookkeeping, like the supply
+    // ledger); wall-masked cells excluded like every other source.
+    // Under dual_energy with the step-end sync on, the energy booking is
+    // the sync-weighted creation fk D_Ei + (1 - fk) D_Ui per cell (the
+    // sync rewrites E_i := KE + p_blend/(gamma - 1) with p_blend = fk
+    // p(E_i) + (1 - fk) p(U_i), so a U_i held up by its floor flows into
+    // the conserved E_i with weight 1 - fk and an E_i pin survives with
+    // weight fk); the raw U_i-block defect sum is kept as its own column
+    // so the E_i-only and U_i-only readings stay auditable.
+    amrex::Real m_pinned_defect_mass = 0.0;
+    amrex::Real m_pinned_defect_energy = 0.0;
+    amrex::Real m_pinned_defect_internal_raw = 0.0;
 
     amrex::Real m_ion_charge_to_mass;
     amrex::Real m_gamma_e = 5.0 / 3.0;
