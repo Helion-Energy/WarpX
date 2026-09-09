@@ -776,6 +776,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_old_ion_perp_energy";
     inline static constexpr char OldIonInternalEnergyName[] =
         "implicit_mhd_old_ion_internal_energy";
+    // Per-cell CUMULATIVE pedestal refresh injections [kg/m^3], [J/m^3]
+    // (plot-able by name; zero-guard; not checkpointed): the raise kernel
+    // adds its per-cell deltas here, so the refresh's footprint can be
+    // located (halo band, separatrix-to-wall band, density class) from
+    // the dumps. The ledger is their measure-weighted domain sum.
+    inline static constexpr char PedestalInjectedMassName[] =
+        "implicit_mhd_pedestal_injected_mass";
+    inline static constexpr char PedestalInjectedElectronEnergyName[] =
+        "implicit_mhd_pedestal_injected_electron_energy";
+    inline static constexpr char PedestalInjectedIonEnergyName[] =
+        "implicit_mhd_pedestal_injected_ion_energy";
     // Resistive backward-Euler option (m_resistive_theta): the
     // beginning-of-step plasma current J^n (captured once per step) and
     // the per-residual resistive-stage scratch
@@ -1264,6 +1275,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // interior point of the admissible set. ----
     amrex::Real m_halo_pedestal_temperature_e = 0.0;
     amrex::Real m_halo_pedestal_temperature_i = 0.0;
+    // ---- STATIC pedestal density [m^-3] (0 = off, bit-identical): an
+    // absolute pedestal density in place of the peak-keyed
+    // f max(rho_peak, rho_ref) -- rho_ped = n (q / (q/m)) = n m_i, never
+    // stepping up with the compression peaks of n_max (measured on the
+    // production run: n_max oscillates 0.5-1.5e21 with a ~2 us period and
+    // the raised-class share of the halo band swings 20-60 % with it,
+    // every peak pushing a fresh band of cells under the pedestal). With
+    // the cold image and the floor raise this is the pedestal as a
+    // numerical floor and nothing else -- the reference code keeps a
+    // static floor of exactly this kind. halo_pedestal_fraction stays the
+    // machinery's on-switch (and the definition of the gates and tapers
+    // keyed to rho_ped); asserted above the mass density floor. ----
+    amrex::Real m_halo_pedestal_number_density = 0.0;
     // How the raise applies a COLD image to a raised (sub-pedestal-
     // density) cell (implicit_mhd.halo_pedestal_cold_raise): true =
     // "reset": the species' energy is SET to the cold image, so the

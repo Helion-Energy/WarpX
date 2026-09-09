@@ -1,0 +1,13 @@
+# The RZ cold-image deck with a STATIC pedestal density and the FLOOR
+# raise: the pedestal as a numerical floor and nothing else (n_static =
+# 3 x the fraction-keyed value 1e-3 n0 the peak would give, so the raise
+# is discriminated; both temperatures at the 2 eV class). Same gates:
+# ledger closure against the domain mass, the per-cell injected fields'
+# domain sums equal the ledger, the raised band on the image.
+FILE = inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold
+my_constants.n_static = 3.0e-3 * n0
+implicit_mhd.halo_pedestal_density = n_static
+# (T_ped_e is 2 eV in the base deck already; redefine the ion constant the
+# base's key line reads)
+my_constants.T_ped_i = 2.0
+implicit_mhd.halo_pedestal_cold_raise = floor

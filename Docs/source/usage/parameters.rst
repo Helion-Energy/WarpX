@@ -5392,6 +5392,34 @@ Jacobian probes.
     electron image, against :pp:param:`implicit_mhd.ion_pressure_floor`
     and the ion temperature floor.
 
+.. pp:param:: implicit_mhd.halo_pedestal_density
+    :type: ``float``
+    :unit: m^-3
+    :default: ``0`` (off, bit-identical)
+
+    STATIC pedestal density. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction` (which stays the
+    pedestal machinery's switch and the reference of its gates and
+    tapers); when set, the pedestal density is the absolute
+    :math:`\rho_\mathrm{ped} = n\,m_i` (through the ion charge-to-mass)
+    instead of the peak-keyed :math:`f\,\max(\rho_\mathrm{peak},
+    \rho_\mathrm{ref})`, so it no longer steps up with every compression
+    peak of the density maximum (measured on the production formation
+    run: the peak oscillates by a factor 3 with a ~2 us period and each
+    peak pushes a fresh band of halo cells under the pedestal, whose
+    temperatures are then reset to the image). With
+    :pp:param:`implicit_mhd.halo_pedestal_temperature_e` / ``_i`` and
+    ``implicit_mhd.halo_pedestal_cold_raise = floor`` the pedestal is a
+    numerical floor and nothing else -- the static cold floor the
+    reference code keeps. Must exceed
+    :pp:param:`implicit_mhd.mass_density_floor`. The per-cell cumulative
+    injections of the refresh are available as the plot fields
+    ``implicit_mhd_pedestal_injected_mass`` [kg/m^3],
+    ``implicit_mhd_pedestal_injected_electron_energy`` and
+    ``implicit_mhd_pedestal_injected_ion_energy`` [J/m^3] (not
+    checkpointed), whose measure-weighted domain sums are the ledger's
+    columns.
+
 .. pp:param:: implicit_mhd.halo_pedestal_cold_raise
     :type: ``string``
     :default: ``reset``

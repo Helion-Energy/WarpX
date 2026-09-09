@@ -478,6 +478,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# STATIC pedestal density (implicit_mhd.halo_pedestal_density): the raise
+# lands on n_static = 0.05 n0, half the peak-keyed value the fraction alone
+# would give (discriminated), with the cold image in pressure balance at
+# that density; same exactness, ledger and injected-field gates.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_static  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_static  # inputs
+    "analysis_mhd_halo_pedestal_cold.py static diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # The cold image under the production SOLVER stack (packed_gmres x
 # fused_vector_ops = 2 x active_set = 1 x fused_residual = 1): the raise
 # and its ledger sit outside the solve, and on the static column every
@@ -559,6 +573,21 @@ add_warpx_test(
     "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref/diags/diag000008"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref  # dependency
+)
+
+# The pedestal as a numerical floor and nothing else: STATIC density (3e-3
+# n0, three times the fraction-keyed value: discriminated) + cold 2 eV
+# images + the FLOOR raise, under the production fluid stack; ledger mass
+# closure, the injected fields' domain sums equal the ledger, source-only
+# bookings, the band's ions lifted exactly onto the image.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_static  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold_static  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt --static 3.0e16 --floor --te 2.0 --ti 2.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
 )
 
 # Offset-density advection (implicit_mhd.advection_density_offset_fraction,

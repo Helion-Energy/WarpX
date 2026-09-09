@@ -75,7 +75,7 @@ def field(data, name):
 
 
 mode = sys.argv[1]
-assert mode in ("reset", "floor", "total_energy", "cgl"), mode
+assert mode in ("reset", "floor", "total_energy", "cgl", "static"), mode
 initial_ds, initial = get_data(sys.argv[2])
 final_ds, final = get_data(sys.argv[3])
 
@@ -92,8 +92,16 @@ electron_temperature_bulk = 1.0
 ion_temperature_bulk = 2.0
 electron_pressure_bulk = number_density * electron_temperature_bulk * constants.elementary_charge
 ion_pressure_bulk = number_density * ion_temperature_bulk * constants.elementary_charge
-pedestal_temperature_e = electron_temperature_bulk / pedestal_fraction
-pedestal_temperature_i = ion_temperature_bulk / pedestal_fraction
+# The static variant pins the pedestal at n_static = 0.05 n0 (half the
+# peak-keyed value) and its cold image at the matching pressure-balance
+# temperatures.
+static_density_fraction = 0.05
+if mode == "static":
+    pedestal_temperature_e = electron_temperature_bulk / static_density_fraction
+    pedestal_temperature_i = ion_temperature_bulk / static_density_fraction
+else:
+    pedestal_temperature_e = electron_temperature_bulk / pedestal_fraction
+    pedestal_temperature_i = ion_temperature_bulk / pedestal_fraction
 ledger_file = "halo_pedestal_ledger.txt"
 # Every deck runs five steps (one ledger row each); the floor mode reads
 # the plotfile after the first step only.
@@ -108,8 +116,13 @@ assert cold_band.sum() == 16 and hot_band.sum() == 16
 
 # The dynamic pedestal keys to the instantaneous peak, not the (lower)
 # reference density.
-pedestal = pedestal_fraction * max(rho0, reference_density)
-assert pedestal == pedestal_fraction * rho0
+if mode == "static":
+    pedestal = static_density_fraction * rho0
+    # Discrimination: the fraction alone would give twice this.
+    assert abs(pedestal - pedestal_fraction * rho0) > 0.4 * pedestal
+else:
+    pedestal = pedestal_fraction * max(rho0, reference_density)
+    assert pedestal == pedestal_fraction * rho0
 # The cold image through n kB T = rho (q/m) T[eV]; in pressure balance
 # with the bulk by construction of the deck.
 charge_to_mass = constants.elementary_charge / constants.proton_mass
@@ -253,6 +266,18 @@ np.testing.assert_allclose(ledger[0, 4], expected_ion, rtol=1.0e-12)
 # Nothing sub-pedestal after the first raise: rows 2-5 add nothing.
 assert np.all(ledger[1:, 1] == 0), ledger[:, 1]
 np.testing.assert_array_equal(ledger[1:, 2:], np.tile(ledger[0, 2:], (steps - 1, 1)))
+# The per-cell injected fields integrate to the ledger exactly (cell
+# measure dz in 1D): mass, electron energy, ion energy.
+injected_mass = field(final, "implicit_mhd_pedestal_injected_mass")
+injected_electron = field(final, "implicit_mhd_pedestal_injected_electron_energy")
+injected_ion = field(final, "implicit_mhd_pedestal_injected_ion_energy")
+np.testing.assert_allclose(np.sum(injected_mass) * cell_size, ledger[-1, 2], rtol=1.0e-12)
+np.testing.assert_allclose(np.sum(injected_electron) * cell_size, ledger[-1, 3], rtol=1.0e-12)
+np.testing.assert_allclose(np.sum(injected_ion) * cell_size, ledger[-1, 4], rtol=1.0e-12)
+# ... and sit on the raised cells only (the bulk was never sub-pedestal).
+np.testing.assert_array_equal(injected_mass[bulk], 0.0)
+np.testing.assert_allclose(injected_mass[halo], pedestal - rho_halo, rtol=1.0e-12)
+
 # Closure against the domain: the ledger IS the total change of each
 # booked block over the run (static contact afterwards).
 np.testing.assert_allclose(

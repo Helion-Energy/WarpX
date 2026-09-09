@@ -39,13 +39,16 @@ import yt
 yt.set_log_level(50)
 
 initial_plotfile, final_plotfile, ledger_file = sys.argv[1:4]
+# Optional: --static <n_static m^-3> (the pedestal density is then fixed, not f max n) and --floor (floor raise: source-only
+# bookings; the hot loaded electrons are kept so the band's electron gate is skipped).
+static_density = float(sys.argv[sys.argv.index("--static") + 1]) if "--static" in sys.argv else None
 
 n0 = 1.0e19
 rho0 = n0 * constants.proton_mass
 gamma = 5.0 / 3.0
 f_ped = 1.0e-3
-T_ped_e = 2.0
-T_ped_i = 20.0
+T_ped_e = float(sys.argv[sys.argv.index("--te") + 1]) if "--te" in sys.argv else 2.0
+T_ped_i = float(sys.argv[sys.argv.index("--ti") + 1]) if "--ti" in sys.argv else 20.0
 steps = 8
 charge_to_mass = constants.elementary_charge / constants.proton_mass
 
@@ -54,6 +57,9 @@ FIELDS = (
     "implicit_mhd_mass_density",
     "implicit_mhd_electron_energy",
     "implicit_mhd_ion_internal_energy",
+    "implicit_mhd_pedestal_injected_mass",
+    "implicit_mhd_pedestal_injected_electron_energy",
+    "implicit_mhd_pedestal_injected_ion_energy",
 )
 
 
@@ -101,17 +107,37 @@ print(f"mass change {mass_change:.9e} kg, booked {booked:.9e} kg, closure {closu
 assert booked > 0.0
 assert closure < 1.0e-6, closure
 
+# 1b. The per-cell injected fields integrate (RZ measure) to the ledger
+# columns exactly: the ledger IS their domain sum.
+for name, col in (("implicit_mhd_pedestal_injected_mass", 2),
+                  ("implicit_mhd_pedestal_injected_electron_energy", 3),
+                  ("implicit_mhd_pedestal_injected_ion_energy", 4)):
+    total = np.sum(final[name] * volume)
+    print(f"{name}: domain sum {total:.9e} vs ledger {ledger[-1, col]:.9e}")
+    np.testing.assert_allclose(total, ledger[-1, col], rtol=1.0e-12)
+
 # 2. Signs of the energy bookings (reset form on a hot sparse halo).
 print(f"energy ledger: electrons {ledger[-1, 3]:.6e} J, ions {ledger[-1, 4]:.6e} J")
-assert ledger[-1, 3] < 0.0, ledger[-1, 3]
-assert ledger[-1, 4] > 0.0, ledger[-1, 4]
+floor_raise = "--floor" in sys.argv
+if floor_raise:
+    # floor form: max(own, image) -- pure source, every booking >= 0 (the
+    # hot electrons are kept, the cold ions lifted).
+    assert ledger[-1, 3] >= 0.0 and ledger[-1, 4] > 0.0, ledger[-1, 3:5]
+else:
+    assert ledger[-1, 3] < 0.0, ledger[-1, 3]
+    assert ledger[-1, 4] > 0.0, ledger[-1, 4]
 
 # 3. The cold band rides near the cold image. The band cells next to the
 # column edge are heated by the capped perpendicular conduction from the
 # hot edge (a few cells over 8 steps), so the MEDIAN is the statistic of
 # the raised state; the mass-weighted mean must still sit far below the
 # peak image (the core temperature).
-pedestal = f_ped * rho_f.max()
+if static_density is not None:
+    pedestal = static_density * constants.proton_mass
+    # Discrimination: the fraction-keyed pedestal would be a third of this.
+    assert abs(pedestal - f_ped * rho_f.max()) > 0.4 * pedestal
+else:
+    pedestal = f_ped * rho_f.max()
 band = rho_f <= 1.1 * pedestal
 print(f"band cells {band.sum()} of {band.size}")
 assert band.sum() >= 0.4 * band.size
@@ -126,11 +152,16 @@ ti_median = np.median(ti_band)
 print(f"band <Te>_m {te_mean:.4f} eV, median {te_median:.4f} (image {T_ped_e}); "
       f"<Ti>_m {ti_mean:.4f} eV, median {ti_median:.4f} (image {T_ped_i})")
 print(f"band Te range {te_band.min():.4f}..{te_band.max():.4f}, Ti range {ti_band.min():.4f}..{ti_band.max():.4f}")
-assert abs(te_median / T_ped_e - 1.0) < 0.25, te_median
+if not floor_raise:
+    assert abs(te_median / T_ped_e - 1.0) < 0.25, te_median
+    # Far from the peak image (the core temperature, 50 eV) even on average.
+    assert te_mean < 0.3 * 50.0, te_mean
+    # The raise lands exactly on the image: the coldest band cells sit on it.
+    np.testing.assert_allclose(te_band.min(), T_ped_e, rtol=1.0e-6)
 assert abs(ti_median / T_ped_i - 1.0) < 0.25, ti_median
-# The raise lands exactly on the image: the coldest band cells sit on it.
-np.testing.assert_allclose(te_band.min(), T_ped_e, rtol=1.0e-6)
-np.testing.assert_allclose(ti_band.min(), T_ped_i, rtol=1.0e-6)
-# Far from the peak image (the core temperature, 50 eV) even on average.
-assert te_mean < 0.3 * 50.0, te_mean
+# The coldest band cells sit on the ion image: exactly where the pedestal
+# rises every step (re-raise at the start of the last step), within the
+# 8-step conductive drift (~1 %) when the pedestal is static (no re-raise
+# after the first step).
+np.testing.assert_allclose(ti_band.min(), T_ped_i, rtol=(5.0e-2 if static_density is not None else 1.0e-6))
 print("cold pedestal image (RZ): ledger closes, signs right, band cold")

@@ -145,5 +145,8 @@ diag1.fields_to_plot = Bz implicit_mhd_mass_density \
                        implicit_mhd_electron_energy implicit_mhd_ion_energy \
                        implicit_mhd_ion_internal_energy \
                        implicit_mhd_momentum_r implicit_mhd_momentum_t \
-                       implicit_mhd_momentum_z
+                       implicit_mhd_momentum_z \
+                       implicit_mhd_pedestal_injected_mass \
+                       implicit_mhd_pedestal_injected_electron_energy \
+                       implicit_mhd_pedestal_injected_ion_energy
 diag1.write_species = 0

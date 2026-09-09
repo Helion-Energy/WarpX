@@ -3332,6 +3332,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         drains the pinned band toward the COLD image). Same floor
         conditions as the electron image.
 
+    halo_pedestal_density: float, default=0 (off, bit-identical)
+        STATIC pedestal density in m^-3 (requires halo_pedestal_fraction >
+        0, which stays the machinery's switch): an absolute pedestal
+        rho_ped = n m_i in place of the peak-keyed f max(rho_peak,
+        rho_ref), so the pedestal no longer steps up with every
+        compression peak of the density maximum. With the cold image and
+        halo_pedestal_cold_raise="floor" the pedestal is a numerical
+        floor and nothing else. Must exceed the mass density floor.
+
     halo_pedestal_cold_raise: {"reset", "floor"}, default="reset"
         How the raise applies a COLD image to a raised (sub-pedestal-
         density) cell: "reset" SETS the species' energy to the image
@@ -3909,6 +3918,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_energy_rate=None,
         halo_pedestal_temperature_e=None,
         halo_pedestal_temperature_i=None,
+        halo_pedestal_density=None,
         halo_pedestal_cold_raise=None,
         halo_pedestal_ledger_file=None,
         advection_density_offset_fraction=None,
@@ -4056,6 +4066,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
         self.halo_pedestal_temperature_e = halo_pedestal_temperature_e
         self.halo_pedestal_temperature_i = halo_pedestal_temperature_i
+        self.halo_pedestal_density = halo_pedestal_density
         self.halo_pedestal_cold_raise = halo_pedestal_cold_raise
         self.halo_pedestal_ledger_file = halo_pedestal_ledger_file
         self.advection_density_offset_fraction = advection_density_offset_fraction
@@ -4213,6 +4224,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
         implicit_mhd.halo_pedestal_temperature_e = self.halo_pedestal_temperature_e
         implicit_mhd.halo_pedestal_temperature_i = self.halo_pedestal_temperature_i
+        implicit_mhd.halo_pedestal_density = self.halo_pedestal_density
         implicit_mhd.halo_pedestal_cold_raise = self.halo_pedestal_cold_raise
         implicit_mhd.halo_pedestal_ledger_file = self.halo_pedestal_ledger_file
         implicit_mhd.advection_density_offset_fraction = (
