@@ -7183,7 +7183,25 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
             << " wall_pin=" << wall_pin;
-        if (any_leg_bc) { amrex::Print() << " wall_leg=" << wall_leg; }
+        if (any_leg_bc) {
+            // wall_leg AS STORED (the wall_pin convention) and, next to it,
+            // in Joules: the stored sum times the node dual-cell volume --
+            // RZ carries the 2 pi r/dr weight already, so x dr dz; Cartesian
+            // x the product of the cell sizes (the WARPX_QDSMC_COND_STATS
+            // line's convention). The 2026-09-09 formation twin was read as
+            // a 35 J drain from the stored value; it was 2 mJ.
+            amrex::Geometry const & geom0 = warpx.Geom(0);
+#ifdef WARPX_DIM_RZ
+            amrex::Real const leg_to_J = geom0.CellSize(0) * geom0.CellSize(1);
+#else
+            amrex::Real leg_to_J = 1.0_rt;
+            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                leg_to_J *= geom0.CellSize(dd);
+            }
+#endif
+            amrex::Print() << " wall_leg=" << wall_leg
+                           << " wall_leg_J=" << wall_leg * leg_to_J;
+        }
         amrex::Print()
             << " corner_pin=" << m_cond_corner_tally
             << " corner_Te_max_eV="
