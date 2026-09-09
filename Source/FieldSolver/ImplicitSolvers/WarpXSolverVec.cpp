@@ -758,11 +758,10 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
 {
     assertIsDefined( a_X );
     assertSameType( a_X );
-    // NOTE for the merge with the component-probe branch (dotProduct(a_X,
-    // a_apply_block_scales)): the fused path must receive that flag,
-    // fusedDot(a_X, a_apply_block_scales), or the unweighted component norm
-    // would silently become the weighted solver norm at fused_vector_ops = 2.
-    if (FusedLevel() >= 2 && fusedAvailable()) { return fusedDot(a_X, true); }
+    // The fused inner product carries the block-scale flag: with it false
+    // (the component probe's unweighted norm) the fused kernel weights every
+    // segment by 1 instead of 1/scale^2, exactly like the loop below.
+    if (FusedLevel() >= 2 && fusedAvailable()) { return fusedDot(a_X, a_apply_block_scales); }
 
     amrex::Real result = 0.0;
     const bool local = true;

@@ -1115,6 +1115,25 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_probe_edge_flat  # dependency
 )
 
+# Fused-2 twin of the component probe: the same deck and component-scaled
+# probe with implicit_evolve.fused_vector_ops = 2 (fused inner product) and
+# the packed GMRES solver. The component probe sizes its perturbation from
+# the UNWEIGHTED norm dotProduct(X, false); the fused inner product must
+# carry that flag (fusedDot(X, a_apply_block_scales)) -- with it hard-wired
+# to true the norm silently becomes the block-weighted solver norm, the
+# probe is mis-sized by the block scales and the run fails to converge.
+# Same analysis and gates as the component test: the same Newton work up
+# to round-off and the same converged state as the three probe twins.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge_component_fused  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_probe_edge newton.jfnk_epsilon_mode=component implicit_evolve.fused_vector_ops=2 newton.linear_solver=packed_gmres"  # inputs
+    "analysis_mhd_probe_edge.py diags/diag000016 ../test_1d_theta_implicit_mhd_probe_edge ../test_1d_theta_implicit_mhd_probe_edge_eps8 ../test_1d_theta_implicit_mhd_probe_edge_flat"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_probe_edge_component  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the
