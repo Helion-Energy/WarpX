@@ -119,6 +119,22 @@ struct FluxParameters {
     // subtraction. Asymptotes stay exact (floor below, E_i - KE above);
     // the inflation is width/2, confined to near-corner cells.
     amrex::Real pressure_corner_width_fraction = 0.0;
+    // Width factor of the smooth ion-pressure floors (implicit_mhd.
+    // pressure_floor_width_factor, default 1 = the legacy width = the
+    // floor itself, bit-identical): multiplies the width of the C^1
+    // smooth-max recoveries p(E_i) (load_cell_state,
+    // dual_energy_blended_pressure), of the C-infinity floor of the
+    // internal pressure p(U_i) and of the guarded energy of the
+    // kinetic-fraction blend. A wider corner has less curvature per unit
+    // update (the second derivative of the recovery scales as 1/width),
+    // so a Newton step that moves a near-floor ion energy across the
+    // corner is better predicted by its linear model, at the price of a
+    // larger inflation (width/2 at the corner, decaying as floor^2/
+    // (4 excess) above it). Asymptotes stay exact.
+    amrex::Real pressure_floor_width_factor = 1.0;
+    // Rectifier width of the dual-energy kinetic fraction (implicit_mhd.
+    // dual_energy_fk_width, default dual_energy_fk_width_default below).
+    amrex::Real dual_energy_fk_width = 0.05;
     // Dual-energy ion closure (the reference code's "mixmaster" mix = -1 form):
     // BOTH the conservative ion total energy E_i (evolved exactly as
     // under total_energy_closure, which MakeFluxParameters keeps true)
@@ -176,7 +192,7 @@ struct FluxParameters {
 // sheet at fk ~ 0.4) are untouched while the kink at KE = gamma_i E_i
 // (exactly the KE-dominated population the closure exists for) is
 // smoothed away for the matrix-free Jacobian probes.
-constexpr amrex::Real dual_energy_fk_width = 0.05;
+constexpr amrex::Real dual_energy_fk_width_default = 0.05;
 
 struct CellState {
     amrex::Real density;
@@ -582,6 +598,21 @@ smooth_positive_floor (const amrex::Real value,
     const amrex::Real excess = value - floor;
     return floor +
            0.5 * (excess + std::sqrt(excess * excess + floor * floor));
+}
+
+// smooth_positive_floor with the corner width DECOUPLED from the floor:
+// floor + 0.5 (excess + sqrt(excess^2 + width^2)). At width == floor the
+// arithmetic is that of smooth_positive_floor (the product 1.0 * floor is
+// exact), which keeps the default bit-identical; a wider width lowers the
+// corner curvature at the price of a larger inflation (width/2 at the
+// corner).
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smooth_positive_floor_width (const amrex::Real value,
+                             const amrex::Real floor,
+                             const amrex::Real width) noexcept {
+    const amrex::Real excess = value - floor;
+    return floor +
+           0.5 * (excess + std::sqrt(excess * excess + width * width));
 }
 
 /**
@@ -1110,7 +1141,7 @@ load_cell_state (const amrex::Array4<const amrex::Real>& density,
         // below, E_i - KE above); the corner inflation is width/2,
         // confined to near-corner cells.
         const amrex::Real corner_width = std::max(
-            internal_floor,
+            parameters.pressure_floor_width_factor * internal_floor,
             parameters.pressure_corner_width_fraction * kinetic_energy);
         state.ion_internal =
             internal_floor +
@@ -1302,7 +1333,8 @@ load_cell_state_hlld_cgl (const amrex::Array4<const amrex::Real>& density,
  *
  * smoothly rectified onto [0, 1] -- the upper bound holds automatically
  * (KE >= 0 and the guarded E_i > 0 give fk_raw <= 1), and the lower clamp
- * is the C-infinity smooth_max of width dual_energy_fk_width, so the
+ * is the C-infinity smooth_max of width dual_energy_fk_width (a
+ * FluxParameters member, implicit_mhd.dual_energy_fk_width), so the
  * whole map is smooth in (E_i, KE) for the matrix-free Jacobian probes
  * (the task-critical population sits exactly at the KE ~ gamma_i E_i
  * corner a hard clamp would kink). The division guard is the ion
@@ -1325,11 +1357,12 @@ dual_energy_kinetic_fraction (const amrex::Real ion_energy,
     }
     const amrex::Real internal_floor =
         parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
-    const amrex::Real guarded_energy =
-        smooth_positive_floor(ion_energy, internal_floor);
+    const amrex::Real guarded_energy = smooth_positive_floor_width(
+        ion_energy, internal_floor,
+        parameters.pressure_floor_width_factor * internal_floor);
     const amrex::Real raw =
         1.0 - kinetic_energy / (parameters.gamma_i * guarded_energy);
-    return smooth_max(raw, 0.0, dual_energy_fk_width);
+    return smooth_max(raw, 0.0, parameters.dual_energy_fk_width);
 }
 
 /**
@@ -1354,16 +1387,17 @@ dual_energy_blended_pressure (const amrex::Real ion_energy,
     const amrex::Real excess =
         ion_energy - kinetic_energy - internal_floor;
     const amrex::Real corner_width = std::max(
-        internal_floor,
+        parameters.pressure_floor_width_factor * internal_floor,
         parameters.pressure_corner_width_fraction * kinetic_energy);
     const amrex::Real pressure_total =
         (parameters.gamma_i - 1.0) *
         (internal_floor +
          0.5 * (excess + std::sqrt(excess * excess +
                                    corner_width * corner_width)));
-    const amrex::Real pressure_internal = smooth_positive_floor(
+    const amrex::Real pressure_internal = smooth_positive_floor_width(
         (parameters.gamma_i - 1.0) * internal_energy,
-        parameters.ion_pressure_floor);
+        parameters.ion_pressure_floor,
+        parameters.pressure_floor_width_factor * parameters.ion_pressure_floor);
     const amrex::Real fk = dual_energy_kinetic_fraction(
         ion_energy, kinetic_energy, old_internal_energy, parameters);
     return fk * pressure_total + (1.0 - fk) * pressure_internal;
@@ -1779,7 +1813,7 @@ rebuild_cell_state (CellState& state, const amrex::Real hall_drift,
         const amrex::Real excess =
             state.ion_energy - kinetic_energy - internal_floor;
         const amrex::Real corner_width = std::max(
-            internal_floor,
+            parameters.pressure_floor_width_factor * internal_floor,
             parameters.pressure_corner_width_fraction * kinetic_energy);
         state.ion_internal =
             internal_floor +

@@ -349,6 +349,25 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The linear Newton predictor (implicit_mhd.newton_predictor = linear: the
+# initial guess 2 U^n - U^{n-1}, projected onto the admissible set) on the
+# temperature-floor deck: it must REDUCE the Newton work (measured 396 vs
+# 421 iterations, -6%; a predictor with the wrong sign or an unprojected
+# guess raises it), not grow the linear work, and leave the converged
+# physics within 5e-3 relative L2 of the control (the same nonlinear system
+# solved to the same tolerance from a different start: measured 1.3e-3 on
+# the electron energy, the deck's tolerance class). Default none is
+# bit-identical.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_temperature_floor_predictor  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_temperature_floor implicit_mhd.newton_predictor=linear"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000200 --control ../test_1d_theta_implicit_mhd_temperature_floor --newton-reduction 0.98 --gmres-max 1.02 --physics 5e-3 --require-knob implicit_mhd.newton_predictor=linear"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_temperature_floor  # dependency
+)
+
 # offset-density halo pedestal: the sub-pedestal halo of a static contact
 # is raised exactly onto the dynamic (peak-keyed) pedestal and rides
 # there, while the bulk state is exactly invariant
@@ -3786,6 +3805,25 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
 )
+# The smooth-floor widths (implicit_mhd.pressure_floor_width_factor,
+# implicit_mhd.dual_energy_fk_width) on the churn deck, where the wall row
+# rides its floor every solve: the wider corners must leave the converged
+# physics within 5e-3 relative L2 of the control on every fluid block
+# (measured 4e-5 .. 1.2e-3 at factor 4 / width 0.2; the radial momentum is
+# ~0 on this deck and is not compared) and must not grow the Newton or
+# linear work by more than 10% (measured 53 vs 52 Newton, +3% GMRES). The
+# defaults are bit-identical (the byte-identity gate of the branch report).
+# analysis_mhd_newton_knob_vs_control.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_churn_wide_floor  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.globalization_diagnostics=1 implicit_mhd.pressure_floor_width_factor=4 implicit_mhd.dual_energy_fk_width=0.2"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_churn --newton-max 1.10 --gmres-max 1.10 --physics 5e-3 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob implicit_mhd.pressure_floor_width_factor=4"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_active_set_debt_release_fused  # name
     RZ  # dims

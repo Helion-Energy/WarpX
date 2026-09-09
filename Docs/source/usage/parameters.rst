@@ -6877,6 +6877,50 @@ Jacobian probes.
     stay exact (floor below, :math:`E_i - \rho u^2/2` above); the corner
     inflation is width/2, confined to near-corner cells.
 
+.. pp:param:: implicit_mhd.pressure_floor_width_factor
+    :type: ``float``
+    :default: ``1``
+
+    Width factor of the smooth ion-pressure floors: multiplies the
+    corner width of the :math:`C^1` smooth-max recoveries
+    :math:`p_i(E_i)` (the recast's pressure recovery and the dual-energy
+    blend), of the :math:`C^\infty` floor of the internal pressure
+    :math:`p_i(U_i)` and of the guarded energy of the dual-energy kinetic
+    fraction; the ``pressure_corner_width_fraction`` term still applies
+    on top (the width is the larger of the two). The default 1 is the
+    legacy width (the floor itself) and is bit-identical. A wider corner
+    has a smaller second derivative (:math:`\propto 1/\text{width}`), so a
+    Newton step that carries a near-floor ion energy across the corner is
+    better predicted by its linear model, at the price of a larger
+    inflation at the corner (width/2, decaying as
+    :math:`\text{floor}^2/(4\,\text{excess})` above it). Asymptotes stay
+    exact.
+
+.. pp:param:: implicit_mhd.dual_energy_fk_width
+    :type: ``float``
+    :default: ``0.05``
+
+    Rectifier width of the dual-energy kinetic fraction
+    :math:`f_k = \max(0, 1 - \rho u^2/(2\gamma_i E_i))` (the
+    :math:`C^\infty` smooth-max of this width; the default is the legacy
+    compile-time value, bit-identical). Wider rectifiers smooth the
+    thermal/kinetic switch of the blended ion pressure over a wider band
+    of kinetic fractions.
+
+.. pp:param:: implicit_mhd.newton_predictor
+    :type: ``string``
+    :default: ``none``
+
+    Newton initial guess of the theta-implicit MHD solve. ``none`` starts
+    every solve from the step-start state (the legacy guess,
+    bit-identical). ``linear`` starts from the linear extrapolation
+    :math:`2U^n - U^{n-1}` of the two previous step-start states,
+    projected onto the admissible set (the theta-image floors, non-finite
+    scrub); the first step of a run or of a restart keeps the legacy
+    guess. A guess nearer the solution shrinks the first Newton update
+    and, with it, the nonlinear defect of the first iteration (measured
+    at ~60% of the residual on the production formation deck).
+
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``
     :default: ``outflow``

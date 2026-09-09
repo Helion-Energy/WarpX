@@ -884,6 +884,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                                : legacy_wall_cap_factor));
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
+    utils::parser::queryWithParser(pp, "pressure_floor_width_factor",
+                                   m_pressure_floor_width_factor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pressure_floor_width_factor > 0.0_rt,
+        "implicit_mhd.pressure_floor_width_factor must be positive");
+    utils::parser::queryWithParser(pp, "dual_energy_fk_width",
+                                   m_dual_energy_fk_width);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_dual_energy_fk_width > 0.0_rt,
+        "implicit_mhd.dual_energy_fk_width must be positive");
+    pp.query("newton_predictor", m_newton_predictor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_newton_predictor == "none" || m_newton_predictor == "linear",
+        "implicit_mhd.newton_predictor must be 'none' or 'linear'");
     pp.query("r_open_fluid", m_r_open_fluid);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
@@ -3861,6 +3875,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << (m_conduction_coefficient_step_old ? "step_old"
                                                          : "theta")
                    << "\n"
+                   << "Pressure floor width factor:   "
+                   << m_pressure_floor_width_factor
+                   << (m_pressure_floor_width_factor == 1.0_rt
+                           ? " (legacy: width = floor)" : " x floor")
+                   << "\n"
+                   << "Dual-energy fk width:          " << m_dual_energy_fk_width
+                   << "\n"
+                   << "Newton predictor:              " << m_newton_predictor
+                   << "\n"
                    << "Thermal conduction model:      "
                    << m_thermal_conduction_model
                    << (m_conduction_braginskii
@@ -5258,7 +5281,19 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
     RefreshHaloPedestal();
     RefreshVacuumReferenceDensity(step);
+    if (m_newton_predictor == "linear") {
+        // Keep the previous step-start state for the linear predictor
+        // below (m_state_old is about to become this step's start).
+        if (!m_state_prev.IsDefined()) {
+            m_state_prev.Define(m_state);
+        }
+        if (m_state_old_valid) {
+            m_state_prev.Copy(m_state_old);
+            m_predictor_ready = true;
+        }
+    }
     m_state_old.Copy(m_state);
+    m_state_old_valid = true;
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
     // limiters (theta-extrapolated end-of-step donor gating needs old
@@ -5338,6 +5373,17 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         rho_n_frozen.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     }
 
+    if (m_newton_predictor == "linear" && m_predictor_ready) {
+        // Linear predictor: the Newton initial guess is the extrapolation
+        // 2 U^n - U^{n-1} of the two previous step-start states (the
+        // solver otherwise starts from U^n), projected onto the
+        // admissible set (theta-image floors, non-finite scrub) so the
+        // first identification and residual see an admissible state.
+        m_state.Copy(m_state_old);
+        m_state.increment(m_state_old, 1.0_rt);
+        m_state.increment(m_state_prev, -1.0_rt);
+        ProjectStateToAdmissibleSet(m_state);
+    }
     m_nlsolver->Solve(m_state, m_state_old, start_time, m_dt, step);
     const int exit_status = m_nlsolver->GetExitStatus();
     if (exit_status < 0) {
@@ -8481,6 +8527,9 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_dual_energy_internal_old_max;
     flux_parameters.pressure_corner_width_fraction =
         m_pressure_corner_width_fraction;
+    flux_parameters.pressure_floor_width_factor =
+        m_pressure_floor_width_factor;
+    flux_parameters.dual_energy_fk_width = m_dual_energy_fk_width;
     flux_parameters.fluid_reconstruction = m_fluid_reconstruction_mode;
     flux_parameters.reconstruction_kappa = m_reconstruction_kappa;
     flux_parameters.central_dissipation = m_central_dissipation;
@@ -15216,7 +15265,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     const amrex::Real excess =
                         ion_e(i, j, k) - kinetic_energy - ion_energy_floor;
                     const amrex::Real corner_width = std::max(
-                        ion_energy_floor,
+                        flux_parameters.pressure_floor_width_factor *
+                            ion_energy_floor,
                         flux_parameters.pressure_corner_width_fraction *
                             kinetic_energy);
                     pressure_i =

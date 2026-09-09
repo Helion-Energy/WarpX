@@ -2438,6 +2438,27 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).
     amrex::Real m_pressure_corner_width_fraction = 0.0;
+    // Width factor of the smooth ion-pressure floors and rectifier width
+    // of the dual-energy kinetic fraction (see FluxParameters::
+    // pressure_floor_width_factor / dual_energy_fk_width; inputs
+    // implicit_mhd.pressure_floor_width_factor (default 1, bit-identical)
+    // and implicit_mhd.dual_energy_fk_width (default 0.05, bit-identical)).
+    amrex::Real m_pressure_floor_width_factor = 1.0;
+    amrex::Real m_dual_energy_fk_width = 0.05;  // = dual_energy_fk_width_default (ThetaImplicitMHD_K.H)
+    // Newton initial guess (implicit_mhd.newton_predictor): "none" (the
+    // step-old state, the legacy guess, bit-identical) or "linear" (the
+    // linear extrapolation 2 U^n - U^{n-1} of the two previous step-start
+    // states, projected onto the admissible set; the first step of a run
+    // or a restart keeps the legacy guess). Measured motivation: on the
+    // production formation deck the first Newton step of every solve
+    // carries a nonlinear defect of ~60% of the residual (the linear
+    // model of a step from U^n mispredicts F(U^n - dU) in the halo ion
+    // energy rows); a predictor that starts nearer the solution shrinks
+    // the first update and, with it, the quadratic defect.
+    std::string m_newton_predictor = "none";
+    WarpXSolverVec m_state_prev;
+    bool m_predictor_ready = false;
+    bool m_state_old_valid = false;
     // C-infinity smoothing widths of the HLLD wave fan (see FluxParameters
     // in ThetaImplicitMHD_K.H); inputs implicit_mhd.hlld_kappa_*.
     amrex::Real m_hlld_kappa_signal = 0.05;
