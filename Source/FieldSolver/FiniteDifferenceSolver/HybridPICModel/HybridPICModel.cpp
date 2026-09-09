@@ -48,6 +48,25 @@
 #include <vector>
 
 using namespace amrex;
+
+namespace
+{
+    /** Domain-face name for the qdsmc conduction BC prints: "<axis>_lo"
+     *  / "<axis>_hi" for grid dim d, side s (0 = lo, 1 = hi). */
+    std::string QdsmcFaceName (int const d, int const s)
+    {
+#if defined(WARPX_DIM_RZ)
+        static char const * const ax[] = {"r", "z"};
+#elif defined(WARPX_DIM_3D)
+        static char const * const ax[] = {"x", "y", "z"};
+#elif defined(WARPX_DIM_XZ)
+        static char const * const ax[] = {"x", "z"};
+#else
+        static char const * const ax[] = {"z"};
+#endif
+        return std::string(ax[d]) + ((s == 0) ? "_lo" : "_hi");
+    }
+}
 using warpx::fields::FieldType;
 
 HybridPICModel::HybridPICModel ()
@@ -826,10 +845,12 @@ void HybridPICModel::ReadParameters ()
                         "entry per grid dimension)");
                     m_cond_bc_q[d][side] = vq[d];
                 }
+                else if (types[d] == "leg") { m_cond_bc[d][side] = 3; }
                 else {
                     WARPX_ABORT_WITH_MESSAGE(
                         "hybrid_pic_model.qdsmc_conduction_bc entries "
-                        "must be 'adiabatic', 'isothermal' or 'flux'");
+                        "must be 'adiabatic', 'isothermal', 'flux' or "
+                        "'leg'");
                 }
             }
         }
@@ -847,6 +868,25 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form must be "
                 "'free_streaming' or 'sonic'");
         }
+        // conduction-leg (Robin) domain-face BC knobs, shared by every
+        // face typed 'leg' (member doc of m_cond_leg_length)
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_leg_length", m_cond_leg_length);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_leg_length > 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_leg_length must be > 0 [m]");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_leg_Te_wall", m_cond_leg_Te_wall);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_leg_Te_wall >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_leg_Te_wall must be >= 0 [eV]");
+        pp_hybrid.query("qdsmc_conduction_leg_iterations",
+                        m_cond_leg_iterations);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_leg_iterations >= 1,
+            "hybrid_pic_model.qdsmc_conduction_leg_iterations must be >= 1");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_leg_flux_limit", m_cond_leg_flux_limit);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_leg_flux_limit >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_leg_flux_limit must be "
+            ">= 0 (0 = off)");
         utils::parser::queryWithParser(pp_hybrid,
             "qdsmc_conduction_eb_flux_limit", m_cond_eb_flux_limit);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_eb_flux_limit >= 0.0_rt,
@@ -1534,6 +1574,18 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             << (m_cond_eb_flux_limit > 0.0_rt ? "" : " (plain reset)")
             << "; EB conduction BC " << (m_cond_eb_bc == 1 ? "isothermal" : "adiabatic")
             << "\n";
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        for (int s = 0; s < 2; ++s) {
+            if (m_cond_bc[d][s] != 3) { continue; }
+            amrex::Print() << "[qdsmc] conduction " << QdsmcFaceName(d, s)
+                << " BC: LEG (L = " << fmt(m_cond_leg_length)
+                << " m, T_wall = " << fmt(m_cond_leg_Te_wall)
+                << " eV, iterations " << m_cond_leg_iterations
+                << (m_cond_leg_flux_limit > 0.0_rt
+                    ? ", flux cap f = " + fmt(m_cond_leg_flux_limit)
+                    : std::string())
+                << ")\n";
+        }}
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -6932,6 +6984,16 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
             wall_pin += m_cond_wall_tally[d][0] + m_cond_wall_tally[d][1];
         }
+        // conduction-leg faces: their own class wall_leg (same units and
+        // sign as wall_pin); the token appears only when a leg is armed
+        bool any_leg_bc = false;
+        amrex::Real wall_leg = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            for (int s = 0; s < 2; ++s) {
+                any_leg_bc = any_leg_bc || (m_cond_bc[d][s] == 3);
+                wall_leg += m_cond_leg_tally[d][s];
+            }
+        }
         amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
             << " joule_dropped_J: heat_gate=" << m_joule_dropped_heat_gate_J
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
@@ -6940,7 +7002,9 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " sink_floor=" << m_energy_sink_declined_J
             << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
-            << " wall_pin=" << wall_pin
+            << " wall_pin=" << wall_pin;
+        if (any_leg_bc) { amrex::Print() << " wall_leg=" << wall_leg; }
+        amrex::Print()
             << " source_taper=" << m_source_taper_J
             << " te_pedestal=" << m_te_pedestal_J
             << " te_pedestal_cap_eV="
@@ -7274,6 +7338,10 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
             "is the symmetry axis, not a wall (only 'adiabatic' is "
             "meaningful there)");
 #endif
+        if (bc == 3) {
+            ApplyQdsmcConductionLegBC(lev, d, s, dt_c, Te, rho);
+            continue;
+        }
         int const wall = (s == 0) ? dom_nodes.smallEnd(d)
                                   : dom_nodes.bigEnd(d);
         amrex::Real const Te_wall_K = m_cond_bc_Te[d][s] * qe / kb;
@@ -7366,6 +7434,237 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
         amrex::ParallelDescriptor::ReduceRealSum(tally);
         m_cond_wall_tally[d][s] += tally;
     }}
+}
+
+void HybridPICModel::ApplyQdsmcConductionLegBC (
+    int const lev, int const d, int const s, amrex::Real const dt_c,
+    amrex::MultiFab & Te, amrex::MultiFab const & rho) const
+{
+    // Robin (series-conductance) condition on the boundary node row, see
+    // the member doc of m_cond_leg_length. The FD operator is nodal with
+    // no node beyond a non-periodic face (face_flux: "outside a
+    // non-periodic wall: no face"), so the prescribed "ghost" is the
+    // domain-face node row itself and Te_1 is the node one inward; the
+    // operator's last face then carries q = G_int (Te_1 - Te_f) into the
+    // row, and the reset booked here is that heat (plus whatever the
+    // row's transverse faces moved), the exact energy the BC removed.
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(dom_nodes.length(d) >= 2,
+        "qdsmc_conduction_bc leg: the domain needs at least one cell "
+        "along the leg direction");
+    amrex::Real const kb = PhysConst::kb;
+    amrex::Real const qe = PhysConst::q_e;
+    amrex::Real const me = PhysConst::m_e;
+    amrex::Real const t_now = warpx.gett_new(lev);
+    auto const kappa_par_ex = m_kappa_par;
+    // the FD operator's Pass A floors: b_ne = max(n, n_floor) for every
+    // conductance, the open set n > n_open for the interior face
+    amrex::Real const n_floor = m_qdsmc_n_floor;
+    amrex::Real const n_open = m_qdsmc_halo_unfreeze ? 0.0_rt : n_floor;
+    amrex::Real const te_floor_K = m_cond_te_floor * qe / kb;
+    amrex::Real const T_wall_K = m_cond_leg_Te_wall * qe / kb;   // eV -> K
+    amrex::Real const T_min_K = amrex::max(T_wall_K, te_floor_K);
+    amrex::Real const dx_d = geom.CellSize(d);
+    amrex::Real const L_leg = m_cond_leg_length;
+    int const n_iter = m_cond_leg_iterations;
+    // optional cap with the leg's OWN factor: same form (free-streaming /
+    // sonic) and A/V = 1/dx convention as the isothermal pin's cap
+    bool const sonic = (m_cond_wall_flux_cap_form == 1);
+    amrex::Real const gam = m_gamma;
+    amrex::Real const mi = sonic ? WallCapIonMass() : PhysConst::m_e;
+    amrex::Real const cap_dt_dx = m_cond_leg_flux_limit * dt_c / dx_d;
+
+    int const wall = (s == 0) ? dom_nodes.smallEnd(d) : dom_nodes.bigEnd(d);
+    int const in_off = (s == 0) ? 1 : -1;   // toward the first interior node
+    int const di = (d == 0) ? in_off : 0;
+    int const dj = (d == 1) ? in_off : 0;
+    int const dk = (d == 2) ? in_off : 0;
+#ifdef WARPX_DIM_RZ
+    amrex::Real const r_edge0 = geom.ProbLo(0);
+    amrex::Real const dr_rz = geom.CellSize(0);
+    int const dom_rlo = dom_nodes.smallEnd(0);
+#endif
+    amrex::Real const r_big = std::numeric_limits<amrex::Real>::max();
+    // probe node for the WARPX_QDSMC_COND_STATS line (one node, so the
+    // Robin relation can be checked against the printed G_int / G_leg):
+    // the face node at the LOW end of the first transverse dim (the axis
+    // in RZ, where an exhaust plume sits), the other transverse index at
+    // its mid; env WARPX_QDSMC_LEG_PROBE = <index> moves the first
+    // transverse index. Diagnostic only, never read by the physics.
+    static int const probe_override = std::getenv("WARPX_QDSMC_LEG_PROBE")
+        ? std::atoi(std::getenv("WARPX_QDSMC_LEG_PROBE")) : -1;
+    int pr[3] = {0, 0, 0};
+    bool first_transverse = true;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+        if (dd == d) { pr[dd] = wall; continue; }
+        if (first_transverse) {
+            pr[dd] = (probe_override >= 0)
+                ? amrex::min(amrex::max(probe_override, dom_nodes.smallEnd(dd)),
+                             dom_nodes.bigEnd(dd))
+                : dom_nodes.smallEnd(dd);
+            first_transverse = false;
+        } else {
+            pr[dd] = (dom_nodes.smallEnd(dd) + dom_nodes.bigEnd(dd)) / 2;
+        }
+    }
+    int const pi = pr[0], pj = pr[1], pk = pr[2];
+
+    // tally; the engaged face's Te_1 and Te_f ranges; probe node values
+    // (engaged flag, Te_1, Te_f, G_int, G_leg) -- all for the stats line
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpMin, amrex::ReduceOpMax,
+                     amrex::ReduceOpMin, amrex::ReduceOpMax,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box tile_box = mfi.tilebox();
+        {   // unique node ownership (fixup-loop seam trim)
+            amrex::Box const box_nodes =
+                amrex::surroundingNodes(mfi.validbox());
+            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                if (tile_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                    (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                     geom.isPeriodic(dd))) {
+                    tile_box.growHi(dd, -1);
+                }
+            }
+        }
+        if (wall < tile_box.smallEnd(d) || wall > tile_box.bigEnd(d)) {
+            continue;
+        }
+        amrex::Box wall_plane = tile_box;
+        wall_plane.setSmall(d, wall);
+        wall_plane.setBig(d, wall);
+        // The interior node (wall + in_off) lies in this FAB's valid node
+        // box (nodes = cells + 1 along d), so it is read fresh; it is
+        // never written by this kernel.
+
+        amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+        reduce_op.eval(wall_plane, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+        {
+            ReduceTuple const skip = {0.0_rt, r_big, -r_big, r_big, -r_big,
+                                      0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+            amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+            if (ne_raw <= 0.0_rt) { return skip; }
+            int const ii = i + di, jj = j + dj, kk = k + dk;
+            amrex::Real const ne1_raw = rho_arr(ii,jj,kk) / qe;
+            amrex::Real const T0  = Te_arr(i,j,k);
+            amrex::Real const Te1 = Te_arr(ii,jj,kk);
+            // one-sided (outflow) gate anchored at max(T_wall, Te floor),
+            // the MHD outflow_limited anchor: a colder interior keeps the
+            // legacy adiabatic face untouched
+            if (Te1 <= T_min_K) { return skip; }
+#ifdef WARPX_DIM_RZ
+            amrex::Real const r_i =
+                r_edge0 + amrex::Real(i - dom_rlo)*dr_rz;
+            amrex::Real const w_v = 2.0_rt*MathConst::pi*
+                ((r_i > 0.0_rt) ? r_i : dr_rz/8.0_rt);
+#else
+            amrex::Real const w_v = 1.0_rt;
+#endif
+            // operator's face ingredients: floored densities, harmonic
+            // face density, closed face when either node is outside the
+            // open set (then G_int = 0 and the row sits at T_wall)
+            amrex::Real const ne_w = amrex::max(ne_raw, n_floor);
+            amrex::Real const ne_1 = amrex::max(ne1_raw, n_floor);
+            bool const face_open = (ne_raw > n_open) && (ne1_raw > n_open);
+            amrex::Real const ne_f = 2.0_rt*ne_w*ne_1/(ne_w + ne_1);
+            amrex::Real const Te1_eV = amrex::max(Te1, 0.0_rt) * kb / qe;
+            amrex::Real const kappa_1 =
+                amrex::max(kappa_par_ex(ne_1, Te1_eV, t_now), 0.0_rt);
+            amrex::Real Tf = amrex::max(T0, T_min_K);
+            amrex::Real G_int = 0.0_rt, G_leg = 0.0_rt;
+            for (int it = 0; it < n_iter; ++it) {
+                amrex::Real const Tf_eV = Tf * kb / qe;
+                amrex::Real const kappa_f =
+                    amrex::max(kappa_par_ex(ne_w, Tf_eV, t_now), 0.0_rt);
+                // face kappa as face_flux forms it: kfac 1.5 kB ne_f times
+                // the arithmetic mean of chi = kappa/(1.5 kB ne)
+                amrex::Real const kappa_face = face_open
+                    ? ne_f * 0.5_rt * (kappa_1/ne_1 + kappa_f/ne_w) : 0.0_rt;
+                G_int = kappa_face / dx_d;
+                G_leg = kappa_f / L_leg;
+                amrex::Real const G_sum = G_int + G_leg;
+                Tf = (G_sum > 0.0_rt)
+                    ? (G_int*Te1 + G_leg*T_wall_K) / G_sum : T_wall_K;
+                Tf = amrex::max(Tf, T_min_K);
+            }
+            amrex::Real T1 = Tf;
+            if (cap_dt_dx > 0.0_rt && T0 > Tf) {
+                amrex::Real const vte = sonic
+                    ? std::sqrt(gam * kb * T0 / mi)
+                    : std::sqrt(kb * T0 / me);
+                T1 = amrex::max(Tf, T0 - cap_dt_dx * vte * T0 / 1.5_rt);
+            }
+            amrex::Real const du = 1.5_rt * kb * ne_raw * (T1 - T0);
+            Te_arr(i,j,k) = T1;
+            amrex::Real const p = (i == pi && j == pj && k == pk) ? 1.0_rt : 0.0_rt;
+            return {w_v*du, Te1, Te1, T1, T1, p, p*Te1, p*T1, p*G_int, p*G_leg};
+        });
+    }
+    auto tup = reduce_data.value(reduce_op);
+    amrex::Real tally  = amrex::get<0>(tup);
+    amrex::Real te1_lo = amrex::get<1>(tup);
+    amrex::Real te1_hi = amrex::get<2>(tup);
+    amrex::Real tef_lo = amrex::get<3>(tup);
+    amrex::Real tef_hi = amrex::get<4>(tup);
+    amrex::Real p_on   = amrex::get<5>(tup);
+    amrex::Real p_te1  = amrex::get<6>(tup);
+    amrex::Real p_tef  = amrex::get<7>(tup);
+    amrex::Real p_gint = amrex::get<8>(tup);
+    amrex::Real p_gleg = amrex::get<9>(tup);
+    amrex::ParallelDescriptor::ReduceRealSum(tally);
+    amrex::ParallelDescriptor::ReduceRealMin(te1_lo);
+    amrex::ParallelDescriptor::ReduceRealMax(te1_hi);
+    amrex::ParallelDescriptor::ReduceRealMin(tef_lo);
+    amrex::ParallelDescriptor::ReduceRealMax(tef_hi);
+    amrex::ParallelDescriptor::ReduceRealSum(p_on);
+    amrex::ParallelDescriptor::ReduceRealSum(p_te1);
+    amrex::ParallelDescriptor::ReduceRealSum(p_tef);
+    amrex::ParallelDescriptor::ReduceRealSum(p_gint);
+    amrex::ParallelDescriptor::ReduceRealSum(p_gleg);
+    m_cond_leg_tally[d][s] += tally;
+
+    static bool const cond_stats =
+        (std::getenv("WARPX_QDSMC_COND_STATS") != nullptr);
+    if (cond_stats) {
+#ifdef WARPX_DIM_RZ
+        amrex::Real const to_J = dr_rz * geom.CellSize(1);
+#else
+        amrex::Real to_J = 1.0_rt;
+        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+            to_J *= geom.CellSize(dd);
+        }
+#endif
+        amrex::Real const K_to_eV = kb / qe;
+        amrex::Print() << "[qdsmc] leg " << QdsmcFaceName(d, s)
+            << ": dt=" << dt_c
+            << " Te_1=[" << te1_lo*K_to_eV << ", " << te1_hi*K_to_eV
+            << "] eV Te_face=[" << tef_lo*K_to_eV << ", " << tef_hi*K_to_eV
+            << "] eV T_wall=" << m_cond_leg_Te_wall
+            << " eV dE=" << tally*to_J
+            << " J (cumulative " << m_cond_leg_tally[d][s]*to_J << " J)"
+            << " probe(" << pi << "," << pj << "," << pk << ")";
+        if (p_on > 0.5_rt) {
+            amrex::Print() << " Te_1=" << p_te1*K_to_eV
+                << " Te_face=" << p_tef*K_to_eV
+                << " eV G_int=" << p_gint << " G_leg=" << p_gleg
+                << " W/(m^2 K)\n";
+        } else {
+            amrex::Print() << " not engaged (Te_1 <= max(T_wall, floor))\n";
+        }
+    }
 }
 
 void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_c,

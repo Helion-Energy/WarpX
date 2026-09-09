@@ -374,6 +374,16 @@ void init_WarpX (py::module& m)
             "[J/m^3] summed over boundary nodes (positive = energy "
             "added to the plasma)."
         )
+        .def("get_qdsmc_leg_tally",
+            [](WarpX& wx, int dim, int side) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcLegTally(dim, side);
+            },
+            py::arg("dim"), py::arg("side"),
+            "Cumulative QDSMC conduction-leg BC energy tally for the "
+            "domain face (dim, side: 0=lo, 1=hi), same units and sign "
+            "as get_qdsmc_wall_tally (ledger class wall_leg)."
+        )
         .def("get_qdsmc_eb_tally",
             [](WarpX& wx) {
                 return wx.get_pointer_HybridPICModel()->GetQdsmcEbTally();

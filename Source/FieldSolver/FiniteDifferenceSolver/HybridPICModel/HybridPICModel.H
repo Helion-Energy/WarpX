@@ -2170,9 +2170,15 @@ public:
      *  bath re-emission; the exchanged energy is tallied), 2 = flux
      *  (a prescribed heat flux q_wall [W/m^2, positive = into the
      *  plasma] is injected into the boundary row each substep;
-     *  tallied). Only meaningful on non-periodic dims (asserted at
-     *  first use). Inputs (entries per grid dim):
-     *  qdsmc_conduction_bc_lo / _hi = adiabatic | isothermal | flux,
+     *  tallied), 3 = leg (Robin condition: the boundary node row is
+     *  set to the series-conductance temperature between the first
+     *  interior node and a conduction leg of length m_cond_leg_length
+     *  ending on a wall at m_cond_leg_Te_wall, see
+     *  ApplyQdsmcConductionLegBC; tallied in m_cond_leg_tally). Only
+     *  meaningful on non-periodic dims (asserted at first use). Inputs
+     *  (entries per grid dim):
+     *  qdsmc_conduction_bc_lo / _hi = adiabatic | isothermal | flux |
+     *  leg,
      *  qdsmc_conduction_bc_Te_lo / _hi = <eV>,
      *  qdsmc_conduction_bc_q_lo / _hi = <W/m^2>. */
     int m_cond_bc[AMREX_SPACEDIM][2] = {};
@@ -2218,6 +2224,39 @@ public:
      *  qdsmc_conduction_eb_flux_limit. */
     amrex::Real m_cond_eb_flux_limit = 0.1;
 
+    /** Conduction-leg (Robin) domain-face BC, bc == 3 (Eric 2026-09-09:
+     *  "instead of outflow to zero pressure and a huge temp gradient at
+     *  the wall ... add a resistive drop to the wall", a 1D heat equation
+     *  along the field line to the divertor wall, zero-velocity frame, no
+     *  cross-field transport). Per boundary node the face is in series
+     *  with a leg of length L to a wall at T_wall: the face temperature
+     *  solving G_int (Te_1 - Te_f) = G_leg (Te_f - T_wall) is
+     *  Te_f = (G_int Te_1 + G_leg T_wall) / (G_int + G_leg), with
+     *  G_int = kappa_face / dx the operator's own interior-face
+     *  conductance (harmonic floored density x arithmetic chi from the
+     *  qdsmc_kappa_par parser; zero when the face is closed) and
+     *  G_leg = kappa_par(n_face, Te_f) / L, re-evaluated at the new Te_f
+     *  for m_cond_leg_iterations passes. Te_f is clamped at T_wall and
+     *  at the conduction Te floor. ONE-SIDED like the MHD lane's
+     *  outflow_limited wall and halo relaxation outlet (7972d2564): the
+     *  leg engages only where Te_1 exceeds max(T_wall, Te floor) -- an
+     *  exhaust face is an energy OUTFLOW (Eric 2026-09-09) -- and a
+     *  colder interior keeps the legacy adiabatic face (no reset, no
+     *  tally), so the face flux G_int G_leg/(G_int + G_leg) (Te_1 -
+     *  T_wall) is continuous through zero. The hybrid hook runs outside
+     *  any Newton solve, so the hard rectifier replaces the MHD C^1
+     *  gate. The leg throttles itself, so the
+     *  domain-face cap m_cond_wall_flux_limit does NOT apply; the leg
+     *  has its own optional cap m_cond_leg_flux_limit (same form and
+     *  A/V = 1/dx convention as the pin cap, 0 = off). Knobs are shared
+     *  by every face typed 'leg'. Inputs: qdsmc_conduction_leg_length
+     *  [m], qdsmc_conduction_leg_Te_wall [eV], qdsmc_conduction_leg_
+     *  iterations, qdsmc_conduction_leg_flux_limit. */
+    amrex::Real m_cond_leg_length = 6.0;
+    amrex::Real m_cond_leg_Te_wall = 0.5;
+    int m_cond_leg_iterations = 2;
+    amrex::Real m_cond_leg_flux_limit = 0.0;
+
     /** Ion mass used by the sonic wall cap: the first charged species. */
     [[nodiscard]] amrex::Real WallCapIonMass () const;
 
@@ -2236,6 +2275,17 @@ public:
         return m_cond_wall_tally[dim][side];
     }
 
+    /** Cumulative conduction-leg BC energy tallies per (grid dim, side),
+     *  same units and sign convention as m_cond_wall_tally, kept apart
+     *  from it (ledger class wall_leg, not wall_pin). Exposed to Python
+     *  as warpx.get_qdsmc_leg_tally(dim, side). */
+    mutable amrex::Real m_cond_leg_tally[AMREX_SPACEDIM][2] = {};
+
+    amrex::Real GetQdsmcLegTally (int const dim, int const side) const
+    {
+        return m_cond_leg_tally[dim][side];
+    }
+
     /** Fluxform only: faces touching a floored node (n_e <= n_floor)
      *  carry zero flux — conduction does not exchange energy with
      *  effectively-electron-free regions. Closes the measured vacuum
@@ -2248,7 +2298,7 @@ public:
     bool m_cond_closed_floor_faces = true;
 
     /** Apply the Thrust-D domain-face conduction BCs (isothermal pin /
-     *  prescribed-flux injection) to the boundary node rows and
+     *  prescribed-flux injection / conduction leg) to the boundary node rows and
      *  accumulate the wall tallies. Called at the end of every
      *  conduction substep, before the final T_e ghost fill, for all
      *  conduction forms. rho must be the same density paired with T_e
@@ -2256,6 +2306,16 @@ public:
     void ApplyQdsmcConductionWallBCs (int lev, amrex::Real dt_c,
                                       amrex::MultiFab & Te,
                                       amrex::MultiFab const & rho) const;
+
+    /** The conduction-leg (bc == 3) domain-face BC on face (dim d, side
+     *  s), see m_cond_leg_length: sets the boundary node row from the
+     *  first interior node and accumulates m_cond_leg_tally[d][s].
+     *  Dispatched from ApplyQdsmcConductionWallBCs; same call cadence
+     *  and rho pairing. */
+    void ApplyQdsmcConductionLegBC (int lev, int d, int s,
+                                    amrex::Real dt_c,
+                                    amrex::MultiFab & Te,
+                                    amrex::MultiFab const & rho) const;
 
     /** Embedded-boundary conduction BC (Thrust D EB leg, staircase
      *  per-line form — deliberately NO boundary normals: level-set
