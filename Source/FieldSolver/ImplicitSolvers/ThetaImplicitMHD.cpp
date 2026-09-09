@@ -6,6 +6,7 @@
  */
 #include "ThetaImplicitMHD.H"
 #include "ThetaImplicitMHD_K.H"
+#include "FusedResidualOps.H"
 
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "Circuit/CircuitCoupler.H"
@@ -48,6 +49,28 @@
 
 using namespace amrex::literals;
 using warpx::fields::FieldType;
+namespace fr = warpx::fused_residual;
+
+namespace warpx::fused_residual_detail
+{
+/** One target of the fused fluid-source interpolation launch
+ * (ThetaImplicitMHD::FillFluidSources, m_fused_residual): kind 0 writes
+ * charge_to_mass * Interp(src) on the valid box and 0 on the ghost cells
+ * (what setVal(0) followed by the valid-box kernel leaves); kind 1 is the
+ * cell temperature over the grown box. */
+struct FluidSourceSegment
+{
+    amrex::Array4<amrex::Real> dst;
+    amrex::Array4<amrex::Real const> src;
+    amrex::Array4<amrex::Real const> src2;
+    amrex::Box grown;
+    amrex::Box valid;
+    amrex::GpuArray<int, 3> dst_stag;
+    int src_comp;
+    int kind;
+    amrex::Long offset;
+};
+} // namespace warpx::fused_residual_detail
 
 namespace
 {
@@ -2451,6 +2474,18 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     pp.query("theta", m_theta);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_theta >= 0.5_rt && m_theta <= 1.0_rt,
                                      "implicit_evolve.theta must be between 0.5 and 1");
+    // implicit_evolve.fused_residual: one launch per stage for the residual
+    // and preconditioner bookkeeping (see FusedResidualOps.H); wired into
+    // the RZ conservative-form path only.
+    m_fused_residual = false;
+#if defined(WARPX_DIM_RZ)
+    m_fused_residual = fr::Enabled() && m_use_recast;
+#endif
+    if (fr::Enabled() && !m_fused_residual) {
+        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1 has no "
+                          "effect on this path (RZ with implicit_mhd.fluid_flux = hlld "
+                          "or central only)\n";
+    }
     if (m_resistive_theta < 0.0_rt) {
         // Default: the dissipative Ohm terms keep the global centering.
         m_resistive_theta = m_theta;
@@ -3444,6 +3479,7 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "-------- THETA IMPLICIT SINGLE-FLUID MHD PARAMETERS -------\n"
                    << "-----------------------------------------------------------\n"
                    << "Theta:                         " << m_theta << "\n"
+                   << "Fused residual bookkeeping:    " << (m_fused_residual ? "on" : "off") << "\n"
                    << "Ion charge-to-mass [C/kg]:     " << m_ion_charge_to_mass << "\n"
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
@@ -3978,8 +4014,19 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
     // ghosts first, so the radial fill below also propagates them into
     // the corner ghosts.
     if (m_z_neumann) {
-        ApplyNeumannZDomainGhosts(density);
-        ApplyNeumannZDomainGhosts(momentum);
+        if (m_fused_residual) {
+            // the seven zero-gradient fills are independent: one launch
+            std::vector<fr::Op> ghost_ops;
+            for (amrex::MultiFab* mf : {&density, &momentum, &electron_energy,
+                                        &ion_energy, &ion_parallel_energy,
+                                        &ion_perp_energy, &ion_internal_energy}) {
+                AppendZGhostOp(ghost_ops, *mf, 0, nullptr);
+            }
+            fr::Run(ghost_ops);
+        } else {
+            ApplyNeumannZDomainGhosts(density);
+            ApplyNeumannZDomainGhosts(momentum);
+        }
         if (m_z_outflow_no_reflux) {
             // No-reflux outflow (opt-in): the zero-gradient ghosts are
             // passive and admit inflow when the interior pulls inward
@@ -4013,11 +4060,13 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 });
             }
         }
-        ApplyNeumannZDomainGhosts(electron_energy);
-        ApplyNeumannZDomainGhosts(ion_energy);
-        ApplyNeumannZDomainGhosts(ion_parallel_energy);
-        ApplyNeumannZDomainGhosts(ion_perp_energy);
-        ApplyNeumannZDomainGhosts(ion_internal_energy);
+        if (!m_fused_residual) {
+            ApplyNeumannZDomainGhosts(electron_energy);
+            ApplyNeumannZDomainGhosts(ion_energy);
+            ApplyNeumannZDomainGhosts(ion_parallel_energy);
+            ApplyNeumannZDomainGhosts(ion_perp_energy);
+            ApplyNeumannZDomainGhosts(ion_internal_energy);
+        }
         if (m_z_boundary_fluid != "neumann") {
             // Selectable z-end fluid ghosts (recast path). The Neumann
             // fill above stays the base image -- same density and
@@ -4161,6 +4210,19 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
             // evaluation, and precedes the radial pass below so the
             // corner ghosts inherit the mirrored rows. z_hi keeps the
             // Neumann image and the z_boundary_fluid override above.
+            if (m_fused_residual) {
+                // mirror-only ops (the Neumann pass ran above): one launch
+                static const amrex::GpuArray<int, 3> even = {1, 1, 1};
+                static const amrex::GpuArray<int, 3> polar = {1, 1, -1};
+                std::vector<fr::Op> ghost_ops;
+                for (amrex::MultiFab* mf : {&density, &electron_energy, &ion_energy,
+                                            &ion_parallel_energy, &ion_perp_energy,
+                                            &ion_internal_energy}) {
+                    AppendMirrorOnlyOp(ghost_ops, *mf, even);
+                }
+                AppendMirrorOnlyOp(ghost_ops, momentum, polar);
+                fr::Run(ghost_ops);
+            } else {
             ApplyMirrorZLoDomainGhosts(density, {1, 1, 1});
             ApplyMirrorZLoDomainGhosts(momentum, {1, 1, -1});
             ApplyMirrorZLoDomainGhosts(electron_energy, {1, 1, 1});
@@ -4168,6 +4230,7 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
             ApplyMirrorZLoDomainGhosts(ion_parallel_energy, {1, 1, 1});
             ApplyMirrorZLoDomainGhosts(ion_perp_energy, {1, 1, 1});
             ApplyMirrorZLoDomainGhosts(ion_internal_energy, {1, 1, 1});
+            }
         }
     }
     const amrex::Box& domain = m_WarpX->Geom(0).Domain();
@@ -5140,7 +5203,11 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
     if (m_use_recast) {
         // Conservative form: the state array block IS B^{n+theta}; E is
         // assembled from the face EMF and eta J later in the residual.
-        m_WarpX->SetMagneticFieldAndApplyBCs(state, theta_time);
+        if (m_fused_residual) {
+            SetMagneticFieldFused(state, theta_time);
+        } else {
+            m_WarpX->SetMagneticFieldAndApplyBCs(state, theta_time);
+        }
     } else {
         m_WarpX->SetElectricFieldAndApplyBCs(state, theta_time);
 
@@ -5152,6 +5219,7 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
 
     if (m_z_neumann) {
         using ablastr::fields::Direction;
+        std::vector<fr::Op> ghost_ops;
         for (int direction = 0; direction < 3; ++direction) {
             // E has no Green's-fill counterpart and its cap ghosts feed no
             // residual stencil (the ghost-B rows a curl-E write could reach
@@ -5166,18 +5234,29 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
             // even mirror.
             amrex::MultiFab& electric_component =
                 *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0);
+            amrex::MultiFab& magnetic_component =
+                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
+            if (m_fused_residual) {
+                // one wave: the six fields' ghost fills are independent
+                static const amrex::GpuArray<int, 3> odd = {-1, -1, -1};
+                AppendZGhostOp(ghost_ops, electric_component, 0,
+                               direction == 2 ? &odd : nullptr);
+                AppendZGhostOp(ghost_ops, magnetic_component,
+                               magnetic_component.nGrowVect()[1],
+                               direction != 2 ? &odd : nullptr);
+                continue;
+            }
             ApplyNeumannZDomainGhosts(electric_component);
             if (direction == 2) {
                 ApplyMirrorZLoDomainGhosts(electric_component, {-1, -1, -1});
             }
-            amrex::MultiFab& magnetic_component =
-                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
             ApplyNeumannZDomainGhosts(magnetic_component,
                                       magnetic_component.nGrowVect()[1]);
             if (direction != 2) {
                 ApplyMirrorZLoDomainGhosts(magnetic_component, {-1, -1, -1});
             }
         }
+        fr::Run(ghost_ops);
     }
 
     FillFluidSources(state);
@@ -5185,11 +5264,30 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
 
 void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
 {
-    for (auto const& block_spec : state.getMultiFabBlockSpecs()) {
-        amrex::MultiFab& destination = *m_WarpX->m_fields.get(block_spec.name, 0);
-        const amrex::MultiFab& source = state.getMultiFabBlock(block_spec.name, 0);
-        amrex::MultiFab::Copy(destination, source, 0, 0, destination.nComp(), 0);
-        destination.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    if (m_fused_residual) {
+        // Every fluid block of the state in one launch; the ghost exchange
+        // is skipped where it cannot move data (single box, non-periodic).
+        std::vector<fr::Op> copy_ops;
+        for (auto const& block_spec : state.getMultiFabBlockSpecs()) {
+            amrex::MultiFab& destination = *m_WarpX->m_fields.get(block_spec.name, 0);
+            const amrex::MultiFab& source = state.getMultiFabBlock(block_spec.name, 0);
+            for (amrex::MFIter mfi(destination); mfi.isValid(); ++mfi) {
+                copy_ops.push_back(fr::CopyOp(destination, source, mfi, mfi.validbox(),
+                                              destination.nComp()));
+            }
+        }
+        fr::Run(copy_ops);
+        for (auto const& block_spec : state.getMultiFabBlockSpecs()) {
+            fr::FillBoundaryAndSync(*m_WarpX->m_fields.get(block_spec.name, 0),
+                                    m_WarpX->Geom(0).periodicity(), true);
+        }
+    } else {
+        for (auto const& block_spec : state.getMultiFabBlockSpecs()) {
+            amrex::MultiFab& destination = *m_WarpX->m_fields.get(block_spec.name, 0);
+            const amrex::MultiFab& source = state.getMultiFabBlock(block_spec.name, 0);
+            amrex::MultiFab::Copy(destination, source, 0, 0, destination.nComp(), 0);
+            destination.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+        }
     }
     ApplyFluidDomainBoundaries(*m_WarpX->m_fields.get(MassDensityName, 0),
                                *m_WarpX->m_fields.get(MomentumDensityName, 0),
@@ -5222,6 +5320,70 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     const amrex::Real charge_density_floor =
         OhmMassDensityFloor() * m_ion_charge_to_mass;
 
+    amrex::MultiFab& electron_temperature_cc =
+        *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
+    if (m_fused_residual) {
+        // ONE launch for the nodal charge density, the three ion-current
+        // components (each: the interpolation on the valid box, zero on the
+        // ghost cells exactly as setVal(0) + the valid-box kernel left them)
+        // and the cell temperature over its grown box. Their axial and
+        // radial ghost passes follow the nodal closure below (waves A and
+        // B): nothing in between reads those ghosts.
+        for (amrex::MFIter mfi(charge_density); mfi.isValid(); ++mfi) {
+            amrex::GpuArray<warpx::fused_residual_detail::FluidSourceSegment, 5> seg;
+            amrex::Long total = 0;
+            auto add = [&] (const int s, amrex::MultiFab& dst, const amrex::MultiFab& src,
+                            const amrex::MultiFab* src2, const int src_comp, const int kind) {
+                seg[s].dst = dst.array(mfi);
+                seg[s].src = src.const_array(mfi);
+                seg[s].src2 = (src2 != nullptr) ? src2->const_array(mfi)
+                                                : amrex::Array4<amrex::Real const>{};
+                seg[s].grown = mfi.fabbox(); // setVal(0) covered the whole FAB
+                seg[s].valid = mfi.tilebox(dst.ixType().toIntVect());
+                seg[s].dst_stag = field_staggering(dst);
+                seg[s].src_comp = src_comp;
+                seg[s].kind = kind;
+                seg[s].offset = total;
+                total += seg[s].grown.numPts();
+            };
+            add(0, charge_density, density, nullptr, 0, 0);
+            for (int component = 0; component < 3; ++component) {
+                add(1 + component, *ion_current[component], momentum, nullptr, component, 0);
+            }
+            add(4, electron_temperature_cc, electron_energy, &density, 0, 1);
+            amrex::ParallelFor(total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept {
+                int s = 0;
+                while (s + 1 < 5 && idx >= seg[s + 1].offset) { ++s; }
+                const warpx::fused_residual_detail::FluidSourceSegment& sg = seg[s];
+                const amrex::Dim3 lo = amrex::lbound(sg.grown);
+                const amrex::Dim3 len = amrex::length(sg.grown);
+                amrex::Long r = idx - sg.offset;
+                const int i = lo.x + static_cast<int>(r % len.x);
+                r /= len.x;
+                const int j = lo.y + static_cast<int>(r % len.y);
+                const int k = lo.z + static_cast<int>(r / len.y);
+                if (sg.kind == 0) {
+                    if (sg.valid.contains(amrex::IntVect(AMREX_D_DECL(i, j, k)))) {
+                        sg.dst(i, j, k) =
+                            charge_to_mass * ablastr::coarsen::sample::Interp(
+                                                 sg.src, cell_stag, sg.dst_stag,
+                                                 coarsening, i, j, k, sg.src_comp);
+                    } else {
+                        sg.dst(i, j, k) = 0.0_rt;
+                    }
+                } else {
+                    const amrex::Real cell_pressure = std::max(
+                        gamma_e_minus_one * sg.src(i, j, k), pressure_floor);
+                    const amrex::Real number_density =
+                        std::max(charge_to_mass * sg.src2(i, j, k),
+                                 charge_density_floor) /
+                        PhysConst::q_e;
+                    sg.dst(i, j, k) =
+                        cell_pressure / (number_density * PhysConst::kb);
+                }
+            });
+        }
+    } else {
     charge_density.setVal(0.0_rt);
     for (amrex::MFIter mfi(charge_density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.tilebox(charge_density.ixType().toIntVect());
@@ -5288,8 +5450,6 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     //       (e n_f) INCLUDING the floor band. Matches the hybrid trees'
     //       QDSMCFillElectronPressureFromTe convention (Pe derived from
     //       n and Te, never the reverse).
-    amrex::MultiFab& electron_temperature_cc =
-        *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
     for (amrex::MFIter mfi(electron_temperature_cc); mfi.isValid(); ++mfi) {
         // Ghosts computed in place from the ghosted moments (filled by
         // ApplyFluidDomainBoundaries above), so the node interpolation and
@@ -5311,6 +5471,7 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
                 cell_pressure / (number_density * PhysConst::kb);
         });
     }
+    } // !m_fused_residual
 
     for (amrex::MFIter mfi(electron_pressure); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.tilebox(electron_pressure.ixType().toIntVect());
@@ -5330,6 +5491,32 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
                 number_density * PhysConst::kb * temperature_value;
         });
     }
+    if (m_fused_residual) {
+        // Wave A: axial ghosts of the nodal charge density, the ion
+        // current (J_z odd across the z_lo mirror) and the temperature;
+        // wave B: their radial ghosts (which read the axial rows of A).
+        // The exchanges are real only where data can move (multi-box).
+        const amrex::Periodicity& period = m_WarpX->Geom(0).periodicity();
+        fr::FillBoundaryAndSync(charge_density, period, true);
+        for (int component = 0; component < 3; ++component) {
+            fr::FillBoundaryAndSync(*ion_current[component], period, true);
+        }
+        fr::FillBoundaryAndSync(electron_pressure, period, true);
+        fr::FillBoundaryAndSync(electron_temperature, period, true);
+        static const amrex::GpuArray<int, 3> odd = {-1, -1, -1};
+        std::vector<fr::Op> ghost_ops;
+        AppendZGhostOp(ghost_ops, charge_density, 0, nullptr);
+        for (int component = 0; component < 3; ++component) {
+            AppendZGhostOp(ghost_ops, *ion_current[component], 0,
+                           component == 2 ? &odd : nullptr);
+        }
+        AppendZGhostOp(ghost_ops, electron_temperature, 0, nullptr);
+        fr::Run(ghost_ops);
+        ghost_ops.clear();
+        AppendScalarRadialOp(ghost_ops, charge_density);
+        AppendScalarRadialOp(ghost_ops, electron_temperature);
+        fr::Run(ghost_ops);
+    } else {
     electron_pressure.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     electron_temperature.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyNeumannZDomainGhosts(electron_temperature);
@@ -5338,6 +5525,7 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     // carries the zero-normal-gradient wall temperature instead of the
     // stale values FillBoundaryAndSync leaves at non-periodic domain edges.
     ApplyScalarRadialDomainGhosts(electron_temperature);
+    } // !m_fused_residual
     // The PRESSURE domain ghosts are REBUILT as Pe = n_f kB Te from the
     // mirrored/clamped temperature and density images (never mirrored
     // directly), so the co-location identity of step (3) holds exactly in
@@ -5412,6 +5600,58 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
         }
         return box;
     };
+    if (m_fused_residual) {
+        // The six interpolations (and the external-B fold) in one launch:
+        // per cell the same expressions as the per-component kernels
+        // below, the external term added to the stored interpolant.
+        const bool add_external_cc = m_hybrid_pic_model->m_add_external_fields;
+        const ablastr::fields::VectorField external_field =
+            add_external_cc
+                ? m_WarpX->m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0)
+                : ablastr::fields::VectorField{};
+        amrex::GpuArray<amrex::GpuArray<int, 3>, 3> current_stag;
+        amrex::GpuArray<amrex::GpuArray<int, 3>, 3> magnetic_stag;
+        amrex::GpuArray<amrex::GpuArray<int, 3>, 3> external_stag;
+        for (int component = 0; component < 3; ++component) {
+            current_stag[component] = field_staggering(*total_current[component]);
+            magnetic_stag[component] = field_staggering(*magnetic_field[component]);
+            external_stag[component] =
+                add_external_cc ? field_staggering(*external_field[component])
+                                : cell_stag;
+        }
+        for (amrex::MFIter mfi(total_current_cc); mfi.isValid(); ++mfi) {
+            const amrex::Box box = grow_into_open_caps(mfi.validbox());
+            const auto current_cc = total_current_cc.array(mfi);
+            const auto magnetic_cc = magnetic_field_cc.array(mfi);
+            amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> current;
+            amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> magnetic;
+            amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> external;
+            for (int component = 0; component < 3; ++component) {
+                current[component] = total_current[component]->const_array(mfi);
+                magnetic[component] = magnetic_field[component]->const_array(mfi);
+                external[component] =
+                    add_external_cc ? external_field[component]->const_array(mfi)
+                                    : amrex::Array4<amrex::Real const>{};
+            }
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                for (int component = 0; component < 3; ++component) {
+                    current_cc(i, j, k, component) = ablastr::coarsen::sample::Interp(
+                        current[component], current_stag[component], cell_stag,
+                        coarsening, i, j, k, 0);
+                    magnetic_cc(i, j, k, component) = ablastr::coarsen::sample::Interp(
+                        magnetic[component], magnetic_stag[component], cell_stag,
+                        coarsening, i, j, k, 0);
+                }
+                if (add_external_cc) {
+                    for (int component = 0; component < 3; ++component) {
+                        magnetic_cc(i, j, k, component) += ablastr::coarsen::sample::Interp(
+                            external[component], external_stag[component], cell_stag,
+                            coarsening, i, j, k, 0);
+                    }
+                }
+            });
+        }
+    } else {
     for (int component = 0; component < 3; ++component) {
         const auto current_stag = field_staggering(*total_current[component]);
         const auto magnetic_stag = field_staggering(*magnetic_field[component]);
@@ -5449,6 +5689,53 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
                 });
             }
         }
+    }
+    } // !m_fused_residual
+
+    if (m_fused_residual) {
+        // Wave A: the axial ghost fills of both cell-centered fields (J a
+        // polar vector: J_r, J_theta even, J_z odd across the z_lo mirror;
+        // B axial: B_r, B_theta odd, B_z even); wave B: their radial fills.
+        const amrex::Periodicity& period = m_WarpX->Geom(0).periodicity();
+        fr::FillBoundaryAndSync(total_current_cc, period, true);
+        fr::FillBoundaryAndSync(magnetic_field_cc, period, true);
+        static const amrex::GpuArray<int, 3> polar = {1, 1, -1};
+        static const amrex::GpuArray<int, 3> axial = {-1, -1, 1};
+        std::vector<fr::Op> ghost_ops;
+        AppendZGhostOp(ghost_ops, total_current_cc, 1, &polar);
+        AppendZGhostOp(ghost_ops, magnetic_field_cc, 1, &axial);
+        fr::Run(ghost_ops);
+        ghost_ops.clear();
+#if defined(WARPX_DIM_RZ)
+        {
+            // the radial fill of the cell-centered current (see the
+            // unfused block below for the contract)
+            const amrex::Box current_domain = amrex::convert(
+                m_WarpX->Geom(0).Domain(), total_current_cc.ixType().toIntVect());
+            fr::Op op;
+            op.kind = fr::RGhost;
+            op.ncomp = total_current_cc.nComp();
+            op.r_lo = current_domain.smallEnd(0);
+            op.r_hi = current_domain.bigEnd(0);
+            op.cc_offset = 1;
+            op.do_lo = (m_fluid_reconstruction_mode !=
+                        theta_implicit_mhd::reconstruction_none);
+            op.parity_lo = {-1, -1, 1};
+            op.do_hi = true;
+            op.hi_clamp = true;
+            op.parity_hi = {1, 1, 1};
+            for (amrex::MFIter mfi(total_current_cc); mfi.isValid(); ++mfi) {
+                op.dst = total_current_cc.array(mfi);
+                op.box = amrex::grow(mfi.validbox(), total_current_cc.nGrowVect());
+                ghost_ops.push_back(op);
+            }
+        }
+#endif
+        if (m_use_recast) {
+            AppendMagneticCCRadialOp(ghost_ops, magnetic_field_cc);
+        }
+        fr::Run(ghost_ops);
+        return;
     }
 
     total_current_cc.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
@@ -5540,6 +5827,49 @@ void ThetaImplicitMHD::FillCellCenteredOhmElectricField ()
 
     const auto cell_stag = cell_staggering();
     const auto coarsening = amrex::GpuArray<int, 3>{1, 1, 1};
+    if (m_fused_residual) {
+        // the three gathers (and the external-E fold) in one launch
+        const bool add_external_cc = m_hybrid_pic_model->m_add_external_fields;
+        const ablastr::fields::VectorField external_field =
+            add_external_cc
+                ? m_WarpX->m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0)
+                : ablastr::fields::VectorField{};
+        amrex::GpuArray<amrex::GpuArray<int, 3>, 3> electric_stag;
+        amrex::GpuArray<amrex::GpuArray<int, 3>, 3> external_stag;
+        for (int component = 0; component < 3; ++component) {
+            electric_stag[component] = field_staggering(*electric_field[component]);
+            external_stag[component] =
+                add_external_cc ? field_staggering(*external_field[component])
+                                : cell_stag;
+        }
+        for (amrex::MFIter mfi(electric_field_cc); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto electric_cc = electric_field_cc.array(mfi);
+            amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> electric;
+            amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> external;
+            for (int component = 0; component < 3; ++component) {
+                electric[component] = electric_field[component]->const_array(mfi);
+                external[component] =
+                    add_external_cc ? external_field[component]->const_array(mfi)
+                                    : amrex::Array4<amrex::Real const>{};
+            }
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                for (int component = 0; component < 3; ++component) {
+                    electric_cc(i, j, k, component) = ablastr::coarsen::sample::Interp(
+                        electric[component], electric_stag[component], cell_stag,
+                        coarsening, i, j, k, 0);
+                }
+                if (add_external_cc) {
+                    for (int component = 0; component < 3; ++component) {
+                        electric_cc(i, j, k, component) += ablastr::coarsen::sample::Interp(
+                            external[component], external_stag[component], cell_stag,
+                            coarsening, i, j, k, 0);
+                    }
+                }
+            });
+        }
+        return;
+    }
     for (int component = 0; component < 3; ++component) {
         const auto electric_stag = field_staggering(*electric_field[component]);
         for (amrex::MFIter mfi(electric_field_cc); mfi.isValid(); ++mfi) {
@@ -5591,9 +5921,16 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     m_hybrid_pic_model->CalculatePlasmaCurrent(magnetic_field, m_WarpX->GetEBUpdateEFlag());
     if (m_z_neumann) {
         using ablastr::fields::Direction;
+        std::vector<fr::Op> ghost_ops;
+        static const amrex::GpuArray<int, 3> odd = {-1, -1, -1};
         for (int direction = 0; direction < 3; ++direction) {
             amrex::MultiFab& current_component = *m_WarpX->m_fields.get(
                 FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            if (m_fused_residual) {
+                AppendZGhostOp(ghost_ops, current_component, 1,
+                               direction == 2 ? &odd : nullptr);
+                continue;
+            }
             ApplyNeumannZDomainGhosts(current_component, 1);
             if (direction == 2) {
                 // z_lo mirror: J_z (cell-centered in z) is ODD; J_r and
@@ -5602,6 +5939,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
                 ApplyMirrorZLoDomainGhosts(current_component, {-1, -1, -1});
             }
         }
+        fr::Run(ghost_ops);
     }
 
     if (m_external_field_iteration &&
@@ -5694,9 +6032,13 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         AssembleOhmElectricField(theta_time, true);
         const auto& magnetic_field_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
-        m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old,
-                                                m_theta * m_dt, start_time);
-        rhs.Copy(FieldType::Bfield_fp);
+        if (m_fused_residual) {
+            UpdateMagneticFieldFused(m_theta * m_dt, start_time);
+        } else {
+            m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old,
+                                                    m_theta * m_dt, start_time);
+            rhs.Copy(FieldType::Bfield_fp);
+        }
     } else {
         const auto electric_field =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
@@ -5711,6 +6053,49 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
 
         rhs.Copy(FieldType::Efield_fp);
     }
+    if (m_fused_residual) {
+        // rhs_B = B^{new} - B^n on the valid faces, the shaped-wall field
+        // freeze rows zeroed (below), the three components in one launch;
+        // the copy-then-subtract of the unfused path is the same
+        // difference of the same two operands.
+        const ablastr::fields::VectorField magnetic_new =
+            m_WarpX->m_fields.get_alldirs(FieldType::Bfield_fp, 0);
+        const auto& magnetic_old_vec = m_state_old.getArrayVec()[0];
+        const auto& rhs_vec = rhs.getArrayVec()[0];
+        const warpx::mhd_pc::WallFieldFreezeView freeze_view =
+            m_wall_mask.FieldFreezeView();
+        const bool freeze = freeze_view.active;
+        const int* const AMREX_RESTRICT first0 = freeze_view.first_frozen_br;
+        const int* const AMREX_RESTRICT first1 = freeze_view.first_frozen_bt;
+        const int* const AMREX_RESTRICT first2 = freeze_view.first_frozen_bz;
+        AMREX_ALWAYS_ASSERT(rhs_vec[0]->nComp() == 1);
+        for (amrex::MFIter mfi(*rhs_vec[0]); mfi.isValid(); ++mfi) {
+            const int index = mfi.index();
+            const auto out0 = rhs_vec[0]->array(mfi);
+            const auto out1 = rhs_vec[1]->array(mfi);
+            const auto out2 = rhs_vec[2]->array(mfi);
+            const auto new0 = magnetic_new[0]->const_array(mfi);
+            const auto new1 = magnetic_new[1]->const_array(mfi);
+            const auto new2 = magnetic_new[2]->const_array(mfi);
+            const auto old0 = magnetic_old_vec[0]->const_array(mfi);
+            const auto old1 = magnetic_old_vec[1]->const_array(mfi);
+            const auto old2 = magnetic_old_vec[2]->const_array(mfi);
+            amrex::ParallelFor(
+                rhs_vec[0]->box(index), rhs_vec[1]->box(index), rhs_vec[2]->box(index),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    out0(i, j, k) = new0(i, j, k) - old0(i, j, k);
+                    if (freeze && i >= first0[j]) { out0(i, j, k) = 0.0_rt; }
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    out1(i, j, k) = new1(i, j, k) - old1(i, j, k);
+                    if (freeze && i >= first1[j]) { out1(i, j, k) = 0.0_rt; }
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    out2(i, j, k) = new2(i, j, k) - old2(i, j, k);
+                    if (freeze && i >= first2[j]) { out2(i, j, k) = 0.0_rt; }
+                });
+        }
+    } else {
     for (int component = 0; component < 3; ++component) {
         rhs.getArrayVec()[0][component]->minus(*m_state_old.getArrayVec()[0][component], 0, 1, 0);
     }
@@ -5747,6 +6132,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
             }
         }
     }
+    } // !m_fused_residual
     if (m_joule_ohm_current && m_include_joule_heating) {
         // Ohm-current Joule quench: refresh the cell-centered gather of
         // the just-assembled stage E on EVERY residual evaluation, so the
@@ -6701,6 +7087,7 @@ void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
         MassDensityName, ElectronEnergyName,
         cgl_closure ? IonParallelEnergyName : IonEnergyName,
         dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    std::vector<fr::Op> fused_ops; // m_fused_residual: all blocks in one launch
     for (int block = 0; block < num_blocks; ++block) {
         const amrex::iMultiFab& mask_mf = m_projection_masks[block];
         if (m_projected_per_block[block] == 0 || !mask_mf.ok()) {
@@ -6709,6 +7096,10 @@ void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
         amrex::MultiFab& value_mf = a_v.getMultiFabBlock(block_names[block], 0);
         for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
             const amrex::Box box = mfi.validbox();
+            if (m_fused_residual) {
+                fused_ops.push_back(fr::MaskedSetValOp(value_mf, mask_mf, mfi, box, 1, 0.0_rt));
+                continue;
+            }
             const auto value = value_mf.array(mfi);
             const auto mask = mask_mf.const_array(mfi);
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -6718,6 +7109,7 @@ void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
             });
         }
     }
+    fr::Run(fused_ops);
 }
 
 void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
@@ -6737,6 +7129,7 @@ void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
         MassDensityName, ElectronEnergyName,
         cgl_closure ? IonParallelEnergyName : IonEnergyName,
         dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    std::vector<fr::Op> fused_ops; // m_fused_residual: all blocks in one launch
     for (int block = 0; block < num_blocks; ++block) {
         const amrex::iMultiFab& mask_mf = m_projection_masks[block];
         if (m_projected_per_block[block] == 0 || !mask_mf.ok()) {
@@ -6747,6 +7140,10 @@ void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
             a_src.getMultiFabBlock(block_names[block], 0);
         for (amrex::MFIter mfi(dst_mf); mfi.isValid(); ++mfi) {
             const amrex::Box box = mfi.validbox();
+            if (m_fused_residual) {
+                fused_ops.push_back(fr::MaskedCopyOp(dst_mf, src_mf, mask_mf, mfi, box, 1));
+                continue;
+            }
             const auto dst = dst_mf.array(mfi);
             const auto src = src_mf.const_array(mfi);
             const auto mask = mask_mf.const_array(mfi);
@@ -6757,6 +7154,7 @@ void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
             });
         }
     }
+    fr::Run(fused_ops);
 }
 
 void ThetaImplicitMHD::BookPinnedDefect (const WarpXSolverVec& a_residual)
@@ -7963,6 +8361,17 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
         m_conduction_pc_active =
             m_conduction_pc_coefficients && conduction_channel;
     }
+    // fused residual: the register zero fills below as one launch
+    std::vector<fr::Op> zero_ops;
+    auto zero_register = [&] (amrex::MultiFab& mf) {
+        if (!m_fused_residual) {
+            mf.setVal(0.0_rt);
+            return;
+        }
+        for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+            zero_ops.push_back(fr::SetValOp(mf, mfi, mfi.fabbox(), mf.nComp(), 0.0_rt));
+        }
+    };
     if (m_conduction_pc_active) {
         const amrex::MultiFab& density =
             *m_WarpX->m_fields.get(MassDensityName, 0);
@@ -7978,7 +8387,7 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
                         density.DistributionMap(), ConductionPCComponents,
                         0);
             }
-            m_conduction_pc_coefficient[direction]->setVal(0.0_rt);
+            zero_register(*m_conduction_pc_coefficient[direction]);
         }
         if (m_ion_closure == "dual_energy" && m_conduction_pc_blend == nullptr) {
             m_conduction_pc_blend = std::make_unique<amrex::MultiFab>(
@@ -7993,8 +8402,9 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
                 density.boxArray(), density.DistributionMap(),
                 WallConductionRowComponents, 0);
         }
-        m_wall_conduction_diagonal->setVal(0.0_rt);
+        zero_register(*m_wall_conduction_diagonal);
     }
+    fr::Run(zero_ops);
 #if defined(WARPX_DIM_1D_Z)
     ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
                                  a_time);
@@ -13159,6 +13569,28 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         });
     }
 
+    if (m_fused_residual) {
+        // the external-E subtraction of the three components as one launch
+        // (same difference of the same operands as MultiFab::Subtract)
+        std::vector<fr::Op> ops;
+        for (int direction = 0; direction < 3 && add_external; ++direction) {
+            amrex::MultiFab& electric_field = *m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{direction}, 0);
+            const amrex::MultiFab& electric_field_external =
+                *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external,
+                                       Direction{direction}, 0);
+            for (amrex::MFIter mfi(electric_field); mfi.isValid(); ++mfi) {
+                ops.push_back(fr::SubtractOp(electric_field, electric_field_external, mfi,
+                                             mfi.validbox(), 1));
+            }
+        }
+        fr::Run(ops);
+        for (int direction = 0; direction < 3; ++direction) {
+            fr::FillBoundaryAndSync(
+                *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0),
+                m_WarpX->Geom(0).periodicity(), true);
+        }
+    } else {
     if (add_external) {
         for (int direction = 0; direction < 3; ++direction) {
             amrex::MultiFab& electric_field = *m_WarpX->m_fields.get(
@@ -13176,11 +13608,19 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             .get(FieldType::Efield_fp, Direction{direction}, 0)
             ->FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     }
+    } // !m_fused_residual
     m_WarpX->ApplyEfieldBoundary(0, PatchType::fine, time);
     if (m_z_neumann) {
+        std::vector<fr::Op> ghost_ops;
+        static const amrex::GpuArray<int, 3> odd = {-1, -1, -1};
         for (int direction = 0; direction < 3; ++direction) {
             amrex::MultiFab& electric_component = *m_WarpX->m_fields.get(
                 FieldType::Efield_fp, Direction{direction}, 0);
+            if (m_fused_residual) {
+                AppendZGhostOp(ghost_ops, electric_component, 0,
+                               direction == 2 ? &odd : nullptr);
+                continue;
+            }
             ApplyNeumannZDomainGhosts(electric_component);
             if (direction == 2) {
                 // z_lo mirror: E_z (cell-centered in z) is ODD; E_r and
@@ -13189,6 +13629,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 ApplyMirrorZLoDomainGhosts(electric_component, {-1, -1, -1});
             }
         }
+        fr::Run(ghost_ops);
     }
     if (m_wall_mask.IsActive()) {
         // Stair-step conducting shaped wall: project the conductor
@@ -15098,6 +15539,210 @@ void ThetaImplicitMHD::ApplyMagneticCCDomainGhosts (amrex::MultiFab& mf) const
 #else
     amrex::ignore_unused(mf);
 #endif
+}
+
+void ThetaImplicitMHD::AppendZGhostOp (std::vector<fr::Op>& a_ops, amrex::MultiFab& mf,
+                                       const int a_open_face_keep_rows,
+                                       const amrex::GpuArray<int, 3>* a_mirror_parity) const
+{
+#if defined(WARPX_DIM_RZ)
+    // The composition of ApplyNeumannZDomainGhosts(mf, keep_rows) and, when
+    // a_mirror_parity is given, ApplyMirrorZLoDomainGhosts(mf, parity) run
+    // in that order (see FusedResidualOps.H for the per-cell rule). Both
+    // read interior rows only, so every op of a wave is independent.
+    const bool neumann = m_z_neumann;
+    const bool mirror = (a_mirror_parity != nullptr) && m_z_lo_pmc;
+    if (!neumann && !mirror) {
+        return;
+    }
+    const amrex::Box domain =
+        amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
+    fr::Op op;
+    op.kind = fr::ZGhost;
+    op.ncomp = mf.nComp();
+    op.nodal_z = mf.ixType().nodeCentered(1);
+    op.neumann = neumann;
+    op.clamp_lo = domain.smallEnd(1) - (m_z_lo_open ? a_open_face_keep_rows : 0);
+    op.clamp_hi = domain.bigEnd(1) + (m_z_hi_open ? a_open_face_keep_rows : 0);
+    op.mirror = mirror;
+    op.plane = domain.smallEnd(1);
+    op.zdomain_hi = domain.bigEnd(1);
+    if (mirror) {
+        AMREX_ALWAYS_ASSERT(op.ncomp <= 3);
+        op.parity = *a_mirror_parity;
+    }
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        const bool neumann_touches =
+            neumann && !(grown.smallEnd(1) >= op.clamp_lo && grown.bigEnd(1) <= op.clamp_hi);
+        const bool mirror_touches = mirror && !(grown.smallEnd(1) > op.plane);
+        if (!neumann_touches && !mirror_touches) {
+            continue;
+        }
+        op.dst = mf.array(mfi);
+        op.box = grown;
+        a_ops.push_back(op);
+    }
+#else
+    amrex::ignore_unused(a_ops, mf, a_open_face_keep_rows, a_mirror_parity);
+#endif
+}
+
+void ThetaImplicitMHD::AppendMirrorOnlyOp (std::vector<fr::Op>& a_ops, amrex::MultiFab& mf,
+                                           const amrex::GpuArray<int, 3>& a_parity) const
+{
+#if defined(WARPX_DIM_RZ)
+    // ApplyMirrorZLoDomainGhosts alone (its Neumann companion already ran
+    // in an earlier wave).
+    if (!m_z_lo_pmc) {
+        return;
+    }
+    const amrex::Box domain =
+        amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
+    fr::Op op;
+    op.kind = fr::ZGhost;
+    op.ncomp = mf.nComp();
+    AMREX_ALWAYS_ASSERT(op.ncomp <= 3);
+    op.nodal_z = mf.ixType().nodeCentered(1);
+    op.neumann = false;
+    op.mirror = true;
+    op.plane = domain.smallEnd(1);
+    op.zdomain_hi = domain.bigEnd(1);
+    op.parity = a_parity;
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        if (grown.smallEnd(1) > op.plane) {
+            continue;
+        }
+        op.dst = mf.array(mfi);
+        op.box = grown;
+        a_ops.push_back(op);
+    }
+#else
+    amrex::ignore_unused(a_ops, mf, a_parity);
+#endif
+}
+
+void ThetaImplicitMHD::AppendScalarRadialOp (std::vector<fr::Op>& a_ops, amrex::MultiFab& mf) const
+{
+#if defined(WARPX_DIM_RZ)
+    // ApplyScalarRadialDomainGhosts as a fused op (same index maps).
+    const amrex::Box domain =
+        amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
+    fr::Op op;
+    op.kind = fr::RGhost;
+    op.ncomp = mf.nComp();
+    op.r_lo = domain.smallEnd(0);
+    op.r_hi = domain.bigEnd(0);
+    op.cc_offset = mf.ixType().cellCentered(0) ? 1 : 0;
+    op.do_lo = true;
+    op.do_hi = true;
+    op.hi_clamp = m_r_open && (m_r_open_fluid != "reflect");
+    op.parity_lo = {1, 1, 1};
+    op.parity_hi = {1, 1, 1};
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        if (grown.smallEnd(0) >= op.r_lo && grown.bigEnd(0) <= op.r_hi) {
+            continue;
+        }
+        op.dst = mf.array(mfi);
+        op.box = grown;
+        a_ops.push_back(op);
+    }
+#else
+    amrex::ignore_unused(a_ops, mf);
+#endif
+}
+
+void ThetaImplicitMHD::AppendMagneticCCRadialOp (std::vector<fr::Op>& a_ops,
+                                                 amrex::MultiFab& mf) const
+{
+#if defined(WARPX_DIM_RZ)
+    // ApplyMagneticCCDomainGhosts as a fused op: odd B_r, B_theta and even
+    // B_z across the axis; at r_max the perfect-conductor image (odd B_r)
+    // or the zero-gradient clamp of the open boundary.
+    const amrex::Box& domain = m_WarpX->Geom(0).Domain();
+    fr::Op op;
+    op.kind = fr::RGhost;
+    op.ncomp = 3;
+    AMREX_ALWAYS_ASSERT(mf.nComp() == 3);
+    op.r_lo = domain.smallEnd(0);
+    op.r_hi = domain.bigEnd(0);
+    op.cc_offset = 1;
+    op.do_lo = true;
+    op.parity_lo = {-1, -1, 1};
+    op.do_hi = true;
+    op.hi_clamp = m_r_open;
+    op.parity_hi = m_r_open ? amrex::GpuArray<int, 3>{1, 1, 1}
+                            : amrex::GpuArray<int, 3>{-1, 1, 1};
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        if (grown.smallEnd(0) >= op.r_lo && grown.bigEnd(0) <= op.r_hi) {
+            continue;
+        }
+        op.dst = mf.array(mfi);
+        op.box = grown;
+        a_ops.push_back(op);
+    }
+#else
+    amrex::ignore_unused(a_ops, mf);
+#endif
+}
+
+void ThetaImplicitMHD::SetMagneticFieldFused (const WarpXSolverVec& state, const amrex::Real a_time)
+{
+    // WarpX::SetMagneticFieldAndApplyBCs: the three ghosted copies of the
+    // state's B into Bfield_fp as one launch; the ghost exchange only where
+    // it can move data; then the boundary application unchanged.
+    using ablastr::fields::Direction;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        state.getArrayVecType() == FieldType::Bfield_fp,
+        "ThetaImplicitMHD::SetMagneticFieldFused() must be called with Bfield_fp type");
+    const auto& state_fields = state.getArrayVec()[0];
+    const amrex::Periodicity& period = m_WarpX->Geom(0).periodicity();
+    std::vector<fr::Op> ops;
+    bool exchange = false;
+    for (int direction = 0; direction < 3; ++direction) {
+        amrex::MultiFab& destination =
+            *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
+        const amrex::MultiFab& source = *state_fields[direction];
+        exchange = exchange || fr::NeedsGhostExchange(destination, period);
+        for (amrex::MFIter mfi(destination); mfi.isValid(); ++mfi) {
+            ops.push_back(fr::CopyOp(destination, source, mfi,
+                                     amrex::grow(mfi.validbox(), source.nGrowVect()),
+                                     destination.nComp()));
+        }
+    }
+    fr::Run(ops);
+    m_WarpX->ApplyMagneticFieldBoundaryAfterSet(a_time, exchange);
+}
+
+void ThetaImplicitMHD::UpdateMagneticFieldFused (const amrex::Real a_thetadt,
+                                                 const amrex::Real a_start_time)
+{
+    // WarpX::UpdateMagneticFieldAndApplyBCs(B_old, theta dt, t): the three
+    // ghosted copies of B^n into Bfield_fp as one launch, the Faraday
+    // update with its boundary application, the ghost exchange only where
+    // it can move data. (The unfused path then copies Bfield_fp into the
+    // residual; the fused residual assembles rhs = B - B^n directly.)
+    using ablastr::fields::Direction;
+    const amrex::Periodicity& period = m_WarpX->Geom(0).periodicity();
+    std::vector<fr::Op> ops;
+    bool exchange = false;
+    for (int direction = 0; direction < 3; ++direction) {
+        amrex::MultiFab& destination =
+            *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
+        const amrex::MultiFab& source =
+            *m_WarpX->m_fields.get(FieldType::B_old, Direction{direction}, 0);
+        exchange = exchange || fr::NeedsGhostExchange(destination, period);
+        for (amrex::MFIter mfi(destination); mfi.isValid(); ++mfi) {
+            ops.push_back(fr::CopyOp(destination, source, mfi,
+                                     amrex::grow(mfi.validbox(), source.nGrowVect()),
+                                     destination.nComp()));
+        }
+    }
+    fr::Run(ops);
+    m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange);
 }
 
 void ThetaImplicitMHD::SanitizeLoadedState ()

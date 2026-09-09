@@ -97,6 +97,25 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
 }
 
 void
+WarpX::ApplyMagneticFieldBoundaryAfterSet ( amrex::Real a_time, bool a_exchange_ghosts )
+{
+    if (a_exchange_ghosts) {
+        FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
+    }
+    ApplyBfieldBoundary(0, PatchType::fine, SubcyclingHalf::None, a_time);
+}
+
+void
+WarpX::EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
+                                        bool a_exchange_ghosts )
+{
+    EvolveB(a_thetadt, SubcyclingHalf::None, start_time);
+    if (a_exchange_ghosts) {
+        FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
+    }
+}
+
+void
 WarpX::FinishMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                        amrex::Real a_theta, amrex::Real a_time )
 {

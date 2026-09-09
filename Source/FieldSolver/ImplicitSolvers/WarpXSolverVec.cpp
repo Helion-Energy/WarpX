@@ -5,6 +5,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
+#include "FieldSolver/ImplicitSolvers/FusedResidualOps.H"
 #include "WarpX.H"
 
 #include <AMReX_GpuContainers.H>
@@ -275,13 +276,22 @@ void WarpXSolverVec::fusedCopyFrom (const amrex::Real* const a_arr)
         if (dof >= 0) { ya[s](c.i, c.j, c.k, c.n) = segs[s].scale * a_arr[dof]; }
     });
     // duplicates of shared grid points (staggered fields) take the owner's value
+    // (implicit_evolve.fused_residual: skipped where nothing can move,
+    // i.e. one box in a non-periodic domain)
     constexpr int lev = 0;
     const auto periodicity = m_WarpX->Geom(lev).periodicity();
+    const bool fused_residual = warpx::fused_residual::Enabled();
     if (m_array_type != FieldType::None) {
-        for (int n = 0; n < 3; ++n) { m_array_vec[lev][n]->FillBoundaryAndSync(periodicity); }
+        for (int n = 0; n < 3; ++n) {
+            warpx::fused_residual::FillBoundaryAndSync(*m_array_vec[lev][n], periodicity, fused_residual);
+        }
     }
-    if (m_scalar_type != FieldType::None) { m_scalar_vec[lev]->FillBoundaryAndSync(periodicity); }
-    for (auto& block : m_multifab_blocks) { block.data[lev]->FillBoundaryAndSync(periodicity); }
+    if (m_scalar_type != FieldType::None) {
+        warpx::fused_residual::FillBoundaryAndSync(*m_scalar_vec[lev], periodicity, fused_residual);
+    }
+    for (auto& block : m_multifab_blocks) {
+        warpx::fused_residual::FillBoundaryAndSync(*block.data[lev], periodicity, fused_residual);
+    }
 }
 
 WarpXSolverVec::~WarpXSolverVec ()

@@ -3723,6 +3723,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         operations as one kernel over the fused layout of the state
         (bit-identical), 2 = also the inner product as one kernel plus one
         reduction (round-off-level change of the summation order)
+    fused_residual: int, default=0
+        One launch per stage for the bookkeeping of the MHD residual and
+        of the block preconditioner (``implicit_evolve.fused_residual``):
+        block copies, domain-ghost fills, cell-centered interpolations,
+        zero fills, frozen-row restores as one kernel over all MultiFabs
+        of a stage, and the ghost exchanges that cannot move data (one
+        box, non-periodic) skipped; bit-identical (RZ recast path only)
     """
 
     def __init__(
@@ -3868,6 +3875,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         evolve_ion_fluid=None,
         include_joule_heating=None,
         fused_vector_ops=None,
+        fused_residual=None,
     ):
         self.nonlinear_solver = nonlinear_solver
         self.mass_density = mass_density
@@ -4012,6 +4020,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.evolve_ion_fluid = evolve_ion_fluid
         self.include_joule_heating = include_joule_heating
         self.fused_vector_ops = fused_vector_ops
+        self.fused_residual = fused_residual
 
         assert isinstance(nonlinear_solver, NonlinearSolverBase)
 
@@ -4020,6 +4029,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_evolve = pywarpx.warpx.get_bucket("implicit_evolve")
         implicit_evolve.theta = self.theta
         implicit_evolve.fused_vector_ops = self.fused_vector_ops
+        implicit_evolve.fused_residual = self.fused_residual
 
         implicit_mhd = pywarpx.warpx.get_bucket("implicit_mhd")
         implicit_mhd.__setattr__("mass_density(x,y,z)", self.mass_density)
