@@ -188,6 +188,11 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     const bool open_bc_greens_z =
         (field_boundary_lo[1] == FieldBoundaryType::Open) ||
         (field_boundary_hi[1] == FieldBoundaryType::Open);
+    // (An open z cap is NEVER subject to m_skip_open_bc_bfield_ghost_fill: the
+    // cap fill is one step of a lagged recursion -- the next application's
+    // source deposit reads the cap ghost row it wrote (see the deposit in
+    // GreensFunctionOpenBC::ApplyToBfield), so the ghosts are live across
+    // applications there. Only the r_hi-only fill at the tail may be skipped.)
     if (GreensFunctionOpenBC::IsActive() && open_bc_greens_z &&
         patch_type == PatchType::fine) {
         if (!m_open_bc_greens) {
@@ -280,8 +285,15 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     // the free-space field of the interior sources (default off; active
     // only with boundary.field_hi[0] == open and the hybrid solver). When
     // a z cap is open too, the fill already ran at the top of this method.
+    // m_skip_open_bc_bfield_ghost_fill: the implicit residual's Faraday
+    // update skips this fill (see EvolveMagneticFieldAndApplyBCs). Exact
+    // here because the r_hi-only application is a function of the valid B
+    // and of ghosts refreshed earlier in this same application (the z_lo
+    // mirror row the deposit reads at j = 0 is the PMC/PEC fill above, or
+    // untouched by this fill), and it writes the r_hi ghost band only,
+    // which the next application overwrites before anything reads it.
     if (GreensFunctionOpenBC::IsActive() && !open_bc_greens_z &&
-        patch_type == PatchType::fine) {
+        patch_type == PatchType::fine && !m_skip_open_bc_bfield_ghost_fill) {
         if (!m_open_bc_greens) {
             m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
         }

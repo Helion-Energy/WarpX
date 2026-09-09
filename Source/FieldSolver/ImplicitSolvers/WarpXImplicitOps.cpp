@@ -107,9 +107,18 @@ WarpX::ApplyMagneticFieldBoundaryAfterSet ( amrex::Real a_time, bool a_exchange_
 
 void
 WarpX::EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
-                                        bool a_exchange_ghosts )
+                                        bool a_exchange_ghosts,
+                                        bool a_skip_open_bc_ghost_fill )
 {
+    // The r_hi-only Green's-function open-boundary fill writes the r_hi
+    // ghost band only, from the valid B (and ghosts refreshed earlier in the
+    // same application): a caller whose residual reads the updated B on the
+    // valid faces and re-sets B before the next use may skip it exactly. An
+    // open z cap is exempt inside ApplyBfieldBoundary (its fill feeds the next
+    // application's deposit). The reflecting/axis/insulator applications stay.
+    m_skip_open_bc_bfield_ghost_fill = a_skip_open_bc_ghost_fill;
     EvolveB(a_thetadt, SubcyclingHalf::None, start_time);
+    m_skip_open_bc_bfield_ghost_fill = false;
     if (a_exchange_ghosts) {
         FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
     }

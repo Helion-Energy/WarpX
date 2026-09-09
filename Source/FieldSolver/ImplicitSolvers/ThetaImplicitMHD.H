@@ -1797,6 +1797,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // one launch per MultiFab; RZ recast path only, bit-identical to the
     // sequence it replaces (same per-element expressions). Set in Define.
     bool m_fused_residual = false;
+    // The knob's level while m_fused_residual (0 otherwise): 2 adds the
+    // exact residual-only skips (the dead open-boundary ghost refill of
+    // the Faraday update; the MFIter stream-sync elision on a single local
+    // box), 3 the split face-flux launches. See FusedResidualOps.H.
+    int m_fused_residual_level = 0;
+    // Level >= 2 AND this rank owns one box (AMReX rotates the GPU streams
+    // over the local boxes of an MFIter, so single-stream issue order --
+    // the premise of the elision -- holds only then).
+    bool m_fused_residual_nosync = false;
     // ---- TVD reconstruction of the recast face states
     // (implicit_mhd.fluid_reconstruction; default "none" = the
     // bit-identical donor-cell path). The recast otherwise hands

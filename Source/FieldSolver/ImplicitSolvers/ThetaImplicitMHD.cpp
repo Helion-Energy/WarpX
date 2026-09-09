@@ -2496,8 +2496,16 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
 #if defined(WARPX_DIM_RZ)
     m_fused_residual = fr::Enabled() && m_use_recast;
 #endif
+    m_fused_residual_level = m_fused_residual ? fr::Level() : 0;
+    // Level >= 2 stream-sync elision needs every kernel of a stage on ONE
+    // stream: AMReX's MFIter rotates the GPU streams over the LOCAL boxes,
+    // so the elision is armed only where this rank owns a single box.
+    m_fused_residual_nosync =
+        m_fused_residual_level >= 2 &&
+        m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->local_size() == 1;
     if (fr::Enabled() && !m_fused_residual) {
-        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1: the "
+        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = "
+                       << fr::Level() << ": the "
                           "residual-side fusion is wired into the RZ conservative-form "
                           "path only and is off here; the preconditioner, direct-solver "
                           "and solver-vector parts of the knob stay on (exact)\n";
@@ -3675,7 +3683,9 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "-------- THETA IMPLICIT SINGLE-FLUID MHD PARAMETERS -------\n"
                    << "-----------------------------------------------------------\n"
                    << "Theta:                         " << m_theta << "\n"
-                   << "Fused residual bookkeeping:    " << (m_fused_residual ? "on" : "off") << "\n"
+                   << "Fused residual bookkeeping:    " << (m_fused_residual ? "on" : "off")
+                   << " (level " << m_fused_residual_level << ", stream-sync elision "
+                   << (m_fused_residual_nosync ? "on" : "off") << ")\n"
                    << "Ion charge-to-mass [C/kg]:     " << m_ion_charge_to_mass << "\n"
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
@@ -6110,6 +6120,18 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
 {
     BL_PROFILE("ThetaImplicitMHD::ComputeRHS()");
     amrex::ignore_unused(nonlinear_iteration);
+    // fused_residual >= 2 on a single local box: no per-MFIter stream
+    // synchronization inside this evaluation (FusedResidualOps.H,
+    // NoSyncScope). Every kernel of the evaluation is issued on the one
+    // stream in program order, the kernel arguments are copied at launch
+    // (fused op tables by value, Array4 views of persistent MultiFabs,
+    // device pointers of persistent tables), and nothing below allocates
+    // and frees device memory a queued kernel still reads -- the host
+    // reductions (MultiFab::max/min, Gpu::copy) synchronize on their own --
+    // so the results are unchanged; the GPU stops idling for the host
+    // between consecutive small launches. The circuit hook restores the
+    // synchronizations for its own duration (below).
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
 
     UpdateWarpXFields(state, start_time);
 
@@ -6141,6 +6163,10 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     if (m_external_field_iteration &&
         (!m_circuit_hook_newton_scope ||
          (!from_jacobian && m_residual_is_newton_iterate))) {
+        // The hook (python callback or native engine, then the external
+        // field refresh) runs with the stream synchronizations restored:
+        // foreign code, at accepted Newton iterates only.
+        const fr::SyncScope sync_for_hook(m_fused_residual_nosync);
         // Circuit-in-the-residual coupling: python measures the
         // reciprocity flux linkage of THIS iterate's plasma current
         // (hybrid_current_fp_plasma, just computed), re-advances the
@@ -7765,6 +7791,9 @@ void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
     if (m_projected_components == 0) {
         return;
     }
+    // fused_residual >= 2: no MFIter stream sync (persistent masks and
+    // blocks only; see ComputeRHS).
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -7807,6 +7836,7 @@ void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
     if (m_projected_components == 0) {
         return;
     }
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -10073,2514 +10103,5200 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             add_external ? external_face->const_array(mfi)
                          : amrex::Array4<const amrex::Real>{};
         const auto flux_arr = face_flux_mf.array(mfi);
-        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-            // The face at index n separates cells n-1 (left) and n (right)
-            // along the normal direction.
-            int il = i;
-            int jl = j;
-            int kl = k;
-            shift_index(il, jl, kl, normal, -1);
+        if (m_fused_residual_level < 3) {
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // The face at index n separates cells n-1 (left) and n (right)
+                // along the normal direction.
+                int il = i;
+                int jl = j;
+                int kl = k;
+                shift_index(il, jl, kl, normal, -1);
 #if defined(WARPX_DIM_RZ)
-            if (radial_faces) {
-                const amrex::Real face_radius =
-                    radial_lower + i * radial_cell_size;
-                if (face_radius == 0.0_rt) {
-                    for (int component = 0;
-                         component < FaceFluxComponent::count; ++component) {
-                        flux_arr(i, j, k, component) = 0.0_rt;
+                if (radial_faces) {
+                    const amrex::Real face_radius =
+                        radial_lower + i * radial_cell_size;
+                    if (face_radius == 0.0_rt) {
+                        for (int component = 0;
+                             component < FaceFluxComponent::count; ++component) {
+                            flux_arr(i, j, k, component) = 0.0_rt;
+                        }
+                        return;
                     }
-                    return;
                 }
-            }
 #endif
-            const auto load_state = [=] (const int ic, const int jc,
-                                         const int kc) {
+                const auto load_state = [=] (const int ic, const int jc,
+                                             const int kc) {
+                    if (parameters.cgl_closure) {
+                        return theta_implicit_mhd::load_cell_state_hlld_cgl(
+                            rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
+                            ic, jc, kc, normal, parameters);
+                    }
+                    if (parameters.dual_energy_closure) {
+                        // Blended-pressure loader: every pressure consumer of
+                        // the fan (momentum flux, signal bounds, conduction
+                        // temperatures) sees the fk blend; the E_i channel
+                        // machinery keeps the total_energy assembly.
+                        return theta_implicit_mhd::load_cell_state_hlld_dual(
+                            rho, mom, energy, ion_e, ion_int, ion_int_old,
+                            j_cc, b_cc, ic, jc, kc, normal, parameters);
+                    }
+                    return theta_implicit_mhd::load_cell_state_hlld(
+                        rho, mom, energy, ion_e, j_cc, b_cc, ic, jc, kc,
+                        normal, parameters);
+                };
+                auto left = load_state(il, jl, kl);
+                auto right = load_state(i, j, k);
+                // Cell-centred donor states for the DIFFUSIVE legs. The
+                // reconstruction below rewrites left/right in place for the
+                // advective fan only. A viscous stress or a conductive flux
+                // differenced from reconstructed FACE states is a limiter
+                // residual, not a gradient: on a linear profile the two
+                // reconstructed values of a face coincide and the flux
+                // vanishes (measured on the 1D shear and conduction decks
+                // under the median limiter: 5% of the nominal nu and chi).
+                // The diffusive legs difference the cell values a distance
+                // dn apart, which is what inverse_normal_size assumes, and
+                // take their face densities, coefficient pressures, cap
+                // temperatures and field direction from the same cell
+                // values. Donor cell reconstruction leaves left/right
+                // untouched, so these copies are then bit-identical to them.
+                // At a shaped-wall interface face the masked side's copy is
+                // refreshed below with the absorb image, so the diffusive legs
+                // see the same wall image the advective fan does.
+                auto cell_left = left;
+                auto cell_right = right;
+
+                if (reconstruct_faces) {
+                    // Four-cell normal stencil (far_left, left | right,
+                    // far_right); the outer two live in the second guard
+                    // layer at a grid or domain edge.
+                    int ill = il, jll = jl, kll = kl;
+                    shift_index(ill, jll, kll, normal, -1);
+                    int irr = i, jrr = j, krr = k;
+                    shift_index(irr, jrr, krr, normal, 1);
+                    bool donor_cell = false;
+                    if (reconstruction_first_masked_cc != nullptr) {
+                        const auto masked = [=] (const int ic, const int jc) {
+                            const int jz = std::max(
+                                wall_mask_z_lo, std::min(wall_mask_z_hi, jc));
+                            return ic >= reconstruction_first_masked_cc[jz];
+                        };
+                        donor_cell = masked(ill, jll) || masked(il, jl) ||
+                                     masked(i, j) || masked(irr, jrr);
+                    }
+                    if (!donor_cell && reconstruction_no_slip) {
+                        const auto pinned = [=] (const int ic, const int jc) {
+                            for (int dj = -reconstruction_no_slip_width;
+                                 dj <= reconstruction_no_slip_width; ++dj) {
+                                const int jz = std::max(
+                                    wall_mask_z_lo,
+                                    std::min(wall_mask_z_hi, jc + dj));
+                                if (ic >= reconstruction_first_masked_cc[jz] -
+                                              reconstruction_no_slip_width) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        };
+                        donor_cell = pinned(il, jl) || pinned(i, j);
+                    }
+                    if (!donor_cell) {
+                        const auto far_left = load_state(ill, jll, kll);
+                        const auto far_right = load_state(irr, jrr, krr);
+                        theta_implicit_mhd::reconstruct_face_states(
+                            far_left, far_right, normal, parameters, left, right);
+                    }
+                }
+
+                // Wall face classification against the cell-centered mask
+                // (see the host constants above the loop): exactly one
+                // masked cell = stair-step interface face, both masked =
+                // interior metal. The table's z index is clamped to its
+                // stored range (constant continuation, like the polyline).
+                // Always false when the thermal wall is off (nullptr table
+                // never read); the mask is static geometry, so every branch
+                // below is C-infinity in the state.
+                bool wall_left_masked = false;
+                bool wall_right_masked = false;
+                if (wall_mechanics) {
+                    const int jzl = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, jl));
+                    const int jzr = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, j));
+                    wall_left_masked = (il >= wall_first_masked_cc[jzl]);
+                    wall_right_masked = (i >= wall_first_masked_cc[jzr]);
+                }
+                const bool wall_interface =
+                    (wall_left_masked != wall_right_masked);
+                // Donor indices for the positivity gates: interface faces
+                // gate BOTH sides on the interior donor (the masked side
+                // presents the interior's absorb image below, so its frozen
+                // band arrays are not this face's donor).
+                int donor_il = il, donor_jl = jl, donor_kl = kl;
+                int donor_ir = i, donor_jr = j, donor_kr = k;
+                if (wall_interface) {
+                    if (wall_right_masked) {
+                        donor_ir = il; donor_jr = jl; donor_kr = kl;
+                    } else {
+                        donor_il = i; donor_jl = j; donor_kl = k;
+                    }
+                    // Absorbing DIELECTRIC image (the r_max absorbing-wall
+                    // idea applied per stair face, with a no-injection
+                    // amendment): the masked side presents the INTERIOR
+                    // state with its normal momentum replaced by the
+                    // INTO-WALL smooth absolute value m |m|/(|m|+...) --
+                    // C-infinity, exactly zero at stagnation. On approach
+                    // the image matches the interior (the stair admits
+                    // incident plasma at its signal-limited rate: a
+                    // frozen-dust image instead stagnates a supersonic
+                    // contact jet against a rigid corner, converting ram
+                    // into a keV-scale E_i pocket at the stair steps -- the
+                    // rr12 v2 S0w corpse, 116 keV one cell inside the cone
+                    // step corner at first wall contact). On RETREAT the
+                    // image MIRRORS the interior, so the face flux closes:
+                    // a dielectric machine wall supplies no plasma, ever --
+                    // the held-ghost exhaust recipe would inject at half
+                    // the retreat rate through the central average. E_i is
+                    // copied verbatim (the r_max absorber's ghost carries
+                    // the incident kinetic energy unadjusted); the thermal
+                    // reservoir acts ONLY through the conduction drain
+                    // below.
+                    auto& image = wall_right_masked ? right : left;
+                    const auto& interior_state =
+                        wall_right_masked ? left : right;
+                    image = interior_state;
+                    const amrex::Real rectifier_width =
+                        parameters.hlld_kappa_signal *
+                        std::sqrt(
+                            parameters.gamma_e *
+                            (parameters.gamma_e - 1.0_rt) *
+                            std::max(interior_state.electron_energy,
+                                     parameters.electron_pressure_floor /
+                                         (parameters.gamma_e - 1.0_rt)) *
+                            interior_state.safe_density);
+                    const amrex::Real into_wall_sign =
+                        wall_right_masked ? 1.0_rt : -1.0_rt;
+                    // m * smooth_sign(m, w) is the C-infinity |m| with an
+                    // exact zero at m = 0 (no spurious O(w) suction on
+                    // quiescent faces).
+                    const amrex::Real normal_momentum =
+                        into_wall_sign * interior_state.momentum[normal] *
+                        theta_implicit_mhd::smooth_sign(
+                            interior_state.momentum[normal], rectifier_width);
+                    image.momentum[normal] = normal_momentum;
+                    image.ion_velocity[normal] =
+                        normal_momentum / image.safe_density;
+                    image.electron_velocity_normal =
+                        interior_state.electron_velocity_normal +
+                        (image.ion_velocity[normal] -
+                         interior_state.ion_velocity[normal]);
+                    image.wave_speed =
+                        std::max(std::abs(image.ion_velocity[normal]) +
+                                     image.sound_speed,
+                                 std::abs(image.electron_velocity_normal));
+                    image.fast_wave_speed =
+                        std::abs(image.ion_velocity[normal]) +
+                        image.fast_speed;
+                }
+                if (wall_interface) {
+                    // The masked side of an interface face is the absorb image
+                    // just built (not a fluid cell): the diffusive legs must
+                    // difference against it, exactly as before the cell-state
+                    // copies existed (interface faces are donor cell by the
+                    // mask check, so the interior side is unchanged).
+                    if (wall_right_masked) {
+                        cell_right = right;
+                    } else {
+                        cell_left = left;
+                    }
+                }
+
+                amrex::Real bn_face = bn_staggered(i, j, k);
+                if (add_external) {
+                    bn_face += bn_external(i, j, k);
+                }
+                auto flux =
+                    use_central
+                        ? theta_implicit_mhd::central_flux(left, right, bn_face,
+                                                           normal, parameters)
+                        : theta_implicit_mhd::hlld_flux(left, right, bn_face,
+                                                        normal, parameters);
+
+                // Donor-gated positivity guards on the advected mass and
+                // energy channels, gating on the theta-extrapolated
+                // end-of-step donor values -- identical policy to face_flux
+                // (momentum, stress, and induction channels have no floors).
+                // The donor SIDE is selected by a C-infinity smoothed flux
+                // sign: near-stagnant faces whose two donors carry different
+                // limiter values (a floored halo cell against a healthy
+                // neighbor) would otherwise present a derivative kink at
+                // every zero crossing, which defeats the Newton line search
+                // on near-floor equilibria. The blend width scales with the
+                // face signal span times the donor magnitudes, so an exactly
+                // zero flux stays exactly zero (static contacts remain
+                // machine-preserved) and a strong flux keeps its pure donor.
+                const amrex::Real ext =
+                    (1.0_rt - parameters.theta) / parameters.theta;
+                const amrex::Real signal_span =
+                    0.5_rt * (flux.signal_right - flux.signal_left);
+                const auto donor_blend = [=] (const amrex::Real flux_value,
+                                              const amrex::Real limiter_left,
+                                              const amrex::Real limiter_right,
+                                              const amrex::Real value_scale) {
+                    const amrex::Real width = parameters.hlld_kappa_signal *
+                                              signal_span * value_scale;
+                    const amrex::Real left_weight =
+                        0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                               flux_value, width));
+                    return left_weight * limiter_left +
+                           (1.0_rt - left_weight) * limiter_right;
+                };
+                const auto donor_end = [=] (const amrex::Array4<const amrex::Real>& now,
+                                            const amrex::Array4<const amrex::Real>& old,
+                                            const int id, const int jd, const int kd) {
+                    return now(id, jd, kd) * (1.0_rt + ext) - old(id, jd, kd) * ext;
+                };
+                // The mass gate anchors at the halo pedestal when active
+                // (see FluxParameters::halo_pedestal): outflow from a donor
+                // closes smoothly at rho_ped, holding the pedestal band as a
+                // dynamically invariant set while the Newton admissibility
+                // bound stays at the far-lower positivity floor -- no cell
+                // ever operates on a bound.
+                // The offset-density advection (FluxParameters::
+                // advection_density_offset) deliberately does NOT anchor
+                // this gate: its own C^1 rectifier already carries the reference code's
+                // in-loop MAX(en, 0) (see offset_density_shift), and it
+                // does so by driving the TRANSPORTED density to zero below
+                // the offset -- a sub-offset donor has no advective outflow
+                // left for a gate to close. This gate therefore keeps its
+                // floor/pedestal anchors, and the Newton admissibility
+                // bound is untouched.
+                const amrex::Real mass_gate_floor = std::max(
+                    parameters.density_floor, parameters.halo_pedestal);
+                flux.mass *= donor_blend(
+                    flux.mass,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(rho, rho_old, donor_il, donor_jl, donor_kl),
+                        mass_gate_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(rho, rho_old, donor_ir, donor_jr, donor_kr),
+                        mass_gate_floor),
+                    0.5_rt * (left.safe_density + right.safe_density));
+                // The energy gates anchor at their pedestal values when the
+                // pedestal is active (see FluxParameters::halo_pedestal*):
+                // the pedestal is an f-scaled image of the peak STATE, so
+                // every block's band is held off its bound the same way the
+                // mass band is.
+                const amrex::Real electron_energy_floor = std::max(
+                    parameters.electron_pressure_floor /
+                        (parameters.gamma_e - 1.0_rt),
+                    parameters.halo_pedestal_electron_energy);
+                flux.electron_energy *= donor_blend(
+                    flux.electron_energy,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(energy, energy_old, donor_il, donor_jl,
+                                  donor_kl),
+                        electron_energy_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(energy, energy_old, donor_ir, donor_jr,
+                                  donor_kr),
+                        electron_energy_floor),
+                    0.5_rt * (left.electron_energy + right.electron_energy) +
+                        electron_energy_floor);
+                if (parameters.total_energy_closure) {
+                    const auto ion_internal_end = [=] (const int id, const int jd,
+                                                       const int kd) {
+                        const amrex::Real ei_end =
+                            donor_end(ion_e, ion_e_old, id, jd, kd);
+                        amrex::Real kinetic_end = 0.0_rt;
+                        for (int component = 0; component < 3; ++component) {
+                            const amrex::Real mom_end =
+                                mom(id, jd, kd, component) * (1.0_rt + ext) -
+                                mom_old(id, jd, kd, component) * ext;
+                            kinetic_end += mom_end * mom_end;
+                        }
+                        kinetic_end *=
+                            0.5_rt / std::max(donor_end(rho, rho_old, id, jd, kd),
+                                              parameters.density_floor);
+                        return ei_end - kinetic_end;
+                    };
+                    const amrex::Real ion_energy_floor = std::max(
+                        parameters.ion_pressure_floor /
+                            (parameters.gamma_i - 1.0_rt),
+                        parameters.halo_pedestal_ion_internal);
+                    flux.ion_energy *= donor_blend(
+                        flux.ion_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            ion_internal_end(donor_il, donor_jl, donor_kl),
+                            ion_energy_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            ion_internal_end(donor_ir, donor_jr, donor_kr),
+                            ion_energy_floor),
+                        0.5_rt * (left.ion_energy + right.ion_energy) +
+                            ion_energy_floor);
+                }
                 if (parameters.cgl_closure) {
-                    return theta_implicit_mhd::load_cell_state_hlld_cgl(
-                        rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
-                        ic, jc, kc, normal, parameters);
+                    // CGL internal-energy channels: same donor-gated guards,
+                    // gating on the U fields directly (U_par and U_perp are
+                    // pure internal energies -- no kinetic subtraction), with
+                    // U_par floored at p_i_floor/2 and U_perp at p_i_floor.
+                    const amrex::Real parallel_floor = std::max(
+                        0.5_rt * parameters.ion_pressure_floor,
+                        parameters.halo_pedestal_ion_parallel);
+                    flux.ion_parallel_energy *= donor_blend(
+                        flux.ion_parallel_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(upar, upar_old, donor_il, donor_jl,
+                                      donor_kl),
+                            parallel_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(upar, upar_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            parallel_floor),
+                        0.5_rt * (left.ion_parallel_energy +
+                                  right.ion_parallel_energy) +
+                            parallel_floor);
+                    const amrex::Real perp_floor =
+                        std::max(parameters.ion_pressure_floor,
+                                 parameters.halo_pedestal_ion_perp);
+                    flux.ion_perp_energy *= donor_blend(
+                        flux.ion_perp_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(uperp, uperp_old, donor_il, donor_jl,
+                                      donor_kl),
+                            perp_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(uperp, uperp_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            perp_floor),
+                        0.5_rt *
+                                (left.ion_perp_energy + right.ion_perp_energy) +
+                            perp_floor);
                 }
                 if (parameters.dual_energy_closure) {
-                    // Blended-pressure loader: every pressure consumer of
-                    // the fan (momentum flux, signal bounds, conduction
-                    // temperatures) sees the fk blend; the E_i channel
-                    // machinery keeps the total_energy assembly.
-                    return theta_implicit_mhd::load_cell_state_hlld_dual(
-                        rho, mom, energy, ion_e, ion_int, ion_int_old,
-                        j_cc, b_cc, ic, jc, kc, normal, parameters);
+                    // Dual-energy auxiliary internal channel: same donor-gated
+                    // guard, gating on U_i directly (a pure internal energy --
+                    // no kinetic subtraction), floored at the internal-energy
+                    // image of the ion pressure floor and anchored at the SAME
+                    // internal pedestal image as the E_i gate.
+                    const amrex::Real internal_gate_floor = std::max(
+                        parameters.ion_pressure_floor /
+                            (parameters.gamma_i - 1.0_rt),
+                        parameters.halo_pedestal_ion_internal);
+                    flux.ion_internal_energy *= donor_blend(
+                        flux.ion_internal_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(ion_int, ion_int_old, donor_il, donor_jl,
+                                      donor_kl),
+                            internal_gate_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(ion_int, ion_int_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            internal_gate_floor),
+                        0.5_rt * (left.ion_internal_energy +
+                                  right.ion_internal_energy) +
+                            internal_gate_floor);
                 }
-                return theta_implicit_mhd::load_cell_state_hlld(
-                    rho, mom, energy, ion_e, j_cc, b_cc, ic, jc, kc,
-                    normal, parameters);
-            };
-            auto left = load_state(il, jl, kl);
-            auto right = load_state(i, j, k);
-            // Cell-centred donor states for the DIFFUSIVE legs. The
-            // reconstruction below rewrites left/right in place for the
-            // advective fan only. A viscous stress or a conductive flux
-            // differenced from reconstructed FACE states is a limiter
-            // residual, not a gradient: on a linear profile the two
-            // reconstructed values of a face coincide and the flux
-            // vanishes (measured on the 1D shear and conduction decks
-            // under the median limiter: 5% of the nominal nu and chi).
-            // The diffusive legs difference the cell values a distance
-            // dn apart, which is what inverse_normal_size assumes, and
-            // take their face densities, coefficient pressures, cap
-            // temperatures and field direction from the same cell
-            // values. Donor cell reconstruction leaves left/right
-            // untouched, so these copies are then bit-identical to them.
-            // At a shaped-wall interface face the masked side's copy is
-            // refreshed below with the absorb image, so the diffusive legs
-            // see the same wall image the advective fan does.
-            auto cell_left = left;
-            auto cell_right = right;
 
-            if (reconstruct_faces) {
-                // Four-cell normal stencil (far_left, left | right,
-                // far_right); the outer two live in the second guard
-                // layer at a grid or domain edge.
-                int ill = il, jll = jl, kll = kl;
-                shift_index(ill, jll, kll, normal, -1);
-                int irr = i, jrr = j, krr = k;
-                shift_index(irr, jrr, krr, normal, 1);
-                bool donor_cell = false;
-                if (reconstruction_first_masked_cc != nullptr) {
-                    const auto masked = [=] (const int ic, const int jc) {
-                        const int jz = std::max(
-                            wall_mask_z_lo, std::min(wall_mask_z_hi, jc));
-                        return ic >= reconstruction_first_masked_cc[jz];
-                    };
-                    donor_cell = masked(ill, jll) || masked(il, jl) ||
-                                 masked(i, j) || masked(irr, jrr);
-                }
-                if (!donor_cell && reconstruction_no_slip) {
-                    const auto pinned = [=] (const int ic, const int jc) {
-                        for (int dj = -reconstruction_no_slip_width;
-                             dj <= reconstruction_no_slip_width; ++dj) {
+                // Explicit ion viscosity (implicit_mhd.viscosity): the
+                // normal-gradient viscous stress on the SAME face registers,
+                // evaluated at the theta-stage states like every other flux
+                // term. The momentum stress and its velocity-weighted work
+                // are added as an exactly conservative pair AFTER the donor
+                // gates (which only scale the advective channels): gating one
+                // member of the pair without the other converts stress work
+                // into a spurious energy source/sink. The reflect wall face
+                // passes no viscous flux either -- the override below zeroes
+                // the tangential pair, and the normal member must not survive
+                // alone.
+                // Wall viscosity band (see the host constants): a face is a
+                // band face when either adjacent cell sits within
+                // wall_viscosity_mask_width cells (Chebyshev distance over
+                // the stair-step tables) of the masked contour. The band
+                // SUBSTITUTES one coefficient for both the momentum stress
+                // AND its heating work (the conservative pair must never
+                // split): wall_viscosity_band_value [Pa s] when positive
+                // (the reference code's small_vis pedestal), else the legacy exact zero
+                // -- realized by skipping the block entirely, so the default
+                // stays bit-identical.
+                bool viscosity_slip_face = false;
+                if (wall_viscosity_first_masked != nullptr) {
+                    const auto near_wall = [&] (const int ic, const int jc) {
+                        for (int dj = -wall_viscosity_width;
+                             dj <= wall_viscosity_width; ++dj) {
                             const int jz = std::max(
                                 wall_mask_z_lo,
                                 std::min(wall_mask_z_hi, jc + dj));
-                            if (ic >= reconstruction_first_masked_cc[jz] -
-                                          reconstruction_no_slip_width) {
+                            if (ic >= wall_viscosity_first_masked[jz] -
+                                           wall_viscosity_width) {
                                 return true;
                             }
                         }
                         return false;
                     };
-                    donor_cell = pinned(il, jl) || pinned(i, j);
+                    viscosity_slip_face = near_wall(il, jl) || near_wall(i, j);
                 }
-                if (!donor_cell) {
-                    const auto far_left = load_state(ill, jll, kll);
-                    const auto far_right = load_state(irr, jrr, krr);
-                    theta_implicit_mhd::reconstruct_face_states(
-                        far_left, far_right, normal, parameters, left, right);
-                }
-            }
-
-            // Wall face classification against the cell-centered mask
-            // (see the host constants above the loop): exactly one
-            // masked cell = stair-step interface face, both masked =
-            // interior metal. The table's z index is clamped to its
-            // stored range (constant continuation, like the polyline).
-            // Always false when the thermal wall is off (nullptr table
-            // never read); the mask is static geometry, so every branch
-            // below is C-infinity in the state.
-            bool wall_left_masked = false;
-            bool wall_right_masked = false;
-            if (wall_mechanics) {
-                const int jzl = std::max(wall_mask_z_lo,
-                                         std::min(wall_mask_z_hi, jl));
-                const int jzr = std::max(wall_mask_z_lo,
-                                         std::min(wall_mask_z_hi, j));
-                wall_left_masked = (il >= wall_first_masked_cc[jzl]);
-                wall_right_masked = (i >= wall_first_masked_cc[jzr]);
-            }
-            const bool wall_interface =
-                (wall_left_masked != wall_right_masked);
-            // Donor indices for the positivity gates: interface faces
-            // gate BOTH sides on the interior donor (the masked side
-            // presents the interior's absorb image below, so its frozen
-            // band arrays are not this face's donor).
-            int donor_il = il, donor_jl = jl, donor_kl = kl;
-            int donor_ir = i, donor_jr = j, donor_kr = k;
-            if (wall_interface) {
-                if (wall_right_masked) {
-                    donor_ir = il; donor_jr = jl; donor_kr = kl;
-                } else {
-                    donor_il = i; donor_jl = j; donor_kl = k;
-                }
-                // Absorbing DIELECTRIC image (the r_max absorbing-wall
-                // idea applied per stair face, with a no-injection
-                // amendment): the masked side presents the INTERIOR
-                // state with its normal momentum replaced by the
-                // INTO-WALL smooth absolute value m |m|/(|m|+...) --
-                // C-infinity, exactly zero at stagnation. On approach
-                // the image matches the interior (the stair admits
-                // incident plasma at its signal-limited rate: a
-                // frozen-dust image instead stagnates a supersonic
-                // contact jet against a rigid corner, converting ram
-                // into a keV-scale E_i pocket at the stair steps -- the
-                // rr12 v2 S0w corpse, 116 keV one cell inside the cone
-                // step corner at first wall contact). On RETREAT the
-                // image MIRRORS the interior, so the face flux closes:
-                // a dielectric machine wall supplies no plasma, ever --
-                // the held-ghost exhaust recipe would inject at half
-                // the retreat rate through the central average. E_i is
-                // copied verbatim (the r_max absorber's ghost carries
-                // the incident kinetic energy unadjusted); the thermal
-                // reservoir acts ONLY through the conduction drain
-                // below.
-                auto& image = wall_right_masked ? right : left;
-                const auto& interior_state =
-                    wall_right_masked ? left : right;
-                image = interior_state;
-                const amrex::Real rectifier_width =
-                    parameters.hlld_kappa_signal *
-                    std::sqrt(
-                        parameters.gamma_e *
-                        (parameters.gamma_e - 1.0_rt) *
-                        std::max(interior_state.electron_energy,
-                                 parameters.electron_pressure_floor /
-                                     (parameters.gamma_e - 1.0_rt)) *
-                        interior_state.safe_density);
-                const amrex::Real into_wall_sign =
-                    wall_right_masked ? 1.0_rt : -1.0_rt;
-                // m * smooth_sign(m, w) is the C-infinity |m| with an
-                // exact zero at m = 0 (no spurious O(w) suction on
-                // quiescent faces).
-                const amrex::Real normal_momentum =
-                    into_wall_sign * interior_state.momentum[normal] *
-                    theta_implicit_mhd::smooth_sign(
-                        interior_state.momentum[normal], rectifier_width);
-                image.momentum[normal] = normal_momentum;
-                image.ion_velocity[normal] =
-                    normal_momentum / image.safe_density;
-                image.electron_velocity_normal =
-                    interior_state.electron_velocity_normal +
-                    (image.ion_velocity[normal] -
-                     interior_state.ion_velocity[normal]);
-                image.wave_speed =
-                    std::max(std::abs(image.ion_velocity[normal]) +
-                                 image.sound_speed,
-                             std::abs(image.electron_velocity_normal));
-                image.fast_wave_speed =
-                    std::abs(image.ion_velocity[normal]) +
-                    image.fast_speed;
-            }
-            if (wall_interface) {
-                // The masked side of an interface face is the absorb image
-                // just built (not a fluid cell): the diffusive legs must
-                // difference against it, exactly as before the cell-state
-                // copies existed (interface faces are donor cell by the
-                // mask check, so the interior side is unchanged).
-                if (wall_right_masked) {
-                    cell_right = right;
-                } else {
-                    cell_left = left;
-                }
-            }
-
-            amrex::Real bn_face = bn_staggered(i, j, k);
-            if (add_external) {
-                bn_face += bn_external(i, j, k);
-            }
-            auto flux =
-                use_central
-                    ? theta_implicit_mhd::central_flux(left, right, bn_face,
-                                                       normal, parameters)
-                    : theta_implicit_mhd::hlld_flux(left, right, bn_face,
-                                                    normal, parameters);
-
-            // Donor-gated positivity guards on the advected mass and
-            // energy channels, gating on the theta-extrapolated
-            // end-of-step donor values -- identical policy to face_flux
-            // (momentum, stress, and induction channels have no floors).
-            // The donor SIDE is selected by a C-infinity smoothed flux
-            // sign: near-stagnant faces whose two donors carry different
-            // limiter values (a floored halo cell against a healthy
-            // neighbor) would otherwise present a derivative kink at
-            // every zero crossing, which defeats the Newton line search
-            // on near-floor equilibria. The blend width scales with the
-            // face signal span times the donor magnitudes, so an exactly
-            // zero flux stays exactly zero (static contacts remain
-            // machine-preserved) and a strong flux keeps its pure donor.
-            const amrex::Real ext =
-                (1.0_rt - parameters.theta) / parameters.theta;
-            const amrex::Real signal_span =
-                0.5_rt * (flux.signal_right - flux.signal_left);
-            const auto donor_blend = [=] (const amrex::Real flux_value,
-                                          const amrex::Real limiter_left,
-                                          const amrex::Real limiter_right,
-                                          const amrex::Real value_scale) {
-                const amrex::Real width = parameters.hlld_kappa_signal *
-                                          signal_span * value_scale;
-                const amrex::Real left_weight =
-                    0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
-                                           flux_value, width));
-                return left_weight * limiter_left +
-                       (1.0_rt - left_weight) * limiter_right;
-            };
-            const auto donor_end = [=] (const amrex::Array4<const amrex::Real>& now,
-                                        const amrex::Array4<const amrex::Real>& old,
-                                        const int id, const int jd, const int kd) {
-                return now(id, jd, kd) * (1.0_rt + ext) - old(id, jd, kd) * ext;
-            };
-            // The mass gate anchors at the halo pedestal when active
-            // (see FluxParameters::halo_pedestal): outflow from a donor
-            // closes smoothly at rho_ped, holding the pedestal band as a
-            // dynamically invariant set while the Newton admissibility
-            // bound stays at the far-lower positivity floor -- no cell
-            // ever operates on a bound.
-            // The offset-density advection (FluxParameters::
-            // advection_density_offset) deliberately does NOT anchor
-            // this gate: its own C^1 rectifier already carries the reference code's
-            // in-loop MAX(en, 0) (see offset_density_shift), and it
-            // does so by driving the TRANSPORTED density to zero below
-            // the offset -- a sub-offset donor has no advective outflow
-            // left for a gate to close. This gate therefore keeps its
-            // floor/pedestal anchors, and the Newton admissibility
-            // bound is untouched.
-            const amrex::Real mass_gate_floor = std::max(
-                parameters.density_floor, parameters.halo_pedestal);
-            flux.mass *= donor_blend(
-                flux.mass,
-                theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, donor_il, donor_jl, donor_kl),
-                    mass_gate_floor),
-                theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, donor_ir, donor_jr, donor_kr),
-                    mass_gate_floor),
-                0.5_rt * (left.safe_density + right.safe_density));
-            // The energy gates anchor at their pedestal values when the
-            // pedestal is active (see FluxParameters::halo_pedestal*):
-            // the pedestal is an f-scaled image of the peak STATE, so
-            // every block's band is held off its bound the same way the
-            // mass band is.
-            const amrex::Real electron_energy_floor = std::max(
-                parameters.electron_pressure_floor /
-                    (parameters.gamma_e - 1.0_rt),
-                parameters.halo_pedestal_electron_energy);
-            flux.electron_energy *= donor_blend(
-                flux.electron_energy,
-                theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(energy, energy_old, donor_il, donor_jl,
-                              donor_kl),
-                    electron_energy_floor),
-                theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(energy, energy_old, donor_ir, donor_jr,
-                              donor_kr),
-                    electron_energy_floor),
-                0.5_rt * (left.electron_energy + right.electron_energy) +
-                    electron_energy_floor);
-            if (parameters.total_energy_closure) {
-                const auto ion_internal_end = [=] (const int id, const int jd,
-                                                   const int kd) {
-                    const amrex::Real ei_end =
-                        donor_end(ion_e, ion_e_old, id, jd, kd);
-                    amrex::Real kinetic_end = 0.0_rt;
-                    for (int component = 0; component < 3; ++component) {
-                        const amrex::Real mom_end =
-                            mom(id, jd, kd, component) * (1.0_rt + ext) -
-                            mom_old(id, jd, kd, component) * ext;
-                        kinetic_end += mom_end * mom_end;
-                    }
-                    kinetic_end *=
-                        0.5_rt / std::max(donor_end(rho, rho_old, id, jd, kd),
-                                          parameters.density_floor);
-                    return ei_end - kinetic_end;
-                };
-                const amrex::Real ion_energy_floor = std::max(
-                    parameters.ion_pressure_floor /
-                        (parameters.gamma_i - 1.0_rt),
-                    parameters.halo_pedestal_ion_internal);
-                flux.ion_energy *= donor_blend(
-                    flux.ion_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(donor_il, donor_jl, donor_kl),
-                        ion_energy_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(donor_ir, donor_jr, donor_kr),
-                        ion_energy_floor),
-                    0.5_rt * (left.ion_energy + right.ion_energy) +
-                        ion_energy_floor);
-            }
-            if (parameters.cgl_closure) {
-                // CGL internal-energy channels: same donor-gated guards,
-                // gating on the U fields directly (U_par and U_perp are
-                // pure internal energies -- no kinetic subtraction), with
-                // U_par floored at p_i_floor/2 and U_perp at p_i_floor.
-                const amrex::Real parallel_floor = std::max(
-                    0.5_rt * parameters.ion_pressure_floor,
-                    parameters.halo_pedestal_ion_parallel);
-                flux.ion_parallel_energy *= donor_blend(
-                    flux.ion_parallel_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(upar, upar_old, donor_il, donor_jl,
-                                  donor_kl),
-                        parallel_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(upar, upar_old, donor_ir, donor_jr,
-                                  donor_kr),
-                        parallel_floor),
-                    0.5_rt * (left.ion_parallel_energy +
-                              right.ion_parallel_energy) +
-                        parallel_floor);
-                const amrex::Real perp_floor =
-                    std::max(parameters.ion_pressure_floor,
-                             parameters.halo_pedestal_ion_perp);
-                flux.ion_perp_energy *= donor_blend(
-                    flux.ion_perp_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, donor_il, donor_jl,
-                                  donor_kl),
-                        perp_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, donor_ir, donor_jr,
-                                  donor_kr),
-                        perp_floor),
-                    0.5_rt *
-                            (left.ion_perp_energy + right.ion_perp_energy) +
-                        perp_floor);
-            }
-            if (parameters.dual_energy_closure) {
-                // Dual-energy auxiliary internal channel: same donor-gated
-                // guard, gating on U_i directly (a pure internal energy --
-                // no kinetic subtraction), floored at the internal-energy
-                // image of the ion pressure floor and anchored at the SAME
-                // internal pedestal image as the E_i gate.
-                const amrex::Real internal_gate_floor = std::max(
-                    parameters.ion_pressure_floor /
-                        (parameters.gamma_i - 1.0_rt),
-                    parameters.halo_pedestal_ion_internal);
-                flux.ion_internal_energy *= donor_blend(
-                    flux.ion_internal_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(ion_int, ion_int_old, donor_il, donor_jl,
-                                  donor_kl),
-                        internal_gate_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(ion_int, ion_int_old, donor_ir, donor_jr,
-                                  donor_kr),
-                        internal_gate_floor),
-                    0.5_rt * (left.ion_internal_energy +
-                              right.ion_internal_energy) +
-                        internal_gate_floor);
-            }
-
-            // Explicit ion viscosity (implicit_mhd.viscosity): the
-            // normal-gradient viscous stress on the SAME face registers,
-            // evaluated at the theta-stage states like every other flux
-            // term. The momentum stress and its velocity-weighted work
-            // are added as an exactly conservative pair AFTER the donor
-            // gates (which only scale the advective channels): gating one
-            // member of the pair without the other converts stress work
-            // into a spurious energy source/sink. The reflect wall face
-            // passes no viscous flux either -- the override below zeroes
-            // the tangential pair, and the normal member must not survive
-            // alone.
-            // Wall viscosity band (see the host constants): a face is a
-            // band face when either adjacent cell sits within
-            // wall_viscosity_mask_width cells (Chebyshev distance over
-            // the stair-step tables) of the masked contour. The band
-            // SUBSTITUTES one coefficient for both the momentum stress
-            // AND its heating work (the conservative pair must never
-            // split): wall_viscosity_band_value [Pa s] when positive
-            // (the reference code's small_vis pedestal), else the legacy exact zero
-            // -- realized by skipping the block entirely, so the default
-            // stays bit-identical.
-            bool viscosity_slip_face = false;
-            if (wall_viscosity_first_masked != nullptr) {
-                const auto near_wall = [&] (const int ic, const int jc) {
-                    for (int dj = -wall_viscosity_width;
-                         dj <= wall_viscosity_width; ++dj) {
-                        const int jz = std::max(
-                            wall_mask_z_lo,
-                            std::min(wall_mask_z_hi, jc + dj));
-                        if (ic >= wall_viscosity_first_masked[jz] -
-                                       wall_viscosity_width) {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-                viscosity_slip_face = near_wall(il, jl) || near_wall(i, j);
-            }
-            const bool viscosity_band_face =
-                viscosity_slip_face && wall_viscosity_pedestal;
-            // NO-SLIP wall FACE condition (implicit_mhd.wall_no_slip):
-            // a no-slip wall constrains the TANGENTIAL slip AT the
-            // contour, u_t|wall = 0, and nothing else. On a stair
-            // interface face the masked side therefore presents the
-            // ANTISYMMETRIC tangential image of the interior state,
-            // -u_t, so the face-centered tangential velocity is exactly
-            // zero and the viscous difference quotient
-            // (u_t^image - u_t^interior)/dn = -2 u_t/dn is the half-cell
-            // one-sided wall gradient (0 - u_t)/(dn/2): the textbook
-            // wall shear tau_w = mu u_t/(dn/2). The NORMAL component is
-            // untouched -- the fluid stays free to lift off the wall (and
-            // to be scraped by the absorbing image, which owns that
-            // channel) -- exactly as the interior cell momentum stays a
-            // live unknown. Because the face velocity is zero the paired
-            // viscous WORK vanishes on the tangential components: the
-            // wall does no work, so the tangential kinetic energy the
-            // stress removes is converted to internal energy in the
-            // adjacent cell instead of being exported. Static geometry,
-            // C-infinity in the state, and it is a plain face flux, so
-            // the JFNK Jacobian sees it like any other viscous term.
-            const bool no_slip_face = wall_no_slip && wall_interface;
-            if (add_viscosity &&
-                (!viscosity_slip_face || viscosity_band_face || no_slip_face)
+                const bool viscosity_band_face =
+                    viscosity_slip_face && wall_viscosity_pedestal;
+                // NO-SLIP wall FACE condition (implicit_mhd.wall_no_slip):
+                // a no-slip wall constrains the TANGENTIAL slip AT the
+                // contour, u_t|wall = 0, and nothing else. On a stair
+                // interface face the masked side therefore presents the
+                // ANTISYMMETRIC tangential image of the interior state,
+                // -u_t, so the face-centered tangential velocity is exactly
+                // zero and the viscous difference quotient
+                // (u_t^image - u_t^interior)/dn = -2 u_t/dn is the half-cell
+                // one-sided wall gradient (0 - u_t)/(dn/2): the textbook
+                // wall shear tau_w = mu u_t/(dn/2). The NORMAL component is
+                // untouched -- the fluid stays free to lift off the wall (and
+                // to be scraped by the absorbing image, which owns that
+                // channel) -- exactly as the interior cell momentum stays a
+                // live unknown. Because the face velocity is zero the paired
+                // viscous WORK vanishes on the tangential components: the
+                // wall does no work, so the tangential kinetic energy the
+                // stress removes is converted to internal energy in the
+                // adjacent cell instead of being exported. Static geometry,
+                // C-infinity in the state, and it is a plain face flux, so
+                // the JFNK Jacobian sees it like any other viscous term.
+                const bool no_slip_face = wall_no_slip && wall_interface;
+                if (add_viscosity &&
+                    (!viscosity_slip_face || viscosity_band_face || no_slip_face)
 #if defined(WARPX_DIM_RZ)
-                && !(reflect_wall && i == radial_wall_face)
+                    && !(reflect_wall && i == radial_wall_face)
 #endif
-            ) {
-                const amrex::Real face_density =
-                    0.5_rt * (cell_left.density + cell_right.density);
-                // Interior: rho_f nu (implicit_mhd.viscosity is the
-                // kinematic-style knob). Band: the dynamic pedestal --
-                // a hard, density-independent set (absolute), or an
-                // upper bound on the interior coefficient (capped). A
-                // no-slip contour face keeps whichever of the two the
-                // deck asked for -- the pedestal when the band covers it
-                // (the reference code's small_vis on the 'bndy' row),
-                // else the physical rho_f nu -- but never the legacy
-                // exact-zero skip, which would silently make the wall
-                // free-slip again. Assembled interior-first so the
-                // capped band bounds the SAME coefficient the face would
-                // carry without the band; on an absolute band face the
-                // product is discarded below (bit-identical result).
-                // NOT const: the reference code's nu_op region multiplier below
-                // scales this in place (segment-staging lane).
-                amrex::Real viscous_coefficient = face_density * viscosity;
-                // The reference code's nu_op (step.f90:199-201): the region multiplier
-                // scales the INTERIOR coefficient only -- their WHERE
-                // runs BEFORE the small_vis wall assignment, which
-                // overwrites it, so an ABSOLUTE band face skips it. A
-                // CAPPED band face bounds the interior coefficient the
-                // face would otherwise carry, region scale included, so
-                // the scale is applied there first. The face takes the
-                // mean of its two adjacent cell multipliers (our
-                // coefficient lives on faces; theirs on the nodes their
-                // operator differences).
-                if (viscosity_region_scale != nullptr &&
-                    (!viscosity_band_face || wall_viscosity_band_capped)) {
-                    const auto region_scale_at =
-                        [=] (const int ic, const int jc) {
-                            const int ir = std::min(
-                                std::max(ic - viscosity_region_radial_lo, 0),
-                                viscosity_region_radial_cells - 1);
-                            const int jz = std::min(
-                                std::max(jc - viscosity_region_axial_lo, 0),
-                                viscosity_region_axial_cells - 1);
-                            return viscosity_region_scale
-                                [static_cast<std::size_t>(ir) *
-                                     viscosity_region_axial_cells +
-                                 jz];
-                        };
-                    viscous_coefficient *=
-                        0.5_rt * (region_scale_at(il, jl) +
-                                  region_scale_at(i, j));
-                }
-                if (viscosity_band_face) {
-                    // absolute: the hard set (the pre-knob path, bit for
-                    // bit). capped: the pedestal never exceeds the
-                    // interior coefficient -- where rho_f nu is the
-                    // smaller of the two, the face keeps EXACTLY the
-                    // value it would carry without the band.
-                    viscous_coefficient =
-                        wall_viscosity_band_capped
-                            ? std::min(wall_viscosity_band_value,
-                                       viscous_coefficient)
-                            : wall_viscosity_band_value;
-                }
-                amrex::Real viscous_work = 0.0_rt;
-                amrex::Real viscous_dissipation = 0.0_rt;
-                amrex::Real wall_friction_work = 0.0_rt;
-                // Staged old-state velocities for viscous_theta. Hoisted
-                // out of the component loop: both sides' densities are
-                // component-independent, and the floor must match the one
-                // the conduction stage uses so the two legs of the same
-                // tensor never disagree about what an empty cell is.
-                amrex::Real viscous_rho_old_left = 1.0_rt;
-                amrex::Real viscous_rho_old_right = 1.0_rt;
-                if (viscous_stage) {
-                    viscous_rho_old_left = std::max(
-                        rho_old(il, jl, kl), parameters.density_floor);
-                    viscous_rho_old_right = std::max(
-                        rho_old(i, j, k), parameters.density_floor);
-                }
-                for (int component = 0; component < 3; ++component) {
-                    amrex::Real left_velocity =
-                        cell_left.ion_velocity[component];
-                    amrex::Real right_velocity =
-                        cell_right.ion_velocity[component];
+                ) {
+                    const amrex::Real face_density =
+                        0.5_rt * (cell_left.density + cell_right.density);
+                    // Interior: rho_f nu (implicit_mhd.viscosity is the
+                    // kinematic-style knob). Band: the dynamic pedestal --
+                    // a hard, density-independent set (absolute), or an
+                    // upper bound on the interior coefficient (capped). A
+                    // no-slip contour face keeps whichever of the two the
+                    // deck asked for -- the pedestal when the band covers it
+                    // (the reference code's small_vis on the 'bndy' row),
+                    // else the physical rho_f nu -- but never the legacy
+                    // exact-zero skip, which would silently make the wall
+                    // free-slip again. Assembled interior-first so the
+                    // capped band bounds the SAME coefficient the face would
+                    // carry without the band; on an absolute band face the
+                    // product is discarded below (bit-identical result).
+                    // NOT const: the reference code's nu_op region multiplier below
+                    // scales this in place (segment-staging lane).
+                    amrex::Real viscous_coefficient = face_density * viscosity;
+                    // The reference code's nu_op (step.f90:199-201): the region multiplier
+                    // scales the INTERIOR coefficient only -- their WHERE
+                    // runs BEFORE the small_vis wall assignment, which
+                    // overwrites it, so an ABSOLUTE band face skips it. A
+                    // CAPPED band face bounds the interior coefficient the
+                    // face would otherwise carry, region scale included, so
+                    // the scale is applied there first. The face takes the
+                    // mean of its two adjacent cell multipliers (our
+                    // coefficient lives on faces; theirs on the nodes their
+                    // operator differences).
+                    if (viscosity_region_scale != nullptr &&
+                        (!viscosity_band_face || wall_viscosity_band_capped)) {
+                        const auto region_scale_at =
+                            [=] (const int ic, const int jc) {
+                                const int ir = std::min(
+                                    std::max(ic - viscosity_region_radial_lo, 0),
+                                    viscosity_region_radial_cells - 1);
+                                const int jz = std::min(
+                                    std::max(jc - viscosity_region_axial_lo, 0),
+                                    viscosity_region_axial_cells - 1);
+                                return viscosity_region_scale
+                                    [static_cast<std::size_t>(ir) *
+                                         viscosity_region_axial_cells +
+                                     jz];
+                            };
+                        viscous_coefficient *=
+                            0.5_rt * (region_scale_at(il, jl) +
+                                      region_scale_at(i, j));
+                    }
+                    if (viscosity_band_face) {
+                        // absolute: the hard set (the pre-knob path, bit for
+                        // bit). capped: the pedestal never exceeds the
+                        // interior coefficient -- where rho_f nu is the
+                        // smaller of the two, the face keeps EXACTLY the
+                        // value it would carry without the band.
+                        viscous_coefficient =
+                            wall_viscosity_band_capped
+                                ? std::min(wall_viscosity_band_value,
+                                           viscous_coefficient)
+                                : wall_viscosity_band_value;
+                    }
+                    amrex::Real viscous_work = 0.0_rt;
+                    amrex::Real viscous_dissipation = 0.0_rt;
+                    amrex::Real wall_friction_work = 0.0_rt;
+                    // Staged old-state velocities for viscous_theta. Hoisted
+                    // out of the component loop: both sides' densities are
+                    // component-independent, and the floor must match the one
+                    // the conduction stage uses so the two legs of the same
+                    // tensor never disagree about what an empty cell is.
+                    amrex::Real viscous_rho_old_left = 1.0_rt;
+                    amrex::Real viscous_rho_old_right = 1.0_rt;
                     if (viscous_stage) {
-                        // u^n = (rho u)^n / rho^n. Applied BEFORE the
-                        // no-slip image below, so the antisymmetric wall
-                        // reflection mirrors the staged velocity rather
-                        // than a mixed-stage one.
-                        left_velocity =
-                            viscous_new_weight * left_velocity +
-                            viscous_old_weight *
-                                (mom_old(il, jl, kl, component) /
-                                 viscous_rho_old_left);
-                        right_velocity =
-                            viscous_new_weight * right_velocity +
-                            viscous_old_weight *
-                                (mom_old(i, j, k, component) /
-                                 viscous_rho_old_right);
+                        viscous_rho_old_left = std::max(
+                            rho_old(il, jl, kl), parameters.density_floor);
+                        viscous_rho_old_right = std::max(
+                            rho_old(i, j, k), parameters.density_floor);
                     }
-                    if (no_slip_face && component != normal) {
-                        if (wall_right_masked) {
-                            right_velocity = -left_velocity;
-                        } else {
-                            left_velocity = -right_velocity;
+                    for (int component = 0; component < 3; ++component) {
+                        amrex::Real left_velocity =
+                            cell_left.ion_velocity[component];
+                        amrex::Real right_velocity =
+                            cell_right.ion_velocity[component];
+                        if (viscous_stage) {
+                            // u^n = (rho u)^n / rho^n. Applied BEFORE the
+                            // no-slip image below, so the antisymmetric wall
+                            // reflection mirrors the staged velocity rather
+                            // than a mixed-stage one.
+                            left_velocity =
+                                viscous_new_weight * left_velocity +
+                                viscous_old_weight *
+                                    (mom_old(il, jl, kl, component) /
+                                     viscous_rho_old_left);
+                            right_velocity =
+                                viscous_new_weight * right_velocity +
+                                viscous_old_weight *
+                                    (mom_old(i, j, k, component) /
+                                     viscous_rho_old_right);
                         }
-                    }
-                    // Kinetic-energy PAIRING velocities of the dual-energy
-                    // dissipation register (viscous_dissipation_register;
-                    // see the host constant): the THETA-stage CELL-CENTRED
-                    // velocities of the two cells this face moves momentum
-                    // between. Those are what the discrete kinetic-energy
-                    // identity KE^{n+1} - KE^n = u^{n+theta} . dm (exact at
-                    // theta = 1/2, uniform density; at theta = 1 it misses
-                    // |dm|^2/(2 rho) per cell and step) pairs with the
-                    // momentum increment -- the same cell-centred states the
-                    // stress itself differences (cell_left/cell_right; the
-                    // reconstruction rewrites only the advective fan), and
-                    // NOT the viscous-stage velocities: the heat booked must
-                    // be the kinetic energy the stress ACTUALLY removes,
-                    // whatever velocity level the stress was formed from.
-                    // When the far side of the face is not a live cell --
-                    // the masked cell of a rigid-wall interface (frozen
-                    // under wall_thermal_bc != none, which is what makes
-                    // wall_interface true; its half of the deposit is
-                    // discarded with wall_live), or the boundary ghost of a
-                    // non-periodic z-domain end face or of the r_max face
-                    // (never deposited: outside the valid box) -- it is
-                    // paired antisymmetrically, -u_live, so the live half of
-                    // the face dissipation is exactly the live cell's own
-                    // loss u_live . Pi_f/dn for EVERY component, whichever
-                    // image (no-slip antisymmetric, absorb, rectified or
-                    // copied ghost, z_lo mirror) the stress used.
-                    amrex::Real pair_left_velocity = 0.0_rt;
-                    amrex::Real pair_right_velocity = 0.0_rt;
-                    // The live cell's theta-stage velocity at a wall
-                    // interface, before the antisymmetric pairing below:
-                    // under wall_friction_heating = drop it multiplies the
-                    // tangential stress into the E_i work flux, so the
-                    // energy leaving E_i is exactly the kinetic energy the
-                    // stress removes (the same pairing the register uses).
-                    amrex::Real live_pair_velocity = 0.0_rt;
-                    if (viscous_dissipation_register || wall_friction_drop) {
-                        pair_left_velocity =
-                            mom(il, jl, kl, component) /
-                            std::max(rho(il, jl, kl),
-                                     parameters.density_floor);
-                        pair_right_velocity =
-                            mom(i, j, k, component) /
-                            std::max(rho(i, j, k), parameters.density_floor);
-                        live_pair_velocity = wall_right_masked
-                                                 ? pair_left_velocity
-                                                 : pair_right_velocity;
-                        bool far_right = wall_interface && wall_right_masked;
-                        bool far_left = wall_interface && !wall_right_masked;
-                        if (normal == 2 && !viscous_z_periodic) {
+                        if (no_slip_face && component != normal) {
+                            if (wall_right_masked) {
+                                right_velocity = -left_velocity;
+                            } else {
+                                left_velocity = -right_velocity;
+                            }
+                        }
+                        // Kinetic-energy PAIRING velocities of the dual-energy
+                        // dissipation register (viscous_dissipation_register;
+                        // see the host constant): the THETA-stage CELL-CENTRED
+                        // velocities of the two cells this face moves momentum
+                        // between. Those are what the discrete kinetic-energy
+                        // identity KE^{n+1} - KE^n = u^{n+theta} . dm (exact at
+                        // theta = 1/2, uniform density; at theta = 1 it misses
+                        // |dm|^2/(2 rho) per cell and step) pairs with the
+                        // momentum increment -- the same cell-centred states the
+                        // stress itself differences (cell_left/cell_right; the
+                        // reconstruction rewrites only the advective fan), and
+                        // NOT the viscous-stage velocities: the heat booked must
+                        // be the kinetic energy the stress ACTUALLY removes,
+                        // whatever velocity level the stress was formed from.
+                        // When the far side of the face is not a live cell --
+                        // the masked cell of a rigid-wall interface (frozen
+                        // under wall_thermal_bc != none, which is what makes
+                        // wall_interface true; its half of the deposit is
+                        // discarded with wall_live), or the boundary ghost of a
+                        // non-periodic z-domain end face or of the r_max face
+                        // (never deposited: outside the valid box) -- it is
+                        // paired antisymmetrically, -u_live, so the live half of
+                        // the face dissipation is exactly the live cell's own
+                        // loss u_live . Pi_f/dn for EVERY component, whichever
+                        // image (no-slip antisymmetric, absorb, rectified or
+                        // copied ghost, z_lo mirror) the stress used.
+                        amrex::Real pair_left_velocity = 0.0_rt;
+                        amrex::Real pair_right_velocity = 0.0_rt;
+                        // The live cell's theta-stage velocity at a wall
+                        // interface, before the antisymmetric pairing below:
+                        // under wall_friction_heating = drop it multiplies the
+                        // tangential stress into the E_i work flux, so the
+                        // energy leaving E_i is exactly the kinetic energy the
+                        // stress removes (the same pairing the register uses).
+                        amrex::Real live_pair_velocity = 0.0_rt;
+                        if (viscous_dissipation_register || wall_friction_drop) {
+                            pair_left_velocity =
+                                mom(il, jl, kl, component) /
+                                std::max(rho(il, jl, kl),
+                                         parameters.density_floor);
+                            pair_right_velocity =
+                                mom(i, j, k, component) /
+                                std::max(rho(i, j, k), parameters.density_floor);
+                            live_pair_velocity = wall_right_masked
+                                                     ? pair_left_velocity
+                                                     : pair_right_velocity;
+                            bool far_right = wall_interface && wall_right_masked;
+                            bool far_left = wall_interface && !wall_right_masked;
+                            if (normal == 2 && !viscous_z_periodic) {
 #if defined(WARPX_DIM_RZ)
-                            const int face_axial_index = j;
+                                const int face_axial_index = j;
 #else
-                            const int face_axial_index = i;
+                                const int face_axial_index = i;
 #endif
-                            far_left = far_left ||
-                                       (face_axial_index == z_end_face_lo);
-                            far_right = far_right ||
-                                        (face_axial_index == z_end_face_hi);
-                        }
+                                far_left = far_left ||
+                                           (face_axial_index == z_end_face_lo);
+                                far_right = far_right ||
+                                            (face_axial_index == z_end_face_hi);
+                            }
 #if defined(WARPX_DIM_RZ)
-                        if (normal == 0 && i == radial_wall_face) {
-                            far_right = true;
-                        }
+                            if (normal == 0 && i == radial_wall_face) {
+                                far_right = true;
+                            }
 #endif
-                        if (far_right) {
-                            pair_right_velocity = -pair_left_velocity;
-                        } else if (far_left) {
-                            pair_left_velocity = -pair_right_velocity;
+                            if (far_right) {
+                                pair_right_velocity = -pair_left_velocity;
+                            } else if (far_left) {
+                                pair_left_velocity = -pair_right_velocity;
+                            }
                         }
-                    }
-                    amrex::Real viscous_stress =
-                        -viscous_coefficient *
-                        (right_velocity - left_velocity) *
-                        inverse_normal_size;
-                    // FREE-STREAMING CAP on the viscous momentum flux,
-                    // the exact analogue of the conduction cap
-                    // q/(1 + |q|/(f q_fs)) with q_fs = n kB Ti v_ti.
-                    // A viscous stress IS a momentum flux, and the
-                    // free-streaming bound a thermal ion population can
-                    // carry is tau_fs = rho v_ti^2 = n kB Ti, i.e. the
-                    // ION PRESSURE. Same harmonic form, same branchless
-                    // smoothness for the JFNK probes, and deliberately
-                    // the SAME factor f as conduction so the energy and
-                    // momentum equations are limited identically --
-                    // until now conduction was flux-limited and
-                    // viscosity was not limited at all, which is a
-                    // transport mismatch between the two legs of the
-                    // same tensor (Eric 2026-09-04, from the ripples in
-                    // haloD's Ti field).
-                    if (viscous_limit > 0.0_rt) {
-                        const amrex::Real free_streaming_stress =
-                            0.5_rt * (cell_left.ion_pressure +
-                                      cell_right.ion_pressure);
-                        if (free_streaming_stress > 0.0_rt) {
-                            viscous_stress /=
-                                1.0_rt + std::abs(viscous_stress) /
-                                             (viscous_limit *
-                                              free_streaming_stress);
-                        }
-                    }
-                    flux.momentum[component] += viscous_stress;
-                    viscous_work += 0.5_rt *
-                                    (left_velocity + right_velocity) *
-                                    viscous_stress;
-                    const bool friction_component =
-                        no_slip_face && component != normal;
-                    if (wall_friction_drop && friction_component) {
-                        // wall_friction_heating = drop: the tangential
-                        // face velocity is zero (image), so the term above
-                        // is exactly zero here; export the friction work
-                        // u_live . Pi_f instead. The live cell's E_i then
-                        // loses exactly the kinetic energy the stress
-                        // removes (E_i - KE unchanged: no heat), and the
-                        // energy crosses into the wall -- tallied by the
-                        // shaped-wall ledger through wall_friction_work
-                        // (into-wall sign: positive for dissipative
-                        // friction).
-                        const amrex::Real friction_flux =
-                            live_pair_velocity * viscous_stress;
-                        viscous_work += friction_flux;
-                        wall_friction_work +=
-                            (wall_right_masked ? 1.0_rt : -1.0_rt) *
-                            friction_flux;
-                    }
-                    if (viscous_dissipation_register &&
-                        !(wall_friction_drop && friction_component)) {
-                        // The FINAL stress (staged, banded, imaged,
-                        // region-scaled, capped) times the pairing
-                        // difference: -Pi_f . (u_R - u_L)/dn is the rate at
-                        // which this face's momentum flux drains kinetic
-                        // energy from the two cells together. At
-                        // viscous_theta = theta and donor states this is
-                        // mu_f |du/dn|^2 / (1 + |Pi|/(f p_i)) >= 0; in
-                        // general it is positive exactly where the stress
-                        // is dissipative, and the exact KE loss always.
-                        viscous_dissipation -=
-                            viscous_stress *
-                            (pair_right_velocity - pair_left_velocity) *
+                        amrex::Real viscous_stress =
+                            -viscous_coefficient *
+                            (right_velocity - left_velocity) *
                             inverse_normal_size;
+                        // FREE-STREAMING CAP on the viscous momentum flux,
+                        // the exact analogue of the conduction cap
+                        // q/(1 + |q|/(f q_fs)) with q_fs = n kB Ti v_ti.
+                        // A viscous stress IS a momentum flux, and the
+                        // free-streaming bound a thermal ion population can
+                        // carry is tau_fs = rho v_ti^2 = n kB Ti, i.e. the
+                        // ION PRESSURE. Same harmonic form, same branchless
+                        // smoothness for the JFNK probes, and deliberately
+                        // the SAME factor f as conduction so the energy and
+                        // momentum equations are limited identically --
+                        // until now conduction was flux-limited and
+                        // viscosity was not limited at all, which is a
+                        // transport mismatch between the two legs of the
+                        // same tensor (Eric 2026-09-04, from the ripples in
+                        // haloD's Ti field).
+                        if (viscous_limit > 0.0_rt) {
+                            const amrex::Real free_streaming_stress =
+                                0.5_rt * (cell_left.ion_pressure +
+                                          cell_right.ion_pressure);
+                            if (free_streaming_stress > 0.0_rt) {
+                                viscous_stress /=
+                                    1.0_rt + std::abs(viscous_stress) /
+                                                 (viscous_limit *
+                                                  free_streaming_stress);
+                            }
+                        }
+                        flux.momentum[component] += viscous_stress;
+                        viscous_work += 0.5_rt *
+                                        (left_velocity + right_velocity) *
+                                        viscous_stress;
+                        const bool friction_component =
+                            no_slip_face && component != normal;
+                        if (wall_friction_drop && friction_component) {
+                            // wall_friction_heating = drop: the tangential
+                            // face velocity is zero (image), so the term above
+                            // is exactly zero here; export the friction work
+                            // u_live . Pi_f instead. The live cell's E_i then
+                            // loses exactly the kinetic energy the stress
+                            // removes (E_i - KE unchanged: no heat), and the
+                            // energy crosses into the wall -- tallied by the
+                            // shaped-wall ledger through wall_friction_work
+                            // (into-wall sign: positive for dissipative
+                            // friction).
+                            const amrex::Real friction_flux =
+                                live_pair_velocity * viscous_stress;
+                            viscous_work += friction_flux;
+                            wall_friction_work +=
+                                (wall_right_masked ? 1.0_rt : -1.0_rt) *
+                                friction_flux;
+                        }
+                        if (viscous_dissipation_register &&
+                            !(wall_friction_drop && friction_component)) {
+                            // The FINAL stress (staged, banded, imaged,
+                            // region-scaled, capped) times the pairing
+                            // difference: -Pi_f . (u_R - u_L)/dn is the rate at
+                            // which this face's momentum flux drains kinetic
+                            // energy from the two cells together. At
+                            // viscous_theta = theta and donor states this is
+                            // mu_f |du/dn|^2 / (1 + |Pi|/(f p_i)) >= 0; in
+                            // general it is positive exactly where the stress
+                            // is dissipative, and the exact KE loss always.
+                            viscous_dissipation -=
+                                viscous_stress *
+                                (pair_right_velocity - pair_left_velocity) *
+                                inverse_normal_size;
+                        }
                     }
+                    flux.ion_energy += viscous_work;
+                    // Zero unless viscous_dissipation_register (struct default).
+                    flux.viscous_dissipation = viscous_dissipation;
+                    // Zero unless wall_friction_heating = drop at a no-slip face.
+                    flux.wall_friction_work = wall_friction_work;
                 }
-                flux.ion_energy += viscous_work;
-                // Zero unless viscous_dissipation_register (struct default).
-                flux.viscous_dissipation = viscous_dissipation;
-                // Zero unless wall_friction_heating = drop at a no-slip face.
-                flux.wall_friction_work = wall_friction_work;
-            }
 
-            // Thermal conduction (implicit_mhd.thermal_diffusivity_* or
-            // thermal_conduction_model = braginskii, which replaces the
-            // scalar flux with the anisotropic tensor form -- see the
-            // braginskii host constants above):
-            // the conductive internal-energy flux -chi rho_f d(e_spec)/dn
-            // (q = -kappa grad T with kappa = chi rho c_v) on the SAME
-            // face registers, placed exactly like the viscous terms --
-            // after the donor gates (which only scale the advective
-            // channels) and inside the zero-flux wall mask. Pure energy
-            // diffusion: unlike the viscous stress there is no momentum
-            // twin to pair, so no channel-splitting hazard exists. The
-            // specific internal energies come from the SAME CellState
-            // pressures the physical fluxes use (the smooth-floored
-            // recovered p_i(E_i) under total_energy: ion_internal is
-            // exactly p_i/(gamma_i - 1)).
-            // Interior-metal faces never conduct; interface faces
-            // conduct only in the temperature (Dirichlet) mode (the
-            // masked flags were classified above, before the absorb
-            // image). wall_thermal is false when conduction is off, so
-            // the skip only ever engages alongside an active channel.
-            const bool wall_skip_conduction =
-                wall_thermal &&
-                ((wall_left_masked && wall_right_masked) ||
-                 (wall_interface && !wall_reservoir));
+                // Thermal conduction (implicit_mhd.thermal_diffusivity_* or
+                // thermal_conduction_model = braginskii, which replaces the
+                // scalar flux with the anisotropic tensor form -- see the
+                // braginskii host constants above):
+                // the conductive internal-energy flux -chi rho_f d(e_spec)/dn
+                // (q = -kappa grad T with kappa = chi rho c_v) on the SAME
+                // face registers, placed exactly like the viscous terms --
+                // after the donor gates (which only scale the advective
+                // channels) and inside the zero-flux wall mask. Pure energy
+                // diffusion: unlike the viscous stress there is no momentum
+                // twin to pair, so no channel-splitting hazard exists. The
+                // specific internal energies come from the SAME CellState
+                // pressures the physical fluxes use (the smooth-floored
+                // recovered p_i(E_i) under total_energy: ion_internal is
+                // exactly p_i/(gamma_i - 1)).
+                // Interior-metal faces never conduct; interface faces
+                // conduct only in the temperature (Dirichlet) mode (the
+                // masked flags were classified above, before the absorb
+                // image). wall_thermal is false when conduction is off, so
+                // the skip only ever engages alongside an active channel.
+                const bool wall_skip_conduction =
+                    wall_thermal &&
+                    ((wall_left_masked && wall_right_masked) ||
+                     (wall_interface && !wall_reservoir));
 
-            if (add_conduction && !wall_skip_conduction
+                if (add_conduction && !wall_skip_conduction
 #if defined(WARPX_DIM_RZ)
-                && !(reflect_wall && i == radial_wall_face)
+                    && !(reflect_wall && i == radial_wall_face)
 #endif
-            ) {
-                // Frozen-coefficient option (implicit_mhd.
-                // conduction_coefficient_state = step_old): the chi
-                // COEFFICIENT inputs -- the rho_f multiplier, the face
-                // charge density, and the face temperatures feeding the
-                // parser diffusivities, the Braginskii coefficients,
-                // and the free-streaming caps -- come from the STEP-OLD
-                // fields, per-solve constants like the rho_old-keyed
-                // source masks: Newton then sees LINEAR diffusion in
-                // the energies. Probe-measured motivation: every
-                // Newton-hostile conduction incident on the formation
-                // ladder is a state-dependent chi inside the residual
-                // (30 vs 322 steps/min in the isolation probes);
-                // constant coefficients are cheap at any amplitude.
-                // The FLUX keeps the live theta-state specific-energy
-                // gradient; the parser J input stays live (theta j_cc,
-                // no old-current register). Hard floors are fine here:
-                // frozen inputs are constants w.r.t. the Newton state,
-                // so residual smoothness is unaffected. Default theta
-                // is bit-identical.
-                amrex::Real coeff_density_left = cell_left.density;
-                amrex::Real coeff_density_right = cell_right.density;
-                amrex::Real coeff_pe_left = cell_left.electron_pressure;
-                amrex::Real coeff_pe_right = cell_right.electron_pressure;
-                amrex::Real coeff_pi_left = cell_left.ion_pressure;
-                amrex::Real coeff_pi_right = cell_right.ion_pressure;
-                if (chi_coeff_old) {
-                    coeff_density_left = rho_old(il, jl, kl);
-                    coeff_density_right = rho_old(i, j, k);
-                    coeff_pe_left = std::max(
-                        (parameters.gamma_e - 1.0_rt) *
-                            energy_old(il, jl, kl),
-                        parameters.electron_pressure_floor);
-                    coeff_pe_right = std::max(
-                        (parameters.gamma_e - 1.0_rt) *
-                            energy_old(i, j, k),
-                        parameters.electron_pressure_floor);
-                    if (chi_total_energy) {
-                        amrex::Real ke_left = 0.0_rt;
-                        amrex::Real ke_right = 0.0_rt;
-                        for (int component = 0; component < 3;
-                             ++component) {
-                            ke_left += mom_old(il, jl, kl, component) *
-                                       mom_old(il, jl, kl, component);
-                            ke_right += mom_old(i, j, k, component) *
-                                        mom_old(i, j, k, component);
-                        }
-                        ke_left *= 0.5_rt /
-                                   std::max(rho_old(il, jl, kl),
-                                            parameters.density_floor);
-                        ke_right *= 0.5_rt /
-                                    std::max(rho_old(i, j, k),
-                                             parameters.density_floor);
-                        if (chi_dual_energy) {
-                            // Frozen coefficients take the SAME blend the
-                            // live path sees, evaluated at the step-old
-                            // state (a per-solve constant, so smoothness
-                            // is moot but consistency is not).
-                            coeff_pi_left =
-                                theta_implicit_mhd::
-                                    dual_energy_blended_pressure(
-                                        ion_e_old(il, jl, kl), ke_left,
-                                        ion_int_old(il, jl, kl),
-                                        ion_int_old(il, jl, kl),
-                                        parameters);
-                            coeff_pi_right =
-                                theta_implicit_mhd::
-                                    dual_energy_blended_pressure(
-                                        ion_e_old(i, j, k), ke_right,
-                                        ion_int_old(i, j, k),
-                                        ion_int_old(i, j, k), parameters);
-                        } else {
-                            coeff_pi_left = std::max(
-                                (parameters.gamma_i - 1.0_rt) *
-                                    (ion_e_old(il, jl, kl) - ke_left),
-                                parameters.ion_pressure_floor);
-                            coeff_pi_right = std::max(
-                                (parameters.gamma_i - 1.0_rt) *
-                                    (ion_e_old(i, j, k) - ke_right),
-                                parameters.ion_pressure_floor);
-                        }
-                    }
-                }
-                // Inside this block a masked side implies a Dirichlet
-                // interface face (interior metal and zero_flux faces
-                // were skipped above): the masked side presents the
-                // wall reservoir, and the face density is the INTERIOR
-                // side's -- chi rho is the exchange conductivity and
-                // the conductor's near-floor fill must not choke it.
-                const amrex::Real face_density =
-                    wall_left_masked
-                        ? coeff_density_right
-                        : (wall_right_masked
-                               ? coeff_density_left
-                               : 0.5_rt * (coeff_density_left +
-                                           coeff_density_right));
-                // Donor-averaged face state for the parser diffusivities
-                // and the free-streaming limiter (unused, and skipped, on
-                // the constant/limiter-off path). Temperatures are the
-                // temperature-primary face ratios p_face/(n_f kB); Ti is
-                // 0 outside total_energy (where the ion channel is
-                // disallowed anyway). Dirichlet interface faces average
-                // the interior side against the T_wall reservoir.
-                // Interface faces need the face state even when the
-                // parser/limiter path is globally off: the wall drain is
-                // always free-streaming limited. A CAPPED z-end face
-                // (wall_heat_flux_cap) needs it for the same reason.
-                const bool wall_face =
-                    wall_left_masked || wall_right_masked;
-                // Conductive z-end wall faces (see the z_wall_conduction
-                // host constants): the z domain END faces of this z-face
-                // family. Static geometry; a shaped-wall interface face
-                // keeps the EB machinery (the branch order below).
-#if defined(WARPX_DIM_RZ)
-                const int z_axial_index = j;
-#else
-                const int z_axial_index = i;
-#endif
-                const bool z_end_hi_face =
-                    z_wall_conduction && z_axial_index == z_end_face_hi;
-                const bool z_end_lo_face =
-                    z_wall_conduction_lo && z_axial_index == z_end_face_lo;
-                const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
-                // Corner weight of the cell this face drains (see the
-                // wall_corner_weight host constant): one coherent wall
-                // condition per cell instead of the unguarded sum of
-                // the per-face half-cell exchanges. Exactly 1 on every
-                // flat wall, so the drains below are bit-identical
-                // there; both hard-pin branches take the SAME weight,
-                // which is what makes a shaped-wall face and a z-end
-                // face on one cell aware of each other.
-                amrex::Real corner_weight = 1.0_rt;
-                if (wall_face || z_end_wall_face) {
-                    const int corner_i =
-                        wall_face ? (wall_left_masked ? i : il)
-                                  : (z_end_hi_face ? il : i);
-                    const int corner_j =
-                        wall_face ? (wall_left_masked ? j : jl)
-                                  : (z_end_hi_face ? jl : j);
-                    corner_weight = wall_corner_weight(corner_i, corner_j);
-                }
-                // Wall-thermal PRECONDITIONER ROW scatter (see the host
-                // constants). Both wall drains below are built as
-                //     drain = conductance * (interior e_int - bath),
-                // so the interior cell's energy-row diagonal gains
-                //     (metric/dn) * conductance * (theta_c/theta) / rho
-                // per wall face. The metric reproduces the divergence
-                // this face enters: r_face/r_cell on RZ radial faces
-                // (a factor 2 in the first ring -- dropping it is not an
-                // option), plain 1/dn on axial faces. The scatter fires
-                // only for the cell that OWNS the face here, so a face
-                // seen by two boxes contributes once.
-                const auto wall_row_metric = [=] (const int ic)
-                {
-                    amrex::Real metric = inverse_normal_size;
-#if defined(WARPX_DIM_RZ)
-                    if (radial_faces) {
-                        metric *=
-                            (radial_lower + i * radial_cell_size) /
-                            (radial_lower +
-                             (static_cast<amrex::Real>(ic) + 0.5_rt) *
-                                 radial_cell_size);
-                    }
-#else
-                    amrex::ignore_unused(ic);
-#endif
-                    return metric;
-                };
-                const auto emit_wall_row =
-                    [=] (const int channel, const int ic, const int jc,
-                         const int kc, const amrex::Real conductance,
-                         const amrex::Real interior_safe_density)
-                {
-                    if (!emit_wall_rows) { return; }
-                    if (!wall_row_cells.contains(
-                            amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
-                        return;
-                    }
-                    amrex::Gpu::Atomic::AddNoRet(
-                        &wall_rows(ic, jc, kc, channel),
-                        wall_row_metric(ic) * conductance *
-                            wall_row_stage_weight / interior_safe_density);
-                };
-                // Round-off guard of the factorization the row assumes
-                // (implicit_mhd.wall_conduction_validate_rows): the
-                // conductance emitted above, times the same temperature
-                // difference the drain uses, must reproduce the drain the
-                // flux actually carries.
-                const auto validate_wall_row =
-                    [=] (const int ic, const int jc, const int kc,
-                         const amrex::Real conductance,
-                         const amrex::Real drain,
-                         const amrex::Real interior_e_spec,
-                         const amrex::Real bath)
-                {
-                    if (!validate_wall_rows) { return; }
-                    if (!wall_row_cells.contains(
-                            amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
-                        return;
-                    }
-                    const amrex::Real reference =
-                        conductance * (interior_e_spec - bath);
-                    amrex::Gpu::Atomic::Max(
-                        &wall_rows(ic, jc, kc, wall_row_mismatch),
-                        std::abs(reference - drain) /
-                            std::max(std::abs(drain), 1.0e-300_rt));
-                };
-                amrex::Real face_charge_density = 0.0_rt;
-                amrex::Real face_te = 0.0_rt;
-                amrex::Real face_ti = 0.0_rt;
-                amrex::Real face_jmag = 0.0_rt;
-                // INTERIOR (sheath-edge) state of a capped wall face for the
-                // sonic cap (implicit_mhd.wall_heat_flux_cap = sonic; see
-                // the header): the plasma-side cell's coefficient-state
-                // charge density and temperatures, NOT the reservoir
-                // average the free-streaming cap keeps. Zero and unused
-                // unless a sonic cap is live at this face.
-                amrex::Real interior_charge_density = 0.0_rt;
-                amrex::Real interior_te = 0.0_rt;
-                amrex::Real interior_ti = 0.0_rt;
-                if (chi_needs_state || wall_face ||
-                    (z_end_wall_face && z_wall_capped)) {
-                    face_charge_density =
-                        std::max(chi_charge_to_mass * face_density,
-                                 chi_charge_floor);
-                    const amrex::Real inverse_nkb =
-                        PhysConst::q_e /
-                        (face_charge_density * PhysConst::kb);
-                    if (wall_face) {
-                        const amrex::Real interior_pe =
-                            wall_left_masked ? coeff_pe_right
-                                             : coeff_pe_left;
-                        face_te = 0.5_rt * (interior_pe * inverse_nkb +
-                                            wall_te_kelvin);
-                        amrex::Real interior_pi = 0.0_rt;
+                ) {
+                    // Frozen-coefficient option (implicit_mhd.
+                    // conduction_coefficient_state = step_old): the chi
+                    // COEFFICIENT inputs -- the rho_f multiplier, the face
+                    // charge density, and the face temperatures feeding the
+                    // parser diffusivities, the Braginskii coefficients,
+                    // and the free-streaming caps -- come from the STEP-OLD
+                    // fields, per-solve constants like the rho_old-keyed
+                    // source masks: Newton then sees LINEAR diffusion in
+                    // the energies. Probe-measured motivation: every
+                    // Newton-hostile conduction incident on the formation
+                    // ladder is a state-dependent chi inside the residual
+                    // (30 vs 322 steps/min in the isolation probes);
+                    // constant coefficients are cheap at any amplitude.
+                    // The FLUX keeps the live theta-state specific-energy
+                    // gradient; the parser J input stays live (theta j_cc,
+                    // no old-current register). Hard floors are fine here:
+                    // frozen inputs are constants w.r.t. the Newton state,
+                    // so residual smoothness is unaffected. Default theta
+                    // is bit-identical.
+                    amrex::Real coeff_density_left = cell_left.density;
+                    amrex::Real coeff_density_right = cell_right.density;
+                    amrex::Real coeff_pe_left = cell_left.electron_pressure;
+                    amrex::Real coeff_pe_right = cell_right.electron_pressure;
+                    amrex::Real coeff_pi_left = cell_left.ion_pressure;
+                    amrex::Real coeff_pi_right = cell_right.ion_pressure;
+                    if (chi_coeff_old) {
+                        coeff_density_left = rho_old(il, jl, kl);
+                        coeff_density_right = rho_old(i, j, k);
+                        coeff_pe_left = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(il, jl, kl),
+                            parameters.electron_pressure_floor);
+                        coeff_pe_right = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(i, j, k),
+                            parameters.electron_pressure_floor);
                         if (chi_total_energy) {
-                            interior_pi =
-                                wall_left_masked ? coeff_pi_right
-                                                 : coeff_pi_left;
-                            face_ti = 0.5_rt * (interior_pi * inverse_nkb +
-                                                wall_te_kelvin);
-                        }
-                        if (wall_cap_sonic) {
-                            // at a shaped-wall face the face density IS the
-                            // interior side's (see face_density above)
-                            interior_charge_density = face_charge_density;
-                            interior_te = interior_pe * inverse_nkb;
-                            interior_ti = interior_pi * inverse_nkb;
-                        }
-                    } else {
-                        face_te = 0.5_rt *
-                                  (coeff_pe_left + coeff_pe_right) *
-                                  inverse_nkb;
-                        if (chi_total_energy) {
-                            face_ti =
-                                0.5_rt *
-                                (coeff_pi_left + coeff_pi_right) *
-                                inverse_nkb;
-                        }
-                        if (z_end_wall_face && z_wall_cap_sonic) {
-                            // z-end face: the interior side is the domain
-                            // cell (left of a z_hi face, right of a z_lo
-                            // face); the ghost carries the wall image.
-                            const amrex::Real interior_density =
-                                z_end_hi_face ? coeff_density_left
-                                              : coeff_density_right;
-                            interior_charge_density = std::max(
-                                chi_charge_to_mass * interior_density,
-                                chi_charge_floor);
-                            const amrex::Real interior_inverse_nkb =
-                                PhysConst::q_e /
-                                (interior_charge_density * PhysConst::kb);
-                            interior_te =
-                                (z_end_hi_face ? coeff_pe_left
-                                               : coeff_pe_right) *
-                                interior_inverse_nkb;
-                            if (chi_total_energy) {
-                                interior_ti =
-                                    (z_end_hi_face ? coeff_pi_left
-                                                   : coeff_pi_right) *
-                                    interior_inverse_nkb;
+                            amrex::Real ke_left = 0.0_rt;
+                            amrex::Real ke_right = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                ke_left += mom_old(il, jl, kl, component) *
+                                           mom_old(il, jl, kl, component);
+                                ke_right += mom_old(i, j, k, component) *
+                                            mom_old(i, j, k, component);
+                            }
+                            ke_left *= 0.5_rt /
+                                       std::max(rho_old(il, jl, kl),
+                                                parameters.density_floor);
+                            ke_right *= 0.5_rt /
+                                        std::max(rho_old(i, j, k),
+                                                 parameters.density_floor);
+                            if (chi_dual_energy) {
+                                // Frozen coefficients take the SAME blend the
+                                // live path sees, evaluated at the step-old
+                                // state (a per-solve constant, so smoothness
+                                // is moot but consistency is not).
+                                coeff_pi_left =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(il, jl, kl), ke_left,
+                                            ion_int_old(il, jl, kl),
+                                            ion_int_old(il, jl, kl),
+                                            parameters);
+                                coeff_pi_right =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(i, j, k), ke_right,
+                                            ion_int_old(i, j, k),
+                                            ion_int_old(i, j, k), parameters);
+                            } else {
+                                coeff_pi_left = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(il, jl, kl) - ke_left),
+                                    parameters.ion_pressure_floor);
+                                coeff_pi_right = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(i, j, k) - ke_right),
+                                    parameters.ion_pressure_floor);
                             }
                         }
                     }
-                    if (chi_any_parser) {
-                        amrex::Real jsq = 0.0_rt;
-                        for (int component = 0; component < 3; ++component) {
-                            const amrex::Real face_current =
-                                0.5_rt * (j_cc(il, jl, kl, component) +
-                                          j_cc(i, j, k, component));
-                            jsq += face_current * face_current;
-                        }
-                        face_jmag = std::sqrt(jsq);
+                    // Inside this block a masked side implies a Dirichlet
+                    // interface face (interior metal and zero_flux faces
+                    // were skipped above): the masked side presents the
+                    // wall reservoir, and the face density is the INTERIOR
+                    // side's -- chi rho is the exchange conductivity and
+                    // the conductor's near-floor fill must not choke it.
+                    const amrex::Real face_density =
+                        wall_left_masked
+                            ? coeff_density_right
+                            : (wall_right_masked
+                                   ? coeff_density_left
+                                   : 0.5_rt * (coeff_density_left +
+                                               coeff_density_right));
+                    // Donor-averaged face state for the parser diffusivities
+                    // and the free-streaming limiter (unused, and skipped, on
+                    // the constant/limiter-off path). Temperatures are the
+                    // temperature-primary face ratios p_face/(n_f kB); Ti is
+                    // 0 outside total_energy (where the ion channel is
+                    // disallowed anyway). Dirichlet interface faces average
+                    // the interior side against the T_wall reservoir.
+                    // Interface faces need the face state even when the
+                    // parser/limiter path is globally off: the wall drain is
+                    // always free-streaming limited. A CAPPED z-end face
+                    // (wall_heat_flux_cap) needs it for the same reason.
+                    const bool wall_face =
+                        wall_left_masked || wall_right_masked;
+                    // Conductive z-end wall faces (see the z_wall_conduction
+                    // host constants): the z domain END faces of this z-face
+                    // family. Static geometry; a shaped-wall interface face
+                    // keeps the EB machinery (the branch order below).
+#if defined(WARPX_DIM_RZ)
+                    const int z_axial_index = j;
+#else
+                    const int z_axial_index = i;
+#endif
+                    const bool z_end_hi_face =
+                        z_wall_conduction && z_axial_index == z_end_face_hi;
+                    const bool z_end_lo_face =
+                        z_wall_conduction_lo && z_axial_index == z_end_face_lo;
+                    const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
+                    // Corner weight of the cell this face drains (see the
+                    // wall_corner_weight host constant): one coherent wall
+                    // condition per cell instead of the unguarded sum of
+                    // the per-face half-cell exchanges. Exactly 1 on every
+                    // flat wall, so the drains below are bit-identical
+                    // there; both hard-pin branches take the SAME weight,
+                    // which is what makes a shaped-wall face and a z-end
+                    // face on one cell aware of each other.
+                    amrex::Real corner_weight = 1.0_rt;
+                    if (wall_face || z_end_wall_face) {
+                        const int corner_i =
+                            wall_face ? (wall_left_masked ? i : il)
+                                      : (z_end_hi_face ? il : i);
+                        const int corner_j =
+                            wall_face ? (wall_left_masked ? j : jl)
+                                      : (z_end_hi_face ? jl : j);
+                        corner_weight = wall_corner_weight(corner_i, corner_j);
                     }
-                }
-                // Conduction-stage energy arguments (implicit_mhd.
-                // conduction_theta != implicit_evolve.theta): the
-                // per-side specific internal energies that drive every
-                // conductive flux below -- the normal gradients, the
-                // wall-drain interior energy, and (with the weights
-                // folded into the gradient) the Braginskii tangential
-                // stencil -- are the exact extrapolation
-                //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
-                //                     + (1 - theta_c/theta) e^n.
-                // The old terms use the chi_coeff_old recipes (hard
-                // floors are fine on per-solve constants); the theta
-                // terms are the SAME CellState values the default path
-                // reads, so the stage value is LINEAR in the theta-stage
-                // energy arguments and matrix-free Jacobian probes see
-                // the shifted centering exactly -- nothing is
-                // re-evaluated nonlinearly at the stage value. The
-                // free-streaming caps and the wall-drain gate consume
-                // the SAME stage energies (one consistent conduction
-                // stage): with theta_c != theta the limiter inputs are
-                // stage values, NOT theta or end-of-step values. The chi
-                // COEFFICIENTS keep conduction_coefficient_state.
-                const amrex::Real inverse_gamma_e_minus_one =
-                    1.0_rt / (parameters.gamma_e - 1.0_rt);
-                amrex::Real e_spec_electron_left =
-                    cell_left.electron_pressure * inverse_gamma_e_minus_one /
-                    cell_left.safe_density;
-                amrex::Real e_spec_electron_right =
-                    cell_right.electron_pressure * inverse_gamma_e_minus_one /
-                    cell_right.safe_density;
-                amrex::Real e_spec_ion_left =
-                    cell_left.ion_internal / cell_left.safe_density;
-                amrex::Real e_spec_ion_right =
-                    cell_right.ion_internal / cell_right.safe_density;
-                // Free-streaming-cap temperatures: the coefficient-state
-                // face values by default; stage values (from the stage
-                // pressures over the SAME coefficient-state face charge
-                // density) when the conduction stage is shifted. Wall
-                // faces keep the coefficient-state reservoir average --
-                // the drain's sign/cap structure is unchanged, only its
-                // e_int argument shifts.
-                amrex::Real cap_te = face_te;
-                amrex::Real cap_ti = face_ti;
-                if (conduction_stage) {
-                    const amrex::Real rho_old_left = std::max(
-                        rho_old(il, jl, kl), parameters.density_floor);
-                    const amrex::Real rho_old_right = std::max(
-                        rho_old(i, j, k), parameters.density_floor);
-                    const amrex::Real pe_old_left = std::max(
-                        (parameters.gamma_e - 1.0_rt) *
-                            energy_old(il, jl, kl),
-                        parameters.electron_pressure_floor);
-                    const amrex::Real pe_old_right = std::max(
-                        (parameters.gamma_e - 1.0_rt) * energy_old(i, j, k),
-                        parameters.electron_pressure_floor);
-                    e_spec_electron_left =
-                        stage_new_weight * e_spec_electron_left +
-                        stage_old_weight *
-                            (pe_old_left * inverse_gamma_e_minus_one /
-                             rho_old_left);
-                    e_spec_electron_right =
-                        stage_new_weight * e_spec_electron_right +
-                        stage_old_weight *
-                            (pe_old_right * inverse_gamma_e_minus_one /
-                             rho_old_right);
-                    amrex::Real pi_old_left = 0.0_rt;
-                    amrex::Real pi_old_right = 0.0_rt;
-                    if (chi_total_energy) {
-                        amrex::Real ke_left = 0.0_rt;
-                        amrex::Real ke_right = 0.0_rt;
-                        for (int component = 0; component < 3;
-                             ++component) {
-                            ke_left += mom_old(il, jl, kl, component) *
-                                       mom_old(il, jl, kl, component);
-                            ke_right += mom_old(i, j, k, component) *
-                                        mom_old(i, j, k, component);
+                    // Wall-thermal PRECONDITIONER ROW scatter (see the host
+                    // constants). Both wall drains below are built as
+                    //     drain = conductance * (interior e_int - bath),
+                    // so the interior cell's energy-row diagonal gains
+                    //     (metric/dn) * conductance * (theta_c/theta) / rho
+                    // per wall face. The metric reproduces the divergence
+                    // this face enters: r_face/r_cell on RZ radial faces
+                    // (a factor 2 in the first ring -- dropping it is not an
+                    // option), plain 1/dn on axial faces. The scatter fires
+                    // only for the cell that OWNS the face here, so a face
+                    // seen by two boxes contributes once.
+                    const auto wall_row_metric = [=] (const int ic)
+                    {
+                        amrex::Real metric = inverse_normal_size;
+#if defined(WARPX_DIM_RZ)
+                        if (radial_faces) {
+                            metric *=
+                                (radial_lower + i * radial_cell_size) /
+                                (radial_lower +
+                                 (static_cast<amrex::Real>(ic) + 0.5_rt) *
+                                     radial_cell_size);
                         }
-                        ke_left *= 0.5_rt / rho_old_left;
-                        ke_right *= 0.5_rt / rho_old_right;
-                        if (chi_dual_energy) {
-                            // Stage-old energies carry the same blend as
-                            // the live path (per-solve constants).
-                            pi_old_left =
-                                theta_implicit_mhd::
-                                    dual_energy_blended_pressure(
-                                        ion_e_old(il, jl, kl), ke_left,
-                                        ion_int_old(il, jl, kl),
-                                        ion_int_old(il, jl, kl),
-                                        parameters);
-                            pi_old_right =
-                                theta_implicit_mhd::
-                                    dual_energy_blended_pressure(
-                                        ion_e_old(i, j, k), ke_right,
-                                        ion_int_old(i, j, k),
-                                        ion_int_old(i, j, k), parameters);
-                        } else {
-                            pi_old_left = std::max(
-                                (parameters.gamma_i - 1.0_rt) *
-                                    (ion_e_old(il, jl, kl) - ke_left),
-                                parameters.ion_pressure_floor);
-                            pi_old_right = std::max(
-                                (parameters.gamma_i - 1.0_rt) *
-                                    (ion_e_old(i, j, k) - ke_right),
-                                parameters.ion_pressure_floor);
+#else
+                        amrex::ignore_unused(ic);
+#endif
+                        return metric;
+                    };
+                    const auto emit_wall_row =
+                        [=] (const int channel, const int ic, const int jc,
+                             const int kc, const amrex::Real conductance,
+                             const amrex::Real interior_safe_density)
+                    {
+                        if (!emit_wall_rows) { return; }
+                        if (!wall_row_cells.contains(
+                                amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                            return;
                         }
-                        const amrex::Real inverse_gamma_i_minus_one =
-                            1.0_rt / (parameters.gamma_i - 1.0_rt);
-                        e_spec_ion_left =
-                            stage_new_weight * e_spec_ion_left +
-                            stage_old_weight *
-                                (pi_old_left * inverse_gamma_i_minus_one /
-                                 rho_old_left);
-                        e_spec_ion_right =
-                            stage_new_weight * e_spec_ion_right +
-                            stage_old_weight *
-                                (pi_old_right * inverse_gamma_i_minus_one /
-                                 rho_old_right);
-                    }
-                    if (!wall_face && chi_needs_state) {
-                        // Stage cap temperatures: face-averaged stage
-                        // pressures, hard-floored so the thermal speeds
-                        // stay defined on extrapolated probe states.
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &wall_rows(ic, jc, kc, channel),
+                            wall_row_metric(ic) * conductance *
+                                wall_row_stage_weight / interior_safe_density);
+                    };
+                    // Round-off guard of the factorization the row assumes
+                    // (implicit_mhd.wall_conduction_validate_rows): the
+                    // conductance emitted above, times the same temperature
+                    // difference the drain uses, must reproduce the drain the
+                    // flux actually carries.
+                    const auto validate_wall_row =
+                        [=] (const int ic, const int jc, const int kc,
+                             const amrex::Real conductance,
+                             const amrex::Real drain,
+                             const amrex::Real interior_e_spec,
+                             const amrex::Real bath)
+                    {
+                        if (!validate_wall_rows) { return; }
+                        if (!wall_row_cells.contains(
+                                amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                            return;
+                        }
+                        const amrex::Real reference =
+                            conductance * (interior_e_spec - bath);
+                        amrex::Gpu::Atomic::Max(
+                            &wall_rows(ic, jc, kc, wall_row_mismatch),
+                            std::abs(reference - drain) /
+                                std::max(std::abs(drain), 1.0e-300_rt));
+                    };
+                    amrex::Real face_charge_density = 0.0_rt;
+                    amrex::Real face_te = 0.0_rt;
+                    amrex::Real face_ti = 0.0_rt;
+                    amrex::Real face_jmag = 0.0_rt;
+                    // INTERIOR (sheath-edge) state of a capped wall face for the
+                    // sonic cap (implicit_mhd.wall_heat_flux_cap = sonic; see
+                    // the header): the plasma-side cell's coefficient-state
+                    // charge density and temperatures, NOT the reservoir
+                    // average the free-streaming cap keeps. Zero and unused
+                    // unless a sonic cap is live at this face.
+                    amrex::Real interior_charge_density = 0.0_rt;
+                    amrex::Real interior_te = 0.0_rt;
+                    amrex::Real interior_ti = 0.0_rt;
+                    if (chi_needs_state || wall_face ||
+                        (z_end_wall_face && z_wall_capped)) {
+                        face_charge_density =
+                            std::max(chi_charge_to_mass * face_density,
+                                     chi_charge_floor);
                         const amrex::Real inverse_nkb =
                             PhysConst::q_e /
                             (face_charge_density * PhysConst::kb);
-                        cap_te =
-                            std::max(0.5_rt * (stage_new_weight *
-                                                   (cell_left.electron_pressure +
-                                                    cell_right.electron_pressure) +
-                                               stage_old_weight *
-                                                   (pe_old_left +
-                                                    pe_old_right)),
-                                     parameters.electron_pressure_floor) *
-                            inverse_nkb;
-                        if (chi_total_energy) {
-                            cap_ti =
-                                std::max(0.5_rt *
-                                             (stage_new_weight *
-                                                  (cell_left.ion_pressure +
-                                                   cell_right.ion_pressure) +
-                                              stage_old_weight *
-                                                  (pi_old_left +
-                                                   pi_old_right)),
-                                         parameters.ion_pressure_floor) *
-                                inverse_nkb;
-                        }
-                    }
-                }
-                // Wall heat-flux cap magnitude q_cap of one species channel
-                // (implicit_mhd.wall_heat_flux_cap; see the host
-                // constants), shared by the shaped-wall drain and the
-                // z-end exchange of BOTH species so the four sites cannot
-                // drift apart:
-                //   free_streaming: f_s n kB T_s v_th,s, v_th,s = sqrt(kB
-                //                   T_s/m_s) from the coefficient-state
-                //                   RESERVOIR-AVERAGED face state
-                //                   (face_te/face_ti, NOT the conduction-
-                //                   stage cap_te/cap_ti) -- the pre-knob
-                //                   wall cap in its identical floating-
-                //                   point association;
-                //   sonic:          f_s n kB T_s c_s, c_s^2 = (gamma_e kB Te
-                //                   + gamma_i kB Ti)/m_i, from the INTERIOR
-                //                   (sheath-edge) state of the wall-adjacent
-                //                   cell (interior_* above) -- the wall
-                //                   temperature does not enter a sheath
-                //                   flux. Ti is 0 where the ion channel
-                //                   carries no temperature, leaving c_s the
-                //                   electron-only value.
-                // The result carries the CORNER weight w of the cell this
-                // face drains, so that the cap acts on the per-face exchange
-                // before the weighting (the drains below already carry w):
-                // a saturated two-face corner drains sqrt(2) q_cap, one
-                // wall of the vector area, not 2 q_cap. Exact on flat walls
-                // (w == 1.0).
-                const auto wall_cap_flux =
-                    [=] (const bool ion_channel, const bool sonic)
-                {
-                    const amrex::Real factor =
-                        ion_channel ? wall_cap_factor_ion
-                                    : wall_cap_factor_electron;
-                    if (sonic) {
-                        const amrex::Real sound_speed = std::sqrt(
-                            (parameters.gamma_e * PhysConst::kb * interior_te +
-                             parameters.gamma_i * PhysConst::kb * interior_ti) /
-                            conduction_ion_mass);
-                        const amrex::Real species_temperature =
-                            ion_channel ? interior_ti : interior_te;
-                        return factor *
-                               (interior_charge_density / PhysConst::q_e *
-                                PhysConst::kb * species_temperature) *
-                               sound_speed * corner_weight;
-                    }
-                    const amrex::Real species_temperature =
-                        ion_channel ? face_ti : face_te;
-                    const amrex::Real species_mass =
-                        ion_channel ? conduction_ion_mass : PhysConst::m_e;
-                    const amrex::Real thermal_speed = std::sqrt(
-                        PhysConst::kb * species_temperature / species_mass);
-                    const amrex::Real free_streaming_flux =
-                        face_charge_density / PhysConst::q_e *
-                        PhysConst::kb * species_temperature * thermal_speed;
-                    return factor * free_streaming_flux * corner_weight;
-                };
-                // Braginskii face geometry (static branch on the host
-                // model flag): the face field takes the single-valued
-                // staggered B_n and the cell-averaged tangential TOTAL
-                // B; |b|^2 is smooth-floored at the field-energy scale
-                // for the bhat bhat direction only (the magnetization
-                // x = (Omega tau)^2 uses the RAW |b|^2, polynomial in B
-                // and exactly 0 at B = 0). The in-plane tangential
-                // specific-energy gradients use the standard 4-cell
-                // corner stencil; the fluid/parity/domain ghost fills
-                // are 2 deep, which covers the transverse-grown kernel
-                // box (the axis row reads the parity-mirrored scalars,
-                // like the CGL stress stencil). Wall interface faces
-                // skip the tangential machinery: they keep the
-                // one-sided isotropic drain below with the tensor's nn
-                // projection as its scalar chi -- the tensor is never
-                // extended across the wall interface.
-                amrex::Real brag_b2 = 0.0_rt;
-                amrex::Real brag_b2_dir = 1.0_rt;
-                amrex::Real brag_bn = 0.0_rt;
-                amrex::Real brag_bt = 0.0_rt;
-                amrex::Real brag_grad_t_electron = 0.0_rt;
-                amrex::Real brag_grad_t_ion = 0.0_rt;
-                if (braginskii) {
-                    const int tangent1 = (normal + 1) % 3;
-                    const int tangent2 = (normal + 2) % 3;
-                    amrex::Real bt1 =
-                        0.5_rt * (cell_left.magnetic[tangent1] +
-                                  cell_right.magnetic[tangent1]);
-                    amrex::Real bt2 =
-                        0.5_rt * (cell_left.magnetic[tangent2] +
-                                  cell_right.magnetic[tangent2]);
-                    if (z_end_wall_face) {
-                        // Conductive z-end faces take the tangential B
-                        // ONE-SIDED from the interior cell (the ghost
-                        // image is a boundary-condition artifact, never
-                        // a field sample; the staggered bn_face is
-                        // already the single-valued face B_n), so the
-                        // chi_nn projection of the reservoir exchange
-                        // sees the interior field geometry only.
-                        const auto& interior_side =
-                            z_end_hi_face ? cell_left : cell_right;
-                        bt1 = interior_side.magnetic[tangent1];
-                        bt2 = interior_side.magnetic[tangent2];
-                    }
-                    brag_bn = bn_face;
-                    brag_b2 = brag_bn * brag_bn + bt1 * bt1 + bt2 * bt2;
-                    brag_b2_dir = theta_implicit_mhd::smooth_positive_floor(
-                        brag_b2, brag_small_b2);
-#if defined(WARPX_DIM_RZ)
-                    // In-plane tangent: r (= tangent1) for z-faces,
-                    // z (= tangent2) for r-faces; the theta gradient
-                    // vanishes for m = 0.
-                    brag_bt = (normal == 0) ? bt2 : bt1;
-                    // Wall interface AND conductive z-end faces skip the
-                    // tangential corner stencil: their exchange is the
-                    // pure normal Dirichlet form below (no cross term
-                    // against ghost-row samples).
-                    if (!wall_face && !z_end_wall_face) {
-                        const int tangential = (normal == 0) ? 2 : 0;
-                        int ipl = il, jpl = jl, kpl = kl;
-                        int ipr = i, jpr = j, kpr = k;
-                        int iml = il, jml = jl, kml = kl;
-                        int imr = i, jmr = j, kmr = k;
-                        shift_index(ipl, jpl, kpl, tangential, 1);
-                        shift_index(ipr, jpr, kpr, tangential, 1);
-                        shift_index(iml, jml, kml, tangential, -1);
-                        shift_index(imr, jmr, kmr, tangential, -1);
-                        // Upwind side of the LEFT cell's tangential row for
-                        // the advectionalized SMART cross term
-                        // (smart_upwind): the cross flux through this face
-                        // enters the left cell as -F/h_n, i.e. as the
-                        // tangential advection of e with an effective
-                        // velocity of sign -sign(b_n b_t) (chi_par >=
-                        // chi_perp always), so for b_n b_t > 0 its upwind
-                        // side is +t. The right cell takes the opposite
-                        // side. A per-face constant of the face field
-                        // direction; the flux is continuous through
-                        // b_n b_t = 0 because the cross term vanishes
-                        // there.
-                        const int brag_smart_upwind_left =
-                            (brag_bn * brag_bt > 0.0_rt) ? 1 : -1;
-                        // Neighbor specific internal energies mirror the
-                        // CellState recipes exactly (floored electron
-                        // pressure; smooth-floored p_i(E_i) recovery).
-                        const auto electron_e_spec =
-                            [=] (const int ic, const int jc, const int kc) {
-                                const amrex::Real pressure = std::max(
-                                    (parameters.gamma_e - 1.0_rt) *
-                                        energy(ic, jc, kc),
-                                    parameters.electron_pressure_floor);
-                                return pressure /
-                                       ((parameters.gamma_e - 1.0_rt) *
-                                        std::max(rho(ic, jc, kc),
-                                                 parameters.density_floor));
-                            };
-                        if (brag_tangential_smart != 0) {
-                            brag_grad_t_electron =
-                                braginskii_tangential_gradient_smart(
-                                    electron_e_spec, il, jl, kl, i, j, k, tangential,
-                                    brag_tangential_smart, brag_smart_upwind_left,
-                                    inverse_tangential_size);
-                        } else if (brag_tangential_minmod) {
-                            // Sharma-Hammett monotone cross term: the
-                            // face tangential slope is the mean of the
-                            // two cells' minmod-limited one-sided
-                            // slopes -- zero at tangential extrema, so
-                            // the cross-term flux cannot demand states
-                            // below the local stencil minimum (the
-                            // plasma-edge electron pinning mechanism).
-                            const amrex::Real center_left =
-                                electron_e_spec(il, jl, kl);
-                            const amrex::Real center_right =
-                                electron_e_spec(i, j, k);
-                            brag_grad_t_electron =
-                                0.5_rt * inverse_tangential_size *
-                                (theta_implicit_mhd::minmod_pair(
-                                     electron_e_spec(ipl, jpl, kpl) -
-                                         center_left,
-                                     center_left -
-                                         electron_e_spec(iml, jml, kml)) +
-                                 theta_implicit_mhd::minmod_pair(
-                                     electron_e_spec(ipr, jpr, kpr) -
-                                         center_right,
-                                     center_right -
-                                         electron_e_spec(imr, jmr, kmr)));
+                        if (wall_face) {
+                            const amrex::Real interior_pe =
+                                wall_left_masked ? coeff_pe_right
+                                                 : coeff_pe_left;
+                            face_te = 0.5_rt * (interior_pe * inverse_nkb +
+                                                wall_te_kelvin);
+                            amrex::Real interior_pi = 0.0_rt;
+                            if (chi_total_energy) {
+                                interior_pi =
+                                    wall_left_masked ? coeff_pi_right
+                                                     : coeff_pi_left;
+                                face_ti = 0.5_rt * (interior_pi * inverse_nkb +
+                                                    wall_te_kelvin);
+                            }
+                            if (wall_cap_sonic) {
+                                // at a shaped-wall face the face density IS the
+                                // interior side's (see face_density above)
+                                interior_charge_density = face_charge_density;
+                                interior_te = interior_pe * inverse_nkb;
+                                interior_ti = interior_pi * inverse_nkb;
+                            }
                         } else {
-                            brag_grad_t_electron =
-                                0.25_rt * inverse_tangential_size *
-                                (electron_e_spec(ipl, jpl, kpl) +
-                                 electron_e_spec(ipr, jpr, kpr) -
-                                 electron_e_spec(iml, jml, kml) -
-                                 electron_e_spec(imr, jmr, kmr));
+                            face_te = 0.5_rt *
+                                      (coeff_pe_left + coeff_pe_right) *
+                                      inverse_nkb;
+                            if (chi_total_energy) {
+                                face_ti =
+                                    0.5_rt *
+                                    (coeff_pi_left + coeff_pi_right) *
+                                    inverse_nkb;
+                            }
+                            if (z_end_wall_face && z_wall_cap_sonic) {
+                                // z-end face: the interior side is the domain
+                                // cell (left of a z_hi face, right of a z_lo
+                                // face); the ghost carries the wall image.
+                                const amrex::Real interior_density =
+                                    z_end_hi_face ? coeff_density_left
+                                                  : coeff_density_right;
+                                interior_charge_density = std::max(
+                                    chi_charge_to_mass * interior_density,
+                                    chi_charge_floor);
+                                const amrex::Real interior_inverse_nkb =
+                                    PhysConst::q_e /
+                                    (interior_charge_density * PhysConst::kb);
+                                interior_te =
+                                    (z_end_hi_face ? coeff_pe_left
+                                                   : coeff_pe_right) *
+                                    interior_inverse_nkb;
+                                if (chi_total_energy) {
+                                    interior_ti =
+                                        (z_end_hi_face ? coeff_pi_left
+                                                       : coeff_pi_right) *
+                                        interior_inverse_nkb;
+                                }
+                            }
                         }
-                        if (conduction_stage) {
-                            // Stage extrapolation of the tangential
-                            // samples, folded into the gradient (the
-                            // stencil is linear in the samples); the
-                            // old samples use the chi_coeff_old
-                            // hard-floored recipe, per-solve constants.
-                            const auto electron_e_spec_old =
-                                [=] (const int ic, const int jc,
-                                     const int kc) {
+                        if (chi_any_parser) {
+                            amrex::Real jsq = 0.0_rt;
+                            for (int component = 0; component < 3; ++component) {
+                                const amrex::Real face_current =
+                                    0.5_rt * (j_cc(il, jl, kl, component) +
+                                              j_cc(i, j, k, component));
+                                jsq += face_current * face_current;
+                            }
+                            face_jmag = std::sqrt(jsq);
+                        }
+                    }
+                    // Conduction-stage energy arguments (implicit_mhd.
+                    // conduction_theta != implicit_evolve.theta): the
+                    // per-side specific internal energies that drive every
+                    // conductive flux below -- the normal gradients, the
+                    // wall-drain interior energy, and (with the weights
+                    // folded into the gradient) the Braginskii tangential
+                    // stencil -- are the exact extrapolation
+                    //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
+                    //                     + (1 - theta_c/theta) e^n.
+                    // The old terms use the chi_coeff_old recipes (hard
+                    // floors are fine on per-solve constants); the theta
+                    // terms are the SAME CellState values the default path
+                    // reads, so the stage value is LINEAR in the theta-stage
+                    // energy arguments and matrix-free Jacobian probes see
+                    // the shifted centering exactly -- nothing is
+                    // re-evaluated nonlinearly at the stage value. The
+                    // free-streaming caps and the wall-drain gate consume
+                    // the SAME stage energies (one consistent conduction
+                    // stage): with theta_c != theta the limiter inputs are
+                    // stage values, NOT theta or end-of-step values. The chi
+                    // COEFFICIENTS keep conduction_coefficient_state.
+                    const amrex::Real inverse_gamma_e_minus_one =
+                        1.0_rt / (parameters.gamma_e - 1.0_rt);
+                    amrex::Real e_spec_electron_left =
+                        cell_left.electron_pressure * inverse_gamma_e_minus_one /
+                        cell_left.safe_density;
+                    amrex::Real e_spec_electron_right =
+                        cell_right.electron_pressure * inverse_gamma_e_minus_one /
+                        cell_right.safe_density;
+                    amrex::Real e_spec_ion_left =
+                        cell_left.ion_internal / cell_left.safe_density;
+                    amrex::Real e_spec_ion_right =
+                        cell_right.ion_internal / cell_right.safe_density;
+                    // Free-streaming-cap temperatures: the coefficient-state
+                    // face values by default; stage values (from the stage
+                    // pressures over the SAME coefficient-state face charge
+                    // density) when the conduction stage is shifted. Wall
+                    // faces keep the coefficient-state reservoir average --
+                    // the drain's sign/cap structure is unchanged, only its
+                    // e_int argument shifts.
+                    amrex::Real cap_te = face_te;
+                    amrex::Real cap_ti = face_ti;
+                    if (conduction_stage) {
+                        const amrex::Real rho_old_left = std::max(
+                            rho_old(il, jl, kl), parameters.density_floor);
+                        const amrex::Real rho_old_right = std::max(
+                            rho_old(i, j, k), parameters.density_floor);
+                        const amrex::Real pe_old_left = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(il, jl, kl),
+                            parameters.electron_pressure_floor);
+                        const amrex::Real pe_old_right = std::max(
+                            (parameters.gamma_e - 1.0_rt) * energy_old(i, j, k),
+                            parameters.electron_pressure_floor);
+                        e_spec_electron_left =
+                            stage_new_weight * e_spec_electron_left +
+                            stage_old_weight *
+                                (pe_old_left * inverse_gamma_e_minus_one /
+                                 rho_old_left);
+                        e_spec_electron_right =
+                            stage_new_weight * e_spec_electron_right +
+                            stage_old_weight *
+                                (pe_old_right * inverse_gamma_e_minus_one /
+                                 rho_old_right);
+                        amrex::Real pi_old_left = 0.0_rt;
+                        amrex::Real pi_old_right = 0.0_rt;
+                        if (chi_total_energy) {
+                            amrex::Real ke_left = 0.0_rt;
+                            amrex::Real ke_right = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                ke_left += mom_old(il, jl, kl, component) *
+                                           mom_old(il, jl, kl, component);
+                                ke_right += mom_old(i, j, k, component) *
+                                            mom_old(i, j, k, component);
+                            }
+                            ke_left *= 0.5_rt / rho_old_left;
+                            ke_right *= 0.5_rt / rho_old_right;
+                            if (chi_dual_energy) {
+                                // Stage-old energies carry the same blend as
+                                // the live path (per-solve constants).
+                                pi_old_left =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(il, jl, kl), ke_left,
+                                            ion_int_old(il, jl, kl),
+                                            ion_int_old(il, jl, kl),
+                                            parameters);
+                                pi_old_right =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(i, j, k), ke_right,
+                                            ion_int_old(i, j, k),
+                                            ion_int_old(i, j, k), parameters);
+                            } else {
+                                pi_old_left = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(il, jl, kl) - ke_left),
+                                    parameters.ion_pressure_floor);
+                                pi_old_right = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(i, j, k) - ke_right),
+                                    parameters.ion_pressure_floor);
+                            }
+                            const amrex::Real inverse_gamma_i_minus_one =
+                                1.0_rt / (parameters.gamma_i - 1.0_rt);
+                            e_spec_ion_left =
+                                stage_new_weight * e_spec_ion_left +
+                                stage_old_weight *
+                                    (pi_old_left * inverse_gamma_i_minus_one /
+                                     rho_old_left);
+                            e_spec_ion_right =
+                                stage_new_weight * e_spec_ion_right +
+                                stage_old_weight *
+                                    (pi_old_right * inverse_gamma_i_minus_one /
+                                     rho_old_right);
+                        }
+                        if (!wall_face && chi_needs_state) {
+                            // Stage cap temperatures: face-averaged stage
+                            // pressures, hard-floored so the thermal speeds
+                            // stay defined on extrapolated probe states.
+                            const amrex::Real inverse_nkb =
+                                PhysConst::q_e /
+                                (face_charge_density * PhysConst::kb);
+                            cap_te =
+                                std::max(0.5_rt * (stage_new_weight *
+                                                       (cell_left.electron_pressure +
+                                                        cell_right.electron_pressure) +
+                                                   stage_old_weight *
+                                                       (pe_old_left +
+                                                        pe_old_right)),
+                                         parameters.electron_pressure_floor) *
+                                inverse_nkb;
+                            if (chi_total_energy) {
+                                cap_ti =
+                                    std::max(0.5_rt *
+                                                 (stage_new_weight *
+                                                      (cell_left.ion_pressure +
+                                                       cell_right.ion_pressure) +
+                                                  stage_old_weight *
+                                                      (pi_old_left +
+                                                       pi_old_right)),
+                                             parameters.ion_pressure_floor) *
+                                    inverse_nkb;
+                            }
+                        }
+                    }
+                    // Wall heat-flux cap magnitude q_cap of one species channel
+                    // (implicit_mhd.wall_heat_flux_cap; see the host
+                    // constants), shared by the shaped-wall drain and the
+                    // z-end exchange of BOTH species so the four sites cannot
+                    // drift apart:
+                    //   free_streaming: f_s n kB T_s v_th,s, v_th,s = sqrt(kB
+                    //                   T_s/m_s) from the coefficient-state
+                    //                   RESERVOIR-AVERAGED face state
+                    //                   (face_te/face_ti, NOT the conduction-
+                    //                   stage cap_te/cap_ti) -- the pre-knob
+                    //                   wall cap in its identical floating-
+                    //                   point association;
+                    //   sonic:          f_s n kB T_s c_s, c_s^2 = (gamma_e kB Te
+                    //                   + gamma_i kB Ti)/m_i, from the INTERIOR
+                    //                   (sheath-edge) state of the wall-adjacent
+                    //                   cell (interior_* above) -- the wall
+                    //                   temperature does not enter a sheath
+                    //                   flux. Ti is 0 where the ion channel
+                    //                   carries no temperature, leaving c_s the
+                    //                   electron-only value.
+                    // The result carries the CORNER weight w of the cell this
+                    // face drains, so that the cap acts on the per-face exchange
+                    // before the weighting (the drains below already carry w):
+                    // a saturated two-face corner drains sqrt(2) q_cap, one
+                    // wall of the vector area, not 2 q_cap. Exact on flat walls
+                    // (w == 1.0).
+                    const auto wall_cap_flux =
+                        [=] (const bool ion_channel, const bool sonic)
+                    {
+                        const amrex::Real factor =
+                            ion_channel ? wall_cap_factor_ion
+                                        : wall_cap_factor_electron;
+                        if (sonic) {
+                            const amrex::Real sound_speed = std::sqrt(
+                                (parameters.gamma_e * PhysConst::kb * interior_te +
+                                 parameters.gamma_i * PhysConst::kb * interior_ti) /
+                                conduction_ion_mass);
+                            const amrex::Real species_temperature =
+                                ion_channel ? interior_ti : interior_te;
+                            return factor *
+                                   (interior_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * species_temperature) *
+                                   sound_speed * corner_weight;
+                        }
+                        const amrex::Real species_temperature =
+                            ion_channel ? face_ti : face_te;
+                        const amrex::Real species_mass =
+                            ion_channel ? conduction_ion_mass : PhysConst::m_e;
+                        const amrex::Real thermal_speed = std::sqrt(
+                            PhysConst::kb * species_temperature / species_mass);
+                        const amrex::Real free_streaming_flux =
+                            face_charge_density / PhysConst::q_e *
+                            PhysConst::kb * species_temperature * thermal_speed;
+                        return factor * free_streaming_flux * corner_weight;
+                    };
+                    // Braginskii face geometry (static branch on the host
+                    // model flag): the face field takes the single-valued
+                    // staggered B_n and the cell-averaged tangential TOTAL
+                    // B; |b|^2 is smooth-floored at the field-energy scale
+                    // for the bhat bhat direction only (the magnetization
+                    // x = (Omega tau)^2 uses the RAW |b|^2, polynomial in B
+                    // and exactly 0 at B = 0). The in-plane tangential
+                    // specific-energy gradients use the standard 4-cell
+                    // corner stencil; the fluid/parity/domain ghost fills
+                    // are 2 deep, which covers the transverse-grown kernel
+                    // box (the axis row reads the parity-mirrored scalars,
+                    // like the CGL stress stencil). Wall interface faces
+                    // skip the tangential machinery: they keep the
+                    // one-sided isotropic drain below with the tensor's nn
+                    // projection as its scalar chi -- the tensor is never
+                    // extended across the wall interface.
+                    amrex::Real brag_b2 = 0.0_rt;
+                    amrex::Real brag_b2_dir = 1.0_rt;
+                    amrex::Real brag_bn = 0.0_rt;
+                    amrex::Real brag_bt = 0.0_rt;
+                    amrex::Real brag_grad_t_electron = 0.0_rt;
+                    amrex::Real brag_grad_t_ion = 0.0_rt;
+                    if (braginskii) {
+                        const int tangent1 = (normal + 1) % 3;
+                        const int tangent2 = (normal + 2) % 3;
+                        amrex::Real bt1 =
+                            0.5_rt * (cell_left.magnetic[tangent1] +
+                                      cell_right.magnetic[tangent1]);
+                        amrex::Real bt2 =
+                            0.5_rt * (cell_left.magnetic[tangent2] +
+                                      cell_right.magnetic[tangent2]);
+                        if (z_end_wall_face) {
+                            // Conductive z-end faces take the tangential B
+                            // ONE-SIDED from the interior cell (the ghost
+                            // image is a boundary-condition artifact, never
+                            // a field sample; the staggered bn_face is
+                            // already the single-valued face B_n), so the
+                            // chi_nn projection of the reservoir exchange
+                            // sees the interior field geometry only.
+                            const auto& interior_side =
+                                z_end_hi_face ? cell_left : cell_right;
+                            bt1 = interior_side.magnetic[tangent1];
+                            bt2 = interior_side.magnetic[tangent2];
+                        }
+                        brag_bn = bn_face;
+                        brag_b2 = brag_bn * brag_bn + bt1 * bt1 + bt2 * bt2;
+                        brag_b2_dir = theta_implicit_mhd::smooth_positive_floor(
+                            brag_b2, brag_small_b2);
+#if defined(WARPX_DIM_RZ)
+                        // In-plane tangent: r (= tangent1) for z-faces,
+                        // z (= tangent2) for r-faces; the theta gradient
+                        // vanishes for m = 0.
+                        brag_bt = (normal == 0) ? bt2 : bt1;
+                        // Wall interface AND conductive z-end faces skip the
+                        // tangential corner stencil: their exchange is the
+                        // pure normal Dirichlet form below (no cross term
+                        // against ghost-row samples).
+                        if (!wall_face && !z_end_wall_face) {
+                            const int tangential = (normal == 0) ? 2 : 0;
+                            int ipl = il, jpl = jl, kpl = kl;
+                            int ipr = i, jpr = j, kpr = k;
+                            int iml = il, jml = jl, kml = kl;
+                            int imr = i, jmr = j, kmr = k;
+                            shift_index(ipl, jpl, kpl, tangential, 1);
+                            shift_index(ipr, jpr, kpr, tangential, 1);
+                            shift_index(iml, jml, kml, tangential, -1);
+                            shift_index(imr, jmr, kmr, tangential, -1);
+                            // Upwind side of the LEFT cell's tangential row for
+                            // the advectionalized SMART cross term
+                            // (smart_upwind): the cross flux through this face
+                            // enters the left cell as -F/h_n, i.e. as the
+                            // tangential advection of e with an effective
+                            // velocity of sign -sign(b_n b_t) (chi_par >=
+                            // chi_perp always), so for b_n b_t > 0 its upwind
+                            // side is +t. The right cell takes the opposite
+                            // side. A per-face constant of the face field
+                            // direction; the flux is continuous through
+                            // b_n b_t = 0 because the cross term vanishes
+                            // there.
+                            const int brag_smart_upwind_left =
+                                (brag_bn * brag_bt > 0.0_rt) ? 1 : -1;
+                            // Neighbor specific internal energies mirror the
+                            // CellState recipes exactly (floored electron
+                            // pressure; smooth-floored p_i(E_i) recovery).
+                            const auto electron_e_spec =
+                                [=] (const int ic, const int jc, const int kc) {
                                     const amrex::Real pressure = std::max(
                                         (parameters.gamma_e - 1.0_rt) *
-                                            energy_old(ic, jc, kc),
-                                        parameters
-                                            .electron_pressure_floor);
+                                            energy(ic, jc, kc),
+                                        parameters.electron_pressure_floor);
                                     return pressure /
-                                           ((parameters.gamma_e -
-                                             1.0_rt) *
-                                            std::max(
-                                                rho_old(ic, jc, kc),
-                                                parameters
-                                                    .density_floor));
+                                           ((parameters.gamma_e - 1.0_rt) *
+                                            std::max(rho(ic, jc, kc),
+                                                     parameters.density_floor));
                                 };
-                            amrex::Real grad_t_electron_old;
                             if (brag_tangential_smart != 0) {
-                                grad_t_electron_old =
+                                brag_grad_t_electron =
                                     braginskii_tangential_gradient_smart(
-                                        electron_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                        electron_e_spec, il, jl, kl, i, j, k, tangential,
                                         brag_tangential_smart, brag_smart_upwind_left,
                                         inverse_tangential_size);
                             } else if (brag_tangential_minmod) {
+                                // Sharma-Hammett monotone cross term: the
+                                // face tangential slope is the mean of the
+                                // two cells' minmod-limited one-sided
+                                // slopes -- zero at tangential extrema, so
+                                // the cross-term flux cannot demand states
+                                // below the local stencil minimum (the
+                                // plasma-edge electron pinning mechanism).
                                 const amrex::Real center_left =
-                                    electron_e_spec_old(il, jl, kl);
+                                    electron_e_spec(il, jl, kl);
                                 const amrex::Real center_right =
-                                    electron_e_spec_old(i, j, k);
-                                grad_t_electron_old =
+                                    electron_e_spec(i, j, k);
+                                brag_grad_t_electron =
                                     0.5_rt * inverse_tangential_size *
                                     (theta_implicit_mhd::minmod_pair(
-                                         electron_e_spec_old(ipl, jpl,
-                                                             kpl) -
+                                         electron_e_spec(ipl, jpl, kpl) -
                                              center_left,
                                          center_left -
-                                             electron_e_spec_old(
-                                                 iml, jml, kml)) +
+                                             electron_e_spec(iml, jml, kml)) +
                                      theta_implicit_mhd::minmod_pair(
-                                         electron_e_spec_old(ipr, jpr,
-                                                             kpr) -
+                                         electron_e_spec(ipr, jpr, kpr) -
                                              center_right,
                                          center_right -
-                                             electron_e_spec_old(
-                                                 imr, jmr, kmr)));
+                                             electron_e_spec(imr, jmr, kmr)));
                             } else {
-                                grad_t_electron_old =
+                                brag_grad_t_electron =
                                     0.25_rt * inverse_tangential_size *
-                                    (electron_e_spec_old(ipl, jpl, kpl) +
-                                     electron_e_spec_old(ipr, jpr, kpr) -
-                                     electron_e_spec_old(iml, jml, kml) -
-                                     electron_e_spec_old(imr, jmr, kmr));
-                            }
-                            brag_grad_t_electron =
-                                stage_new_weight * brag_grad_t_electron +
-                                stage_old_weight * grad_t_electron_old;
-                        }
-                        if (chi_total_energy) {
-                            const auto ion_e_spec =
-                                [=] (const int ic, const int jc,
-                                     const int kc) {
-                                    const amrex::Real safe_density =
-                                        std::max(rho(ic, jc, kc),
-                                                 parameters.density_floor);
-                                    amrex::Real kinetic = 0.0_rt;
-                                    for (int component = 0; component < 3;
-                                         ++component) {
-                                        kinetic +=
-                                            mom(ic, jc, kc, component) *
-                                            mom(ic, jc, kc, component);
-                                    }
-                                    kinetic *= 0.5_rt / safe_density;
-                                    if (chi_dual_energy) {
-                                        // Blended specific internal
-                                        // energy, mirroring the dual
-                                        // CellState recipe exactly.
-                                        return theta_implicit_mhd::
-                                                   dual_energy_blended_pressure(
-                                                       ion_e(ic, jc, kc),
-                                                       kinetic,
-                                                       ion_int(ic, jc, kc),
-                                                       ion_int_old(ic, jc,
-                                                                   kc),
-                                                       parameters) /
-                                               ((parameters.gamma_i -
-                                                 1.0_rt) *
-                                                safe_density);
-                                    }
-                                    const amrex::Real internal_floor =
-                                        parameters.ion_pressure_floor /
-                                        (parameters.gamma_i - 1.0_rt);
-                                    const amrex::Real excess =
-                                        ion_e(ic, jc, kc) - kinetic -
-                                        internal_floor;
-                                    const amrex::Real corner_width =
-                                        std::max(
-                                            internal_floor,
-                                            parameters
-                                                    .pressure_corner_width_fraction *
-                                                kinetic);
-                                    const amrex::Real internal =
-                                        internal_floor +
-                                        0.5_rt *
-                                            (excess +
-                                             std::sqrt(
-                                                 excess * excess +
-                                                 corner_width *
-                                                     corner_width));
-                                    return internal / safe_density;
-                                };
-                            if (brag_tangential_smart != 0) {
-                                brag_grad_t_ion =
-                                    braginskii_tangential_gradient_smart(
-                                        ion_e_spec, il, jl, kl, i, j, k, tangential,
-                                        brag_tangential_smart, brag_smart_upwind_left,
-                                        inverse_tangential_size);
-                            } else if (brag_tangential_minmod) {
-                                // Same monotone form as the electron
-                                // stencil above.
-                                const amrex::Real center_left =
-                                    ion_e_spec(il, jl, kl);
-                                const amrex::Real center_right =
-                                    ion_e_spec(i, j, k);
-                                brag_grad_t_ion =
-                                    0.5_rt * inverse_tangential_size *
-                                    (theta_implicit_mhd::minmod_pair(
-                                         ion_e_spec(ipl, jpl, kpl) -
-                                             center_left,
-                                         center_left -
-                                             ion_e_spec(iml, jml, kml)) +
-                                     theta_implicit_mhd::minmod_pair(
-                                         ion_e_spec(ipr, jpr, kpr) -
-                                             center_right,
-                                         center_right -
-                                             ion_e_spec(imr, jmr, kmr)));
-                            } else {
-                                brag_grad_t_ion =
-                                    0.25_rt * inverse_tangential_size *
-                                    (ion_e_spec(ipl, jpl, kpl) +
-                                     ion_e_spec(ipr, jpr, kpr) -
-                                     ion_e_spec(iml, jml, kml) -
-                                     ion_e_spec(imr, jmr, kmr));
+                                    (electron_e_spec(ipl, jpl, kpl) +
+                                     electron_e_spec(ipr, jpr, kpr) -
+                                     electron_e_spec(iml, jml, kml) -
+                                     electron_e_spec(imr, jmr, kmr));
                             }
                             if (conduction_stage) {
-                                // Stage extrapolation (see the electron
-                                // stencil above).
-                                const auto ion_e_spec_old =
+                                // Stage extrapolation of the tangential
+                                // samples, folded into the gradient (the
+                                // stencil is linear in the samples); the
+                                // old samples use the chi_coeff_old
+                                // hard-floored recipe, per-solve constants.
+                                const auto electron_e_spec_old =
                                     [=] (const int ic, const int jc,
                                          const int kc) {
-                                        const amrex::Real
-                                            safe_density_old = std::max(
-                                                rho_old(ic, jc, kc),
-                                                parameters.density_floor);
-                                        amrex::Real kinetic = 0.0_rt;
-                                        for (int component = 0;
-                                             component < 3; ++component) {
-                                            kinetic +=
-                                                mom_old(ic, jc, kc,
-                                                        component) *
-                                                mom_old(ic, jc, kc,
-                                                        component);
-                                        }
-                                        kinetic *=
-                                            0.5_rt / safe_density_old;
-                                        if (chi_dual_energy) {
-                                            return theta_implicit_mhd::
-                                                       dual_energy_blended_pressure(
-                                                           ion_e_old(ic, jc,
-                                                                     kc),
-                                                           kinetic,
-                                                           ion_int_old(
-                                                               ic, jc, kc),
-                                                           ion_int_old(
-                                                               ic, jc, kc),
-                                                           parameters) /
-                                                   ((parameters.gamma_i -
-                                                     1.0_rt) *
-                                                    safe_density_old);
-                                        }
-                                        const amrex::Real internal_floor =
-                                            parameters.ion_pressure_floor /
-                                            (parameters.gamma_i - 1.0_rt);
-                                        return std::max(
-                                                   ion_e_old(ic, jc, kc) -
-                                                       kinetic,
-                                                   internal_floor) /
-                                               safe_density_old;
+                                        const amrex::Real pressure = std::max(
+                                            (parameters.gamma_e - 1.0_rt) *
+                                                energy_old(ic, jc, kc),
+                                            parameters
+                                                .electron_pressure_floor);
+                                        return pressure /
+                                               ((parameters.gamma_e -
+                                                 1.0_rt) *
+                                                std::max(
+                                                    rho_old(ic, jc, kc),
+                                                    parameters
+                                                        .density_floor));
                                     };
-                                amrex::Real grad_t_ion_old;
+                                amrex::Real grad_t_electron_old;
                                 if (brag_tangential_smart != 0) {
-                                    grad_t_ion_old =
+                                    grad_t_electron_old =
                                         braginskii_tangential_gradient_smart(
-                                            ion_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                            electron_e_spec_old, il, jl, kl, i, j, k, tangential,
                                             brag_tangential_smart, brag_smart_upwind_left,
                                             inverse_tangential_size);
                                 } else if (brag_tangential_minmod) {
                                     const amrex::Real center_left =
-                                        ion_e_spec_old(il, jl, kl);
+                                        electron_e_spec_old(il, jl, kl);
                                     const amrex::Real center_right =
-                                        ion_e_spec_old(i, j, k);
-                                    grad_t_ion_old =
+                                        electron_e_spec_old(i, j, k);
+                                    grad_t_electron_old =
                                         0.5_rt * inverse_tangential_size *
                                         (theta_implicit_mhd::minmod_pair(
-                                             ion_e_spec_old(ipl, jpl,
-                                                            kpl) -
+                                             electron_e_spec_old(ipl, jpl,
+                                                                 kpl) -
                                                  center_left,
                                              center_left -
-                                                 ion_e_spec_old(iml, jml,
-                                                                kml)) +
+                                                 electron_e_spec_old(
+                                                     iml, jml, kml)) +
                                          theta_implicit_mhd::minmod_pair(
-                                             ion_e_spec_old(ipr, jpr,
-                                                            kpr) -
+                                             electron_e_spec_old(ipr, jpr,
+                                                                 kpr) -
                                                  center_right,
                                              center_right -
-                                                 ion_e_spec_old(imr, jmr,
-                                                                kmr)));
+                                                 electron_e_spec_old(
+                                                     imr, jmr, kmr)));
                                 } else {
-                                    grad_t_ion_old =
-                                        0.25_rt *
-                                        inverse_tangential_size *
-                                        (ion_e_spec_old(ipl, jpl, kpl) +
-                                         ion_e_spec_old(ipr, jpr, kpr) -
-                                         ion_e_spec_old(iml, jml, kml) -
-                                         ion_e_spec_old(imr, jmr, kmr));
+                                    grad_t_electron_old =
+                                        0.25_rt * inverse_tangential_size *
+                                        (electron_e_spec_old(ipl, jpl, kpl) +
+                                         electron_e_spec_old(ipr, jpr, kpr) -
+                                         electron_e_spec_old(iml, jml, kml) -
+                                         electron_e_spec_old(imr, jmr, kmr));
                                 }
-                                brag_grad_t_ion =
-                                    stage_new_weight * brag_grad_t_ion +
-                                    stage_old_weight * grad_t_ion_old;
+                                brag_grad_t_electron =
+                                    stage_new_weight * brag_grad_t_electron +
+                                    stage_old_weight * grad_t_electron_old;
+                            }
+                            if (chi_total_energy) {
+                                const auto ion_e_spec =
+                                    [=] (const int ic, const int jc,
+                                         const int kc) {
+                                        const amrex::Real safe_density =
+                                            std::max(rho(ic, jc, kc),
+                                                     parameters.density_floor);
+                                        amrex::Real kinetic = 0.0_rt;
+                                        for (int component = 0; component < 3;
+                                             ++component) {
+                                            kinetic +=
+                                                mom(ic, jc, kc, component) *
+                                                mom(ic, jc, kc, component);
+                                        }
+                                        kinetic *= 0.5_rt / safe_density;
+                                        if (chi_dual_energy) {
+                                            // Blended specific internal
+                                            // energy, mirroring the dual
+                                            // CellState recipe exactly.
+                                            return theta_implicit_mhd::
+                                                       dual_energy_blended_pressure(
+                                                           ion_e(ic, jc, kc),
+                                                           kinetic,
+                                                           ion_int(ic, jc, kc),
+                                                           ion_int_old(ic, jc,
+                                                                       kc),
+                                                           parameters) /
+                                                   ((parameters.gamma_i -
+                                                     1.0_rt) *
+                                                    safe_density);
+                                        }
+                                        const amrex::Real internal_floor =
+                                            parameters.ion_pressure_floor /
+                                            (parameters.gamma_i - 1.0_rt);
+                                        const amrex::Real excess =
+                                            ion_e(ic, jc, kc) - kinetic -
+                                            internal_floor;
+                                        const amrex::Real corner_width =
+                                            std::max(
+                                                internal_floor,
+                                                parameters
+                                                        .pressure_corner_width_fraction *
+                                                    kinetic);
+                                        const amrex::Real internal =
+                                            internal_floor +
+                                            0.5_rt *
+                                                (excess +
+                                                 std::sqrt(
+                                                     excess * excess +
+                                                     corner_width *
+                                                         corner_width));
+                                        return internal / safe_density;
+                                    };
+                                if (brag_tangential_smart != 0) {
+                                    brag_grad_t_ion =
+                                        braginskii_tangential_gradient_smart(
+                                            ion_e_spec, il, jl, kl, i, j, k, tangential,
+                                            brag_tangential_smart, brag_smart_upwind_left,
+                                            inverse_tangential_size);
+                                } else if (brag_tangential_minmod) {
+                                    // Same monotone form as the electron
+                                    // stencil above.
+                                    const amrex::Real center_left =
+                                        ion_e_spec(il, jl, kl);
+                                    const amrex::Real center_right =
+                                        ion_e_spec(i, j, k);
+                                    brag_grad_t_ion =
+                                        0.5_rt * inverse_tangential_size *
+                                        (theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec(ipl, jpl, kpl) -
+                                                 center_left,
+                                             center_left -
+                                                 ion_e_spec(iml, jml, kml)) +
+                                         theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec(ipr, jpr, kpr) -
+                                                 center_right,
+                                             center_right -
+                                                 ion_e_spec(imr, jmr, kmr)));
+                                } else {
+                                    brag_grad_t_ion =
+                                        0.25_rt * inverse_tangential_size *
+                                        (ion_e_spec(ipl, jpl, kpl) +
+                                         ion_e_spec(ipr, jpr, kpr) -
+                                         ion_e_spec(iml, jml, kml) -
+                                         ion_e_spec(imr, jmr, kmr));
+                                }
+                                if (conduction_stage) {
+                                    // Stage extrapolation (see the electron
+                                    // stencil above).
+                                    const auto ion_e_spec_old =
+                                        [=] (const int ic, const int jc,
+                                             const int kc) {
+                                            const amrex::Real
+                                                safe_density_old = std::max(
+                                                    rho_old(ic, jc, kc),
+                                                    parameters.density_floor);
+                                            amrex::Real kinetic = 0.0_rt;
+                                            for (int component = 0;
+                                                 component < 3; ++component) {
+                                                kinetic +=
+                                                    mom_old(ic, jc, kc,
+                                                            component) *
+                                                    mom_old(ic, jc, kc,
+                                                            component);
+                                            }
+                                            kinetic *=
+                                                0.5_rt / safe_density_old;
+                                            if (chi_dual_energy) {
+                                                return theta_implicit_mhd::
+                                                           dual_energy_blended_pressure(
+                                                               ion_e_old(ic, jc,
+                                                                         kc),
+                                                               kinetic,
+                                                               ion_int_old(
+                                                                   ic, jc, kc),
+                                                               ion_int_old(
+                                                                   ic, jc, kc),
+                                                               parameters) /
+                                                       ((parameters.gamma_i -
+                                                         1.0_rt) *
+                                                        safe_density_old);
+                                            }
+                                            const amrex::Real internal_floor =
+                                                parameters.ion_pressure_floor /
+                                                (parameters.gamma_i - 1.0_rt);
+                                            return std::max(
+                                                       ion_e_old(ic, jc, kc) -
+                                                           kinetic,
+                                                       internal_floor) /
+                                                   safe_density_old;
+                                        };
+                                    amrex::Real grad_t_ion_old;
+                                    if (brag_tangential_smart != 0) {
+                                        grad_t_ion_old =
+                                            braginskii_tangential_gradient_smart(
+                                                ion_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                                brag_tangential_smart, brag_smart_upwind_left,
+                                                inverse_tangential_size);
+                                    } else if (brag_tangential_minmod) {
+                                        const amrex::Real center_left =
+                                            ion_e_spec_old(il, jl, kl);
+                                        const amrex::Real center_right =
+                                            ion_e_spec_old(i, j, k);
+                                        grad_t_ion_old =
+                                            0.5_rt * inverse_tangential_size *
+                                            (theta_implicit_mhd::minmod_pair(
+                                                 ion_e_spec_old(ipl, jpl,
+                                                                kpl) -
+                                                     center_left,
+                                                 center_left -
+                                                     ion_e_spec_old(iml, jml,
+                                                                    kml)) +
+                                             theta_implicit_mhd::minmod_pair(
+                                                 ion_e_spec_old(ipr, jpr,
+                                                                kpr) -
+                                                     center_right,
+                                                 center_right -
+                                                     ion_e_spec_old(imr, jmr,
+                                                                    kmr)));
+                                    } else {
+                                        grad_t_ion_old =
+                                            0.25_rt *
+                                            inverse_tangential_size *
+                                            (ion_e_spec_old(ipl, jpl, kpl) +
+                                             ion_e_spec_old(ipr, jpr, kpr) -
+                                             ion_e_spec_old(iml, jml, kml) -
+                                             ion_e_spec_old(imr, jmr, kmr));
+                                    }
+                                    brag_grad_t_ion =
+                                        stage_new_weight * brag_grad_t_ion +
+                                        stage_old_weight * grad_t_ion_old;
+                                }
                             }
                         }
-                    }
 #endif
-                }
-                // Smooth clamps of the Braginskii chi_par/chi_perp
-                // (0 = off): smooth-max floor at chi_min; C^2 soft cap
-                // at chi_max with knee width chi_max/10 (exact
-                // pass-through below 0.9 chi_max). Per-component bounds
-                // (the reference code's xil*_mn/mx vs xip*_mn/mx, global.f90:75-77)
-                // are physical-convention values converted per species
-                // in the host constants; the par >= perp guard below
-                // re-establishes the ordering the separate clamps (and
-                // the perp boosts) can break -- the reference code applies the same
-                // MAX after its clamps (ntb.f90:594).
-                const auto clamp_with = [=] (amrex::Real chi_value,
-                                             const amrex::Real lo,
-                                             const amrex::Real hi) {
-                    chi_value = theta_implicit_mhd::smooth_positive_floor(
-                        chi_value, lo);
-                    if (hi > 0.0_rt) {
-                        chi_value = theta_implicit_mhd::soft_upper_clip(
-                            chi_value, hi, 0.1_rt * hi);
                     }
-                    return chi_value;
-                };
-                // Quasi-shorting cross-field boost (implicit_mhd.
-                // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
-                // keyed to the pseudo-entropy excess
-                //     s = (T/T0) (rho0/rho_guarded)^{2/3},
-                //     rho_guarded = sqrt(rho^2 + rho_guard^2),
-                // above the load envelope, ramped by the C-infinity
-                // smooth-max 0.5 ((s - onset) + sqrt((s - onset)^2 +
-                // w^2)) with w = 0.3 (onset - 1) -- centered ABOVE the
-                // envelope (onset > 1): a ramp centered ON it leaks w/2
-                // of the amplitude onto every on-adiabat cell (measured
-                // fatal in production). The s inputs (the face
-                // temperature and the coefficient-state face density)
-                // follow conduction_coefficient_state like every other
-                // Braginskii coefficient input; the chi_min/max clamp
-                // applies AFTER the addition.
-                const auto qs_boost =
-                    [=] (const amrex::Real face_temperature) {
-                        const amrex::Real guarded_density = std::sqrt(
-                            face_density * face_density +
-                            qs_density_guard * qs_density_guard);
-                        const amrex::Real density_ratio =
-                            qs_envelope_density / guarded_density;
-                        const amrex::Real entropy =
-                            face_temperature * qs_inverse_t0 *
-                            std::cbrt(density_ratio * density_ratio);
-                        const amrex::Real excess = entropy - qs_onset;
-                        return qs_chi * 0.5_rt *
-                               (excess + std::sqrt(excess * excess +
-                                                   qs_width * qs_width));
+                    // Smooth clamps of the Braginskii chi_par/chi_perp
+                    // (0 = off): smooth-max floor at chi_min; C^2 soft cap
+                    // at chi_max with knee width chi_max/10 (exact
+                    // pass-through below 0.9 chi_max). Per-component bounds
+                    // (the reference code's xil*_mn/mx vs xip*_mn/mx, global.f90:75-77)
+                    // are physical-convention values converted per species
+                    // in the host constants; the par >= perp guard below
+                    // re-establishes the ordering the separate clamps (and
+                    // the perp boosts) can break -- the reference code applies the same
+                    // MAX after its clamps (ntb.f90:594).
+                    const auto clamp_with = [=] (amrex::Real chi_value,
+                                                 const amrex::Real lo,
+                                                 const amrex::Real hi) {
+                        chi_value = theta_implicit_mhd::smooth_positive_floor(
+                            chi_value, lo);
+                        if (hi > 0.0_rt) {
+                            chi_value = theta_implicit_mhd::soft_upper_clip(
+                                chi_value, hi, 0.1_rt * hi);
+                        }
+                        return chi_value;
                     };
-                if ((braginskii && chi_total_energy) || chi_ion > 0.0_rt ||
-                    chi_ion_is_parser) {
-                    amrex::Real chi_ion_face =
-                        chi_ion_is_parser
-                            ? chi_ion_parser(face_charge_density, face_te,
-                                             face_ti, face_jmag, face_time)
-                            : chi_ion;
-                    amrex::Real brag_chi_par_ion = 0.0_rt;
-                    amrex::Real brag_chi_perp_ion = 0.0_rt;
-                    if (braginskii) {
-                        // chi_par_i = 3.9 kB Ti tau_i / m_i and the ion
-                        // perpendicular fit, Braginskii (1965) Z = 1.
-                        const amrex::Real kb_ti = PhysConst::kb * face_ti;
-                        const amrex::Real face_number_density =
-                            face_charge_density / PhysConst::q_e;
-                        // Collision time at the host coefficient's
-                        // lnLambda (the constant path, bit-identical);
-                        // the live lnLambda divides by the face value,
-                        // floored at 1 like the reference code.
-                        const amrex::Real tau_ion_host =
-                            brag_tau_i_coefficient * kb_ti *
-                            std::sqrt(kb_ti) / face_number_density;
-                        const amrex::Real tau_ion =
-                            brag_live_coulomb_log
-                                ? tau_ion_host /
-                                      std::max(
-                                          theta_implicit_mhd::coulomb_log_ion(
-                                              face_number_density,
-                                              kb_ti / PhysConst::q_e),
-                                          brag_coulomb_log_floor)
-                                : tau_ion_host;
-                        // (gamma_i - 1): kappa-convention -> operator
-                        // convention (see the host-constant comment).
-                        const amrex::Real chi_par_raw =
-                            brag_i_convention * 3.9_rt * kb_ti * tau_ion /
-                            conduction_ion_mass;
-                        const amrex::Real omega_tau =
-                            brag_omega_i_coefficient * tau_ion;
-                        const amrex::Real x =
-                            omega_tau * omega_tau * brag_b2;
-                        const amrex::Real chi_perp_raw =
-                            chi_par_raw *
-                            (brag_i_numerator_1 * x + 1.0_rt) /
-                            ((brag_i_denominator_2 * x +
-                              brag_i_denominator_1) *
-                                 x +
-                             1.0_rt);
-                        // Density-keyed halo factor, evaluated ONCE: the
-                        // perp boost below and the parallel-ceiling lift
-                        // both consume it, so they cannot drift apart.
-                        amrex::Real halo_factor = 1.0_rt;
-                        if (add_halo_boost) {
-                            const amrex::Real guarded_density =
-                                theta_implicit_mhd::smooth_positive_floor(
-                                    chi_charge_to_mass * face_density,
-                                    halo_boost_guard);
-                            const amrex::Real ratio =
-                                halo_boost_reference / guarded_density;
-                            halo_factor = halo_boost_dp * ratio * ratio;
-                        }
-                        // Halo lift of the PARALLEL ceiling (see the host
-                        // constants): the core keeps brag_par_hi_i, which
-                        // is what holds its pressure gradient, and the
-                        // ceiling opens toward halo_par_hi_i only where
-                        // the density key says halo. Continuous at
-                        // halo_factor = 1 and never below the base.
-                        amrex::Real par_hi_ion = brag_par_hi_i;
-                        if (lift_halo_par && halo_factor > 1.0_rt) {
-                            par_hi_ion = std::min(
-                                halo_par_hi_i, brag_par_hi_i * halo_factor);
-                        }
-                        brag_chi_par_ion = clamp_with(
-                            chi_par_raw, brag_par_lo_i, par_hi_ion);
-                        // Quasi-shorting boost of the ION channel: s is
-                        // keyed on the ion temperature with the SAME
-                        // envelope T0 -- the broken-surface shorting
-                        // acts on the channel whose own thermal content
-                        // breaks the envelope, and a separate ion T0
-                        // would be an uncalibratable second knob.
-                        amrex::Real chi_perp_ion_value =
-                            add_qs ? chi_perp_raw + qs_boost(face_ti)
-                                   : chi_perp_raw;
-                        // Density-keyed halo boost (see the host
-                        // constants): the reference code's exact ntb.f90 t_cond
-                        // ~584 form
-                        //     xip = MAX(xip, xip (en0/en)^2 dp_mn),
-                        // a MULTIPLICATIVE boost of the perp value by
-                        // max(1, dp (rho_ref/rho)^2) -- ION channel
-                        // only, matching the reference code (te_cond carries no
-                        // boost) -- applied BEFORE the chi_min/max
-                        // clamps (boost at ~584, clamps at ~592-593),
-                        // so the perp cap still bounds the boosted halo
-                        // diffusivity. The coefficients are frozen at
-                        // the coefficient state (Newton never
-                        // differentiates them), so the MAX kink at
-                        // boost = 1 is benign.
-                        if (add_halo_boost && halo_factor > 1.0_rt) {
-                            chi_perp_ion_value *= halo_factor;
-                        }
-                        brag_chi_perp_ion = clamp_with(
-                            chi_perp_ion_value, brag_perp_lo_i,
-                            brag_perp_hi_i);
-                        // The reference code's t_cond: xil = MAX(xil, xip) after the
-                        // clamps -- parallel at least perpendicular (also
-                        // keeps the tensor cross term sign-safe).
-                        brag_chi_par_ion =
-                            std::max(brag_chi_par_ion, brag_chi_perp_ion);
-                        // Wall interface faces: the drain's scalar chi is
-                        // a CLAMPED per-component coefficient, NOT the
-                        // tensor nn projection (which on our stair-step
-                        // z-normal faces sees b_n ~ 1 and leaked the
-                        // parallel class in through a geometry artifact --
-                        // the E5 wall-ledger runaway channel, 2026-08-29
-                        // parity audit). Which clamp CLASS is the knob
-                        // implicit_mhd.wall_conduction_scale (see the
-                        // header): "perp" (default) keeps the
-                        // cross-field-only reading of the reference code's polyline
-                        // wall; "parallel" reproduces their MEASURED wall
-                        // conductance G, which their implicit temperature
-                        // solve builds from the PARALLEL clamp maximum
-                        // xili_mx = 1e6 n kB at every cut-cell node
-                        // (2026-09-02 halo-sink instrumentation). Interior
-                        // faces keep the full tensor either way.
-                        chi_ion_face =
-                            wall_face
-                                ? (wall_conduction_parallel_scale
-                                       ? brag_chi_par_ion
-                                       : brag_chi_perp_ion)
-                                : brag_chi_perp_ion +
-                            (brag_chi_par_ion - brag_chi_perp_ion) *
-                                brag_bn * brag_bn / brag_b2_dir;
-                    }
-                    amrex::Real conductive_flux;
-                    // Harmonic cap factor of the bulk flux (1 = uncapped),
-                    // kept for the preconditioner coefficient below.
-                    amrex::Real conduction_pc_cap = 1.0_rt;
-                    if (wall_face) {
-                        // One-sided rectified wall drain (see the host
-                        // constants): zero at/below the GATE anchor
-                        // (max of the wall value and the temperature-
-                        // floor image, so the gate closes exactly where
-                        // the projection stops the state), C^1 full
-                        // above twice it -- the reservoir cools the
-                        // interior toward T_wall but never heats it and
-                        // never fights the floor ratchet. The drain
-                        // magnitude keeps the true wall value. The
-                        // interior e_int is the conduction-stage value;
-                        // the drain's sign/cap structure is unchanged.
-                        const amrex::Real interior_e_spec =
-                            wall_left_masked ? e_spec_ion_right
-                                             : e_spec_ion_left;
-                        // The drain keeps its EXACT original floating-point
-                        // association: the conductance the preconditioner
-                        // row needs is built beside it, only when the rows
-                        // are live, so switching the rows on cannot move
-                        // the residual by even a bit.
-                        amrex::Real drain;
-                        amrex::Real conductance = 0.0_rt;
-                        amrex::Real bath;
-                        if (wall_pin) {
-                            // Dirichlet pin: two-sided exchange against
-                            // the floor-anchored bath at the half-cell
-                            // distance (the wall value sits ON the
-                            // interface, not one cell in). No gate, no
-                            // rectifier -- the cap below bounds both
-                            // directions.
-                            drain = chi_ion_face * face_density *
-                                    (interior_e_spec -
-                                     wall_gate_e_spec_ion) *
-                                    2.0_rt * inverse_normal_size *
-                                    corner_weight;
-                            bath = wall_gate_e_spec_ion;
-                            if (emit_wall_rows) {
-                                conductance = chi_ion_face * face_density *
-                                              2.0_rt * inverse_normal_size *
-                                              corner_weight;
-                            }
-                        } else {
-                            const amrex::Real gate =
-                                theta_implicit_mhd::floor_outflow_limiter(
-                                    interior_e_spec,
-                                    wall_gate_e_spec_ion);
-                            drain = chi_ion_face * face_density *
-                                    (interior_e_spec - wall_e_spec_ion) *
-                                    gate * inverse_normal_size *
-                                    corner_weight;
-                            bath = wall_e_spec_ion;
-                            if (emit_wall_rows) {
-                                conductance = chi_ion_face * face_density *
-                                              gate * inverse_normal_size *
-                                              corner_weight;
-                            }
-                        }
-                        // Cap on the wall exchange -- free-streaming by
-                        // default, except under the HARD dirichlet pin,
-                        // where the solver converges on the demanded
-                        // outflow; implicit_mhd.wall_heat_flux_cap
-                        // overrides both (see the host constants and
-                        // wall_cap_flux). The harmonic form is shared:
-                        // drain /= 1 + |drain|/(q_cap w), the corner
-                        // weight w inside q_cap so the cap acts before the
-                        // weighting; the preconditioner conductance (the
-                        // secant of the capped exchange) divided with it.
-                        if (!wall_uncapped) {
-                            const amrex::Real cap =
-                                1.0_rt +
-                                std::abs(drain) /
-                                    wall_cap_flux(true, wall_cap_sonic);
-                            drain /= cap;
-                            conductance /= cap;
-                        }
-                        // Preconditioner row on the INTERIOR cell (the
-                        // live side of the interface). Under dual_energy
-                        // the identical flux is booked into BOTH ion
-                        // rows, and e_int is the fk blend of the two, so
-                        // the pair's exact Jacobi diagonals are the fk /
-                        // (1 - fk) split of one conductance -- not the
-                        // full value twice.
-                        if (emit_wall_rows) {
-                            const int ric = wall_left_masked ? i : il;
-                            const int rjc = wall_left_masked ? j : jl;
-                            const int rkc = wall_left_masked ? k : kl;
-                            const auto& interior =
-                                wall_left_masked ? cell_right : cell_left;
-                            amrex::Real kinetic_fraction = 1.0_rt;
-                            if (parameters.dual_energy_closure) {
-                                amrex::Real kinetic = 0.0_rt;
-                                for (int component = 0; component < 3;
-                                     ++component) {
-                                    kinetic +=
-                                        interior.momentum[component] *
-                                        interior.momentum[component];
-                                }
-                                kinetic *=
-                                    0.5_rt / interior.safe_density;
-                                kinetic_fraction = theta_implicit_mhd::
-                                    dual_energy_kinetic_fraction(
-                                        interior.ion_energy, kinetic,
-                                        ion_int_old(ric, rjc, rkc),
-                                        parameters);
-                                emit_wall_row(
-                                    wall_row_ion_internal, ric, rjc, rkc,
-                                    (1.0_rt - kinetic_fraction) *
-                                        conductance,
-                                    interior.safe_density);
-                            }
-                            emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
-                                          kinetic_fraction * conductance,
-                                          interior.safe_density);
-                            validate_wall_row(ric, rjc, rkc, conductance,
-                                              drain, interior_e_spec, bath);
-                        }
-                        // +n flux toward a right-side wall, -n toward a
-                        // left-side wall (matches the two-sided sign).
-                        conductive_flux =
-                            wall_right_masked ? drain : -drain;
-                    } else if (z_end_wall_face) {
-                        // Conductive z-end exchange (implicit_mhd.
-                        // z_wall_conduction): hard half-cell Dirichlet
-                        // exchange against the z-wall reservoir -- the
-                        // z-end twin of the shaped-wall dirichlet pin,
-                        // with NO free-streaming cap (the implicit
-                        // solver converges on the demanded outflow).
-                        // chi_ion_face is the full tensor nn scalar
-                        // (one-sided interior B, see the face geometry
-                        // above); the interior e_int is the conduction-
-                        // stage value. +n toward the z_hi wall, -n
-                        // toward the z_lo wall.
-                        const amrex::Real interior_e_spec =
-                            z_end_hi_face ? e_spec_ion_left
-                                          : e_spec_ion_right;
-                        amrex::Real drain =
-                            chi_ion_face * face_density *
-                            (interior_e_spec - z_wall_bath_e_spec_ion) *
-                            2.0_rt * inverse_normal_size * corner_weight;
-                        amrex::Real conductance =
-                            chi_ion_face * face_density * 2.0_rt *
-                            inverse_normal_size * corner_weight;
-                        // implicit_mhd.wall_heat_flux_cap: the z-end
-                        // exchange takes the SAME cap as the shaped-wall
-                        // drain (free_streaming or sonic, same factor,
-                        // same harmonic form, conductance divided with
-                        // it). Unset and "none" leave it uncapped with no
-                        // arithmetic performed (bit-identical).
-                        amrex::Real z_end_cap = 1.0_rt;
-                        if (z_wall_capped) {
-                            const amrex::Real cap =
-                                1.0_rt +
-                                std::abs(drain) /
-                                    wall_cap_flux(true, z_wall_cap_sonic);
-                            drain /= cap;
-                            conductance /= cap;
-                            z_end_cap = cap;
-                        }
-                        // Preconditioner row on the interior cell: at
-                        // frozen coefficients the uncapped branch is
-                        // EXACTLY linear in it (no gate), so the emitted
-                        // diagonal is the exact Jacobian entry; capped,
-                        // it is the secant conductance the shaped-wall
-                        // capped modes emit.
-                        if (emit_wall_rows) {
-                            const int ric = z_end_hi_face ? il : i;
-                            const int rjc = z_end_hi_face ? jl : j;
-                            const int rkc = z_end_hi_face ? kl : k;
-                            const auto& interior =
-                                z_end_hi_face ? cell_left : cell_right;
-                            amrex::Real kinetic_fraction = 1.0_rt;
-                            if (parameters.dual_energy_closure) {
-                                amrex::Real kinetic = 0.0_rt;
-                                for (int component = 0; component < 3;
-                                     ++component) {
-                                    kinetic +=
-                                        interior.momentum[component] *
-                                        interior.momentum[component];
-                                }
-                                kinetic *=
-                                    0.5_rt / interior.safe_density;
-                                kinetic_fraction = theta_implicit_mhd::
-                                    dual_energy_kinetic_fraction(
-                                        interior.ion_energy, kinetic,
-                                        ion_int_old(ric, rjc, rkc),
-                                        parameters);
-                                emit_wall_row(
-                                    wall_row_ion_internal, ric, rjc, rkc,
-                                    (1.0_rt - kinetic_fraction) *
-                                        conductance,
-                                    interior.safe_density);
-                                emit_wall_row(
-                                    wall_row_ion_internal + wall_row_zend_offset,
-                                    ric, rjc, rkc,
-                                    (1.0_rt - kinetic_fraction) *
-                                        conductance,
-                                    interior.safe_density);
-                            }
-                            emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
-                                          kinetic_fraction * conductance,
-                                          interior.safe_density);
-                            emit_wall_row(wall_row_ion_total + wall_row_zend_offset,
-                                          ric, rjc, rkc,
-                                          kinetic_fraction * conductance,
-                                          interior.safe_density);
-                            validate_wall_row(ric, rjc, rkc, conductance,
-                                              drain, interior_e_spec,
-                                              z_wall_bath_e_spec_ion);
-                        }
-                        // Conduction-block END-FACE coefficient: with the
-                        // preconditioner's homogeneous Dirichlet end
-                        // boundary on the energy rows this reproduces the
-                        // exchange's exact linearization 2 chi w/dz^2 on
-                        // the end cell (the bath is frozen, so the row is
-                        // a pure diagonal); a wall heat-flux cap enters as
-                        // the tangent 1/cap^2 of its harmonic form, like
-                        // the bulk coefficient. The full ion value goes to
-                        // the total slot; the pair inverse blends it.
-                        if (emit_conduction_pc &&
-                            conduction_pc.contains(i, j, k)) {
-                            conduction_pc(i, j, k, conduction_pc_ion_total) =
-                                conduction_pc_stage_weight * chi_ion_face *
-                                corner_weight / (z_end_cap * z_end_cap);
-                            conduction_pc(i, j, k, conduction_pc_face_density) =
-                                face_density;
-                        }
-                        conductive_flux = z_end_hi_face ? drain : -drain;
-                    } else if (braginskii) {
-                        // Anisotropic tensor flux: the normal gradient
-                        // uses the SAME (conduction-stage) specific
-                        // energies as the isotropic path; the tangential
-                        // gradient is the corner-stencil value above.
-                        const amrex::Real gradient_normal =
-                            (e_spec_ion_right - e_spec_ion_left) *
-                            inverse_normal_size;
-                        conductive_flux =
-                            -face_density *
-                            (brag_chi_perp_ion * gradient_normal +
-                             (brag_chi_par_ion - brag_chi_perp_ion) *
-                                 brag_bn *
-                                 (brag_bn * gradient_normal +
-                                  brag_cross_scale * brag_bt *
-                                      brag_grad_t_ion) /
-                                 brag_b2_dir);
-                        if (conduction_limit > 0.0_rt) {
-                            // the same free-streaming harmonic cap as
-                            // the isotropic path, applied to the TOTAL
-                            // (normal + tangential) conductive flux;
-                            // the cap temperature is the conduction-
-                            // stage value (see cap_ti above)
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * cap_ti /
-                                conduction_ion_mass);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * cap_ti * thermal_speed;
-                            conduction_pc_cap =
-                                1.0_rt + std::abs(conductive_flux) /
-                                             (conduction_limit *
-                                              free_streaming_flux);
-                            conductive_flux /= conduction_pc_cap;
-                        }
-                    } else {
-                        conductive_flux =
-                            -chi_ion_face * face_density *
-                            (e_spec_ion_right - e_spec_ion_left) *
-                            inverse_normal_size;
-                        if (conduction_limit > 0.0_rt) {
-                            // free-streaming cap q_fs = n kB Ti v_ti,
-                            // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
-                            // form q/(1 + |q|/(f q_fs)), no branches;
-                            // Ti is the conduction-stage cap value
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * cap_ti /
-                                conduction_ion_mass);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * cap_ti * thermal_speed;
-                            conduction_pc_cap =
-                                1.0_rt + std::abs(conductive_flux) /
-                                             (conduction_limit *
-                                              free_streaming_flux);
-                            conductive_flux /= conduction_pc_cap;
-                        }
-                    }
-                    flux.ion_energy += conductive_flux;
-                    if (emit_conduction_pc && !wall_face &&
-                        !z_end_wall_face && conduction_pc.contains(i, j, k)) {
-                        // Linearized normal diffusivity of the flux just
-                        // formed (see the host constants). Under
-                        // dual_energy the SAME flux is booked into both ion
-                        // registers and depends on the blended internal
-                        // energy, so the pair's Jacobian is rank one in the
-                        // register pair: the preconditioner inverts it
-                        // exactly from this one FULL coefficient plus the
-                        // cell blend weight (m_conduction_pc_blend), and
-                        // only the total slot is written here.
-                        conduction_pc(i, j, k, conduction_pc_ion_total) =
-                            conduction_pc_stage_weight * chi_ion_face /
-                            (conduction_pc_cap * conduction_pc_cap);
-                        conduction_pc(i, j, k, conduction_pc_face_density) =
-                            face_density;
-                        if (emit_conduction_pc_cross) {
-                            // Frozen cross-term coefficient of the tensor
-                            // flux (zero for the isotropic path); carries
-                            // the diagnostic cross-term scale so block and
-                            // residual agree for any value of it.
-                            conduction_pc(i, j, k, conduction_pc_cross_ion_total) =
-                                braginskii
-                                    ? conduction_pc_stage_weight *
-                                          (brag_chi_par_ion - brag_chi_perp_ion) *
-                                          brag_cross_scale * brag_bn * brag_bt /
-                                          (brag_b2_dir * conduction_pc_cap *
-                                           conduction_pc_cap)
-                                    : 0.0_rt;
-                        }
-                    }
-                    if (chi_dual_energy) {
-                        // Conduction is a purely internal-energy exchange:
-                        // the auxiliary U_i channel receives the identical
-                        // face flux the conservative E_i channel books
-                        // (its internal-only counterpart is itself).
-                        flux.ion_internal_energy += conductive_flux;
-                    }
-                }
-                if (braginskii || chi_electron > 0.0_rt ||
-                    chi_electron_is_parser) {
-                    amrex::Real chi_electron_face =
-                        chi_electron_is_parser
-                            ? chi_electron_parser(face_charge_density,
-                                                  face_te, face_ti,
-                                                  face_jmag, face_time)
-                            : chi_electron;
-                    amrex::Real brag_chi_par_electron = 0.0_rt;
-                    amrex::Real brag_chi_perp_electron = 0.0_rt;
-                    if (braginskii) {
-                        // chi_par_e = 3.16 kB Te tau_e / m_e and the
-                        // electron perpendicular fit, Braginskii (1965)
-                        // Z = 1.
-                        const amrex::Real kb_te = PhysConst::kb * face_te;
-                        const amrex::Real face_number_density =
-                            face_charge_density / PhysConst::q_e;
-                        // Collision time at the host coefficient's
-                        // lnLambda (constant path, bit-identical); the
-                        // live lnLambda divides by the face value,
-                        // floored at 1 like the reference code.
-                        const amrex::Real tau_electron_host =
-                            brag_tau_e_coefficient * kb_te *
-                            std::sqrt(kb_te) / face_number_density;
-                        const amrex::Real tau_electron =
-                            brag_live_coulomb_log
-                                ? tau_electron_host /
-                                      std::max(
-                                          theta_implicit_mhd::
-                                              coulomb_log_electron(
+                    // Quasi-shorting cross-field boost (implicit_mhd.
+                    // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
+                    // keyed to the pseudo-entropy excess
+                    //     s = (T/T0) (rho0/rho_guarded)^{2/3},
+                    //     rho_guarded = sqrt(rho^2 + rho_guard^2),
+                    // above the load envelope, ramped by the C-infinity
+                    // smooth-max 0.5 ((s - onset) + sqrt((s - onset)^2 +
+                    // w^2)) with w = 0.3 (onset - 1) -- centered ABOVE the
+                    // envelope (onset > 1): a ramp centered ON it leaks w/2
+                    // of the amplitude onto every on-adiabat cell (measured
+                    // fatal in production). The s inputs (the face
+                    // temperature and the coefficient-state face density)
+                    // follow conduction_coefficient_state like every other
+                    // Braginskii coefficient input; the chi_min/max clamp
+                    // applies AFTER the addition.
+                    const auto qs_boost =
+                        [=] (const amrex::Real face_temperature) {
+                            const amrex::Real guarded_density = std::sqrt(
+                                face_density * face_density +
+                                qs_density_guard * qs_density_guard);
+                            const amrex::Real density_ratio =
+                                qs_envelope_density / guarded_density;
+                            const amrex::Real entropy =
+                                face_temperature * qs_inverse_t0 *
+                                std::cbrt(density_ratio * density_ratio);
+                            const amrex::Real excess = entropy - qs_onset;
+                            return qs_chi * 0.5_rt *
+                                   (excess + std::sqrt(excess * excess +
+                                                       qs_width * qs_width));
+                        };
+                    if ((braginskii && chi_total_energy) || chi_ion > 0.0_rt ||
+                        chi_ion_is_parser) {
+                        amrex::Real chi_ion_face =
+                            chi_ion_is_parser
+                                ? chi_ion_parser(face_charge_density, face_te,
+                                                 face_ti, face_jmag, face_time)
+                                : chi_ion;
+                        amrex::Real brag_chi_par_ion = 0.0_rt;
+                        amrex::Real brag_chi_perp_ion = 0.0_rt;
+                        if (braginskii) {
+                            // chi_par_i = 3.9 kB Ti tau_i / m_i and the ion
+                            // perpendicular fit, Braginskii (1965) Z = 1.
+                            const amrex::Real kb_ti = PhysConst::kb * face_ti;
+                            const amrex::Real face_number_density =
+                                face_charge_density / PhysConst::q_e;
+                            // Collision time at the host coefficient's
+                            // lnLambda (the constant path, bit-identical);
+                            // the live lnLambda divides by the face value,
+                            // floored at 1 like the reference code.
+                            const amrex::Real tau_ion_host =
+                                brag_tau_i_coefficient * kb_ti *
+                                std::sqrt(kb_ti) / face_number_density;
+                            const amrex::Real tau_ion =
+                                brag_live_coulomb_log
+                                    ? tau_ion_host /
+                                          std::max(
+                                              theta_implicit_mhd::coulomb_log_ion(
                                                   face_number_density,
-                                                  kb_te / PhysConst::q_e),
-                                          brag_coulomb_log_floor)
-                                : tau_electron_host;
-                        // (gamma_e - 1): kappa-convention -> operator
-                        // convention (see the host-constant comment).
-                        const amrex::Real chi_par_raw =
-                            brag_e_convention * 3.16_rt * kb_te *
-                            tau_electron / PhysConst::m_e;
-                        const amrex::Real omega_tau =
-                            brag_omega_e_coefficient * tau_electron;
-                        const amrex::Real x =
-                            omega_tau * omega_tau * brag_b2;
-                        const amrex::Real chi_perp_raw =
-                            chi_par_raw *
-                            (brag_e_numerator_1 * x + 1.0_rt) /
-                            ((brag_e_denominator_2 * x +
-                              brag_e_denominator_1) *
-                                 x +
-                             1.0_rt);
-                        // Halo lift of the PARALLEL ceiling, same density
-                        // key as the ion channel (recomputed: the ion
-                        // block's copy is out of scope here). This is the
-                        // CEILING, not the perp boost below -- the
-                        // reference clamps xile_mx = xili_mx = 1e6 for
-                        // BOTH species, and the electron parallel channel
-                        // is the faster of the two drains, so restricting
-                        // the lift to ions would leave the halo electrons
-                        // throttled at the core clamp.
-                        amrex::Real par_hi_electron = brag_par_hi_e;
-                        if (lift_halo_par) {
-                            const amrex::Real guarded_density =
-                                theta_implicit_mhd::smooth_positive_floor(
-                                    chi_charge_to_mass * face_density,
-                                    halo_boost_guard);
-                            const amrex::Real ratio =
-                                halo_boost_reference / guarded_density;
-                            const amrex::Real halo_factor =
-                                halo_boost_dp * ratio * ratio;
-                            if (halo_factor > 1.0_rt) {
-                                par_hi_electron = std::min(
-                                    halo_par_hi_e,
-                                    brag_par_hi_e * halo_factor);
+                                                  kb_ti / PhysConst::q_e),
+                                              brag_coulomb_log_floor)
+                                    : tau_ion_host;
+                            // (gamma_i - 1): kappa-convention -> operator
+                            // convention (see the host-constant comment).
+                            const amrex::Real chi_par_raw =
+                                brag_i_convention * 3.9_rt * kb_ti * tau_ion /
+                                conduction_ion_mass;
+                            const amrex::Real omega_tau =
+                                brag_omega_i_coefficient * tau_ion;
+                            const amrex::Real x =
+                                omega_tau * omega_tau * brag_b2;
+                            const amrex::Real chi_perp_raw =
+                                chi_par_raw *
+                                (brag_i_numerator_1 * x + 1.0_rt) /
+                                ((brag_i_denominator_2 * x +
+                                  brag_i_denominator_1) *
+                                     x +
+                                 1.0_rt);
+                            // Density-keyed halo factor, evaluated ONCE: the
+                            // perp boost below and the parallel-ceiling lift
+                            // both consume it, so they cannot drift apart.
+                            amrex::Real halo_factor = 1.0_rt;
+                            if (add_halo_boost) {
+                                const amrex::Real guarded_density =
+                                    theta_implicit_mhd::smooth_positive_floor(
+                                        chi_charge_to_mass * face_density,
+                                        halo_boost_guard);
+                                const amrex::Real ratio =
+                                    halo_boost_reference / guarded_density;
+                                halo_factor = halo_boost_dp * ratio * ratio;
                             }
+                            // Halo lift of the PARALLEL ceiling (see the host
+                            // constants): the core keeps brag_par_hi_i, which
+                            // is what holds its pressure gradient, and the
+                            // ceiling opens toward halo_par_hi_i only where
+                            // the density key says halo. Continuous at
+                            // halo_factor = 1 and never below the base.
+                            amrex::Real par_hi_ion = brag_par_hi_i;
+                            if (lift_halo_par && halo_factor > 1.0_rt) {
+                                par_hi_ion = std::min(
+                                    halo_par_hi_i, brag_par_hi_i * halo_factor);
+                            }
+                            brag_chi_par_ion = clamp_with(
+                                chi_par_raw, brag_par_lo_i, par_hi_ion);
+                            // Quasi-shorting boost of the ION channel: s is
+                            // keyed on the ion temperature with the SAME
+                            // envelope T0 -- the broken-surface shorting
+                            // acts on the channel whose own thermal content
+                            // breaks the envelope, and a separate ion T0
+                            // would be an uncalibratable second knob.
+                            amrex::Real chi_perp_ion_value =
+                                add_qs ? chi_perp_raw + qs_boost(face_ti)
+                                       : chi_perp_raw;
+                            // Density-keyed halo boost (see the host
+                            // constants): the reference code's exact ntb.f90 t_cond
+                            // ~584 form
+                            //     xip = MAX(xip, xip (en0/en)^2 dp_mn),
+                            // a MULTIPLICATIVE boost of the perp value by
+                            // max(1, dp (rho_ref/rho)^2) -- ION channel
+                            // only, matching the reference code (te_cond carries no
+                            // boost) -- applied BEFORE the chi_min/max
+                            // clamps (boost at ~584, clamps at ~592-593),
+                            // so the perp cap still bounds the boosted halo
+                            // diffusivity. The coefficients are frozen at
+                            // the coefficient state (Newton never
+                            // differentiates them), so the MAX kink at
+                            // boost = 1 is benign.
+                            if (add_halo_boost && halo_factor > 1.0_rt) {
+                                chi_perp_ion_value *= halo_factor;
+                            }
+                            brag_chi_perp_ion = clamp_with(
+                                chi_perp_ion_value, brag_perp_lo_i,
+                                brag_perp_hi_i);
+                            // The reference code's t_cond: xil = MAX(xil, xip) after the
+                            // clamps -- parallel at least perpendicular (also
+                            // keeps the tensor cross term sign-safe).
+                            brag_chi_par_ion =
+                                std::max(brag_chi_par_ion, brag_chi_perp_ion);
+                            // Wall interface faces: the drain's scalar chi is
+                            // a CLAMPED per-component coefficient, NOT the
+                            // tensor nn projection (which on our stair-step
+                            // z-normal faces sees b_n ~ 1 and leaked the
+                            // parallel class in through a geometry artifact --
+                            // the E5 wall-ledger runaway channel, 2026-08-29
+                            // parity audit). Which clamp CLASS is the knob
+                            // implicit_mhd.wall_conduction_scale (see the
+                            // header): "perp" (default) keeps the
+                            // cross-field-only reading of the reference code's polyline
+                            // wall; "parallel" reproduces their MEASURED wall
+                            // conductance G, which their implicit temperature
+                            // solve builds from the PARALLEL clamp maximum
+                            // xili_mx = 1e6 n kB at every cut-cell node
+                            // (2026-09-02 halo-sink instrumentation). Interior
+                            // faces keep the full tensor either way.
+                            chi_ion_face =
+                                wall_face
+                                    ? (wall_conduction_parallel_scale
+                                           ? brag_chi_par_ion
+                                           : brag_chi_perp_ion)
+                                    : brag_chi_perp_ion +
+                                (brag_chi_par_ion - brag_chi_perp_ion) *
+                                    brag_bn * brag_bn / brag_b2_dir;
                         }
-                        brag_chi_par_electron = clamp_with(
-                            chi_par_raw, brag_par_lo_e, par_hi_electron);
-                        // Quasi-shorting boost (see the ion channel and
-                        // the qs_boost lambda): additive chi_perp, keyed
-                        // on the electron temperature, clamped after.
-                        // NO halo boost on the electron channel: the reference code
-                        // boosts the ION perp only (ntb.f90 t_cond ~584;
-                        // te_cond carries bare clamps) -- the halo drains
-                        // through ion conduction while the electron
-                        // channel keeps physical Braginskii.
-                        const amrex::Real chi_perp_electron_value =
-                            add_qs ? chi_perp_raw + qs_boost(face_te)
-                                   : chi_perp_raw;
-                        brag_chi_perp_electron = clamp_with(
-                            chi_perp_electron_value, brag_perp_lo_e,
-                            brag_perp_hi_e);
-                        // The reference code's te_cond: parallel at least perpendicular.
-                        brag_chi_par_electron = std::max(
-                            brag_chi_par_electron, brag_chi_perp_electron);
-                        // Wall interface faces: the clamped per-component
-                        // scalar chi selected by
-                        // implicit_mhd.wall_conduction_scale, not the nn
-                        // projection (see the ion channel). BOTH species
-                        // take the same clamp class -- the reference code anchors
-                        // both at 0.5 eV with xile_mx = xili_mx.
-                        chi_electron_face =
-                            wall_face
-                                ? (wall_conduction_parallel_scale
-                                       ? brag_chi_par_electron
-                                       : brag_chi_perp_electron)
-                                : brag_chi_perp_electron +
-                                      (brag_chi_par_electron -
-                                       brag_chi_perp_electron) *
-                                          brag_bn * brag_bn / brag_b2_dir;
-                    }
-                    amrex::Real conductive_flux;
-                    // Harmonic cap factor of the bulk flux (1 = uncapped),
-                    // kept for the preconditioner coefficient below.
-                    amrex::Real conduction_pc_cap = 1.0_rt;
-                    if (wall_face) {
-                        // One-sided rectified wall drain, gated at the
-                        // reachable-set anchor (see the ion channel
-                        // above): the interior e_int is the conduction-
-                        // stage value, the structure is unchanged.
-                        const amrex::Real interior_e_spec =
-                            wall_left_masked ? e_spec_electron_right
-                                             : e_spec_electron_left;
-                        // Conductance beside the unchanged drain (see the
-                        // ion channel): the residual keeps its exact
-                        // floating-point association.
-                        amrex::Real drain;
-                        amrex::Real conductance = 0.0_rt;
-                        amrex::Real bath;
-                        if (wall_pin) {
-                            // Dirichlet pin (see the ion channel).
-                            drain = chi_electron_face * face_density *
-                                    (interior_e_spec -
-                                     wall_gate_e_spec_electron) *
-                                    2.0_rt * inverse_normal_size *
-                                    corner_weight;
-                            bath = wall_gate_e_spec_electron;
+                        amrex::Real conductive_flux;
+                        // Harmonic cap factor of the bulk flux (1 = uncapped),
+                        // kept for the preconditioner coefficient below.
+                        amrex::Real conduction_pc_cap = 1.0_rt;
+                        if (wall_face) {
+                            // One-sided rectified wall drain (see the host
+                            // constants): zero at/below the GATE anchor
+                            // (max of the wall value and the temperature-
+                            // floor image, so the gate closes exactly where
+                            // the projection stops the state), C^1 full
+                            // above twice it -- the reservoir cools the
+                            // interior toward T_wall but never heats it and
+                            // never fights the floor ratchet. The drain
+                            // magnitude keeps the true wall value. The
+                            // interior e_int is the conduction-stage value;
+                            // the drain's sign/cap structure is unchanged.
+                            const amrex::Real interior_e_spec =
+                                wall_left_masked ? e_spec_ion_right
+                                                 : e_spec_ion_left;
+                            // The drain keeps its EXACT original floating-point
+                            // association: the conductance the preconditioner
+                            // row needs is built beside it, only when the rows
+                            // are live, so switching the rows on cannot move
+                            // the residual by even a bit.
+                            amrex::Real drain;
+                            amrex::Real conductance = 0.0_rt;
+                            amrex::Real bath;
+                            if (wall_pin) {
+                                // Dirichlet pin: two-sided exchange against
+                                // the floor-anchored bath at the half-cell
+                                // distance (the wall value sits ON the
+                                // interface, not one cell in). No gate, no
+                                // rectifier -- the cap below bounds both
+                                // directions.
+                                drain = chi_ion_face * face_density *
+                                        (interior_e_spec -
+                                         wall_gate_e_spec_ion) *
+                                        2.0_rt * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_gate_e_spec_ion;
+                                if (emit_wall_rows) {
+                                    conductance = chi_ion_face * face_density *
+                                                  2.0_rt * inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            } else {
+                                const amrex::Real gate =
+                                    theta_implicit_mhd::floor_outflow_limiter(
+                                        interior_e_spec,
+                                        wall_gate_e_spec_ion);
+                                drain = chi_ion_face * face_density *
+                                        (interior_e_spec - wall_e_spec_ion) *
+                                        gate * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_e_spec_ion;
+                                if (emit_wall_rows) {
+                                    conductance = chi_ion_face * face_density *
+                                                  gate * inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            }
+                            // Cap on the wall exchange -- free-streaming by
+                            // default, except under the HARD dirichlet pin,
+                            // where the solver converges on the demanded
+                            // outflow; implicit_mhd.wall_heat_flux_cap
+                            // overrides both (see the host constants and
+                            // wall_cap_flux). The harmonic form is shared:
+                            // drain /= 1 + |drain|/(q_cap w), the corner
+                            // weight w inside q_cap so the cap acts before the
+                            // weighting; the preconditioner conductance (the
+                            // secant of the capped exchange) divided with it.
+                            if (!wall_uncapped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(true, wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                            }
+                            // Preconditioner row on the INTERIOR cell (the
+                            // live side of the interface). Under dual_energy
+                            // the identical flux is booked into BOTH ion
+                            // rows, and e_int is the fk blend of the two, so
+                            // the pair's exact Jacobi diagonals are the fk /
+                            // (1 - fk) split of one conductance -- not the
+                            // full value twice.
                             if (emit_wall_rows) {
-                                conductance = chi_electron_face *
-                                              face_density * 2.0_rt *
-                                              inverse_normal_size *
-                                              corner_weight;
+                                const int ric = wall_left_masked ? i : il;
+                                const int rjc = wall_left_masked ? j : jl;
+                                const int rkc = wall_left_masked ? k : kl;
+                                const auto& interior =
+                                    wall_left_masked ? cell_right : cell_left;
+                                amrex::Real kinetic_fraction = 1.0_rt;
+                                if (parameters.dual_energy_closure) {
+                                    amrex::Real kinetic = 0.0_rt;
+                                    for (int component = 0; component < 3;
+                                         ++component) {
+                                        kinetic +=
+                                            interior.momentum[component] *
+                                            interior.momentum[component];
+                                    }
+                                    kinetic *=
+                                        0.5_rt / interior.safe_density;
+                                    kinetic_fraction = theta_implicit_mhd::
+                                        dual_energy_kinetic_fraction(
+                                            interior.ion_energy, kinetic,
+                                            ion_int_old(ric, rjc, rkc),
+                                            parameters);
+                                    emit_wall_row(
+                                        wall_row_ion_internal, ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                }
+                                emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec, bath);
+                            }
+                            // +n flux toward a right-side wall, -n toward a
+                            // left-side wall (matches the two-sided sign).
+                            conductive_flux =
+                                wall_right_masked ? drain : -drain;
+                        } else if (z_end_wall_face) {
+                            // Conductive z-end exchange (implicit_mhd.
+                            // z_wall_conduction): hard half-cell Dirichlet
+                            // exchange against the z-wall reservoir -- the
+                            // z-end twin of the shaped-wall dirichlet pin,
+                            // with NO free-streaming cap (the implicit
+                            // solver converges on the demanded outflow).
+                            // chi_ion_face is the full tensor nn scalar
+                            // (one-sided interior B, see the face geometry
+                            // above); the interior e_int is the conduction-
+                            // stage value. +n toward the z_hi wall, -n
+                            // toward the z_lo wall.
+                            const amrex::Real interior_e_spec =
+                                z_end_hi_face ? e_spec_ion_left
+                                              : e_spec_ion_right;
+                            amrex::Real drain =
+                                chi_ion_face * face_density *
+                                (interior_e_spec - z_wall_bath_e_spec_ion) *
+                                2.0_rt * inverse_normal_size * corner_weight;
+                            amrex::Real conductance =
+                                chi_ion_face * face_density * 2.0_rt *
+                                inverse_normal_size * corner_weight;
+                            // implicit_mhd.wall_heat_flux_cap: the z-end
+                            // exchange takes the SAME cap as the shaped-wall
+                            // drain (free_streaming or sonic, same factor,
+                            // same harmonic form, conductance divided with
+                            // it). Unset and "none" leave it uncapped with no
+                            // arithmetic performed (bit-identical).
+                            amrex::Real z_end_cap = 1.0_rt;
+                            if (z_wall_capped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(true, z_wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                                z_end_cap = cap;
+                            }
+                            // Preconditioner row on the interior cell: at
+                            // frozen coefficients the uncapped branch is
+                            // EXACTLY linear in it (no gate), so the emitted
+                            // diagonal is the exact Jacobian entry; capped,
+                            // it is the secant conductance the shaped-wall
+                            // capped modes emit.
+                            if (emit_wall_rows) {
+                                const int ric = z_end_hi_face ? il : i;
+                                const int rjc = z_end_hi_face ? jl : j;
+                                const int rkc = z_end_hi_face ? kl : k;
+                                const auto& interior =
+                                    z_end_hi_face ? cell_left : cell_right;
+                                amrex::Real kinetic_fraction = 1.0_rt;
+                                if (parameters.dual_energy_closure) {
+                                    amrex::Real kinetic = 0.0_rt;
+                                    for (int component = 0; component < 3;
+                                         ++component) {
+                                        kinetic +=
+                                            interior.momentum[component] *
+                                            interior.momentum[component];
+                                    }
+                                    kinetic *=
+                                        0.5_rt / interior.safe_density;
+                                    kinetic_fraction = theta_implicit_mhd::
+                                        dual_energy_kinetic_fraction(
+                                            interior.ion_energy, kinetic,
+                                            ion_int_old(ric, rjc, rkc),
+                                            parameters);
+                                    emit_wall_row(
+                                        wall_row_ion_internal, ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                    emit_wall_row(
+                                        wall_row_ion_internal + wall_row_zend_offset,
+                                        ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                }
+                                emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                emit_wall_row(wall_row_ion_total + wall_row_zend_offset,
+                                              ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec,
+                                                  z_wall_bath_e_spec_ion);
+                            }
+                            // Conduction-block END-FACE coefficient: with the
+                            // preconditioner's homogeneous Dirichlet end
+                            // boundary on the energy rows this reproduces the
+                            // exchange's exact linearization 2 chi w/dz^2 on
+                            // the end cell (the bath is frozen, so the row is
+                            // a pure diagonal); a wall heat-flux cap enters as
+                            // the tangent 1/cap^2 of its harmonic form, like
+                            // the bulk coefficient. The full ion value goes to
+                            // the total slot; the pair inverse blends it.
+                            if (emit_conduction_pc &&
+                                conduction_pc.contains(i, j, k)) {
+                                conduction_pc(i, j, k, conduction_pc_ion_total) =
+                                    conduction_pc_stage_weight * chi_ion_face *
+                                    corner_weight / (z_end_cap * z_end_cap);
+                                conduction_pc(i, j, k, conduction_pc_face_density) =
+                                    face_density;
+                            }
+                            conductive_flux = z_end_hi_face ? drain : -drain;
+                        } else if (braginskii) {
+                            // Anisotropic tensor flux: the normal gradient
+                            // uses the SAME (conduction-stage) specific
+                            // energies as the isotropic path; the tangential
+                            // gradient is the corner-stencil value above.
+                            const amrex::Real gradient_normal =
+                                (e_spec_ion_right - e_spec_ion_left) *
+                                inverse_normal_size;
+                            conductive_flux =
+                                -face_density *
+                                (brag_chi_perp_ion * gradient_normal +
+                                 (brag_chi_par_ion - brag_chi_perp_ion) *
+                                     brag_bn *
+                                     (brag_bn * gradient_normal +
+                                      brag_cross_scale * brag_bt *
+                                          brag_grad_t_ion) /
+                                     brag_b2_dir);
+                            if (conduction_limit > 0.0_rt) {
+                                // the same free-streaming harmonic cap as
+                                // the isotropic path, applied to the TOTAL
+                                // (normal + tangential) conductive flux;
+                                // the cap temperature is the conduction-
+                                // stage value (see cap_ti above)
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_ti /
+                                    conduction_ion_mass);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_ti * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
                             }
                         } else {
-                            const amrex::Real gate =
-                                theta_implicit_mhd::floor_outflow_limiter(
-                                    interior_e_spec,
-                                    wall_gate_e_spec_electron);
-                            drain = chi_electron_face * face_density *
-                                    (interior_e_spec -
-                                     wall_e_spec_electron) *
-                                    gate * inverse_normal_size *
-                                    corner_weight;
-                            bath = wall_e_spec_electron;
-                            if (emit_wall_rows) {
-                                conductance = chi_electron_face *
-                                              face_density * gate *
-                                              inverse_normal_size *
-                                              corner_weight;
+                            conductive_flux =
+                                -chi_ion_face * face_density *
+                                (e_spec_ion_right - e_spec_ion_left) *
+                                inverse_normal_size;
+                            if (conduction_limit > 0.0_rt) {
+                                // free-streaming cap q_fs = n kB Ti v_ti,
+                                // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
+                                // form q/(1 + |q|/(f q_fs)), no branches;
+                                // Ti is the conduction-stage cap value
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_ti /
+                                    conduction_ion_mass);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_ti * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
                             }
                         }
-                        // Cap on the wall exchange (see the ion channel
-                        // and wall_cap_flux): free-streaming or sonic,
-                        // per implicit_mhd.wall_heat_flux_cap.
-                        if (!wall_uncapped) {
-                            const amrex::Real cap =
-                                1.0_rt +
-                                std::abs(drain) /
-                                    wall_cap_flux(false, wall_cap_sonic);
-                            drain /= cap;
-                            conductance /= cap;
-                        }
-                        if (emit_wall_rows) {
-                            const int ric = wall_left_masked ? i : il;
-                            const int rjc = wall_left_masked ? j : jl;
-                            const int rkc = wall_left_masked ? k : kl;
-                            const auto& interior =
-                                wall_left_masked ? cell_right : cell_left;
-                            emit_wall_row(wall_row_electron, ric, rjc, rkc,
-                                          conductance,
-                                          interior.safe_density);
-                            validate_wall_row(ric, rjc, rkc, conductance,
-                                              drain, interior_e_spec, bath);
-                        }
-                        conductive_flux =
-                            wall_right_masked ? drain : -drain;
-                    } else if (z_end_wall_face) {
-                        // Conductive z-end exchange (see the ion
-                        // channel): hard half-cell Dirichlet reservoir
-                        // exchange, no free-streaming cap, one-sided
-                        // tensor scalar chi.
-                        const amrex::Real interior_e_spec =
-                            z_end_hi_face ? e_spec_electron_left
-                                          : e_spec_electron_right;
-                        amrex::Real drain =
-                            chi_electron_face * face_density *
-                            (interior_e_spec -
-                             z_wall_bath_e_spec_electron) *
-                            2.0_rt * inverse_normal_size * corner_weight;
-                        amrex::Real conductance =
-                            chi_electron_face * face_density * 2.0_rt *
-                            inverse_normal_size * corner_weight;
-                        // implicit_mhd.wall_heat_flux_cap (see the ion
-                        // channel): same cap as the shaped-wall drain;
-                        // unset/"none" perform no arithmetic.
-                        amrex::Real z_end_cap = 1.0_rt;
-                        if (z_wall_capped) {
-                            const amrex::Real cap =
-                                1.0_rt +
-                                std::abs(drain) /
-                                    wall_cap_flux(false, z_wall_cap_sonic);
-                            drain /= cap;
-                            conductance /= cap;
-                            z_end_cap = cap;
-                        }
-                        if (emit_wall_rows) {
-                            const int ric = z_end_hi_face ? il : i;
-                            const int rjc = z_end_hi_face ? jl : j;
-                            const int rkc = z_end_hi_face ? kl : k;
-                            const auto& interior =
-                                z_end_hi_face ? cell_left : cell_right;
-                            emit_wall_row(wall_row_electron, ric, rjc, rkc,
-                                          conductance,
-                                          interior.safe_density);
-                            emit_wall_row(wall_row_electron + wall_row_zend_offset,
-                                          ric, rjc, rkc, conductance,
-                                          interior.safe_density);
-                            validate_wall_row(
-                                ric, rjc, rkc, conductance, drain,
-                                interior_e_spec,
-                                z_wall_bath_e_spec_electron);
-                        }
-                        // Conduction-block end-face coefficient (see the
-                        // ion channel).
-                        if (emit_conduction_pc &&
-                            conduction_pc.contains(i, j, k)) {
-                            conduction_pc(i, j, k, conduction_pc_electron) =
-                                conduction_pc_stage_weight *
-                                chi_electron_face * corner_weight /
-                                (z_end_cap * z_end_cap);
+                        flux.ion_energy += conductive_flux;
+                        if (emit_conduction_pc && !wall_face &&
+                            !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                            // Linearized normal diffusivity of the flux just
+                            // formed (see the host constants). Under
+                            // dual_energy the SAME flux is booked into both ion
+                            // registers and depends on the blended internal
+                            // energy, so the pair's Jacobian is rank one in the
+                            // register pair: the preconditioner inverts it
+                            // exactly from this one FULL coefficient plus the
+                            // cell blend weight (m_conduction_pc_blend), and
+                            // only the total slot is written here.
+                            conduction_pc(i, j, k, conduction_pc_ion_total) =
+                                conduction_pc_stage_weight * chi_ion_face /
+                                (conduction_pc_cap * conduction_pc_cap);
                             conduction_pc(i, j, k, conduction_pc_face_density) =
                                 face_density;
+                            if (emit_conduction_pc_cross) {
+                                // Frozen cross-term coefficient of the tensor
+                                // flux (zero for the isotropic path); carries
+                                // the diagnostic cross-term scale so block and
+                                // residual agree for any value of it.
+                                conduction_pc(i, j, k, conduction_pc_cross_ion_total) =
+                                    braginskii
+                                        ? conduction_pc_stage_weight *
+                                              (brag_chi_par_ion - brag_chi_perp_ion) *
+                                              brag_cross_scale * brag_bn * brag_bt /
+                                              (brag_b2_dir * conduction_pc_cap *
+                                               conduction_pc_cap)
+                                        : 0.0_rt;
+                            }
                         }
-                        conductive_flux = z_end_hi_face ? drain : -drain;
-                    } else if (braginskii) {
-                        // Anisotropic tensor flux (see the ion channel).
-                        const amrex::Real gradient_normal =
-                            (e_spec_electron_right -
-                             e_spec_electron_left) *
-                            inverse_normal_size;
-                        conductive_flux =
-                            -face_density *
-                            (brag_chi_perp_electron * gradient_normal +
-                             (brag_chi_par_electron -
-                              brag_chi_perp_electron) *
-                                 brag_bn *
-                                 (brag_bn * gradient_normal +
-                                  brag_cross_scale * brag_bt *
-                                      brag_grad_t_electron) /
-                                 brag_b2_dir);
-                        if (conduction_limit > 0.0_rt) {
-                            // cap at the conduction-stage temperature
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * cap_te / PhysConst::m_e);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * cap_te * thermal_speed;
-                            conduction_pc_cap =
-                                1.0_rt + std::abs(conductive_flux) /
-                                             (conduction_limit *
-                                              free_streaming_flux);
-                            conductive_flux /= conduction_pc_cap;
-                        }
-                    } else {
-                        conductive_flux =
-                            -chi_electron_face * face_density *
-                            (e_spec_electron_right -
-                             e_spec_electron_left) *
-                            inverse_normal_size;
-                        if (conduction_limit > 0.0_rt) {
-                            // cap at the conduction-stage temperature
-                            const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * cap_te / PhysConst::m_e);
-                            const amrex::Real free_streaming_flux =
-                                face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * cap_te * thermal_speed;
-                            conduction_pc_cap =
-                                1.0_rt + std::abs(conductive_flux) /
-                                             (conduction_limit *
-                                              free_streaming_flux);
-                            conductive_flux /= conduction_pc_cap;
+                        if (chi_dual_energy) {
+                            // Conduction is a purely internal-energy exchange:
+                            // the auxiliary U_i channel receives the identical
+                            // face flux the conservative E_i channel books
+                            // (its internal-only counterpart is itself).
+                            flux.ion_internal_energy += conductive_flux;
                         }
                     }
-                    flux.electron_energy += conductive_flux;
-                    if (emit_conduction_pc && !wall_face &&
-                        !z_end_wall_face && conduction_pc.contains(i, j, k)) {
-                        conduction_pc(i, j, k, conduction_pc_electron) =
-                            conduction_pc_stage_weight * chi_electron_face /
-                            (conduction_pc_cap * conduction_pc_cap);
-                        conduction_pc(i, j, k, conduction_pc_face_density) =
-                            face_density;
-                        if (emit_conduction_pc_cross) {
-                            // Frozen cross-term coefficient of the tensor
-                            // flux (zero for the isotropic path).
-                            conduction_pc(i, j, k, conduction_pc_cross_electron) =
-                                braginskii
-                                    ? conduction_pc_stage_weight *
+                    if (braginskii || chi_electron > 0.0_rt ||
+                        chi_electron_is_parser) {
+                        amrex::Real chi_electron_face =
+                            chi_electron_is_parser
+                                ? chi_electron_parser(face_charge_density,
+                                                      face_te, face_ti,
+                                                      face_jmag, face_time)
+                                : chi_electron;
+                        amrex::Real brag_chi_par_electron = 0.0_rt;
+                        amrex::Real brag_chi_perp_electron = 0.0_rt;
+                        if (braginskii) {
+                            // chi_par_e = 3.16 kB Te tau_e / m_e and the
+                            // electron perpendicular fit, Braginskii (1965)
+                            // Z = 1.
+                            const amrex::Real kb_te = PhysConst::kb * face_te;
+                            const amrex::Real face_number_density =
+                                face_charge_density / PhysConst::q_e;
+                            // Collision time at the host coefficient's
+                            // lnLambda (constant path, bit-identical); the
+                            // live lnLambda divides by the face value,
+                            // floored at 1 like the reference code.
+                            const amrex::Real tau_electron_host =
+                                brag_tau_e_coefficient * kb_te *
+                                std::sqrt(kb_te) / face_number_density;
+                            const amrex::Real tau_electron =
+                                brag_live_coulomb_log
+                                    ? tau_electron_host /
+                                          std::max(
+                                              theta_implicit_mhd::
+                                                  coulomb_log_electron(
+                                                      face_number_density,
+                                                      kb_te / PhysConst::q_e),
+                                              brag_coulomb_log_floor)
+                                    : tau_electron_host;
+                            // (gamma_e - 1): kappa-convention -> operator
+                            // convention (see the host-constant comment).
+                            const amrex::Real chi_par_raw =
+                                brag_e_convention * 3.16_rt * kb_te *
+                                tau_electron / PhysConst::m_e;
+                            const amrex::Real omega_tau =
+                                brag_omega_e_coefficient * tau_electron;
+                            const amrex::Real x =
+                                omega_tau * omega_tau * brag_b2;
+                            const amrex::Real chi_perp_raw =
+                                chi_par_raw *
+                                (brag_e_numerator_1 * x + 1.0_rt) /
+                                ((brag_e_denominator_2 * x +
+                                  brag_e_denominator_1) *
+                                     x +
+                                 1.0_rt);
+                            // Halo lift of the PARALLEL ceiling, same density
+                            // key as the ion channel (recomputed: the ion
+                            // block's copy is out of scope here). This is the
+                            // CEILING, not the perp boost below -- the
+                            // reference clamps xile_mx = xili_mx = 1e6 for
+                            // BOTH species, and the electron parallel channel
+                            // is the faster of the two drains, so restricting
+                            // the lift to ions would leave the halo electrons
+                            // throttled at the core clamp.
+                            amrex::Real par_hi_electron = brag_par_hi_e;
+                            if (lift_halo_par) {
+                                const amrex::Real guarded_density =
+                                    theta_implicit_mhd::smooth_positive_floor(
+                                        chi_charge_to_mass * face_density,
+                                        halo_boost_guard);
+                                const amrex::Real ratio =
+                                    halo_boost_reference / guarded_density;
+                                const amrex::Real halo_factor =
+                                    halo_boost_dp * ratio * ratio;
+                                if (halo_factor > 1.0_rt) {
+                                    par_hi_electron = std::min(
+                                        halo_par_hi_e,
+                                        brag_par_hi_e * halo_factor);
+                                }
+                            }
+                            brag_chi_par_electron = clamp_with(
+                                chi_par_raw, brag_par_lo_e, par_hi_electron);
+                            // Quasi-shorting boost (see the ion channel and
+                            // the qs_boost lambda): additive chi_perp, keyed
+                            // on the electron temperature, clamped after.
+                            // NO halo boost on the electron channel: the reference code
+                            // boosts the ION perp only (ntb.f90 t_cond ~584;
+                            // te_cond carries bare clamps) -- the halo drains
+                            // through ion conduction while the electron
+                            // channel keeps physical Braginskii.
+                            const amrex::Real chi_perp_electron_value =
+                                add_qs ? chi_perp_raw + qs_boost(face_te)
+                                       : chi_perp_raw;
+                            brag_chi_perp_electron = clamp_with(
+                                chi_perp_electron_value, brag_perp_lo_e,
+                                brag_perp_hi_e);
+                            // The reference code's te_cond: parallel at least perpendicular.
+                            brag_chi_par_electron = std::max(
+                                brag_chi_par_electron, brag_chi_perp_electron);
+                            // Wall interface faces: the clamped per-component
+                            // scalar chi selected by
+                            // implicit_mhd.wall_conduction_scale, not the nn
+                            // projection (see the ion channel). BOTH species
+                            // take the same clamp class -- the reference code anchors
+                            // both at 0.5 eV with xile_mx = xili_mx.
+                            chi_electron_face =
+                                wall_face
+                                    ? (wall_conduction_parallel_scale
+                                           ? brag_chi_par_electron
+                                           : brag_chi_perp_electron)
+                                    : brag_chi_perp_electron +
                                           (brag_chi_par_electron -
                                            brag_chi_perp_electron) *
-                                          brag_cross_scale * brag_bn * brag_bt /
-                                          (brag_b2_dir * conduction_pc_cap *
-                                           conduction_pc_cap)
-                                    : 0.0_rt;
+                                              brag_bn * brag_bn / brag_b2_dir;
+                        }
+                        amrex::Real conductive_flux;
+                        // Harmonic cap factor of the bulk flux (1 = uncapped),
+                        // kept for the preconditioner coefficient below.
+                        amrex::Real conduction_pc_cap = 1.0_rt;
+                        if (wall_face) {
+                            // One-sided rectified wall drain, gated at the
+                            // reachable-set anchor (see the ion channel
+                            // above): the interior e_int is the conduction-
+                            // stage value, the structure is unchanged.
+                            const amrex::Real interior_e_spec =
+                                wall_left_masked ? e_spec_electron_right
+                                                 : e_spec_electron_left;
+                            // Conductance beside the unchanged drain (see the
+                            // ion channel): the residual keeps its exact
+                            // floating-point association.
+                            amrex::Real drain;
+                            amrex::Real conductance = 0.0_rt;
+                            amrex::Real bath;
+                            if (wall_pin) {
+                                // Dirichlet pin (see the ion channel).
+                                drain = chi_electron_face * face_density *
+                                        (interior_e_spec -
+                                         wall_gate_e_spec_electron) *
+                                        2.0_rt * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_gate_e_spec_electron;
+                                if (emit_wall_rows) {
+                                    conductance = chi_electron_face *
+                                                  face_density * 2.0_rt *
+                                                  inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            } else {
+                                const amrex::Real gate =
+                                    theta_implicit_mhd::floor_outflow_limiter(
+                                        interior_e_spec,
+                                        wall_gate_e_spec_electron);
+                                drain = chi_electron_face * face_density *
+                                        (interior_e_spec -
+                                         wall_e_spec_electron) *
+                                        gate * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_e_spec_electron;
+                                if (emit_wall_rows) {
+                                    conductance = chi_electron_face *
+                                                  face_density * gate *
+                                                  inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            }
+                            // Cap on the wall exchange (see the ion channel
+                            // and wall_cap_flux): free-streaming or sonic,
+                            // per implicit_mhd.wall_heat_flux_cap.
+                            if (!wall_uncapped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(false, wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                            }
+                            if (emit_wall_rows) {
+                                const int ric = wall_left_masked ? i : il;
+                                const int rjc = wall_left_masked ? j : jl;
+                                const int rkc = wall_left_masked ? k : kl;
+                                const auto& interior =
+                                    wall_left_masked ? cell_right : cell_left;
+                                emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                              conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec, bath);
+                            }
+                            conductive_flux =
+                                wall_right_masked ? drain : -drain;
+                        } else if (z_end_wall_face) {
+                            // Conductive z-end exchange (see the ion
+                            // channel): hard half-cell Dirichlet reservoir
+                            // exchange, no free-streaming cap, one-sided
+                            // tensor scalar chi.
+                            const amrex::Real interior_e_spec =
+                                z_end_hi_face ? e_spec_electron_left
+                                              : e_spec_electron_right;
+                            amrex::Real drain =
+                                chi_electron_face * face_density *
+                                (interior_e_spec -
+                                 z_wall_bath_e_spec_electron) *
+                                2.0_rt * inverse_normal_size * corner_weight;
+                            amrex::Real conductance =
+                                chi_electron_face * face_density * 2.0_rt *
+                                inverse_normal_size * corner_weight;
+                            // implicit_mhd.wall_heat_flux_cap (see the ion
+                            // channel): same cap as the shaped-wall drain;
+                            // unset/"none" perform no arithmetic.
+                            amrex::Real z_end_cap = 1.0_rt;
+                            if (z_wall_capped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(false, z_wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                                z_end_cap = cap;
+                            }
+                            if (emit_wall_rows) {
+                                const int ric = z_end_hi_face ? il : i;
+                                const int rjc = z_end_hi_face ? jl : j;
+                                const int rkc = z_end_hi_face ? kl : k;
+                                const auto& interior =
+                                    z_end_hi_face ? cell_left : cell_right;
+                                emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                              conductance,
+                                              interior.safe_density);
+                                emit_wall_row(wall_row_electron + wall_row_zend_offset,
+                                              ric, rjc, rkc, conductance,
+                                              interior.safe_density);
+                                validate_wall_row(
+                                    ric, rjc, rkc, conductance, drain,
+                                    interior_e_spec,
+                                    z_wall_bath_e_spec_electron);
+                            }
+                            // Conduction-block end-face coefficient (see the
+                            // ion channel).
+                            if (emit_conduction_pc &&
+                                conduction_pc.contains(i, j, k)) {
+                                conduction_pc(i, j, k, conduction_pc_electron) =
+                                    conduction_pc_stage_weight *
+                                    chi_electron_face * corner_weight /
+                                    (z_end_cap * z_end_cap);
+                                conduction_pc(i, j, k, conduction_pc_face_density) =
+                                    face_density;
+                            }
+                            conductive_flux = z_end_hi_face ? drain : -drain;
+                        } else if (braginskii) {
+                            // Anisotropic tensor flux (see the ion channel).
+                            const amrex::Real gradient_normal =
+                                (e_spec_electron_right -
+                                 e_spec_electron_left) *
+                                inverse_normal_size;
+                            conductive_flux =
+                                -face_density *
+                                (brag_chi_perp_electron * gradient_normal +
+                                 (brag_chi_par_electron -
+                                  brag_chi_perp_electron) *
+                                     brag_bn *
+                                     (brag_bn * gradient_normal +
+                                      brag_cross_scale * brag_bt *
+                                          brag_grad_t_electron) /
+                                     brag_b2_dir);
+                            if (conduction_limit > 0.0_rt) {
+                                // cap at the conduction-stage temperature
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_te / PhysConst::m_e);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_te * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        } else {
+                            conductive_flux =
+                                -chi_electron_face * face_density *
+                                (e_spec_electron_right -
+                                 e_spec_electron_left) *
+                                inverse_normal_size;
+                            if (conduction_limit > 0.0_rt) {
+                                // cap at the conduction-stage temperature
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_te / PhysConst::m_e);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_te * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        }
+                        flux.electron_energy += conductive_flux;
+                        if (emit_conduction_pc && !wall_face &&
+                            !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                            conduction_pc(i, j, k, conduction_pc_electron) =
+                                conduction_pc_stage_weight * chi_electron_face /
+                                (conduction_pc_cap * conduction_pc_cap);
+                            conduction_pc(i, j, k, conduction_pc_face_density) =
+                                face_density;
+                            if (emit_conduction_pc_cross) {
+                                // Frozen cross-term coefficient of the tensor
+                                // flux (zero for the isotropic path).
+                                conduction_pc(i, j, k, conduction_pc_cross_electron) =
+                                    braginskii
+                                        ? conduction_pc_stage_weight *
+                                              (brag_chi_par_electron -
+                                               brag_chi_perp_electron) *
+                                              brag_cross_scale * brag_bn * brag_bt /
+                                              (brag_b2_dir * conduction_pc_cap *
+                                               conduction_pc_cap)
+                                        : 0.0_rt;
+                            }
                         }
                     }
                 }
-            }
 
 #if defined(WARPX_DIM_RZ)
-            if (reflect_wall && i == radial_wall_face) {
-                // Zero-flux wall (see the reflect_wall comment above):
-                // every ADVECTIVE fluid channel of the wall face -- mass,
-                // tangential momentum advection, electron/ion energies,
-                // U_par/U_perp, and the electron pdV velocity -- is
-                // EXACTLY zero, applied after the donor gating so no
-                // limiter can reintroduce a leak. The tangential Maxwell
-                // stress -B_n B_t/mu0 (the Alfven-fan torque channel the
-                // open B_n opens against the mirror states -- the E_i
-                // work drain of the last ring) takes its PEC-image value
-                // (zero) in BOTH the momentum flux and the magnetic work
-                // register, keeping the field-to-fluid work discretely
-                // paired. The NORMAL channel keeps the open fan in both
-                // registers: the free-space field genuinely acts on the
-                // wall band through the face (ram + total pressure -
-                // B_n^2 tension), and swapping it for the PEC image
-                // overcompresses the sealed last ring until the ring
-                // behind it deadlocks on the E_i floor (150-consecutive
-                // frozen Newton solves on the FRC open-wall wedge). The
-                // override is state-independent in structure, so the
-                // residual stays smooth for the JFNK probes.
-                flux.mass = 0.0_rt;
-                flux.momentum[1] = 0.0_rt;
-                flux.momentum[2] = 0.0_rt;
-                flux.momentum_magnetic[1] = 0.0_rt;
-                flux.momentum_magnetic[2] = 0.0_rt;
-                flux.electron_energy = 0.0_rt;
-                flux.ion_energy = 0.0_rt;
-                flux.ion_parallel_energy = 0.0_rt;
-                flux.ion_perp_energy = 0.0_rt;
-                flux.ion_internal_energy = 0.0_rt;
-                flux.viscous_dissipation = 0.0_rt;
-                flux.wall_friction_work = 0.0_rt;
-                flux.electron_velocity = 0.0_rt;
-            }
+                if (reflect_wall && i == radial_wall_face) {
+                    // Zero-flux wall (see the reflect_wall comment above):
+                    // every ADVECTIVE fluid channel of the wall face -- mass,
+                    // tangential momentum advection, electron/ion energies,
+                    // U_par/U_perp, and the electron pdV velocity -- is
+                    // EXACTLY zero, applied after the donor gating so no
+                    // limiter can reintroduce a leak. The tangential Maxwell
+                    // stress -B_n B_t/mu0 (the Alfven-fan torque channel the
+                    // open B_n opens against the mirror states -- the E_i
+                    // work drain of the last ring) takes its PEC-image value
+                    // (zero) in BOTH the momentum flux and the magnetic work
+                    // register, keeping the field-to-fluid work discretely
+                    // paired. The NORMAL channel keeps the open fan in both
+                    // registers: the free-space field genuinely acts on the
+                    // wall band through the face (ram + total pressure -
+                    // B_n^2 tension), and swapping it for the PEC image
+                    // overcompresses the sealed last ring until the ring
+                    // behind it deadlocks on the E_i floor (150-consecutive
+                    // frozen Newton solves on the FRC open-wall wedge). The
+                    // override is state-independent in structure, so the
+                    // residual stays smooth for the JFNK probes.
+                    flux.mass = 0.0_rt;
+                    flux.momentum[1] = 0.0_rt;
+                    flux.momentum[2] = 0.0_rt;
+                    flux.momentum_magnetic[1] = 0.0_rt;
+                    flux.momentum_magnetic[2] = 0.0_rt;
+                    flux.electron_energy = 0.0_rt;
+                    flux.ion_energy = 0.0_rt;
+                    flux.ion_parallel_energy = 0.0_rt;
+                    flux.ion_perp_energy = 0.0_rt;
+                    flux.ion_internal_energy = 0.0_rt;
+                    flux.viscous_dissipation = 0.0_rt;
+                    flux.wall_friction_work = 0.0_rt;
+                    flux.electron_velocity = 0.0_rt;
+                }
 #endif
-            flux_arr(i, j, k, flux_mass) = flux.mass;
-            for (int component = 0; component < 3; ++component) {
-                flux_arr(i, j, k, flux_momentum + component) =
-                    flux.momentum[component];
-                flux_arr(i, j, k, flux_magnetic + component) =
-                    flux.momentum_magnetic[component];
-            }
-            flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
-            flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
-            // Zero under the non-cgl closures (hlld_flux leaves the
-            // struct defaults untouched there).
-            flux_arr(i, j, k, flux_ion_parallel_energy) =
-                flux.ion_parallel_energy;
-            flux_arr(i, j, k, flux_ion_perp_energy) = flux.ion_perp_energy;
-            // Zero under the non-dual closures (the kernels leave the
-            // struct default untouched there).
-            flux_arr(i, j, k, flux_ion_internal_energy) =
-                flux.ion_internal_energy;
-            // Zero unless dual_energy with dual_energy_viscous_heating =
-            // stress_work (the viscous block leaves the default otherwise).
-            flux_arr(i, j, k, flux_viscous_dissipation) =
-                flux.viscous_dissipation;
-            // Zero unless wall_friction_heating = drop at a no-slip face.
-            flux_arr(i, j, k, flux_wall_friction_work) =
-                flux.wall_friction_work;
-            flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
-            flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
-            flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
-            flux_arr(i, j, k, flux_signal_left) = flux.signal_left;
-            flux_arr(i, j, k, flux_signal_right) = flux.signal_right;
-            flux_arr(i, j, k, flux_alfven_left) = flux.signal_alfven_left;
-            flux_arr(i, j, k, flux_alfven_right) = flux.signal_alfven_right;
-        });
+                flux_arr(i, j, k, flux_mass) = flux.mass;
+                for (int component = 0; component < 3; ++component) {
+                    flux_arr(i, j, k, flux_momentum + component) =
+                        flux.momentum[component];
+                    flux_arr(i, j, k, flux_magnetic + component) =
+                        flux.momentum_magnetic[component];
+                }
+                flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
+                flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
+                // Zero under the non-cgl closures (hlld_flux leaves the
+                // struct defaults untouched there).
+                flux_arr(i, j, k, flux_ion_parallel_energy) =
+                    flux.ion_parallel_energy;
+                flux_arr(i, j, k, flux_ion_perp_energy) = flux.ion_perp_energy;
+                // Zero under the non-dual closures (the kernels leave the
+                // struct default untouched there).
+                flux_arr(i, j, k, flux_ion_internal_energy) =
+                    flux.ion_internal_energy;
+                // Zero unless dual_energy with dual_energy_viscous_heating =
+                // stress_work (the viscous block leaves the default otherwise).
+                flux_arr(i, j, k, flux_viscous_dissipation) =
+                    flux.viscous_dissipation;
+                // Zero unless wall_friction_heating = drop at a no-slip face.
+                flux_arr(i, j, k, flux_wall_friction_work) =
+                    flux.wall_friction_work;
+                flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
+                flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
+                flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
+                flux_arr(i, j, k, flux_signal_left) = flux.signal_left;
+                flux_arr(i, j, k, flux_signal_right) = flux.signal_right;
+                flux_arr(i, j, k, flux_alfven_left) = flux.signal_alfven_left;
+                flux_arr(i, j, k, flux_alfven_right) = flux.signal_alfven_right;
+            });
+        } else {
+            // fused_residual >= 3: the face-flux evaluation as two launches per
+            // direction with the same per-face expressions in the same order.
+            // (a) advective: loads, reconstruction, wall image, the fan, the
+            // donor gates, the wall override and the stores of every register;
+            // (b) diffusive: the cell states reloaded, the viscous stress and
+            // the conduction (wall drains, caps, preconditioner registers) added
+            // to the six registers they touch, read back from (a). Each launch
+            // carries about half the live state of the single kernel.
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // The face at index n separates cells n-1 (left) and n (right)
+                // along the normal direction.
+                int il = i;
+                int jl = j;
+                int kl = k;
+                shift_index(il, jl, kl, normal, -1);
+#if defined(WARPX_DIM_RZ)
+                if (radial_faces) {
+                    const amrex::Real face_radius =
+                        radial_lower + i * radial_cell_size;
+                    if (face_radius == 0.0_rt) {
+                        for (int component = 0;
+                             component < FaceFluxComponent::count; ++component) {
+                            flux_arr(i, j, k, component) = 0.0_rt;
+                        }
+                        return;
+                    }
+                }
+#endif
+                const auto load_state = [=] (const int ic, const int jc,
+                                             const int kc) {
+                    if (parameters.cgl_closure) {
+                        return theta_implicit_mhd::load_cell_state_hlld_cgl(
+                            rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
+                            ic, jc, kc, normal, parameters);
+                    }
+                    if (parameters.dual_energy_closure) {
+                        // Blended-pressure loader: every pressure consumer of
+                        // the fan (momentum flux, signal bounds, conduction
+                        // temperatures) sees the fk blend; the E_i channel
+                        // machinery keeps the total_energy assembly.
+                        return theta_implicit_mhd::load_cell_state_hlld_dual(
+                            rho, mom, energy, ion_e, ion_int, ion_int_old,
+                            j_cc, b_cc, ic, jc, kc, normal, parameters);
+                    }
+                    return theta_implicit_mhd::load_cell_state_hlld(
+                        rho, mom, energy, ion_e, j_cc, b_cc, ic, jc, kc,
+                        normal, parameters);
+                };
+                auto left = load_state(il, jl, kl);
+                auto right = load_state(i, j, k);
+                // Cell-centred donor states for the DIFFUSIVE legs. The
+                // reconstruction below rewrites left/right in place for the
+                // advective fan only. A viscous stress or a conductive flux
+                // differenced from reconstructed FACE states is a limiter
+                // residual, not a gradient: on a linear profile the two
+                // reconstructed values of a face coincide and the flux
+                // vanishes (measured on the 1D shear and conduction decks
+                // under the median limiter: 5% of the nominal nu and chi).
+                // The diffusive legs difference the cell values a distance
+                // dn apart, which is what inverse_normal_size assumes, and
+                // take their face densities, coefficient pressures, cap
+                // temperatures and field direction from the same cell
+                // values. Donor cell reconstruction leaves left/right
+                // untouched, so these copies are then bit-identical to them.
+                // At a shaped-wall interface face the masked side's copy is
+                // refreshed below with the absorb image, so the diffusive legs
+                // see the same wall image the advective fan does.
+                auto cell_left = left;
+                auto cell_right = right;
+
+                if (reconstruct_faces) {
+                    // Four-cell normal stencil (far_left, left | right,
+                    // far_right); the outer two live in the second guard
+                    // layer at a grid or domain edge.
+                    int ill = il, jll = jl, kll = kl;
+                    shift_index(ill, jll, kll, normal, -1);
+                    int irr = i, jrr = j, krr = k;
+                    shift_index(irr, jrr, krr, normal, 1);
+                    bool donor_cell = false;
+                    if (reconstruction_first_masked_cc != nullptr) {
+                        const auto masked = [=] (const int ic, const int jc) {
+                            const int jz = std::max(
+                                wall_mask_z_lo, std::min(wall_mask_z_hi, jc));
+                            return ic >= reconstruction_first_masked_cc[jz];
+                        };
+                        donor_cell = masked(ill, jll) || masked(il, jl) ||
+                                     masked(i, j) || masked(irr, jrr);
+                    }
+                    if (!donor_cell && reconstruction_no_slip) {
+                        const auto pinned = [=] (const int ic, const int jc) {
+                            for (int dj = -reconstruction_no_slip_width;
+                                 dj <= reconstruction_no_slip_width; ++dj) {
+                                const int jz = std::max(
+                                    wall_mask_z_lo,
+                                    std::min(wall_mask_z_hi, jc + dj));
+                                if (ic >= reconstruction_first_masked_cc[jz] -
+                                              reconstruction_no_slip_width) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        };
+                        donor_cell = pinned(il, jl) || pinned(i, j);
+                    }
+                    if (!donor_cell) {
+                        const auto far_left = load_state(ill, jll, kll);
+                        const auto far_right = load_state(irr, jrr, krr);
+                        theta_implicit_mhd::reconstruct_face_states(
+                            far_left, far_right, normal, parameters, left, right);
+                    }
+                }
+
+                // Wall face classification against the cell-centered mask
+                // (see the host constants above the loop): exactly one
+                // masked cell = stair-step interface face, both masked =
+                // interior metal. The table's z index is clamped to its
+                // stored range (constant continuation, like the polyline).
+                // Always false when the thermal wall is off (nullptr table
+                // never read); the mask is static geometry, so every branch
+                // below is C-infinity in the state.
+                bool wall_left_masked = false;
+                bool wall_right_masked = false;
+                if (wall_mechanics) {
+                    const int jzl = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, jl));
+                    const int jzr = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, j));
+                    wall_left_masked = (il >= wall_first_masked_cc[jzl]);
+                    wall_right_masked = (i >= wall_first_masked_cc[jzr]);
+                }
+                const bool wall_interface =
+                    (wall_left_masked != wall_right_masked);
+                // Donor indices for the positivity gates: interface faces
+                // gate BOTH sides on the interior donor (the masked side
+                // presents the interior's absorb image below, so its frozen
+                // band arrays are not this face's donor).
+                int donor_il = il, donor_jl = jl, donor_kl = kl;
+                int donor_ir = i, donor_jr = j, donor_kr = k;
+                if (wall_interface) {
+                    if (wall_right_masked) {
+                        donor_ir = il; donor_jr = jl; donor_kr = kl;
+                    } else {
+                        donor_il = i; donor_jl = j; donor_kl = k;
+                    }
+                    // Absorbing DIELECTRIC image (the r_max absorbing-wall
+                    // idea applied per stair face, with a no-injection
+                    // amendment): the masked side presents the INTERIOR
+                    // state with its normal momentum replaced by the
+                    // INTO-WALL smooth absolute value m |m|/(|m|+...) --
+                    // C-infinity, exactly zero at stagnation. On approach
+                    // the image matches the interior (the stair admits
+                    // incident plasma at its signal-limited rate: a
+                    // frozen-dust image instead stagnates a supersonic
+                    // contact jet against a rigid corner, converting ram
+                    // into a keV-scale E_i pocket at the stair steps -- the
+                    // rr12 v2 S0w corpse, 116 keV one cell inside the cone
+                    // step corner at first wall contact). On RETREAT the
+                    // image MIRRORS the interior, so the face flux closes:
+                    // a dielectric machine wall supplies no plasma, ever --
+                    // the held-ghost exhaust recipe would inject at half
+                    // the retreat rate through the central average. E_i is
+                    // copied verbatim (the r_max absorber's ghost carries
+                    // the incident kinetic energy unadjusted); the thermal
+                    // reservoir acts ONLY through the conduction drain
+                    // below.
+                    auto& image = wall_right_masked ? right : left;
+                    const auto& interior_state =
+                        wall_right_masked ? left : right;
+                    image = interior_state;
+                    const amrex::Real rectifier_width =
+                        parameters.hlld_kappa_signal *
+                        std::sqrt(
+                            parameters.gamma_e *
+                            (parameters.gamma_e - 1.0_rt) *
+                            std::max(interior_state.electron_energy,
+                                     parameters.electron_pressure_floor /
+                                         (parameters.gamma_e - 1.0_rt)) *
+                            interior_state.safe_density);
+                    const amrex::Real into_wall_sign =
+                        wall_right_masked ? 1.0_rt : -1.0_rt;
+                    // m * smooth_sign(m, w) is the C-infinity |m| with an
+                    // exact zero at m = 0 (no spurious O(w) suction on
+                    // quiescent faces).
+                    const amrex::Real normal_momentum =
+                        into_wall_sign * interior_state.momentum[normal] *
+                        theta_implicit_mhd::smooth_sign(
+                            interior_state.momentum[normal], rectifier_width);
+                    image.momentum[normal] = normal_momentum;
+                    image.ion_velocity[normal] =
+                        normal_momentum / image.safe_density;
+                    image.electron_velocity_normal =
+                        interior_state.electron_velocity_normal +
+                        (image.ion_velocity[normal] -
+                         interior_state.ion_velocity[normal]);
+                    image.wave_speed =
+                        std::max(std::abs(image.ion_velocity[normal]) +
+                                     image.sound_speed,
+                                 std::abs(image.electron_velocity_normal));
+                    image.fast_wave_speed =
+                        std::abs(image.ion_velocity[normal]) +
+                        image.fast_speed;
+                }
+                if (wall_interface) {
+                    // The masked side of an interface face is the absorb image
+                    // just built (not a fluid cell): the diffusive legs must
+                    // difference against it, exactly as before the cell-state
+                    // copies existed (interface faces are donor cell by the
+                    // mask check, so the interior side is unchanged).
+                    if (wall_right_masked) {
+                        cell_right = right;
+                    } else {
+                        cell_left = left;
+                    }
+                }
+
+                amrex::Real bn_face = bn_staggered(i, j, k);
+                if (add_external) {
+                    bn_face += bn_external(i, j, k);
+                }
+                auto flux =
+                    use_central
+                        ? theta_implicit_mhd::central_flux(left, right, bn_face,
+                                                           normal, parameters)
+                        : theta_implicit_mhd::hlld_flux(left, right, bn_face,
+                                                        normal, parameters);
+
+                // Donor-gated positivity guards on the advected mass and
+                // energy channels, gating on the theta-extrapolated
+                // end-of-step donor values -- identical policy to face_flux
+                // (momentum, stress, and induction channels have no floors).
+                // The donor SIDE is selected by a C-infinity smoothed flux
+                // sign: near-stagnant faces whose two donors carry different
+                // limiter values (a floored halo cell against a healthy
+                // neighbor) would otherwise present a derivative kink at
+                // every zero crossing, which defeats the Newton line search
+                // on near-floor equilibria. The blend width scales with the
+                // face signal span times the donor magnitudes, so an exactly
+                // zero flux stays exactly zero (static contacts remain
+                // machine-preserved) and a strong flux keeps its pure donor.
+                const amrex::Real ext =
+                    (1.0_rt - parameters.theta) / parameters.theta;
+                const amrex::Real signal_span =
+                    0.5_rt * (flux.signal_right - flux.signal_left);
+                const auto donor_blend = [=] (const amrex::Real flux_value,
+                                              const amrex::Real limiter_left,
+                                              const amrex::Real limiter_right,
+                                              const amrex::Real value_scale) {
+                    const amrex::Real width = parameters.hlld_kappa_signal *
+                                              signal_span * value_scale;
+                    const amrex::Real left_weight =
+                        0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                               flux_value, width));
+                    return left_weight * limiter_left +
+                           (1.0_rt - left_weight) * limiter_right;
+                };
+                const auto donor_end = [=] (const amrex::Array4<const amrex::Real>& now,
+                                            const amrex::Array4<const amrex::Real>& old,
+                                            const int id, const int jd, const int kd) {
+                    return now(id, jd, kd) * (1.0_rt + ext) - old(id, jd, kd) * ext;
+                };
+                // The mass gate anchors at the halo pedestal when active
+                // (see FluxParameters::halo_pedestal): outflow from a donor
+                // closes smoothly at rho_ped, holding the pedestal band as a
+                // dynamically invariant set while the Newton admissibility
+                // bound stays at the far-lower positivity floor -- no cell
+                // ever operates on a bound.
+                // The offset-density advection (FluxParameters::
+                // advection_density_offset) deliberately does NOT anchor
+                // this gate: its own C^1 rectifier already carries the reference code's
+                // in-loop MAX(en, 0) (see offset_density_shift), and it
+                // does so by driving the TRANSPORTED density to zero below
+                // the offset -- a sub-offset donor has no advective outflow
+                // left for a gate to close. This gate therefore keeps its
+                // floor/pedestal anchors, and the Newton admissibility
+                // bound is untouched.
+                const amrex::Real mass_gate_floor = std::max(
+                    parameters.density_floor, parameters.halo_pedestal);
+                flux.mass *= donor_blend(
+                    flux.mass,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(rho, rho_old, donor_il, donor_jl, donor_kl),
+                        mass_gate_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(rho, rho_old, donor_ir, donor_jr, donor_kr),
+                        mass_gate_floor),
+                    0.5_rt * (left.safe_density + right.safe_density));
+                // The energy gates anchor at their pedestal values when the
+                // pedestal is active (see FluxParameters::halo_pedestal*):
+                // the pedestal is an f-scaled image of the peak STATE, so
+                // every block's band is held off its bound the same way the
+                // mass band is.
+                const amrex::Real electron_energy_floor = std::max(
+                    parameters.electron_pressure_floor /
+                        (parameters.gamma_e - 1.0_rt),
+                    parameters.halo_pedestal_electron_energy);
+                flux.electron_energy *= donor_blend(
+                    flux.electron_energy,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(energy, energy_old, donor_il, donor_jl,
+                                  donor_kl),
+                        electron_energy_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(energy, energy_old, donor_ir, donor_jr,
+                                  donor_kr),
+                        electron_energy_floor),
+                    0.5_rt * (left.electron_energy + right.electron_energy) +
+                        electron_energy_floor);
+                if (parameters.total_energy_closure) {
+                    const auto ion_internal_end = [=] (const int id, const int jd,
+                                                       const int kd) {
+                        const amrex::Real ei_end =
+                            donor_end(ion_e, ion_e_old, id, jd, kd);
+                        amrex::Real kinetic_end = 0.0_rt;
+                        for (int component = 0; component < 3; ++component) {
+                            const amrex::Real mom_end =
+                                mom(id, jd, kd, component) * (1.0_rt + ext) -
+                                mom_old(id, jd, kd, component) * ext;
+                            kinetic_end += mom_end * mom_end;
+                        }
+                        kinetic_end *=
+                            0.5_rt / std::max(donor_end(rho, rho_old, id, jd, kd),
+                                              parameters.density_floor);
+                        return ei_end - kinetic_end;
+                    };
+                    const amrex::Real ion_energy_floor = std::max(
+                        parameters.ion_pressure_floor /
+                            (parameters.gamma_i - 1.0_rt),
+                        parameters.halo_pedestal_ion_internal);
+                    flux.ion_energy *= donor_blend(
+                        flux.ion_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            ion_internal_end(donor_il, donor_jl, donor_kl),
+                            ion_energy_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            ion_internal_end(donor_ir, donor_jr, donor_kr),
+                            ion_energy_floor),
+                        0.5_rt * (left.ion_energy + right.ion_energy) +
+                            ion_energy_floor);
+                }
+                if (parameters.cgl_closure) {
+                    // CGL internal-energy channels: same donor-gated guards,
+                    // gating on the U fields directly (U_par and U_perp are
+                    // pure internal energies -- no kinetic subtraction), with
+                    // U_par floored at p_i_floor/2 and U_perp at p_i_floor.
+                    const amrex::Real parallel_floor = std::max(
+                        0.5_rt * parameters.ion_pressure_floor,
+                        parameters.halo_pedestal_ion_parallel);
+                    flux.ion_parallel_energy *= donor_blend(
+                        flux.ion_parallel_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(upar, upar_old, donor_il, donor_jl,
+                                      donor_kl),
+                            parallel_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(upar, upar_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            parallel_floor),
+                        0.5_rt * (left.ion_parallel_energy +
+                                  right.ion_parallel_energy) +
+                            parallel_floor);
+                    const amrex::Real perp_floor =
+                        std::max(parameters.ion_pressure_floor,
+                                 parameters.halo_pedestal_ion_perp);
+                    flux.ion_perp_energy *= donor_blend(
+                        flux.ion_perp_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(uperp, uperp_old, donor_il, donor_jl,
+                                      donor_kl),
+                            perp_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(uperp, uperp_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            perp_floor),
+                        0.5_rt *
+                                (left.ion_perp_energy + right.ion_perp_energy) +
+                            perp_floor);
+                }
+                if (parameters.dual_energy_closure) {
+                    // Dual-energy auxiliary internal channel: same donor-gated
+                    // guard, gating on U_i directly (a pure internal energy --
+                    // no kinetic subtraction), floored at the internal-energy
+                    // image of the ion pressure floor and anchored at the SAME
+                    // internal pedestal image as the E_i gate.
+                    const amrex::Real internal_gate_floor = std::max(
+                        parameters.ion_pressure_floor /
+                            (parameters.gamma_i - 1.0_rt),
+                        parameters.halo_pedestal_ion_internal);
+                    flux.ion_internal_energy *= donor_blend(
+                        flux.ion_internal_energy,
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(ion_int, ion_int_old, donor_il, donor_jl,
+                                      donor_kl),
+                            internal_gate_floor),
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            donor_end(ion_int, ion_int_old, donor_ir, donor_jr,
+                                      donor_kr),
+                            internal_gate_floor),
+                        0.5_rt * (left.ion_internal_energy +
+                                  right.ion_internal_energy) +
+                            internal_gate_floor);
+                }
+
+#if defined(WARPX_DIM_RZ)
+                if (reflect_wall && i == radial_wall_face) {
+                    // Zero-flux wall (see the reflect_wall comment above):
+                    // every ADVECTIVE fluid channel of the wall face -- mass,
+                    // tangential momentum advection, electron/ion energies,
+                    // U_par/U_perp, and the electron pdV velocity -- is
+                    // EXACTLY zero, applied after the donor gating so no
+                    // limiter can reintroduce a leak. The tangential Maxwell
+                    // stress -B_n B_t/mu0 (the Alfven-fan torque channel the
+                    // open B_n opens against the mirror states -- the E_i
+                    // work drain of the last ring) takes its PEC-image value
+                    // (zero) in BOTH the momentum flux and the magnetic work
+                    // register, keeping the field-to-fluid work discretely
+                    // paired. The NORMAL channel keeps the open fan in both
+                    // registers: the free-space field genuinely acts on the
+                    // wall band through the face (ram + total pressure -
+                    // B_n^2 tension), and swapping it for the PEC image
+                    // overcompresses the sealed last ring until the ring
+                    // behind it deadlocks on the E_i floor (150-consecutive
+                    // frozen Newton solves on the FRC open-wall wedge). The
+                    // override is state-independent in structure, so the
+                    // residual stays smooth for the JFNK probes.
+                    flux.mass = 0.0_rt;
+                    flux.momentum[1] = 0.0_rt;
+                    flux.momentum[2] = 0.0_rt;
+                    flux.momentum_magnetic[1] = 0.0_rt;
+                    flux.momentum_magnetic[2] = 0.0_rt;
+                    flux.electron_energy = 0.0_rt;
+                    flux.ion_energy = 0.0_rt;
+                    flux.ion_parallel_energy = 0.0_rt;
+                    flux.ion_perp_energy = 0.0_rt;
+                    flux.ion_internal_energy = 0.0_rt;
+                    flux.viscous_dissipation = 0.0_rt;
+                    flux.wall_friction_work = 0.0_rt;
+                    flux.electron_velocity = 0.0_rt;
+                }
+#endif
+                flux_arr(i, j, k, flux_mass) = flux.mass;
+                for (int component = 0; component < 3; ++component) {
+                    flux_arr(i, j, k, flux_momentum + component) =
+                        flux.momentum[component];
+                    flux_arr(i, j, k, flux_magnetic + component) =
+                        flux.momentum_magnetic[component];
+                }
+                flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
+                flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
+                // Zero under the non-cgl closures (hlld_flux leaves the
+                // struct defaults untouched there).
+                flux_arr(i, j, k, flux_ion_parallel_energy) =
+                    flux.ion_parallel_energy;
+                flux_arr(i, j, k, flux_ion_perp_energy) = flux.ion_perp_energy;
+                // Zero under the non-dual closures (the kernels leave the
+                // struct default untouched there).
+                flux_arr(i, j, k, flux_ion_internal_energy) =
+                    flux.ion_internal_energy;
+                // Zero unless dual_energy with dual_energy_viscous_heating =
+                // stress_work (the viscous block leaves the default otherwise).
+                flux_arr(i, j, k, flux_viscous_dissipation) =
+                    flux.viscous_dissipation;
+                // Zero unless wall_friction_heating = drop at a no-slip face.
+                flux_arr(i, j, k, flux_wall_friction_work) =
+                    flux.wall_friction_work;
+                flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
+                flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
+                flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
+                flux_arr(i, j, k, flux_signal_left) = flux.signal_left;
+                flux_arr(i, j, k, flux_signal_right) = flux.signal_right;
+                flux_arr(i, j, k, flux_alfven_left) = flux.signal_alfven_left;
+                flux_arr(i, j, k, flux_alfven_right) = flux.signal_alfven_right;
+            });
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // The face at index n separates cells n-1 (left) and n (right)
+                // along the normal direction.
+                int il = i;
+                int jl = j;
+                int kl = k;
+                shift_index(il, jl, kl, normal, -1);
+#if defined(WARPX_DIM_RZ)
+                if (radial_faces) {
+                    const amrex::Real face_radius =
+                        radial_lower + i * radial_cell_size;
+                    if (face_radius == 0.0_rt) {
+                        // the advective launch zeroed every register here
+                        return;
+                    }
+                }
+#endif
+                const auto load_state = [=] (const int ic, const int jc,
+                                             const int kc) {
+                    if (parameters.cgl_closure) {
+                        return theta_implicit_mhd::load_cell_state_hlld_cgl(
+                            rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
+                            ic, jc, kc, normal, parameters);
+                    }
+                    if (parameters.dual_energy_closure) {
+                        // Blended-pressure loader: every pressure consumer of
+                        // the fan (momentum flux, signal bounds, conduction
+                        // temperatures) sees the fk blend; the E_i channel
+                        // machinery keeps the total_energy assembly.
+                        return theta_implicit_mhd::load_cell_state_hlld_dual(
+                            rho, mom, energy, ion_e, ion_int, ion_int_old,
+                            j_cc, b_cc, ic, jc, kc, normal, parameters);
+                    }
+                    return theta_implicit_mhd::load_cell_state_hlld(
+                        rho, mom, energy, ion_e, j_cc, b_cc, ic, jc, kc,
+                        normal, parameters);
+                };
+                // Diffusive launch (fused_residual >= 3): the cell-centred donor
+                // states the viscous and conductive legs difference -- the same
+                // loads the advective launch copied into cell_left/cell_right.
+                auto cell_left = load_state(il, jl, kl);
+                auto cell_right = load_state(i, j, k);
+                bool wall_left_masked = false;
+                bool wall_right_masked = false;
+                if (wall_mechanics) {
+                    const int jzl = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, jl));
+                    const int jzr = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, j));
+                    wall_left_masked = (il >= wall_first_masked_cc[jzl]);
+                    wall_right_masked = (i >= wall_first_masked_cc[jzr]);
+                }
+                const bool wall_interface =
+                    (wall_left_masked != wall_right_masked);
+                if (wall_interface) {
+                    // The masked side presents the absorb image of the interior
+                    // state, built exactly as in the advective launch: from the
+                    // fan states, which are the cell loads at every interface face
+                    // unless a reconstruction ran there (it is donor cell by the
+                    // mask check; the decision is replicated to the letter).
+                    auto interior_state = wall_right_masked ? cell_left : cell_right;
+                    if (reconstruct_faces) {
+                        int ill = il, jll = jl, kll = kl;
+                        shift_index(ill, jll, kll, normal, -1);
+                        int irr = i, jrr = j, krr = k;
+                        shift_index(irr, jrr, krr, normal, 1);
+                        bool donor_cell = false;
+                        if (reconstruction_first_masked_cc != nullptr) {
+                            const auto masked = [=] (const int ic, const int jc) {
+                                const int jz = std::max(
+                                    wall_mask_z_lo, std::min(wall_mask_z_hi, jc));
+                                return ic >= reconstruction_first_masked_cc[jz];
+                            };
+                            donor_cell = masked(ill, jll) || masked(il, jl) ||
+                                         masked(i, j) || masked(irr, jrr);
+                        }
+                        if (!donor_cell && reconstruction_no_slip) {
+                            const auto pinned = [=] (const int ic, const int jc) {
+                                for (int dj = -reconstruction_no_slip_width;
+                                     dj <= reconstruction_no_slip_width; ++dj) {
+                                    const int jz = std::max(
+                                        wall_mask_z_lo,
+                                        std::min(wall_mask_z_hi, jc + dj));
+                                    if (ic >= reconstruction_first_masked_cc[jz] -
+                                                  reconstruction_no_slip_width) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            };
+                            donor_cell = pinned(il, jl) || pinned(i, j);
+                        }
+                        if (!donor_cell) {
+                            const auto far_left = load_state(ill, jll, kll);
+                            const auto far_right = load_state(irr, jrr, krr);
+                            auto left = cell_left;
+                            auto right = cell_right;
+                            theta_implicit_mhd::reconstruct_face_states(
+                                far_left, far_right, normal, parameters, left, right);
+                            interior_state = wall_right_masked ? left : right;
+                        }
+                    }
+                    auto& image = wall_right_masked ? cell_right : cell_left;
+                    image = interior_state;
+                    const amrex::Real rectifier_width =
+                        parameters.hlld_kappa_signal *
+                        std::sqrt(
+                            parameters.gamma_e *
+                            (parameters.gamma_e - 1.0_rt) *
+                            std::max(interior_state.electron_energy,
+                                     parameters.electron_pressure_floor /
+                                         (parameters.gamma_e - 1.0_rt)) *
+                            interior_state.safe_density);
+                    const amrex::Real into_wall_sign =
+                        wall_right_masked ? 1.0_rt : -1.0_rt;
+                    // m * smooth_sign(m, w) is the C-infinity |m| with an
+                    // exact zero at m = 0 (no spurious O(w) suction on
+                    // quiescent faces).
+                    const amrex::Real normal_momentum =
+                        into_wall_sign * interior_state.momentum[normal] *
+                        theta_implicit_mhd::smooth_sign(
+                            interior_state.momentum[normal], rectifier_width);
+                    image.momentum[normal] = normal_momentum;
+                    image.ion_velocity[normal] =
+                        normal_momentum / image.safe_density;
+                    image.electron_velocity_normal =
+                        interior_state.electron_velocity_normal +
+                        (image.ion_velocity[normal] -
+                         interior_state.ion_velocity[normal]);
+                    image.wave_speed =
+                        std::max(std::abs(image.ion_velocity[normal]) +
+                                     image.sound_speed,
+                                 std::abs(image.electron_velocity_normal));
+                    image.fast_wave_speed =
+                        std::abs(image.ion_velocity[normal]) +
+                        image.fast_speed;
+                }
+                amrex::Real bn_face = bn_staggered(i, j, k);
+                if (add_external) {
+                    bn_face += bn_external(i, j, k);
+                }
+                // The six face registers the diffusive legs modify, as the
+                // advective launch stored them: the same values the single-launch
+                // kernel holds at this point, so the += below are the same sums.
+                theta_implicit_mhd::FaceFlux flux{};
+                for (int component = 0; component < 3; ++component) {
+                    flux.momentum[component] =
+                        flux_arr(i, j, k, flux_momentum + component);
+                }
+                flux.electron_energy = flux_arr(i, j, k, flux_electron_energy);
+                flux.ion_energy = flux_arr(i, j, k, flux_ion_energy);
+                flux.ion_internal_energy =
+                    flux_arr(i, j, k, flux_ion_internal_energy);
+
+                // Explicit ion viscosity (implicit_mhd.viscosity): the
+                // normal-gradient viscous stress on the SAME face registers,
+                // evaluated at the theta-stage states like every other flux
+                // term. The momentum stress and its velocity-weighted work
+                // are added as an exactly conservative pair AFTER the donor
+                // gates (which only scale the advective channels): gating one
+                // member of the pair without the other converts stress work
+                // into a spurious energy source/sink. The reflect wall face
+                // passes no viscous flux either -- the override below zeroes
+                // the tangential pair, and the normal member must not survive
+                // alone.
+                // Wall viscosity band (see the host constants): a face is a
+                // band face when either adjacent cell sits within
+                // wall_viscosity_mask_width cells (Chebyshev distance over
+                // the stair-step tables) of the masked contour. The band
+                // SUBSTITUTES one coefficient for both the momentum stress
+                // AND its heating work (the conservative pair must never
+                // split): wall_viscosity_band_value [Pa s] when positive
+                // (the reference code's small_vis pedestal), else the legacy exact zero
+                // -- realized by skipping the block entirely, so the default
+                // stays bit-identical.
+                bool viscosity_slip_face = false;
+                if (wall_viscosity_first_masked != nullptr) {
+                    const auto near_wall = [&] (const int ic, const int jc) {
+                        for (int dj = -wall_viscosity_width;
+                             dj <= wall_viscosity_width; ++dj) {
+                            const int jz = std::max(
+                                wall_mask_z_lo,
+                                std::min(wall_mask_z_hi, jc + dj));
+                            if (ic >= wall_viscosity_first_masked[jz] -
+                                           wall_viscosity_width) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    viscosity_slip_face = near_wall(il, jl) || near_wall(i, j);
+                }
+                const bool viscosity_band_face =
+                    viscosity_slip_face && wall_viscosity_pedestal;
+                // NO-SLIP wall FACE condition (implicit_mhd.wall_no_slip):
+                // a no-slip wall constrains the TANGENTIAL slip AT the
+                // contour, u_t|wall = 0, and nothing else. On a stair
+                // interface face the masked side therefore presents the
+                // ANTISYMMETRIC tangential image of the interior state,
+                // -u_t, so the face-centered tangential velocity is exactly
+                // zero and the viscous difference quotient
+                // (u_t^image - u_t^interior)/dn = -2 u_t/dn is the half-cell
+                // one-sided wall gradient (0 - u_t)/(dn/2): the textbook
+                // wall shear tau_w = mu u_t/(dn/2). The NORMAL component is
+                // untouched -- the fluid stays free to lift off the wall (and
+                // to be scraped by the absorbing image, which owns that
+                // channel) -- exactly as the interior cell momentum stays a
+                // live unknown. Because the face velocity is zero the paired
+                // viscous WORK vanishes on the tangential components: the
+                // wall does no work, so the tangential kinetic energy the
+                // stress removes is converted to internal energy in the
+                // adjacent cell instead of being exported. Static geometry,
+                // C-infinity in the state, and it is a plain face flux, so
+                // the JFNK Jacobian sees it like any other viscous term.
+                const bool no_slip_face = wall_no_slip && wall_interface;
+                if (add_viscosity &&
+                    (!viscosity_slip_face || viscosity_band_face || no_slip_face)
+#if defined(WARPX_DIM_RZ)
+                    && !(reflect_wall && i == radial_wall_face)
+#endif
+                ) {
+                    const amrex::Real face_density =
+                        0.5_rt * (cell_left.density + cell_right.density);
+                    // Interior: rho_f nu (implicit_mhd.viscosity is the
+                    // kinematic-style knob). Band: the dynamic pedestal --
+                    // a hard, density-independent set (absolute), or an
+                    // upper bound on the interior coefficient (capped). A
+                    // no-slip contour face keeps whichever of the two the
+                    // deck asked for -- the pedestal when the band covers it
+                    // (the reference code's small_vis on the 'bndy' row),
+                    // else the physical rho_f nu -- but never the legacy
+                    // exact-zero skip, which would silently make the wall
+                    // free-slip again. Assembled interior-first so the
+                    // capped band bounds the SAME coefficient the face would
+                    // carry without the band; on an absolute band face the
+                    // product is discarded below (bit-identical result).
+                    // NOT const: the reference code's nu_op region multiplier below
+                    // scales this in place (segment-staging lane).
+                    amrex::Real viscous_coefficient = face_density * viscosity;
+                    // The reference code's nu_op (step.f90:199-201): the region multiplier
+                    // scales the INTERIOR coefficient only -- their WHERE
+                    // runs BEFORE the small_vis wall assignment, which
+                    // overwrites it, so an ABSOLUTE band face skips it. A
+                    // CAPPED band face bounds the interior coefficient the
+                    // face would otherwise carry, region scale included, so
+                    // the scale is applied there first. The face takes the
+                    // mean of its two adjacent cell multipliers (our
+                    // coefficient lives on faces; theirs on the nodes their
+                    // operator differences).
+                    if (viscosity_region_scale != nullptr &&
+                        (!viscosity_band_face || wall_viscosity_band_capped)) {
+                        const auto region_scale_at =
+                            [=] (const int ic, const int jc) {
+                                const int ir = std::min(
+                                    std::max(ic - viscosity_region_radial_lo, 0),
+                                    viscosity_region_radial_cells - 1);
+                                const int jz = std::min(
+                                    std::max(jc - viscosity_region_axial_lo, 0),
+                                    viscosity_region_axial_cells - 1);
+                                return viscosity_region_scale
+                                    [static_cast<std::size_t>(ir) *
+                                         viscosity_region_axial_cells +
+                                     jz];
+                            };
+                        viscous_coefficient *=
+                            0.5_rt * (region_scale_at(il, jl) +
+                                      region_scale_at(i, j));
+                    }
+                    if (viscosity_band_face) {
+                        // absolute: the hard set (the pre-knob path, bit for
+                        // bit). capped: the pedestal never exceeds the
+                        // interior coefficient -- where rho_f nu is the
+                        // smaller of the two, the face keeps EXACTLY the
+                        // value it would carry without the band.
+                        viscous_coefficient =
+                            wall_viscosity_band_capped
+                                ? std::min(wall_viscosity_band_value,
+                                           viscous_coefficient)
+                                : wall_viscosity_band_value;
+                    }
+                    amrex::Real viscous_work = 0.0_rt;
+                    amrex::Real viscous_dissipation = 0.0_rt;
+                    amrex::Real wall_friction_work = 0.0_rt;
+                    // Staged old-state velocities for viscous_theta. Hoisted
+                    // out of the component loop: both sides' densities are
+                    // component-independent, and the floor must match the one
+                    // the conduction stage uses so the two legs of the same
+                    // tensor never disagree about what an empty cell is.
+                    amrex::Real viscous_rho_old_left = 1.0_rt;
+                    amrex::Real viscous_rho_old_right = 1.0_rt;
+                    if (viscous_stage) {
+                        viscous_rho_old_left = std::max(
+                            rho_old(il, jl, kl), parameters.density_floor);
+                        viscous_rho_old_right = std::max(
+                            rho_old(i, j, k), parameters.density_floor);
+                    }
+                    for (int component = 0; component < 3; ++component) {
+                        amrex::Real left_velocity =
+                            cell_left.ion_velocity[component];
+                        amrex::Real right_velocity =
+                            cell_right.ion_velocity[component];
+                        if (viscous_stage) {
+                            // u^n = (rho u)^n / rho^n. Applied BEFORE the
+                            // no-slip image below, so the antisymmetric wall
+                            // reflection mirrors the staged velocity rather
+                            // than a mixed-stage one.
+                            left_velocity =
+                                viscous_new_weight * left_velocity +
+                                viscous_old_weight *
+                                    (mom_old(il, jl, kl, component) /
+                                     viscous_rho_old_left);
+                            right_velocity =
+                                viscous_new_weight * right_velocity +
+                                viscous_old_weight *
+                                    (mom_old(i, j, k, component) /
+                                     viscous_rho_old_right);
+                        }
+                        if (no_slip_face && component != normal) {
+                            if (wall_right_masked) {
+                                right_velocity = -left_velocity;
+                            } else {
+                                left_velocity = -right_velocity;
+                            }
+                        }
+                        // Kinetic-energy PAIRING velocities of the dual-energy
+                        // dissipation register (viscous_dissipation_register;
+                        // see the host constant): the THETA-stage CELL-CENTRED
+                        // velocities of the two cells this face moves momentum
+                        // between. Those are what the discrete kinetic-energy
+                        // identity KE^{n+1} - KE^n = u^{n+theta} . dm (exact at
+                        // theta = 1/2, uniform density; at theta = 1 it misses
+                        // |dm|^2/(2 rho) per cell and step) pairs with the
+                        // momentum increment -- the same cell-centred states the
+                        // stress itself differences (cell_left/cell_right; the
+                        // reconstruction rewrites only the advective fan), and
+                        // NOT the viscous-stage velocities: the heat booked must
+                        // be the kinetic energy the stress ACTUALLY removes,
+                        // whatever velocity level the stress was formed from.
+                        // When the far side of the face is not a live cell --
+                        // the masked cell of a rigid-wall interface (frozen
+                        // under wall_thermal_bc != none, which is what makes
+                        // wall_interface true; its half of the deposit is
+                        // discarded with wall_live), or the boundary ghost of a
+                        // non-periodic z-domain end face or of the r_max face
+                        // (never deposited: outside the valid box) -- it is
+                        // paired antisymmetrically, -u_live, so the live half of
+                        // the face dissipation is exactly the live cell's own
+                        // loss u_live . Pi_f/dn for EVERY component, whichever
+                        // image (no-slip antisymmetric, absorb, rectified or
+                        // copied ghost, z_lo mirror) the stress used.
+                        amrex::Real pair_left_velocity = 0.0_rt;
+                        amrex::Real pair_right_velocity = 0.0_rt;
+                        // The live cell's theta-stage velocity at a wall
+                        // interface, before the antisymmetric pairing below:
+                        // under wall_friction_heating = drop it multiplies the
+                        // tangential stress into the E_i work flux, so the
+                        // energy leaving E_i is exactly the kinetic energy the
+                        // stress removes (the same pairing the register uses).
+                        amrex::Real live_pair_velocity = 0.0_rt;
+                        if (viscous_dissipation_register || wall_friction_drop) {
+                            pair_left_velocity =
+                                mom(il, jl, kl, component) /
+                                std::max(rho(il, jl, kl),
+                                         parameters.density_floor);
+                            pair_right_velocity =
+                                mom(i, j, k, component) /
+                                std::max(rho(i, j, k), parameters.density_floor);
+                            live_pair_velocity = wall_right_masked
+                                                     ? pair_left_velocity
+                                                     : pair_right_velocity;
+                            bool far_right = wall_interface && wall_right_masked;
+                            bool far_left = wall_interface && !wall_right_masked;
+                            if (normal == 2 && !viscous_z_periodic) {
+#if defined(WARPX_DIM_RZ)
+                                const int face_axial_index = j;
+#else
+                                const int face_axial_index = i;
+#endif
+                                far_left = far_left ||
+                                           (face_axial_index == z_end_face_lo);
+                                far_right = far_right ||
+                                            (face_axial_index == z_end_face_hi);
+                            }
+#if defined(WARPX_DIM_RZ)
+                            if (normal == 0 && i == radial_wall_face) {
+                                far_right = true;
+                            }
+#endif
+                            if (far_right) {
+                                pair_right_velocity = -pair_left_velocity;
+                            } else if (far_left) {
+                                pair_left_velocity = -pair_right_velocity;
+                            }
+                        }
+                        amrex::Real viscous_stress =
+                            -viscous_coefficient *
+                            (right_velocity - left_velocity) *
+                            inverse_normal_size;
+                        // FREE-STREAMING CAP on the viscous momentum flux,
+                        // the exact analogue of the conduction cap
+                        // q/(1 + |q|/(f q_fs)) with q_fs = n kB Ti v_ti.
+                        // A viscous stress IS a momentum flux, and the
+                        // free-streaming bound a thermal ion population can
+                        // carry is tau_fs = rho v_ti^2 = n kB Ti, i.e. the
+                        // ION PRESSURE. Same harmonic form, same branchless
+                        // smoothness for the JFNK probes, and deliberately
+                        // the SAME factor f as conduction so the energy and
+                        // momentum equations are limited identically --
+                        // until now conduction was flux-limited and
+                        // viscosity was not limited at all, which is a
+                        // transport mismatch between the two legs of the
+                        // same tensor (Eric 2026-09-04, from the ripples in
+                        // haloD's Ti field).
+                        if (viscous_limit > 0.0_rt) {
+                            const amrex::Real free_streaming_stress =
+                                0.5_rt * (cell_left.ion_pressure +
+                                          cell_right.ion_pressure);
+                            if (free_streaming_stress > 0.0_rt) {
+                                viscous_stress /=
+                                    1.0_rt + std::abs(viscous_stress) /
+                                                 (viscous_limit *
+                                                  free_streaming_stress);
+                            }
+                        }
+                        flux.momentum[component] += viscous_stress;
+                        viscous_work += 0.5_rt *
+                                        (left_velocity + right_velocity) *
+                                        viscous_stress;
+                        const bool friction_component =
+                            no_slip_face && component != normal;
+                        if (wall_friction_drop && friction_component) {
+                            // wall_friction_heating = drop: the tangential
+                            // face velocity is zero (image), so the term above
+                            // is exactly zero here; export the friction work
+                            // u_live . Pi_f instead. The live cell's E_i then
+                            // loses exactly the kinetic energy the stress
+                            // removes (E_i - KE unchanged: no heat), and the
+                            // energy crosses into the wall -- tallied by the
+                            // shaped-wall ledger through wall_friction_work
+                            // (into-wall sign: positive for dissipative
+                            // friction).
+                            const amrex::Real friction_flux =
+                                live_pair_velocity * viscous_stress;
+                            viscous_work += friction_flux;
+                            wall_friction_work +=
+                                (wall_right_masked ? 1.0_rt : -1.0_rt) *
+                                friction_flux;
+                        }
+                        if (viscous_dissipation_register &&
+                            !(wall_friction_drop && friction_component)) {
+                            // The FINAL stress (staged, banded, imaged,
+                            // region-scaled, capped) times the pairing
+                            // difference: -Pi_f . (u_R - u_L)/dn is the rate at
+                            // which this face's momentum flux drains kinetic
+                            // energy from the two cells together. At
+                            // viscous_theta = theta and donor states this is
+                            // mu_f |du/dn|^2 / (1 + |Pi|/(f p_i)) >= 0; in
+                            // general it is positive exactly where the stress
+                            // is dissipative, and the exact KE loss always.
+                            viscous_dissipation -=
+                                viscous_stress *
+                                (pair_right_velocity - pair_left_velocity) *
+                                inverse_normal_size;
+                        }
+                    }
+                    flux.ion_energy += viscous_work;
+                    // Zero unless viscous_dissipation_register (struct default).
+                    flux.viscous_dissipation = viscous_dissipation;
+                    // Zero unless wall_friction_heating = drop at a no-slip face.
+                    flux.wall_friction_work = wall_friction_work;
+                }
+
+                // Thermal conduction (implicit_mhd.thermal_diffusivity_* or
+                // thermal_conduction_model = braginskii, which replaces the
+                // scalar flux with the anisotropic tensor form -- see the
+                // braginskii host constants above):
+                // the conductive internal-energy flux -chi rho_f d(e_spec)/dn
+                // (q = -kappa grad T with kappa = chi rho c_v) on the SAME
+                // face registers, placed exactly like the viscous terms --
+                // after the donor gates (which only scale the advective
+                // channels) and inside the zero-flux wall mask. Pure energy
+                // diffusion: unlike the viscous stress there is no momentum
+                // twin to pair, so no channel-splitting hazard exists. The
+                // specific internal energies come from the SAME CellState
+                // pressures the physical fluxes use (the smooth-floored
+                // recovered p_i(E_i) under total_energy: ion_internal is
+                // exactly p_i/(gamma_i - 1)).
+                // Interior-metal faces never conduct; interface faces
+                // conduct only in the temperature (Dirichlet) mode (the
+                // masked flags were classified above, before the absorb
+                // image). wall_thermal is false when conduction is off, so
+                // the skip only ever engages alongside an active channel.
+                const bool wall_skip_conduction =
+                    wall_thermal &&
+                    ((wall_left_masked && wall_right_masked) ||
+                     (wall_interface && !wall_reservoir));
+
+                if (add_conduction && !wall_skip_conduction
+#if defined(WARPX_DIM_RZ)
+                    && !(reflect_wall && i == radial_wall_face)
+#endif
+                ) {
+                    // Frozen-coefficient option (implicit_mhd.
+                    // conduction_coefficient_state = step_old): the chi
+                    // COEFFICIENT inputs -- the rho_f multiplier, the face
+                    // charge density, and the face temperatures feeding the
+                    // parser diffusivities, the Braginskii coefficients,
+                    // and the free-streaming caps -- come from the STEP-OLD
+                    // fields, per-solve constants like the rho_old-keyed
+                    // source masks: Newton then sees LINEAR diffusion in
+                    // the energies. Probe-measured motivation: every
+                    // Newton-hostile conduction incident on the formation
+                    // ladder is a state-dependent chi inside the residual
+                    // (30 vs 322 steps/min in the isolation probes);
+                    // constant coefficients are cheap at any amplitude.
+                    // The FLUX keeps the live theta-state specific-energy
+                    // gradient; the parser J input stays live (theta j_cc,
+                    // no old-current register). Hard floors are fine here:
+                    // frozen inputs are constants w.r.t. the Newton state,
+                    // so residual smoothness is unaffected. Default theta
+                    // is bit-identical.
+                    amrex::Real coeff_density_left = cell_left.density;
+                    amrex::Real coeff_density_right = cell_right.density;
+                    amrex::Real coeff_pe_left = cell_left.electron_pressure;
+                    amrex::Real coeff_pe_right = cell_right.electron_pressure;
+                    amrex::Real coeff_pi_left = cell_left.ion_pressure;
+                    amrex::Real coeff_pi_right = cell_right.ion_pressure;
+                    if (chi_coeff_old) {
+                        coeff_density_left = rho_old(il, jl, kl);
+                        coeff_density_right = rho_old(i, j, k);
+                        coeff_pe_left = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(il, jl, kl),
+                            parameters.electron_pressure_floor);
+                        coeff_pe_right = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(i, j, k),
+                            parameters.electron_pressure_floor);
+                        if (chi_total_energy) {
+                            amrex::Real ke_left = 0.0_rt;
+                            amrex::Real ke_right = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                ke_left += mom_old(il, jl, kl, component) *
+                                           mom_old(il, jl, kl, component);
+                                ke_right += mom_old(i, j, k, component) *
+                                            mom_old(i, j, k, component);
+                            }
+                            ke_left *= 0.5_rt /
+                                       std::max(rho_old(il, jl, kl),
+                                                parameters.density_floor);
+                            ke_right *= 0.5_rt /
+                                        std::max(rho_old(i, j, k),
+                                                 parameters.density_floor);
+                            if (chi_dual_energy) {
+                                // Frozen coefficients take the SAME blend the
+                                // live path sees, evaluated at the step-old
+                                // state (a per-solve constant, so smoothness
+                                // is moot but consistency is not).
+                                coeff_pi_left =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(il, jl, kl), ke_left,
+                                            ion_int_old(il, jl, kl),
+                                            ion_int_old(il, jl, kl),
+                                            parameters);
+                                coeff_pi_right =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(i, j, k), ke_right,
+                                            ion_int_old(i, j, k),
+                                            ion_int_old(i, j, k), parameters);
+                            } else {
+                                coeff_pi_left = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(il, jl, kl) - ke_left),
+                                    parameters.ion_pressure_floor);
+                                coeff_pi_right = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(i, j, k) - ke_right),
+                                    parameters.ion_pressure_floor);
+                            }
+                        }
+                    }
+                    // Inside this block a masked side implies a Dirichlet
+                    // interface face (interior metal and zero_flux faces
+                    // were skipped above): the masked side presents the
+                    // wall reservoir, and the face density is the INTERIOR
+                    // side's -- chi rho is the exchange conductivity and
+                    // the conductor's near-floor fill must not choke it.
+                    const amrex::Real face_density =
+                        wall_left_masked
+                            ? coeff_density_right
+                            : (wall_right_masked
+                                   ? coeff_density_left
+                                   : 0.5_rt * (coeff_density_left +
+                                               coeff_density_right));
+                    // Donor-averaged face state for the parser diffusivities
+                    // and the free-streaming limiter (unused, and skipped, on
+                    // the constant/limiter-off path). Temperatures are the
+                    // temperature-primary face ratios p_face/(n_f kB); Ti is
+                    // 0 outside total_energy (where the ion channel is
+                    // disallowed anyway). Dirichlet interface faces average
+                    // the interior side against the T_wall reservoir.
+                    // Interface faces need the face state even when the
+                    // parser/limiter path is globally off: the wall drain is
+                    // always free-streaming limited. A CAPPED z-end face
+                    // (wall_heat_flux_cap) needs it for the same reason.
+                    const bool wall_face =
+                        wall_left_masked || wall_right_masked;
+                    // Conductive z-end wall faces (see the z_wall_conduction
+                    // host constants): the z domain END faces of this z-face
+                    // family. Static geometry; a shaped-wall interface face
+                    // keeps the EB machinery (the branch order below).
+#if defined(WARPX_DIM_RZ)
+                    const int z_axial_index = j;
+#else
+                    const int z_axial_index = i;
+#endif
+                    const bool z_end_hi_face =
+                        z_wall_conduction && z_axial_index == z_end_face_hi;
+                    const bool z_end_lo_face =
+                        z_wall_conduction_lo && z_axial_index == z_end_face_lo;
+                    const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
+                    // Corner weight of the cell this face drains (see the
+                    // wall_corner_weight host constant): one coherent wall
+                    // condition per cell instead of the unguarded sum of
+                    // the per-face half-cell exchanges. Exactly 1 on every
+                    // flat wall, so the drains below are bit-identical
+                    // there; both hard-pin branches take the SAME weight,
+                    // which is what makes a shaped-wall face and a z-end
+                    // face on one cell aware of each other.
+                    amrex::Real corner_weight = 1.0_rt;
+                    if (wall_face || z_end_wall_face) {
+                        const int corner_i =
+                            wall_face ? (wall_left_masked ? i : il)
+                                      : (z_end_hi_face ? il : i);
+                        const int corner_j =
+                            wall_face ? (wall_left_masked ? j : jl)
+                                      : (z_end_hi_face ? jl : j);
+                        corner_weight = wall_corner_weight(corner_i, corner_j);
+                    }
+                    // Wall-thermal PRECONDITIONER ROW scatter (see the host
+                    // constants). Both wall drains below are built as
+                    //     drain = conductance * (interior e_int - bath),
+                    // so the interior cell's energy-row diagonal gains
+                    //     (metric/dn) * conductance * (theta_c/theta) / rho
+                    // per wall face. The metric reproduces the divergence
+                    // this face enters: r_face/r_cell on RZ radial faces
+                    // (a factor 2 in the first ring -- dropping it is not an
+                    // option), plain 1/dn on axial faces. The scatter fires
+                    // only for the cell that OWNS the face here, so a face
+                    // seen by two boxes contributes once.
+                    const auto wall_row_metric = [=] (const int ic)
+                    {
+                        amrex::Real metric = inverse_normal_size;
+#if defined(WARPX_DIM_RZ)
+                        if (radial_faces) {
+                            metric *=
+                                (radial_lower + i * radial_cell_size) /
+                                (radial_lower +
+                                 (static_cast<amrex::Real>(ic) + 0.5_rt) *
+                                     radial_cell_size);
+                        }
+#else
+                        amrex::ignore_unused(ic);
+#endif
+                        return metric;
+                    };
+                    const auto emit_wall_row =
+                        [=] (const int channel, const int ic, const int jc,
+                             const int kc, const amrex::Real conductance,
+                             const amrex::Real interior_safe_density)
+                    {
+                        if (!emit_wall_rows) { return; }
+                        if (!wall_row_cells.contains(
+                                amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                            return;
+                        }
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &wall_rows(ic, jc, kc, channel),
+                            wall_row_metric(ic) * conductance *
+                                wall_row_stage_weight / interior_safe_density);
+                    };
+                    // Round-off guard of the factorization the row assumes
+                    // (implicit_mhd.wall_conduction_validate_rows): the
+                    // conductance emitted above, times the same temperature
+                    // difference the drain uses, must reproduce the drain the
+                    // flux actually carries.
+                    const auto validate_wall_row =
+                        [=] (const int ic, const int jc, const int kc,
+                             const amrex::Real conductance,
+                             const amrex::Real drain,
+                             const amrex::Real interior_e_spec,
+                             const amrex::Real bath)
+                    {
+                        if (!validate_wall_rows) { return; }
+                        if (!wall_row_cells.contains(
+                                amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                            return;
+                        }
+                        const amrex::Real reference =
+                            conductance * (interior_e_spec - bath);
+                        amrex::Gpu::Atomic::Max(
+                            &wall_rows(ic, jc, kc, wall_row_mismatch),
+                            std::abs(reference - drain) /
+                                std::max(std::abs(drain), 1.0e-300_rt));
+                    };
+                    amrex::Real face_charge_density = 0.0_rt;
+                    amrex::Real face_te = 0.0_rt;
+                    amrex::Real face_ti = 0.0_rt;
+                    amrex::Real face_jmag = 0.0_rt;
+                    // INTERIOR (sheath-edge) state of a capped wall face for the
+                    // sonic cap (implicit_mhd.wall_heat_flux_cap = sonic; see
+                    // the header): the plasma-side cell's coefficient-state
+                    // charge density and temperatures, NOT the reservoir
+                    // average the free-streaming cap keeps. Zero and unused
+                    // unless a sonic cap is live at this face.
+                    amrex::Real interior_charge_density = 0.0_rt;
+                    amrex::Real interior_te = 0.0_rt;
+                    amrex::Real interior_ti = 0.0_rt;
+                    if (chi_needs_state || wall_face ||
+                        (z_end_wall_face && z_wall_capped)) {
+                        face_charge_density =
+                            std::max(chi_charge_to_mass * face_density,
+                                     chi_charge_floor);
+                        const amrex::Real inverse_nkb =
+                            PhysConst::q_e /
+                            (face_charge_density * PhysConst::kb);
+                        if (wall_face) {
+                            const amrex::Real interior_pe =
+                                wall_left_masked ? coeff_pe_right
+                                                 : coeff_pe_left;
+                            face_te = 0.5_rt * (interior_pe * inverse_nkb +
+                                                wall_te_kelvin);
+                            amrex::Real interior_pi = 0.0_rt;
+                            if (chi_total_energy) {
+                                interior_pi =
+                                    wall_left_masked ? coeff_pi_right
+                                                     : coeff_pi_left;
+                                face_ti = 0.5_rt * (interior_pi * inverse_nkb +
+                                                    wall_te_kelvin);
+                            }
+                            if (wall_cap_sonic) {
+                                // at a shaped-wall face the face density IS the
+                                // interior side's (see face_density above)
+                                interior_charge_density = face_charge_density;
+                                interior_te = interior_pe * inverse_nkb;
+                                interior_ti = interior_pi * inverse_nkb;
+                            }
+                        } else {
+                            face_te = 0.5_rt *
+                                      (coeff_pe_left + coeff_pe_right) *
+                                      inverse_nkb;
+                            if (chi_total_energy) {
+                                face_ti =
+                                    0.5_rt *
+                                    (coeff_pi_left + coeff_pi_right) *
+                                    inverse_nkb;
+                            }
+                            if (z_end_wall_face && z_wall_cap_sonic) {
+                                // z-end face: the interior side is the domain
+                                // cell (left of a z_hi face, right of a z_lo
+                                // face); the ghost carries the wall image.
+                                const amrex::Real interior_density =
+                                    z_end_hi_face ? coeff_density_left
+                                                  : coeff_density_right;
+                                interior_charge_density = std::max(
+                                    chi_charge_to_mass * interior_density,
+                                    chi_charge_floor);
+                                const amrex::Real interior_inverse_nkb =
+                                    PhysConst::q_e /
+                                    (interior_charge_density * PhysConst::kb);
+                                interior_te =
+                                    (z_end_hi_face ? coeff_pe_left
+                                                   : coeff_pe_right) *
+                                    interior_inverse_nkb;
+                                if (chi_total_energy) {
+                                    interior_ti =
+                                        (z_end_hi_face ? coeff_pi_left
+                                                       : coeff_pi_right) *
+                                        interior_inverse_nkb;
+                                }
+                            }
+                        }
+                        if (chi_any_parser) {
+                            amrex::Real jsq = 0.0_rt;
+                            for (int component = 0; component < 3; ++component) {
+                                const amrex::Real face_current =
+                                    0.5_rt * (j_cc(il, jl, kl, component) +
+                                              j_cc(i, j, k, component));
+                                jsq += face_current * face_current;
+                            }
+                            face_jmag = std::sqrt(jsq);
+                        }
+                    }
+                    // Conduction-stage energy arguments (implicit_mhd.
+                    // conduction_theta != implicit_evolve.theta): the
+                    // per-side specific internal energies that drive every
+                    // conductive flux below -- the normal gradients, the
+                    // wall-drain interior energy, and (with the weights
+                    // folded into the gradient) the Braginskii tangential
+                    // stencil -- are the exact extrapolation
+                    //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
+                    //                     + (1 - theta_c/theta) e^n.
+                    // The old terms use the chi_coeff_old recipes (hard
+                    // floors are fine on per-solve constants); the theta
+                    // terms are the SAME CellState values the default path
+                    // reads, so the stage value is LINEAR in the theta-stage
+                    // energy arguments and matrix-free Jacobian probes see
+                    // the shifted centering exactly -- nothing is
+                    // re-evaluated nonlinearly at the stage value. The
+                    // free-streaming caps and the wall-drain gate consume
+                    // the SAME stage energies (one consistent conduction
+                    // stage): with theta_c != theta the limiter inputs are
+                    // stage values, NOT theta or end-of-step values. The chi
+                    // COEFFICIENTS keep conduction_coefficient_state.
+                    const amrex::Real inverse_gamma_e_minus_one =
+                        1.0_rt / (parameters.gamma_e - 1.0_rt);
+                    amrex::Real e_spec_electron_left =
+                        cell_left.electron_pressure * inverse_gamma_e_minus_one /
+                        cell_left.safe_density;
+                    amrex::Real e_spec_electron_right =
+                        cell_right.electron_pressure * inverse_gamma_e_minus_one /
+                        cell_right.safe_density;
+                    amrex::Real e_spec_ion_left =
+                        cell_left.ion_internal / cell_left.safe_density;
+                    amrex::Real e_spec_ion_right =
+                        cell_right.ion_internal / cell_right.safe_density;
+                    // Free-streaming-cap temperatures: the coefficient-state
+                    // face values by default; stage values (from the stage
+                    // pressures over the SAME coefficient-state face charge
+                    // density) when the conduction stage is shifted. Wall
+                    // faces keep the coefficient-state reservoir average --
+                    // the drain's sign/cap structure is unchanged, only its
+                    // e_int argument shifts.
+                    amrex::Real cap_te = face_te;
+                    amrex::Real cap_ti = face_ti;
+                    if (conduction_stage) {
+                        const amrex::Real rho_old_left = std::max(
+                            rho_old(il, jl, kl), parameters.density_floor);
+                        const amrex::Real rho_old_right = std::max(
+                            rho_old(i, j, k), parameters.density_floor);
+                        const amrex::Real pe_old_left = std::max(
+                            (parameters.gamma_e - 1.0_rt) *
+                                energy_old(il, jl, kl),
+                            parameters.electron_pressure_floor);
+                        const amrex::Real pe_old_right = std::max(
+                            (parameters.gamma_e - 1.0_rt) * energy_old(i, j, k),
+                            parameters.electron_pressure_floor);
+                        e_spec_electron_left =
+                            stage_new_weight * e_spec_electron_left +
+                            stage_old_weight *
+                                (pe_old_left * inverse_gamma_e_minus_one /
+                                 rho_old_left);
+                        e_spec_electron_right =
+                            stage_new_weight * e_spec_electron_right +
+                            stage_old_weight *
+                                (pe_old_right * inverse_gamma_e_minus_one /
+                                 rho_old_right);
+                        amrex::Real pi_old_left = 0.0_rt;
+                        amrex::Real pi_old_right = 0.0_rt;
+                        if (chi_total_energy) {
+                            amrex::Real ke_left = 0.0_rt;
+                            amrex::Real ke_right = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                ke_left += mom_old(il, jl, kl, component) *
+                                           mom_old(il, jl, kl, component);
+                                ke_right += mom_old(i, j, k, component) *
+                                            mom_old(i, j, k, component);
+                            }
+                            ke_left *= 0.5_rt / rho_old_left;
+                            ke_right *= 0.5_rt / rho_old_right;
+                            if (chi_dual_energy) {
+                                // Stage-old energies carry the same blend as
+                                // the live path (per-solve constants).
+                                pi_old_left =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(il, jl, kl), ke_left,
+                                            ion_int_old(il, jl, kl),
+                                            ion_int_old(il, jl, kl),
+                                            parameters);
+                                pi_old_right =
+                                    theta_implicit_mhd::
+                                        dual_energy_blended_pressure(
+                                            ion_e_old(i, j, k), ke_right,
+                                            ion_int_old(i, j, k),
+                                            ion_int_old(i, j, k), parameters);
+                            } else {
+                                pi_old_left = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(il, jl, kl) - ke_left),
+                                    parameters.ion_pressure_floor);
+                                pi_old_right = std::max(
+                                    (parameters.gamma_i - 1.0_rt) *
+                                        (ion_e_old(i, j, k) - ke_right),
+                                    parameters.ion_pressure_floor);
+                            }
+                            const amrex::Real inverse_gamma_i_minus_one =
+                                1.0_rt / (parameters.gamma_i - 1.0_rt);
+                            e_spec_ion_left =
+                                stage_new_weight * e_spec_ion_left +
+                                stage_old_weight *
+                                    (pi_old_left * inverse_gamma_i_minus_one /
+                                     rho_old_left);
+                            e_spec_ion_right =
+                                stage_new_weight * e_spec_ion_right +
+                                stage_old_weight *
+                                    (pi_old_right * inverse_gamma_i_minus_one /
+                                     rho_old_right);
+                        }
+                        if (!wall_face && chi_needs_state) {
+                            // Stage cap temperatures: face-averaged stage
+                            // pressures, hard-floored so the thermal speeds
+                            // stay defined on extrapolated probe states.
+                            const amrex::Real inverse_nkb =
+                                PhysConst::q_e /
+                                (face_charge_density * PhysConst::kb);
+                            cap_te =
+                                std::max(0.5_rt * (stage_new_weight *
+                                                       (cell_left.electron_pressure +
+                                                        cell_right.electron_pressure) +
+                                                   stage_old_weight *
+                                                       (pe_old_left +
+                                                        pe_old_right)),
+                                         parameters.electron_pressure_floor) *
+                                inverse_nkb;
+                            if (chi_total_energy) {
+                                cap_ti =
+                                    std::max(0.5_rt *
+                                                 (stage_new_weight *
+                                                      (cell_left.ion_pressure +
+                                                       cell_right.ion_pressure) +
+                                                  stage_old_weight *
+                                                      (pi_old_left +
+                                                       pi_old_right)),
+                                             parameters.ion_pressure_floor) *
+                                    inverse_nkb;
+                            }
+                        }
+                    }
+                    // Wall heat-flux cap magnitude q_cap of one species channel
+                    // (implicit_mhd.wall_heat_flux_cap; see the host
+                    // constants), shared by the shaped-wall drain and the
+                    // z-end exchange of BOTH species so the four sites cannot
+                    // drift apart:
+                    //   free_streaming: f_s n kB T_s v_th,s, v_th,s = sqrt(kB
+                    //                   T_s/m_s) from the coefficient-state
+                    //                   RESERVOIR-AVERAGED face state
+                    //                   (face_te/face_ti, NOT the conduction-
+                    //                   stage cap_te/cap_ti) -- the pre-knob
+                    //                   wall cap in its identical floating-
+                    //                   point association;
+                    //   sonic:          f_s n kB T_s c_s, c_s^2 = (gamma_e kB Te
+                    //                   + gamma_i kB Ti)/m_i, from the INTERIOR
+                    //                   (sheath-edge) state of the wall-adjacent
+                    //                   cell (interior_* above) -- the wall
+                    //                   temperature does not enter a sheath
+                    //                   flux. Ti is 0 where the ion channel
+                    //                   carries no temperature, leaving c_s the
+                    //                   electron-only value.
+                    // The result carries the CORNER weight w of the cell this
+                    // face drains, so that the cap acts on the per-face exchange
+                    // before the weighting (the drains below already carry w):
+                    // a saturated two-face corner drains sqrt(2) q_cap, one
+                    // wall of the vector area, not 2 q_cap. Exact on flat walls
+                    // (w == 1.0).
+                    const auto wall_cap_flux =
+                        [=] (const bool ion_channel, const bool sonic)
+                    {
+                        const amrex::Real factor =
+                            ion_channel ? wall_cap_factor_ion
+                                        : wall_cap_factor_electron;
+                        if (sonic) {
+                            const amrex::Real sound_speed = std::sqrt(
+                                (parameters.gamma_e * PhysConst::kb * interior_te +
+                                 parameters.gamma_i * PhysConst::kb * interior_ti) /
+                                conduction_ion_mass);
+                            const amrex::Real species_temperature =
+                                ion_channel ? interior_ti : interior_te;
+                            return factor *
+                                   (interior_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * species_temperature) *
+                                   sound_speed * corner_weight;
+                        }
+                        const amrex::Real species_temperature =
+                            ion_channel ? face_ti : face_te;
+                        const amrex::Real species_mass =
+                            ion_channel ? conduction_ion_mass : PhysConst::m_e;
+                        const amrex::Real thermal_speed = std::sqrt(
+                            PhysConst::kb * species_temperature / species_mass);
+                        const amrex::Real free_streaming_flux =
+                            face_charge_density / PhysConst::q_e *
+                            PhysConst::kb * species_temperature * thermal_speed;
+                        return factor * free_streaming_flux * corner_weight;
+                    };
+                    // Braginskii face geometry (static branch on the host
+                    // model flag): the face field takes the single-valued
+                    // staggered B_n and the cell-averaged tangential TOTAL
+                    // B; |b|^2 is smooth-floored at the field-energy scale
+                    // for the bhat bhat direction only (the magnetization
+                    // x = (Omega tau)^2 uses the RAW |b|^2, polynomial in B
+                    // and exactly 0 at B = 0). The in-plane tangential
+                    // specific-energy gradients use the standard 4-cell
+                    // corner stencil; the fluid/parity/domain ghost fills
+                    // are 2 deep, which covers the transverse-grown kernel
+                    // box (the axis row reads the parity-mirrored scalars,
+                    // like the CGL stress stencil). Wall interface faces
+                    // skip the tangential machinery: they keep the
+                    // one-sided isotropic drain below with the tensor's nn
+                    // projection as its scalar chi -- the tensor is never
+                    // extended across the wall interface.
+                    amrex::Real brag_b2 = 0.0_rt;
+                    amrex::Real brag_b2_dir = 1.0_rt;
+                    amrex::Real brag_bn = 0.0_rt;
+                    amrex::Real brag_bt = 0.0_rt;
+                    amrex::Real brag_grad_t_electron = 0.0_rt;
+                    amrex::Real brag_grad_t_ion = 0.0_rt;
+                    if (braginskii) {
+                        const int tangent1 = (normal + 1) % 3;
+                        const int tangent2 = (normal + 2) % 3;
+                        amrex::Real bt1 =
+                            0.5_rt * (cell_left.magnetic[tangent1] +
+                                      cell_right.magnetic[tangent1]);
+                        amrex::Real bt2 =
+                            0.5_rt * (cell_left.magnetic[tangent2] +
+                                      cell_right.magnetic[tangent2]);
+                        if (z_end_wall_face) {
+                            // Conductive z-end faces take the tangential B
+                            // ONE-SIDED from the interior cell (the ghost
+                            // image is a boundary-condition artifact, never
+                            // a field sample; the staggered bn_face is
+                            // already the single-valued face B_n), so the
+                            // chi_nn projection of the reservoir exchange
+                            // sees the interior field geometry only.
+                            const auto& interior_side =
+                                z_end_hi_face ? cell_left : cell_right;
+                            bt1 = interior_side.magnetic[tangent1];
+                            bt2 = interior_side.magnetic[tangent2];
+                        }
+                        brag_bn = bn_face;
+                        brag_b2 = brag_bn * brag_bn + bt1 * bt1 + bt2 * bt2;
+                        brag_b2_dir = theta_implicit_mhd::smooth_positive_floor(
+                            brag_b2, brag_small_b2);
+#if defined(WARPX_DIM_RZ)
+                        // In-plane tangent: r (= tangent1) for z-faces,
+                        // z (= tangent2) for r-faces; the theta gradient
+                        // vanishes for m = 0.
+                        brag_bt = (normal == 0) ? bt2 : bt1;
+                        // Wall interface AND conductive z-end faces skip the
+                        // tangential corner stencil: their exchange is the
+                        // pure normal Dirichlet form below (no cross term
+                        // against ghost-row samples).
+                        if (!wall_face && !z_end_wall_face) {
+                            const int tangential = (normal == 0) ? 2 : 0;
+                            int ipl = il, jpl = jl, kpl = kl;
+                            int ipr = i, jpr = j, kpr = k;
+                            int iml = il, jml = jl, kml = kl;
+                            int imr = i, jmr = j, kmr = k;
+                            shift_index(ipl, jpl, kpl, tangential, 1);
+                            shift_index(ipr, jpr, kpr, tangential, 1);
+                            shift_index(iml, jml, kml, tangential, -1);
+                            shift_index(imr, jmr, kmr, tangential, -1);
+                            // Upwind side of the LEFT cell's tangential row for
+                            // the advectionalized SMART cross term
+                            // (smart_upwind): the cross flux through this face
+                            // enters the left cell as -F/h_n, i.e. as the
+                            // tangential advection of e with an effective
+                            // velocity of sign -sign(b_n b_t) (chi_par >=
+                            // chi_perp always), so for b_n b_t > 0 its upwind
+                            // side is +t. The right cell takes the opposite
+                            // side. A per-face constant of the face field
+                            // direction; the flux is continuous through
+                            // b_n b_t = 0 because the cross term vanishes
+                            // there.
+                            const int brag_smart_upwind_left =
+                                (brag_bn * brag_bt > 0.0_rt) ? 1 : -1;
+                            // Neighbor specific internal energies mirror the
+                            // CellState recipes exactly (floored electron
+                            // pressure; smooth-floored p_i(E_i) recovery).
+                            const auto electron_e_spec =
+                                [=] (const int ic, const int jc, const int kc) {
+                                    const amrex::Real pressure = std::max(
+                                        (parameters.gamma_e - 1.0_rt) *
+                                            energy(ic, jc, kc),
+                                        parameters.electron_pressure_floor);
+                                    return pressure /
+                                           ((parameters.gamma_e - 1.0_rt) *
+                                            std::max(rho(ic, jc, kc),
+                                                     parameters.density_floor));
+                                };
+                            if (brag_tangential_smart != 0) {
+                                brag_grad_t_electron =
+                                    braginskii_tangential_gradient_smart(
+                                        electron_e_spec, il, jl, kl, i, j, k, tangential,
+                                        brag_tangential_smart, brag_smart_upwind_left,
+                                        inverse_tangential_size);
+                            } else if (brag_tangential_minmod) {
+                                // Sharma-Hammett monotone cross term: the
+                                // face tangential slope is the mean of the
+                                // two cells' minmod-limited one-sided
+                                // slopes -- zero at tangential extrema, so
+                                // the cross-term flux cannot demand states
+                                // below the local stencil minimum (the
+                                // plasma-edge electron pinning mechanism).
+                                const amrex::Real center_left =
+                                    electron_e_spec(il, jl, kl);
+                                const amrex::Real center_right =
+                                    electron_e_spec(i, j, k);
+                                brag_grad_t_electron =
+                                    0.5_rt * inverse_tangential_size *
+                                    (theta_implicit_mhd::minmod_pair(
+                                         electron_e_spec(ipl, jpl, kpl) -
+                                             center_left,
+                                         center_left -
+                                             electron_e_spec(iml, jml, kml)) +
+                                     theta_implicit_mhd::minmod_pair(
+                                         electron_e_spec(ipr, jpr, kpr) -
+                                             center_right,
+                                         center_right -
+                                             electron_e_spec(imr, jmr, kmr)));
+                            } else {
+                                brag_grad_t_electron =
+                                    0.25_rt * inverse_tangential_size *
+                                    (electron_e_spec(ipl, jpl, kpl) +
+                                     electron_e_spec(ipr, jpr, kpr) -
+                                     electron_e_spec(iml, jml, kml) -
+                                     electron_e_spec(imr, jmr, kmr));
+                            }
+                            if (conduction_stage) {
+                                // Stage extrapolation of the tangential
+                                // samples, folded into the gradient (the
+                                // stencil is linear in the samples); the
+                                // old samples use the chi_coeff_old
+                                // hard-floored recipe, per-solve constants.
+                                const auto electron_e_spec_old =
+                                    [=] (const int ic, const int jc,
+                                         const int kc) {
+                                        const amrex::Real pressure = std::max(
+                                            (parameters.gamma_e - 1.0_rt) *
+                                                energy_old(ic, jc, kc),
+                                            parameters
+                                                .electron_pressure_floor);
+                                        return pressure /
+                                               ((parameters.gamma_e -
+                                                 1.0_rt) *
+                                                std::max(
+                                                    rho_old(ic, jc, kc),
+                                                    parameters
+                                                        .density_floor));
+                                    };
+                                amrex::Real grad_t_electron_old;
+                                if (brag_tangential_smart != 0) {
+                                    grad_t_electron_old =
+                                        braginskii_tangential_gradient_smart(
+                                            electron_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                            brag_tangential_smart, brag_smart_upwind_left,
+                                            inverse_tangential_size);
+                                } else if (brag_tangential_minmod) {
+                                    const amrex::Real center_left =
+                                        electron_e_spec_old(il, jl, kl);
+                                    const amrex::Real center_right =
+                                        electron_e_spec_old(i, j, k);
+                                    grad_t_electron_old =
+                                        0.5_rt * inverse_tangential_size *
+                                        (theta_implicit_mhd::minmod_pair(
+                                             electron_e_spec_old(ipl, jpl,
+                                                                 kpl) -
+                                                 center_left,
+                                             center_left -
+                                                 electron_e_spec_old(
+                                                     iml, jml, kml)) +
+                                         theta_implicit_mhd::minmod_pair(
+                                             electron_e_spec_old(ipr, jpr,
+                                                                 kpr) -
+                                                 center_right,
+                                             center_right -
+                                                 electron_e_spec_old(
+                                                     imr, jmr, kmr)));
+                                } else {
+                                    grad_t_electron_old =
+                                        0.25_rt * inverse_tangential_size *
+                                        (electron_e_spec_old(ipl, jpl, kpl) +
+                                         electron_e_spec_old(ipr, jpr, kpr) -
+                                         electron_e_spec_old(iml, jml, kml) -
+                                         electron_e_spec_old(imr, jmr, kmr));
+                                }
+                                brag_grad_t_electron =
+                                    stage_new_weight * brag_grad_t_electron +
+                                    stage_old_weight * grad_t_electron_old;
+                            }
+                            if (chi_total_energy) {
+                                const auto ion_e_spec =
+                                    [=] (const int ic, const int jc,
+                                         const int kc) {
+                                        const amrex::Real safe_density =
+                                            std::max(rho(ic, jc, kc),
+                                                     parameters.density_floor);
+                                        amrex::Real kinetic = 0.0_rt;
+                                        for (int component = 0; component < 3;
+                                             ++component) {
+                                            kinetic +=
+                                                mom(ic, jc, kc, component) *
+                                                mom(ic, jc, kc, component);
+                                        }
+                                        kinetic *= 0.5_rt / safe_density;
+                                        if (chi_dual_energy) {
+                                            // Blended specific internal
+                                            // energy, mirroring the dual
+                                            // CellState recipe exactly.
+                                            return theta_implicit_mhd::
+                                                       dual_energy_blended_pressure(
+                                                           ion_e(ic, jc, kc),
+                                                           kinetic,
+                                                           ion_int(ic, jc, kc),
+                                                           ion_int_old(ic, jc,
+                                                                       kc),
+                                                           parameters) /
+                                                   ((parameters.gamma_i -
+                                                     1.0_rt) *
+                                                    safe_density);
+                                        }
+                                        const amrex::Real internal_floor =
+                                            parameters.ion_pressure_floor /
+                                            (parameters.gamma_i - 1.0_rt);
+                                        const amrex::Real excess =
+                                            ion_e(ic, jc, kc) - kinetic -
+                                            internal_floor;
+                                        const amrex::Real corner_width =
+                                            std::max(
+                                                internal_floor,
+                                                parameters
+                                                        .pressure_corner_width_fraction *
+                                                    kinetic);
+                                        const amrex::Real internal =
+                                            internal_floor +
+                                            0.5_rt *
+                                                (excess +
+                                                 std::sqrt(
+                                                     excess * excess +
+                                                     corner_width *
+                                                         corner_width));
+                                        return internal / safe_density;
+                                    };
+                                if (brag_tangential_smart != 0) {
+                                    brag_grad_t_ion =
+                                        braginskii_tangential_gradient_smart(
+                                            ion_e_spec, il, jl, kl, i, j, k, tangential,
+                                            brag_tangential_smart, brag_smart_upwind_left,
+                                            inverse_tangential_size);
+                                } else if (brag_tangential_minmod) {
+                                    // Same monotone form as the electron
+                                    // stencil above.
+                                    const amrex::Real center_left =
+                                        ion_e_spec(il, jl, kl);
+                                    const amrex::Real center_right =
+                                        ion_e_spec(i, j, k);
+                                    brag_grad_t_ion =
+                                        0.5_rt * inverse_tangential_size *
+                                        (theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec(ipl, jpl, kpl) -
+                                                 center_left,
+                                             center_left -
+                                                 ion_e_spec(iml, jml, kml)) +
+                                         theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec(ipr, jpr, kpr) -
+                                                 center_right,
+                                             center_right -
+                                                 ion_e_spec(imr, jmr, kmr)));
+                                } else {
+                                    brag_grad_t_ion =
+                                        0.25_rt * inverse_tangential_size *
+                                        (ion_e_spec(ipl, jpl, kpl) +
+                                         ion_e_spec(ipr, jpr, kpr) -
+                                         ion_e_spec(iml, jml, kml) -
+                                         ion_e_spec(imr, jmr, kmr));
+                                }
+                                if (conduction_stage) {
+                                    // Stage extrapolation (see the electron
+                                    // stencil above).
+                                    const auto ion_e_spec_old =
+                                        [=] (const int ic, const int jc,
+                                             const int kc) {
+                                            const amrex::Real
+                                                safe_density_old = std::max(
+                                                    rho_old(ic, jc, kc),
+                                                    parameters.density_floor);
+                                            amrex::Real kinetic = 0.0_rt;
+                                            for (int component = 0;
+                                                 component < 3; ++component) {
+                                                kinetic +=
+                                                    mom_old(ic, jc, kc,
+                                                            component) *
+                                                    mom_old(ic, jc, kc,
+                                                            component);
+                                            }
+                                            kinetic *=
+                                                0.5_rt / safe_density_old;
+                                            if (chi_dual_energy) {
+                                                return theta_implicit_mhd::
+                                                           dual_energy_blended_pressure(
+                                                               ion_e_old(ic, jc,
+                                                                         kc),
+                                                               kinetic,
+                                                               ion_int_old(
+                                                                   ic, jc, kc),
+                                                               ion_int_old(
+                                                                   ic, jc, kc),
+                                                               parameters) /
+                                                       ((parameters.gamma_i -
+                                                         1.0_rt) *
+                                                        safe_density_old);
+                                            }
+                                            const amrex::Real internal_floor =
+                                                parameters.ion_pressure_floor /
+                                                (parameters.gamma_i - 1.0_rt);
+                                            return std::max(
+                                                       ion_e_old(ic, jc, kc) -
+                                                           kinetic,
+                                                       internal_floor) /
+                                                   safe_density_old;
+                                        };
+                                    amrex::Real grad_t_ion_old;
+                                    if (brag_tangential_smart != 0) {
+                                        grad_t_ion_old =
+                                            braginskii_tangential_gradient_smart(
+                                                ion_e_spec_old, il, jl, kl, i, j, k, tangential,
+                                                brag_tangential_smart, brag_smart_upwind_left,
+                                                inverse_tangential_size);
+                                    } else if (brag_tangential_minmod) {
+                                        const amrex::Real center_left =
+                                            ion_e_spec_old(il, jl, kl);
+                                        const amrex::Real center_right =
+                                            ion_e_spec_old(i, j, k);
+                                        grad_t_ion_old =
+                                            0.5_rt * inverse_tangential_size *
+                                            (theta_implicit_mhd::minmod_pair(
+                                                 ion_e_spec_old(ipl, jpl,
+                                                                kpl) -
+                                                     center_left,
+                                                 center_left -
+                                                     ion_e_spec_old(iml, jml,
+                                                                    kml)) +
+                                             theta_implicit_mhd::minmod_pair(
+                                                 ion_e_spec_old(ipr, jpr,
+                                                                kpr) -
+                                                     center_right,
+                                                 center_right -
+                                                     ion_e_spec_old(imr, jmr,
+                                                                    kmr)));
+                                    } else {
+                                        grad_t_ion_old =
+                                            0.25_rt *
+                                            inverse_tangential_size *
+                                            (ion_e_spec_old(ipl, jpl, kpl) +
+                                             ion_e_spec_old(ipr, jpr, kpr) -
+                                             ion_e_spec_old(iml, jml, kml) -
+                                             ion_e_spec_old(imr, jmr, kmr));
+                                    }
+                                    brag_grad_t_ion =
+                                        stage_new_weight * brag_grad_t_ion +
+                                        stage_old_weight * grad_t_ion_old;
+                                }
+                            }
+                        }
+#endif
+                    }
+                    // Smooth clamps of the Braginskii chi_par/chi_perp
+                    // (0 = off): smooth-max floor at chi_min; C^2 soft cap
+                    // at chi_max with knee width chi_max/10 (exact
+                    // pass-through below 0.9 chi_max). Per-component bounds
+                    // (the reference code's xil*_mn/mx vs xip*_mn/mx, global.f90:75-77)
+                    // are physical-convention values converted per species
+                    // in the host constants; the par >= perp guard below
+                    // re-establishes the ordering the separate clamps (and
+                    // the perp boosts) can break -- the reference code applies the same
+                    // MAX after its clamps (ntb.f90:594).
+                    const auto clamp_with = [=] (amrex::Real chi_value,
+                                                 const amrex::Real lo,
+                                                 const amrex::Real hi) {
+                        chi_value = theta_implicit_mhd::smooth_positive_floor(
+                            chi_value, lo);
+                        if (hi > 0.0_rt) {
+                            chi_value = theta_implicit_mhd::soft_upper_clip(
+                                chi_value, hi, 0.1_rt * hi);
+                        }
+                        return chi_value;
+                    };
+                    // Quasi-shorting cross-field boost (implicit_mhd.
+                    // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
+                    // keyed to the pseudo-entropy excess
+                    //     s = (T/T0) (rho0/rho_guarded)^{2/3},
+                    //     rho_guarded = sqrt(rho^2 + rho_guard^2),
+                    // above the load envelope, ramped by the C-infinity
+                    // smooth-max 0.5 ((s - onset) + sqrt((s - onset)^2 +
+                    // w^2)) with w = 0.3 (onset - 1) -- centered ABOVE the
+                    // envelope (onset > 1): a ramp centered ON it leaks w/2
+                    // of the amplitude onto every on-adiabat cell (measured
+                    // fatal in production). The s inputs (the face
+                    // temperature and the coefficient-state face density)
+                    // follow conduction_coefficient_state like every other
+                    // Braginskii coefficient input; the chi_min/max clamp
+                    // applies AFTER the addition.
+                    const auto qs_boost =
+                        [=] (const amrex::Real face_temperature) {
+                            const amrex::Real guarded_density = std::sqrt(
+                                face_density * face_density +
+                                qs_density_guard * qs_density_guard);
+                            const amrex::Real density_ratio =
+                                qs_envelope_density / guarded_density;
+                            const amrex::Real entropy =
+                                face_temperature * qs_inverse_t0 *
+                                std::cbrt(density_ratio * density_ratio);
+                            const amrex::Real excess = entropy - qs_onset;
+                            return qs_chi * 0.5_rt *
+                                   (excess + std::sqrt(excess * excess +
+                                                       qs_width * qs_width));
+                        };
+                    if ((braginskii && chi_total_energy) || chi_ion > 0.0_rt ||
+                        chi_ion_is_parser) {
+                        amrex::Real chi_ion_face =
+                            chi_ion_is_parser
+                                ? chi_ion_parser(face_charge_density, face_te,
+                                                 face_ti, face_jmag, face_time)
+                                : chi_ion;
+                        amrex::Real brag_chi_par_ion = 0.0_rt;
+                        amrex::Real brag_chi_perp_ion = 0.0_rt;
+                        if (braginskii) {
+                            // chi_par_i = 3.9 kB Ti tau_i / m_i and the ion
+                            // perpendicular fit, Braginskii (1965) Z = 1.
+                            const amrex::Real kb_ti = PhysConst::kb * face_ti;
+                            const amrex::Real face_number_density =
+                                face_charge_density / PhysConst::q_e;
+                            // Collision time at the host coefficient's
+                            // lnLambda (the constant path, bit-identical);
+                            // the live lnLambda divides by the face value,
+                            // floored at 1 like the reference code.
+                            const amrex::Real tau_ion_host =
+                                brag_tau_i_coefficient * kb_ti *
+                                std::sqrt(kb_ti) / face_number_density;
+                            const amrex::Real tau_ion =
+                                brag_live_coulomb_log
+                                    ? tau_ion_host /
+                                          std::max(
+                                              theta_implicit_mhd::coulomb_log_ion(
+                                                  face_number_density,
+                                                  kb_ti / PhysConst::q_e),
+                                              brag_coulomb_log_floor)
+                                    : tau_ion_host;
+                            // (gamma_i - 1): kappa-convention -> operator
+                            // convention (see the host-constant comment).
+                            const amrex::Real chi_par_raw =
+                                brag_i_convention * 3.9_rt * kb_ti * tau_ion /
+                                conduction_ion_mass;
+                            const amrex::Real omega_tau =
+                                brag_omega_i_coefficient * tau_ion;
+                            const amrex::Real x =
+                                omega_tau * omega_tau * brag_b2;
+                            const amrex::Real chi_perp_raw =
+                                chi_par_raw *
+                                (brag_i_numerator_1 * x + 1.0_rt) /
+                                ((brag_i_denominator_2 * x +
+                                  brag_i_denominator_1) *
+                                     x +
+                                 1.0_rt);
+                            // Density-keyed halo factor, evaluated ONCE: the
+                            // perp boost below and the parallel-ceiling lift
+                            // both consume it, so they cannot drift apart.
+                            amrex::Real halo_factor = 1.0_rt;
+                            if (add_halo_boost) {
+                                const amrex::Real guarded_density =
+                                    theta_implicit_mhd::smooth_positive_floor(
+                                        chi_charge_to_mass * face_density,
+                                        halo_boost_guard);
+                                const amrex::Real ratio =
+                                    halo_boost_reference / guarded_density;
+                                halo_factor = halo_boost_dp * ratio * ratio;
+                            }
+                            // Halo lift of the PARALLEL ceiling (see the host
+                            // constants): the core keeps brag_par_hi_i, which
+                            // is what holds its pressure gradient, and the
+                            // ceiling opens toward halo_par_hi_i only where
+                            // the density key says halo. Continuous at
+                            // halo_factor = 1 and never below the base.
+                            amrex::Real par_hi_ion = brag_par_hi_i;
+                            if (lift_halo_par && halo_factor > 1.0_rt) {
+                                par_hi_ion = std::min(
+                                    halo_par_hi_i, brag_par_hi_i * halo_factor);
+                            }
+                            brag_chi_par_ion = clamp_with(
+                                chi_par_raw, brag_par_lo_i, par_hi_ion);
+                            // Quasi-shorting boost of the ION channel: s is
+                            // keyed on the ion temperature with the SAME
+                            // envelope T0 -- the broken-surface shorting
+                            // acts on the channel whose own thermal content
+                            // breaks the envelope, and a separate ion T0
+                            // would be an uncalibratable second knob.
+                            amrex::Real chi_perp_ion_value =
+                                add_qs ? chi_perp_raw + qs_boost(face_ti)
+                                       : chi_perp_raw;
+                            // Density-keyed halo boost (see the host
+                            // constants): the reference code's exact ntb.f90 t_cond
+                            // ~584 form
+                            //     xip = MAX(xip, xip (en0/en)^2 dp_mn),
+                            // a MULTIPLICATIVE boost of the perp value by
+                            // max(1, dp (rho_ref/rho)^2) -- ION channel
+                            // only, matching the reference code (te_cond carries no
+                            // boost) -- applied BEFORE the chi_min/max
+                            // clamps (boost at ~584, clamps at ~592-593),
+                            // so the perp cap still bounds the boosted halo
+                            // diffusivity. The coefficients are frozen at
+                            // the coefficient state (Newton never
+                            // differentiates them), so the MAX kink at
+                            // boost = 1 is benign.
+                            if (add_halo_boost && halo_factor > 1.0_rt) {
+                                chi_perp_ion_value *= halo_factor;
+                            }
+                            brag_chi_perp_ion = clamp_with(
+                                chi_perp_ion_value, brag_perp_lo_i,
+                                brag_perp_hi_i);
+                            // The reference code's t_cond: xil = MAX(xil, xip) after the
+                            // clamps -- parallel at least perpendicular (also
+                            // keeps the tensor cross term sign-safe).
+                            brag_chi_par_ion =
+                                std::max(brag_chi_par_ion, brag_chi_perp_ion);
+                            // Wall interface faces: the drain's scalar chi is
+                            // a CLAMPED per-component coefficient, NOT the
+                            // tensor nn projection (which on our stair-step
+                            // z-normal faces sees b_n ~ 1 and leaked the
+                            // parallel class in through a geometry artifact --
+                            // the E5 wall-ledger runaway channel, 2026-08-29
+                            // parity audit). Which clamp CLASS is the knob
+                            // implicit_mhd.wall_conduction_scale (see the
+                            // header): "perp" (default) keeps the
+                            // cross-field-only reading of the reference code's polyline
+                            // wall; "parallel" reproduces their MEASURED wall
+                            // conductance G, which their implicit temperature
+                            // solve builds from the PARALLEL clamp maximum
+                            // xili_mx = 1e6 n kB at every cut-cell node
+                            // (2026-09-02 halo-sink instrumentation). Interior
+                            // faces keep the full tensor either way.
+                            chi_ion_face =
+                                wall_face
+                                    ? (wall_conduction_parallel_scale
+                                           ? brag_chi_par_ion
+                                           : brag_chi_perp_ion)
+                                    : brag_chi_perp_ion +
+                                (brag_chi_par_ion - brag_chi_perp_ion) *
+                                    brag_bn * brag_bn / brag_b2_dir;
+                        }
+                        amrex::Real conductive_flux;
+                        // Harmonic cap factor of the bulk flux (1 = uncapped),
+                        // kept for the preconditioner coefficient below.
+                        amrex::Real conduction_pc_cap = 1.0_rt;
+                        if (wall_face) {
+                            // One-sided rectified wall drain (see the host
+                            // constants): zero at/below the GATE anchor
+                            // (max of the wall value and the temperature-
+                            // floor image, so the gate closes exactly where
+                            // the projection stops the state), C^1 full
+                            // above twice it -- the reservoir cools the
+                            // interior toward T_wall but never heats it and
+                            // never fights the floor ratchet. The drain
+                            // magnitude keeps the true wall value. The
+                            // interior e_int is the conduction-stage value;
+                            // the drain's sign/cap structure is unchanged.
+                            const amrex::Real interior_e_spec =
+                                wall_left_masked ? e_spec_ion_right
+                                                 : e_spec_ion_left;
+                            // The drain keeps its EXACT original floating-point
+                            // association: the conductance the preconditioner
+                            // row needs is built beside it, only when the rows
+                            // are live, so switching the rows on cannot move
+                            // the residual by even a bit.
+                            amrex::Real drain;
+                            amrex::Real conductance = 0.0_rt;
+                            amrex::Real bath;
+                            if (wall_pin) {
+                                // Dirichlet pin: two-sided exchange against
+                                // the floor-anchored bath at the half-cell
+                                // distance (the wall value sits ON the
+                                // interface, not one cell in). No gate, no
+                                // rectifier -- the cap below bounds both
+                                // directions.
+                                drain = chi_ion_face * face_density *
+                                        (interior_e_spec -
+                                         wall_gate_e_spec_ion) *
+                                        2.0_rt * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_gate_e_spec_ion;
+                                if (emit_wall_rows) {
+                                    conductance = chi_ion_face * face_density *
+                                                  2.0_rt * inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            } else {
+                                const amrex::Real gate =
+                                    theta_implicit_mhd::floor_outflow_limiter(
+                                        interior_e_spec,
+                                        wall_gate_e_spec_ion);
+                                drain = chi_ion_face * face_density *
+                                        (interior_e_spec - wall_e_spec_ion) *
+                                        gate * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_e_spec_ion;
+                                if (emit_wall_rows) {
+                                    conductance = chi_ion_face * face_density *
+                                                  gate * inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            }
+                            // Cap on the wall exchange -- free-streaming by
+                            // default, except under the HARD dirichlet pin,
+                            // where the solver converges on the demanded
+                            // outflow; implicit_mhd.wall_heat_flux_cap
+                            // overrides both (see the host constants and
+                            // wall_cap_flux). The harmonic form is shared:
+                            // drain /= 1 + |drain|/(q_cap w), the corner
+                            // weight w inside q_cap so the cap acts before the
+                            // weighting; the preconditioner conductance (the
+                            // secant of the capped exchange) divided with it.
+                            if (!wall_uncapped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(true, wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                            }
+                            // Preconditioner row on the INTERIOR cell (the
+                            // live side of the interface). Under dual_energy
+                            // the identical flux is booked into BOTH ion
+                            // rows, and e_int is the fk blend of the two, so
+                            // the pair's exact Jacobi diagonals are the fk /
+                            // (1 - fk) split of one conductance -- not the
+                            // full value twice.
+                            if (emit_wall_rows) {
+                                const int ric = wall_left_masked ? i : il;
+                                const int rjc = wall_left_masked ? j : jl;
+                                const int rkc = wall_left_masked ? k : kl;
+                                const auto& interior =
+                                    wall_left_masked ? cell_right : cell_left;
+                                amrex::Real kinetic_fraction = 1.0_rt;
+                                if (parameters.dual_energy_closure) {
+                                    amrex::Real kinetic = 0.0_rt;
+                                    for (int component = 0; component < 3;
+                                         ++component) {
+                                        kinetic +=
+                                            interior.momentum[component] *
+                                            interior.momentum[component];
+                                    }
+                                    kinetic *=
+                                        0.5_rt / interior.safe_density;
+                                    kinetic_fraction = theta_implicit_mhd::
+                                        dual_energy_kinetic_fraction(
+                                            interior.ion_energy, kinetic,
+                                            ion_int_old(ric, rjc, rkc),
+                                            parameters);
+                                    emit_wall_row(
+                                        wall_row_ion_internal, ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                }
+                                emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec, bath);
+                            }
+                            // +n flux toward a right-side wall, -n toward a
+                            // left-side wall (matches the two-sided sign).
+                            conductive_flux =
+                                wall_right_masked ? drain : -drain;
+                        } else if (z_end_wall_face) {
+                            // Conductive z-end exchange (implicit_mhd.
+                            // z_wall_conduction): hard half-cell Dirichlet
+                            // exchange against the z-wall reservoir -- the
+                            // z-end twin of the shaped-wall dirichlet pin,
+                            // with NO free-streaming cap (the implicit
+                            // solver converges on the demanded outflow).
+                            // chi_ion_face is the full tensor nn scalar
+                            // (one-sided interior B, see the face geometry
+                            // above); the interior e_int is the conduction-
+                            // stage value. +n toward the z_hi wall, -n
+                            // toward the z_lo wall.
+                            const amrex::Real interior_e_spec =
+                                z_end_hi_face ? e_spec_ion_left
+                                              : e_spec_ion_right;
+                            amrex::Real drain =
+                                chi_ion_face * face_density *
+                                (interior_e_spec - z_wall_bath_e_spec_ion) *
+                                2.0_rt * inverse_normal_size * corner_weight;
+                            amrex::Real conductance =
+                                chi_ion_face * face_density * 2.0_rt *
+                                inverse_normal_size * corner_weight;
+                            // implicit_mhd.wall_heat_flux_cap: the z-end
+                            // exchange takes the SAME cap as the shaped-wall
+                            // drain (free_streaming or sonic, same factor,
+                            // same harmonic form, conductance divided with
+                            // it). Unset and "none" leave it uncapped with no
+                            // arithmetic performed (bit-identical).
+                            amrex::Real z_end_cap = 1.0_rt;
+                            if (z_wall_capped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(true, z_wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                                z_end_cap = cap;
+                            }
+                            // Preconditioner row on the interior cell: at
+                            // frozen coefficients the uncapped branch is
+                            // EXACTLY linear in it (no gate), so the emitted
+                            // diagonal is the exact Jacobian entry; capped,
+                            // it is the secant conductance the shaped-wall
+                            // capped modes emit.
+                            if (emit_wall_rows) {
+                                const int ric = z_end_hi_face ? il : i;
+                                const int rjc = z_end_hi_face ? jl : j;
+                                const int rkc = z_end_hi_face ? kl : k;
+                                const auto& interior =
+                                    z_end_hi_face ? cell_left : cell_right;
+                                amrex::Real kinetic_fraction = 1.0_rt;
+                                if (parameters.dual_energy_closure) {
+                                    amrex::Real kinetic = 0.0_rt;
+                                    for (int component = 0; component < 3;
+                                         ++component) {
+                                        kinetic +=
+                                            interior.momentum[component] *
+                                            interior.momentum[component];
+                                    }
+                                    kinetic *=
+                                        0.5_rt / interior.safe_density;
+                                    kinetic_fraction = theta_implicit_mhd::
+                                        dual_energy_kinetic_fraction(
+                                            interior.ion_energy, kinetic,
+                                            ion_int_old(ric, rjc, rkc),
+                                            parameters);
+                                    emit_wall_row(
+                                        wall_row_ion_internal, ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                    emit_wall_row(
+                                        wall_row_ion_internal + wall_row_zend_offset,
+                                        ric, rjc, rkc,
+                                        (1.0_rt - kinetic_fraction) *
+                                            conductance,
+                                        interior.safe_density);
+                                }
+                                emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                emit_wall_row(wall_row_ion_total + wall_row_zend_offset,
+                                              ric, rjc, rkc,
+                                              kinetic_fraction * conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec,
+                                                  z_wall_bath_e_spec_ion);
+                            }
+                            // Conduction-block END-FACE coefficient: with the
+                            // preconditioner's homogeneous Dirichlet end
+                            // boundary on the energy rows this reproduces the
+                            // exchange's exact linearization 2 chi w/dz^2 on
+                            // the end cell (the bath is frozen, so the row is
+                            // a pure diagonal); a wall heat-flux cap enters as
+                            // the tangent 1/cap^2 of its harmonic form, like
+                            // the bulk coefficient. The full ion value goes to
+                            // the total slot; the pair inverse blends it.
+                            if (emit_conduction_pc &&
+                                conduction_pc.contains(i, j, k)) {
+                                conduction_pc(i, j, k, conduction_pc_ion_total) =
+                                    conduction_pc_stage_weight * chi_ion_face *
+                                    corner_weight / (z_end_cap * z_end_cap);
+                                conduction_pc(i, j, k, conduction_pc_face_density) =
+                                    face_density;
+                            }
+                            conductive_flux = z_end_hi_face ? drain : -drain;
+                        } else if (braginskii) {
+                            // Anisotropic tensor flux: the normal gradient
+                            // uses the SAME (conduction-stage) specific
+                            // energies as the isotropic path; the tangential
+                            // gradient is the corner-stencil value above.
+                            const amrex::Real gradient_normal =
+                                (e_spec_ion_right - e_spec_ion_left) *
+                                inverse_normal_size;
+                            conductive_flux =
+                                -face_density *
+                                (brag_chi_perp_ion * gradient_normal +
+                                 (brag_chi_par_ion - brag_chi_perp_ion) *
+                                     brag_bn *
+                                     (brag_bn * gradient_normal +
+                                      brag_cross_scale * brag_bt *
+                                          brag_grad_t_ion) /
+                                     brag_b2_dir);
+                            if (conduction_limit > 0.0_rt) {
+                                // the same free-streaming harmonic cap as
+                                // the isotropic path, applied to the TOTAL
+                                // (normal + tangential) conductive flux;
+                                // the cap temperature is the conduction-
+                                // stage value (see cap_ti above)
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_ti /
+                                    conduction_ion_mass);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_ti * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        } else {
+                            conductive_flux =
+                                -chi_ion_face * face_density *
+                                (e_spec_ion_right - e_spec_ion_left) *
+                                inverse_normal_size;
+                            if (conduction_limit > 0.0_rt) {
+                                // free-streaming cap q_fs = n kB Ti v_ti,
+                                // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
+                                // form q/(1 + |q|/(f q_fs)), no branches;
+                                // Ti is the conduction-stage cap value
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_ti /
+                                    conduction_ion_mass);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_ti * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        }
+                        flux.ion_energy += conductive_flux;
+                        if (emit_conduction_pc && !wall_face &&
+                            !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                            // Linearized normal diffusivity of the flux just
+                            // formed (see the host constants). Under
+                            // dual_energy the SAME flux is booked into both ion
+                            // registers and depends on the blended internal
+                            // energy, so the pair's Jacobian is rank one in the
+                            // register pair: the preconditioner inverts it
+                            // exactly from this one FULL coefficient plus the
+                            // cell blend weight (m_conduction_pc_blend), and
+                            // only the total slot is written here.
+                            conduction_pc(i, j, k, conduction_pc_ion_total) =
+                                conduction_pc_stage_weight * chi_ion_face /
+                                (conduction_pc_cap * conduction_pc_cap);
+                            conduction_pc(i, j, k, conduction_pc_face_density) =
+                                face_density;
+                            if (emit_conduction_pc_cross) {
+                                // Frozen cross-term coefficient of the tensor
+                                // flux (zero for the isotropic path); carries
+                                // the diagnostic cross-term scale so block and
+                                // residual agree for any value of it.
+                                conduction_pc(i, j, k, conduction_pc_cross_ion_total) =
+                                    braginskii
+                                        ? conduction_pc_stage_weight *
+                                              (brag_chi_par_ion - brag_chi_perp_ion) *
+                                              brag_cross_scale * brag_bn * brag_bt /
+                                              (brag_b2_dir * conduction_pc_cap *
+                                               conduction_pc_cap)
+                                        : 0.0_rt;
+                            }
+                        }
+                        if (chi_dual_energy) {
+                            // Conduction is a purely internal-energy exchange:
+                            // the auxiliary U_i channel receives the identical
+                            // face flux the conservative E_i channel books
+                            // (its internal-only counterpart is itself).
+                            flux.ion_internal_energy += conductive_flux;
+                        }
+                    }
+                    if (braginskii || chi_electron > 0.0_rt ||
+                        chi_electron_is_parser) {
+                        amrex::Real chi_electron_face =
+                            chi_electron_is_parser
+                                ? chi_electron_parser(face_charge_density,
+                                                      face_te, face_ti,
+                                                      face_jmag, face_time)
+                                : chi_electron;
+                        amrex::Real brag_chi_par_electron = 0.0_rt;
+                        amrex::Real brag_chi_perp_electron = 0.0_rt;
+                        if (braginskii) {
+                            // chi_par_e = 3.16 kB Te tau_e / m_e and the
+                            // electron perpendicular fit, Braginskii (1965)
+                            // Z = 1.
+                            const amrex::Real kb_te = PhysConst::kb * face_te;
+                            const amrex::Real face_number_density =
+                                face_charge_density / PhysConst::q_e;
+                            // Collision time at the host coefficient's
+                            // lnLambda (constant path, bit-identical); the
+                            // live lnLambda divides by the face value,
+                            // floored at 1 like the reference code.
+                            const amrex::Real tau_electron_host =
+                                brag_tau_e_coefficient * kb_te *
+                                std::sqrt(kb_te) / face_number_density;
+                            const amrex::Real tau_electron =
+                                brag_live_coulomb_log
+                                    ? tau_electron_host /
+                                          std::max(
+                                              theta_implicit_mhd::
+                                                  coulomb_log_electron(
+                                                      face_number_density,
+                                                      kb_te / PhysConst::q_e),
+                                              brag_coulomb_log_floor)
+                                    : tau_electron_host;
+                            // (gamma_e - 1): kappa-convention -> operator
+                            // convention (see the host-constant comment).
+                            const amrex::Real chi_par_raw =
+                                brag_e_convention * 3.16_rt * kb_te *
+                                tau_electron / PhysConst::m_e;
+                            const amrex::Real omega_tau =
+                                brag_omega_e_coefficient * tau_electron;
+                            const amrex::Real x =
+                                omega_tau * omega_tau * brag_b2;
+                            const amrex::Real chi_perp_raw =
+                                chi_par_raw *
+                                (brag_e_numerator_1 * x + 1.0_rt) /
+                                ((brag_e_denominator_2 * x +
+                                  brag_e_denominator_1) *
+                                     x +
+                                 1.0_rt);
+                            // Halo lift of the PARALLEL ceiling, same density
+                            // key as the ion channel (recomputed: the ion
+                            // block's copy is out of scope here). This is the
+                            // CEILING, not the perp boost below -- the
+                            // reference clamps xile_mx = xili_mx = 1e6 for
+                            // BOTH species, and the electron parallel channel
+                            // is the faster of the two drains, so restricting
+                            // the lift to ions would leave the halo electrons
+                            // throttled at the core clamp.
+                            amrex::Real par_hi_electron = brag_par_hi_e;
+                            if (lift_halo_par) {
+                                const amrex::Real guarded_density =
+                                    theta_implicit_mhd::smooth_positive_floor(
+                                        chi_charge_to_mass * face_density,
+                                        halo_boost_guard);
+                                const amrex::Real ratio =
+                                    halo_boost_reference / guarded_density;
+                                const amrex::Real halo_factor =
+                                    halo_boost_dp * ratio * ratio;
+                                if (halo_factor > 1.0_rt) {
+                                    par_hi_electron = std::min(
+                                        halo_par_hi_e,
+                                        brag_par_hi_e * halo_factor);
+                                }
+                            }
+                            brag_chi_par_electron = clamp_with(
+                                chi_par_raw, brag_par_lo_e, par_hi_electron);
+                            // Quasi-shorting boost (see the ion channel and
+                            // the qs_boost lambda): additive chi_perp, keyed
+                            // on the electron temperature, clamped after.
+                            // NO halo boost on the electron channel: the reference code
+                            // boosts the ION perp only (ntb.f90 t_cond ~584;
+                            // te_cond carries bare clamps) -- the halo drains
+                            // through ion conduction while the electron
+                            // channel keeps physical Braginskii.
+                            const amrex::Real chi_perp_electron_value =
+                                add_qs ? chi_perp_raw + qs_boost(face_te)
+                                       : chi_perp_raw;
+                            brag_chi_perp_electron = clamp_with(
+                                chi_perp_electron_value, brag_perp_lo_e,
+                                brag_perp_hi_e);
+                            // The reference code's te_cond: parallel at least perpendicular.
+                            brag_chi_par_electron = std::max(
+                                brag_chi_par_electron, brag_chi_perp_electron);
+                            // Wall interface faces: the clamped per-component
+                            // scalar chi selected by
+                            // implicit_mhd.wall_conduction_scale, not the nn
+                            // projection (see the ion channel). BOTH species
+                            // take the same clamp class -- the reference code anchors
+                            // both at 0.5 eV with xile_mx = xili_mx.
+                            chi_electron_face =
+                                wall_face
+                                    ? (wall_conduction_parallel_scale
+                                           ? brag_chi_par_electron
+                                           : brag_chi_perp_electron)
+                                    : brag_chi_perp_electron +
+                                          (brag_chi_par_electron -
+                                           brag_chi_perp_electron) *
+                                              brag_bn * brag_bn / brag_b2_dir;
+                        }
+                        amrex::Real conductive_flux;
+                        // Harmonic cap factor of the bulk flux (1 = uncapped),
+                        // kept for the preconditioner coefficient below.
+                        amrex::Real conduction_pc_cap = 1.0_rt;
+                        if (wall_face) {
+                            // One-sided rectified wall drain, gated at the
+                            // reachable-set anchor (see the ion channel
+                            // above): the interior e_int is the conduction-
+                            // stage value, the structure is unchanged.
+                            const amrex::Real interior_e_spec =
+                                wall_left_masked ? e_spec_electron_right
+                                                 : e_spec_electron_left;
+                            // Conductance beside the unchanged drain (see the
+                            // ion channel): the residual keeps its exact
+                            // floating-point association.
+                            amrex::Real drain;
+                            amrex::Real conductance = 0.0_rt;
+                            amrex::Real bath;
+                            if (wall_pin) {
+                                // Dirichlet pin (see the ion channel).
+                                drain = chi_electron_face * face_density *
+                                        (interior_e_spec -
+                                         wall_gate_e_spec_electron) *
+                                        2.0_rt * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_gate_e_spec_electron;
+                                if (emit_wall_rows) {
+                                    conductance = chi_electron_face *
+                                                  face_density * 2.0_rt *
+                                                  inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            } else {
+                                const amrex::Real gate =
+                                    theta_implicit_mhd::floor_outflow_limiter(
+                                        interior_e_spec,
+                                        wall_gate_e_spec_electron);
+                                drain = chi_electron_face * face_density *
+                                        (interior_e_spec -
+                                         wall_e_spec_electron) *
+                                        gate * inverse_normal_size *
+                                        corner_weight;
+                                bath = wall_e_spec_electron;
+                                if (emit_wall_rows) {
+                                    conductance = chi_electron_face *
+                                                  face_density * gate *
+                                                  inverse_normal_size *
+                                                  corner_weight;
+                                }
+                            }
+                            // Cap on the wall exchange (see the ion channel
+                            // and wall_cap_flux): free-streaming or sonic,
+                            // per implicit_mhd.wall_heat_flux_cap.
+                            if (!wall_uncapped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(false, wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                            }
+                            if (emit_wall_rows) {
+                                const int ric = wall_left_masked ? i : il;
+                                const int rjc = wall_left_masked ? j : jl;
+                                const int rkc = wall_left_masked ? k : kl;
+                                const auto& interior =
+                                    wall_left_masked ? cell_right : cell_left;
+                                emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                              conductance,
+                                              interior.safe_density);
+                                validate_wall_row(ric, rjc, rkc, conductance,
+                                                  drain, interior_e_spec, bath);
+                            }
+                            conductive_flux =
+                                wall_right_masked ? drain : -drain;
+                        } else if (z_end_wall_face) {
+                            // Conductive z-end exchange (see the ion
+                            // channel): hard half-cell Dirichlet reservoir
+                            // exchange, no free-streaming cap, one-sided
+                            // tensor scalar chi.
+                            const amrex::Real interior_e_spec =
+                                z_end_hi_face ? e_spec_electron_left
+                                              : e_spec_electron_right;
+                            amrex::Real drain =
+                                chi_electron_face * face_density *
+                                (interior_e_spec -
+                                 z_wall_bath_e_spec_electron) *
+                                2.0_rt * inverse_normal_size * corner_weight;
+                            amrex::Real conductance =
+                                chi_electron_face * face_density * 2.0_rt *
+                                inverse_normal_size * corner_weight;
+                            // implicit_mhd.wall_heat_flux_cap (see the ion
+                            // channel): same cap as the shaped-wall drain;
+                            // unset/"none" perform no arithmetic.
+                            amrex::Real z_end_cap = 1.0_rt;
+                            if (z_wall_capped) {
+                                const amrex::Real cap =
+                                    1.0_rt +
+                                    std::abs(drain) /
+                                        wall_cap_flux(false, z_wall_cap_sonic);
+                                drain /= cap;
+                                conductance /= cap;
+                                z_end_cap = cap;
+                            }
+                            if (emit_wall_rows) {
+                                const int ric = z_end_hi_face ? il : i;
+                                const int rjc = z_end_hi_face ? jl : j;
+                                const int rkc = z_end_hi_face ? kl : k;
+                                const auto& interior =
+                                    z_end_hi_face ? cell_left : cell_right;
+                                emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                              conductance,
+                                              interior.safe_density);
+                                emit_wall_row(wall_row_electron + wall_row_zend_offset,
+                                              ric, rjc, rkc, conductance,
+                                              interior.safe_density);
+                                validate_wall_row(
+                                    ric, rjc, rkc, conductance, drain,
+                                    interior_e_spec,
+                                    z_wall_bath_e_spec_electron);
+                            }
+                            // Conduction-block end-face coefficient (see the
+                            // ion channel).
+                            if (emit_conduction_pc &&
+                                conduction_pc.contains(i, j, k)) {
+                                conduction_pc(i, j, k, conduction_pc_electron) =
+                                    conduction_pc_stage_weight *
+                                    chi_electron_face * corner_weight /
+                                    (z_end_cap * z_end_cap);
+                                conduction_pc(i, j, k, conduction_pc_face_density) =
+                                    face_density;
+                            }
+                            conductive_flux = z_end_hi_face ? drain : -drain;
+                        } else if (braginskii) {
+                            // Anisotropic tensor flux (see the ion channel).
+                            const amrex::Real gradient_normal =
+                                (e_spec_electron_right -
+                                 e_spec_electron_left) *
+                                inverse_normal_size;
+                            conductive_flux =
+                                -face_density *
+                                (brag_chi_perp_electron * gradient_normal +
+                                 (brag_chi_par_electron -
+                                  brag_chi_perp_electron) *
+                                     brag_bn *
+                                     (brag_bn * gradient_normal +
+                                      brag_cross_scale * brag_bt *
+                                          brag_grad_t_electron) /
+                                     brag_b2_dir);
+                            if (conduction_limit > 0.0_rt) {
+                                // cap at the conduction-stage temperature
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_te / PhysConst::m_e);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_te * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        } else {
+                            conductive_flux =
+                                -chi_electron_face * face_density *
+                                (e_spec_electron_right -
+                                 e_spec_electron_left) *
+                                inverse_normal_size;
+                            if (conduction_limit > 0.0_rt) {
+                                // cap at the conduction-stage temperature
+                                const amrex::Real thermal_speed = std::sqrt(
+                                    PhysConst::kb * cap_te / PhysConst::m_e);
+                                const amrex::Real free_streaming_flux =
+                                    face_charge_density / PhysConst::q_e *
+                                    PhysConst::kb * cap_te * thermal_speed;
+                                conduction_pc_cap =
+                                    1.0_rt + std::abs(conductive_flux) /
+                                                 (conduction_limit *
+                                                  free_streaming_flux);
+                                conductive_flux /= conduction_pc_cap;
+                            }
+                        }
+                        flux.electron_energy += conductive_flux;
+                        if (emit_conduction_pc && !wall_face &&
+                            !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                            conduction_pc(i, j, k, conduction_pc_electron) =
+                                conduction_pc_stage_weight * chi_electron_face /
+                                (conduction_pc_cap * conduction_pc_cap);
+                            conduction_pc(i, j, k, conduction_pc_face_density) =
+                                face_density;
+                            if (emit_conduction_pc_cross) {
+                                // Frozen cross-term coefficient of the tensor
+                                // flux (zero for the isotropic path).
+                                conduction_pc(i, j, k, conduction_pc_cross_electron) =
+                                    braginskii
+                                        ? conduction_pc_stage_weight *
+                                              (brag_chi_par_electron -
+                                               brag_chi_perp_electron) *
+                                              brag_cross_scale * brag_bn * brag_bt /
+                                              (brag_b2_dir * conduction_pc_cap *
+                                               conduction_pc_cap)
+                                        : 0.0_rt;
+                            }
+                        }
+                    }
+                }
+
+                for (int component = 0; component < 3; ++component) {
+                    flux_arr(i, j, k, flux_momentum + component) =
+                        flux.momentum[component];
+                }
+                flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
+                flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
+                flux_arr(i, j, k, flux_ion_internal_energy) =
+                    flux.ion_internal_energy;
+                flux_arr(i, j, k, flux_viscous_dissipation) =
+                    flux.viscous_dissipation;
+                flux_arr(i, j, k, flux_wall_friction_work) =
+                    flux.wall_friction_work;
+            });
+        }
     }
 #else
     amrex::ignore_unused(face_flux_mf, normal_direction);
@@ -16431,7 +19147,21 @@ void ThetaImplicitMHD::UpdateMagneticFieldFused (const amrex::Real a_thetadt,
         }
     }
     fr::Run(ops);
-    m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange);
+    // Level >= 2: the Green's-function open-boundary ghost refill of this
+    // boundary application is skipped where only the r_hi face is open. It
+    // then writes the r_hi ghost band only (i >= nr for the cell-centered-
+    // in-r components, i >= nr+1 for B_r) from the valid B; the fused
+    // residual reads rhs = B - B^n on the VALID faces (ComputeRHS), and the
+    // next evaluation re-sets the valid Bfield_fp from the state and
+    // re-applies the boundary, whose r_hi-only fill depends on valid data
+    // (and on ghosts it refreshes itself) before anything reads the band.
+    // Exact; the reflecting, axis and insulator applications of EvolveB
+    // stay. An open z cap is exempt (ApplyBfieldBoundary): its fill is one
+    // step of a lagged recursion through the cap ghost row.
+    // (Measured: the open-caps identity deck differs at 1e-5 relative
+    // when the cap fill is skipped; the r_hi-only decks are identical.)
+    m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange,
+                                            m_fused_residual_level >= 2);
 }
 
 void ThetaImplicitMHD::SanitizeLoadedState ()

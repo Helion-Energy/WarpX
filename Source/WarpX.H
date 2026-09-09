@@ -155,9 +155,16 @@ public:
     void ApplyMagneticFieldBoundaryAfterSet ( amrex::Real a_time, bool a_exchange_ghosts );
     /** The Faraday part of UpdateMagneticFieldAndApplyBCs for a caller that
      * wrote B^n into Bfield_fp itself: EvolveB (with its boundary
-     * application) and the ghost exchange only if a_exchange_ghosts. */
+     * application) and the ghost exchange only if a_exchange_ghosts. With
+     * a_skip_open_bc_ghost_fill the Green's-function open-boundary ghost
+     * fill of that boundary application is skipped when only the r_hi face
+     * is open (it then writes the r_hi ghost band only, from valid data):
+     * for a caller that reads the updated B on the valid faces and re-sets
+     * B before the next use, exact. An open z cap keeps its fill (the next
+     * application's source deposit reads the cap ghost row). */
     void EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
-                                          bool a_exchange_ghosts );
+                                          bool a_exchange_ghosts,
+                                          bool a_skip_open_bc_ghost_fill = false );
     void SpectralSourceFreeFieldAdvance ( amrex::Real start_time);
     void FinishMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_theta, amrex::Real a_time );
@@ -1295,6 +1302,10 @@ private:
      * hybrid-PIC B-field advance; lazily constructed in
      * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
     std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
+    /** While true, ApplyBfieldBoundary skips the Green's-function open
+     * boundary ghost fill (set by EvolveMagneticFieldAndApplyBCs for the
+     * implicit residual whose consumer reads the valid faces only). */
+    bool m_skip_open_bc_bfield_ghost_fill = false;
 
     /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields
      * and discrete inductances driving the hybrid solver's split external

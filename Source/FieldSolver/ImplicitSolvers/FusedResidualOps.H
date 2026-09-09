@@ -15,6 +15,7 @@
 #include <AMReX_Box.H>
 #include <AMReX_Dim3.H>
 #include <AMReX_FabArrayBase.H>
+#include <AMReX_GpuControl.H>
 #include <AMReX_GpuLaunch.H>
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_INT.H>
@@ -68,7 +69,25 @@
  */
 namespace warpx::fused_residual
 {
-    /** \brief ``implicit_evolve.fused_residual`` (0 or 1), read once. */
+    /** \brief ``implicit_evolve.fused_residual`` (0 to 3), read once.
+     *
+     * 0: every existing path untouched. 1: the fused bookkeeping described
+     * above. 2: level 1 plus the two residual-only savings that are exact by
+     * construction -- the open-boundary (Green's-function) ghost refill
+     * inside the residual's Faraday update is skipped where only the r_hi
+     * face is open (that fill writes the r_hi ghost band only, from valid
+     * data, and the fused residual reads B - B^n on the valid faces; the
+     * next evaluation re-sets B and re-applies the boundary before any
+     * read; an open z cap keeps its refill: the next application's deposit
+     * reads the cap ghost row), and, on a rank that owns a single box
+     * (every kernel of a stage then
+     * runs on one stream in issue order), AMReX's per-MFIter stream
+     * synchronizations are elided inside the residual evaluation, the
+     * active-set mask operations and the block preconditioner's apply
+     * (NoSyncScope below; the preconditioner's MLMG applications keep
+     * theirs, SyncScope). 3: level 2 plus the face-flux kernels split into
+     * an advective and a diffusive launch per direction (same per-face
+     * expressions, the intermediate face registers stored and reloaded). */
     inline int Level ()
     {
         static const int level = [] () {
@@ -76,14 +95,60 @@ namespace warpx::fused_residual
             const amrex::ParmParse pp("implicit_evolve");
             pp.query("fused_residual", value);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                value == 0 || value == 1,
-                "implicit_evolve.fused_residual must be 0 or 1");
+                value >= 0 && value <= 3,
+                "implicit_evolve.fused_residual must be 0, 1, 2 or 3");
             return value;
         }();
         return level;
     }
 
     inline bool Enabled () { return Level() >= 1; }
+
+    /** \brief Scoped elision of the MFIter stream synchronizations
+     * (amrex::Gpu::setNoSyncRegion(true)) while a_enable; a no-op otherwise
+     * and on CPU builds. The caller guarantees single-stream issue order
+     * (one local box) and that nothing inside frees device memory a queued
+     * kernel still uses. */
+    struct NoSyncScope
+    {
+        explicit NoSyncScope (const bool a_enable) : m_active(a_enable)
+        {
+            if (m_active) { m_prev = amrex::Gpu::setNoSyncRegion(true); }
+        }
+        ~NoSyncScope ()
+        {
+            if (m_active) { amrex::ignore_unused(amrex::Gpu::setNoSyncRegion(m_prev)); }
+        }
+        NoSyncScope (const NoSyncScope&) = delete;
+        NoSyncScope& operator= (const NoSyncScope&) = delete;
+        NoSyncScope (NoSyncScope&&) = delete;
+        NoSyncScope& operator= (NoSyncScope&&) = delete;
+    private:
+        bool m_active = false;
+        bool m_prev = false;
+    };
+
+    /** \brief Scoped restoration of the MFIter stream synchronizations
+     * inside a NoSyncScope (for a callee that allocates and frees device
+     * temporaries of its own, or hands device data to another stream). */
+    struct SyncScope
+    {
+        explicit SyncScope (const bool a_enable = true) : m_active(a_enable)
+        {
+            if (m_active) { m_prev = amrex::Gpu::setNoSyncRegion(false); }
+        }
+        ~SyncScope ()
+        {
+            if (m_active) { amrex::ignore_unused(amrex::Gpu::setNoSyncRegion(m_prev)); }
+        }
+        SyncScope (const SyncScope&) = delete;
+        SyncScope& operator= (const SyncScope&) = delete;
+        SyncScope (SyncScope&&) = delete;
+        SyncScope& operator= (SyncScope&&) = delete;
+    private:
+        bool m_active = false;
+        bool m_prev = false;
+    };
 
     /** \brief True when a FillBoundary of this FabArray can move data. */
     inline bool NeedsGhostExchange (const amrex::FabArrayBase& a_fa,

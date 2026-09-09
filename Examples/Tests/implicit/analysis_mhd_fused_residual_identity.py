@@ -11,10 +11,13 @@
 implicit_evolve.fused_residual = 1 runs the bookkeeping of the MHD residual and of the
 block preconditioner (block copies, domain-ghost fills, cell-centered
 interpolations, zero fills, frozen-row restores) as one kernel per stage
-instead of one per MultiFab, and skips the ghost exchanges that cannot move data (one box, non-periodic), with the per-element expressions unchanged. This run and its
-twin (same deck, fused_residual = 0) must therefore agree exactly: the
-Newton diagnostic file is byte-identical and the final plotfile fields are
-identical to the last bit.
+instead of one per MultiFab, and skips the ghost exchanges that cannot move data (one box, non-periodic), with the per-element expressions unchanged. Level 2 adds the
+skip of the ghost-only open-boundary refill inside the residual's Faraday
+update (and, on GPUs, the per-MFIter stream-sync elision), level 3 the
+split face-flux launches -- all with the per-face expressions unchanged.
+This run and its twin (same deck, a lower level of the knob) must
+therefore agree exactly: the Newton diagnostic file is byte-identical and
+the final plotfile fields are identical to the last bit.
 
 Usage: analysis_mhd_fused_residual_identity.py <final_plotfile> <twin_final_plotfile>
        [<twin_newton_txt>]
@@ -37,7 +40,7 @@ twin_newton = (
 
 used_inputs = Path("warpx_used_inputs").read_text()
 match = re.search(r"^implicit_evolve\.fused_residual\s*=\s*(\S+)", used_inputs, re.MULTILINE)
-assert match is not None and match.group(1) == "1", match
+assert match is not None and int(match.group(1)) >= 1, match
 
 mine = Path("diags/newton.txt").read_bytes()
 twin = Path(twin_newton).read_bytes()
