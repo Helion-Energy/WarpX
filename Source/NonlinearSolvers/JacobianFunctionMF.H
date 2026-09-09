@@ -55,8 +55,46 @@
  * setBaseSolution() (once per Newton iteration); nothing in the probe itself
  * can detect a stale D, so the optional probe report (setProbeReportFile)
  * recomputes |U| + floor from the base state and asserts it equals D.
+ *
+ * block_split: ONE finite difference per BLOCK FAMILY instead of one for the
+ *            whole direction,
+ *              J v ~ sum_f [F(U + eps_f P_f v) - F(U)] / eps_f,
+ *            P_f the projector onto family f and eps_f the COMPONENT-scaled
+ *            size of that family alone,
+ *              eps_f = jfnk_epsilon ||P_f D^{-1} U|| / ||P_f D^{-1} v||,
+ *            D = |U| + floor the component scale of the component mode (so
+ *            the per-block floors newton.jfnk_component_floor_<block> apply).
+ *            Two families: {the field block, momentum} and {mass, the energy
+ *            blocks, any scalar block}. Each family's epsilon is therefore
+ *            relative to its own components' magnitudes (the core and halo
+ *            values of one energy block alike) and cannot be collapsed by
+ *            the other family's scale -- the two failure modes measured on
+ *            the production state: the component mode with the default
+ *            floor leaves the halo energy rows perturbed relative to a floor
+ *            5000x their value, and the component mode with halo-sized
+ *            energy floors lets those components dominate the single scaled
+ *            direction norm and starves the field rows into round-off. Motivation (measured on the production
+ *            formation state with the residual-block report,
+ *            pc_mhd_block.residual_block_norms): the components of one Krylov
+ *            vector span 1e4-1e7 in magnitude relative to their own scale (the
+ *            auxiliary ion energy at its 0.006 J/m^3 floor image in the halo
+ *            against a field-pressure block scale of 3e4 J/m^3, next to 0.3 T
+ *            field rows), and no single eps serves them all: the global size
+ *            perturbs the small energy components by thousands of times their
+ *            value (the true residual of the returned direction was 13x, up to
+ *            5000x, the Krylov solver's estimate, all of it in those rows),
+ *            while a size that fits them starves the field rows into
+ *            round-off (the excess then moved to B_r). One eps per family
+ *            probes every block at its own scale for the price of a second
+ *            residual evaluation per Jacobian application (~+30 % per Krylov
+ *            iteration at the measured 3.4 of 8.5 ms). Exact for a linear
+ *            residual (the two partial differences add to the full one); a
+ *            correctness option, off by default (bit-identical). With a single
+ *            populated family (an electromagnetic-only state) it reduces to
+ *            the global rule. The probe report file is not produced in this
+ *            mode (asserted).
  */
-AMREX_ENUM(JFNKEpsilonMode, global, component);
+AMREX_ENUM(JFNKEpsilonMode, global, component, block_split);
 
 /**
  * \brief This is a linear function class for computing the action of a
@@ -140,6 +178,23 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
         m_Y0.Copy(a_U);
         m_normY0 = this->norm2(m_Y0);
         m_probe_report_pending = !m_probe_report_file.empty();
+        if (m_eps_mode == JFNKEpsilonMode::block_split) {
+            // Component scale of this Newton iteration (as in the component
+            // mode) and the family norms of the scaled base state, frozen for
+            // the whole linear solve like m_normY0.
+            m_D.Copy(a_U);
+            m_D.abs();
+            m_D.addBlockConstants(m_component_floors);
+            for (int family = 0; family < NumFamilies; ++family) {
+                m_Zf.Copy(a_U);
+                m_Zf.divideBy(m_D);
+                restrictToFamily(m_Zf, family);
+                m_normY0_family[family] = std::sqrt(m_Zf.dotProduct(m_Zf, false));
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    std::isfinite(m_normY0_family[family]),
+                    "JacobianFunctionMF: a block_split family norm of D^{-1} U is not finite");
+            }
+        }
         if (m_eps_mode == JFNKEpsilonMode::component || m_probe_report_pending) {
             // Component probe scale of this Newton iteration,
             // D = |U| + floor (per block), and the scaled base-state norm
@@ -216,6 +271,35 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
             m_D.Define(m_Y0);
             m_W.Define(m_Y0);
         }
+        if (m_eps_mode == JFNKEpsilonMode::block_split) {
+            m_Zf.Define(m_Y0);
+            m_D.Define(m_Y0);
+            m_W.Define(m_Y0);
+            m_normY0_family.assign(NumFamilies, RT(0.0));
+            // Family map: the field block and the momentum block form family
+            // 0, every other block (mass, the energy blocks, a scalar block)
+            // family 1. Recorded by name so the restriction never depends on
+            // the block order of the vector.
+            m_block_family.clear();
+            const std::vector<std::string> names = m_Y0.blockNames();
+            std::vector<bool> populated(NumFamilies, false);
+            for (auto const& name : names) {
+                const int family =
+                    (name == m_Y0.getVectorType() ||
+                     name == "implicit_mhd_momentum_density") ? 0 : 1;
+                m_block_family.emplace_back(name, family);
+                populated[family] = true;
+            }
+            m_num_populated_families = 0;
+            for (int family = 0; family < NumFamilies; ++family) {
+                if (populated[family]) { ++m_num_populated_families; }
+            }
+            if (m_num_populated_families < 2) {
+                amrex::Print() << "WARNING: JacobianFunctionMF: newton.jfnk_epsilon_mode = "
+                                  "block_split with a single populated block family "
+                                  "reduces to the global sizing rule\n";
+            }
+        }
     }
 
     [[nodiscard]] inline
@@ -235,6 +319,10 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             isDefined(),
             "JacobianFunctionMF::setProbeReportFile() called before define()");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            a_file.empty() || m_eps_mode != JFNKEpsilonMode::block_split,
+            "newton.jfnk_probe_report_file is not produced with "
+            "newton.jfnk_epsilon_mode = block_split (one epsilon per block family)");
         m_probe_report_file = a_file;
         if (!m_probe_report_file.empty()) {
             if (!m_D.IsDefined()) { m_D.Define(m_Y0); }
@@ -297,6 +385,16 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     // component mode work vectors: the probe scale D of the current
     // Newton iteration and a scratch vector for D^{-1} x
     T m_D, m_W;
+    // block_split mode: the family-restricted direction, the frozen family
+    // norms of the base state, the block -> family map (by block name) and
+    // the number of populated families (1 = degenerate, global rule)
+    static constexpr int NumFamilies = 2;
+    T m_Zf;
+    std::vector<RT> m_normY0_family;
+    std::vector<std::pair<std::string, int>> m_block_family;
+    int m_num_populated_families = 0;
+    void restrictToFamily ( T& a_vec, int a_family ) const;
+    void applyBlockSplit ( T& a_dF, const T& a_dU, RT a_normY );
 
     PreconditionerType m_pc_type = PreconditionerType::none;
 
@@ -370,6 +468,10 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
         "JacobianFunction::apply() called on undefined JacobianFunction");
 
     if (normY < 1.0e-15) { a_dF.zero(); }
+    else if (m_eps_mode == JFNKEpsilonMode::block_split && m_num_populated_families > 1 &&
+             !m_is_linear) {
+        applyBlockSplit(a_dF, a_dU, normY);
+    }
     else {
 
         RT eps;
@@ -468,6 +570,90 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
 
     }
 
+}
+
+template <class T, class Ops>
+void JacobianFunctionMF<T,Ops>::restrictToFamily ( T& a_vec, const int a_family ) const
+{
+    // Zero every block that is not in a_family (the block MultiFabs are the
+    // vector's storage, fused layout included, so per-block setVal is exact).
+    using warpx::fields::FieldType;
+    auto family_of = [&] (const std::string& name) {
+        for (auto const& entry : m_block_family) {
+            if (entry.first == name) { return entry.second; }
+        }
+        return 1;
+    };
+    const int num_levels = static_cast<int>(a_vec.getArrayVec().size());
+    for (int lev = 0; lev < num_levels; ++lev) {
+        if (a_vec.getArrayVecType() != FieldType::None &&
+            family_of(a_vec.getVectorType()) != a_family) {
+            for (int n = 0; n < 3; ++n) { a_vec.getArrayVec()[lev][n]->setVal(0.0); }
+        }
+        if (a_vec.getScalarVecType() != FieldType::None &&
+            family_of(a_vec.getScalarType()) != a_family) {
+            a_vec.getScalarVec()[lev]->setVal(0.0);
+        }
+        for (auto const& spec : a_vec.getMultiFabBlockSpecs()) {
+            if (family_of(spec.name) != a_family) {
+                a_vec.getMultiFabBlock(spec.name, lev).setVal(0.0);
+            }
+        }
+    }
+}
+
+template <class T, class Ops>
+void JacobianFunctionMF<T,Ops>::applyBlockSplit ( T& a_dF, const T& a_dU, const RT a_normY )
+{
+    BL_PROFILE("JacobianFunctionMF::applyBlockSplit()");
+    using namespace amrex::literals;
+    // J v ~ sum over block families of [F(U + eps_f P_f v) - F(U)] / eps_f:
+    // F(Y) = Y - b - R(Y) gives dF = v - sum_f (R(Z_f) - R(Y0)) / eps_f.
+    a_dF.Copy(a_dU);
+    for (int family = 0; family < NumFamilies; ++family) {
+        m_Zf.Copy(a_dU);
+        restrictToFamily(m_Zf, family);
+        const RT normVf = this->norm2(m_Zf);
+        // A family the direction does not touch contributes nothing
+        // (the threshold is the one of apply() relative to the full norm).
+        if (normVf < 1.0e-15_rt * a_normY) { continue; }
+        // Component-scaled size of this family alone: the scaled direction
+        // norm over the family's components, so every component of the
+        // family is perturbed by jfnk_epsilon of its own magnitude in the
+        // root-mean-square sense (falls back to the family's plain
+        // Pernice-Walker size if the scaled base norm vanishes).
+        m_W.Copy(m_Zf);
+        m_W.divideBy(m_D);
+        const RT normWf = std::sqrt(m_W.dotProduct(m_W, false));
+        RT eps = (m_normY0_family[family] > 0.0_rt && normWf > 0.0_rt)
+                     ? m_epsJFNK * m_normY0_family[family] / normWf
+                     : m_epsJFNK * this->norm2(m_Y0) / normVf;
+        if (m_ops->ProbePerturbationsNeedLimiting()) {
+            const RT requested_eps = eps;
+            eps = m_ops->LimitSolverStep(m_Y0, m_Zf, requested_eps);
+            if (std::abs(eps) < std::abs(requested_eps)) {
+                const RT negative_eps =
+                    m_ops->LimitSolverStep(m_Y0, m_Zf, -requested_eps);
+                if (std::abs(negative_eps) > std::abs(eps)) { eps = negative_eps; }
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                std::abs(eps) > std::numeric_limits<RT>::epsilon(),
+                "The matrix-free Jacobian perturbation cannot remain in the "
+                "operator's admissible state domain (block_split family)");
+        }
+        const RT eps_inv = 1.0_rt / eps;
+        m_Z.linComb(1.0, m_Y0, eps, m_Zf); // Z = Y0 + eps_f P_f v
+        if (m_active_set_masking) {
+            m_ops->CopyActiveSetComponents(m_Z, m_Y0);
+        }
+        m_ops->ComputeRHS(m_R, m_Z, m_cur_time, -1, true);
+        a_dF.increment(m_R0, eps_inv);
+        a_dF.increment(m_R, -eps_inv);
+    }
+    if (m_active_set_masking) {
+        // Pinned rows: identity on the active set, as in apply().
+        m_ops->CopyActiveSetComponents(a_dF, a_dU);
+    }
 }
 
 template <class T, class Ops>

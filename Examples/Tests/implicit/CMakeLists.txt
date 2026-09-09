@@ -2161,6 +2161,25 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# The block-split JFNK probe (newton.jfnk_epsilon_mode = block_split): the
+# ions-on oblique-edge arm with the energy block scale widened 10x
+# (my_constants.B_ref 0.05 -> 0.5, the norm weights only; the physics is
+# unchanged) and a deliberately coarse probe (jfnk_epsilon 1e-5), so that the
+# components of one Krylov vector span the production state's dynamic range
+# and a single epsilon cannot serve them: the true residual of the returned
+# direction (the residual-block report) must agree with the Krylov solver's
+# estimate -- median ratio <= 2.5, p90 <= 6, none above 15 (measured 1.8 /
+# 4.6 / 10.2). Sabotage: the same run with jfnk_epsilon_mode = global gives
+# 12.5 / 22 / 63 (FAIL); component gives 1.3 / 5.6 / 43 (fails the tail gate).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_jfnk_block_split  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.evolve_ion_fluid=true implicit_mhd.ion_closure=dual_energy implicit_mhd.reference_ion_pressure=n_core*q_e*50.0 implicit_mhd.ion_pressure_floor=floor_frac*n_ref*q_e*Te_halo implicit_mhd.ion_pressure(x,y,z)=q_e*n_halo*exp(log(n_core/n_halo)*0.5*(1.0-tanh((abs(z)-z_edge)/w_n)))*(Te_halo+(50.0-Te_halo)*0.5*(1.0-tanh((abs(z)-z_front)/w_T))) implicit_mhd.electron_ion_equilibration=1.0 implicit_mhd.wall_heat_flux_cap_factor_ion=2.5 my_constants.B_ref=0.5 newton.jfnk_epsilon=1e-5 newton.jfnk_epsilon_mode=block_split newton.active_set=1 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt max_step=4"  # inputs
+    "analysis_mhd_jfnk_block_split.py diags/residual_blocks.txt diags/newton.txt 2.5 6.0 15.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
 # The frozen cross-term registers and their MLMG consumer on top of the
 # weight: the gate on the register contents (sign-sensitive: 40 / 266
 # measured, 46 / 616 with the sign of b_n b_t flipped).

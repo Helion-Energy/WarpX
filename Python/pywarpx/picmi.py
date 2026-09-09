@@ -2229,6 +2229,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         component perturbed by jfnk_epsilon of its own magnitude in the
         root-mean-square sense, realized as a column scaling of the Jacobian
         that leaves the right-preconditioned GMRES iteration unchanged).
+        'block_split': one finite difference per block family (the field
+        and momentum blocks; the mass, energy and scalar blocks), each
+        sized by jfnk_epsilon of its own family norm -- every block probed
+        at its own scale for a second residual evaluation per Jacobian
+        application (correctness option; see the parameters documentation)
 
     jfnk_component_floor: float, default=1.e-3
         Additive floor of the component probe scale, as a fraction of each
