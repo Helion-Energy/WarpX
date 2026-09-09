@@ -20,11 +20,18 @@ identity rows where the stencil emits nothing (the axis and outer-wall B_r
 faces of this deck); (3) split into exactly two coupled blocks -- the poloidal (B_r,
 B_z) and the azimuthal (B_theta) components decouple in axisymmetry
 without the Hall term -- plus those identity rows; (4) be exactly
-symmetric under the geometric row scaling d_i a_ij = d_j a_ji (the
+symmetric under a geometric row scaling d_i a_ij = d_j a_ji (the
 cylindrical face-volume weights make the curl-curl self-adjoint), while
-the raw matrix is visibly asymmetric: the property the symmetric/Cholesky
-backends of the block depend on, and the sabotage the check would catch
-(a lost metric factor or a one-sided boundary emission breaks it).
+the raw matrix is visibly asymmetric -- this catches one-sided emissions
+and cycle-inconsistent errors, but NOT a metric factor applied uniformly
+to a coupling class (the scaling absorbs it), hence (5): the radial
+coupling of the azimuthal component carries the ANALYTIC cylindrical
+metric, a(i, i+1) / a(i+1, i) = r_{i+1} / r_i = (i + 3/2) / (i + 1/2) for
+cell centres with the axis at r = 0 (both entries come from the same
+E_z node with the same eta, so only the metric survives the ratio); the
+check compares against that formula to 1e-12 and fails for a lost or
+perturbed radius weight (a 1e-9 perturbation of radius_high / radius is
+caught, the row-scaled symmetry alone is not).
 """
 
 import os
@@ -129,10 +136,33 @@ scaled = (sp.diags(d) @ a).tocsr()
 scale = abs(scaled).max()
 scaled_asymmetry = abs(scaled - scaled.T).max() / scale
 raw_asymmetry = abs(a - a.T).max() / abs(a).max()
+# (5) the analytic radial metric of the azimuthal coupling class
+active1, offset1, low1, high1 = comps[1]
+assert active1 and low1[0] == 0, "the azimuthal component must start at the axis (prob_lo r = 0)"
+len_r1 = high1[0] - low1[0] + 1
+len_z1 = high1[1] - low1[1] + 1
+a_csr = a.tocsr()
+measured = []
+analytic = []
+for jz in range(len_z1):
+    base = offset1 + jz * len_r1
+    for ir in range(len_r1 - 1):
+        a_up = a_csr[base + ir, base + ir + 1]
+        a_down = a_csr[base + ir + 1, base + ir]
+        if a_up != 0.0 and a_down != 0.0:
+            measured.append(a_up / a_down)
+            analytic.append((ir + 1.5) / (ir + 0.5))
+measured = np.asarray(measured)
+analytic = np.asarray(analytic)
+assert len(measured) >= len_z1 * (len_r1 - 2), (len(measured), "too few azimuthal radial couplings")
+metric_error = np.max(np.abs(measured - analytic) / analytic)
+assert metric_error < 1.0e-12, (metric_error, "azimuthal radial coupling ratio vs (i + 3/2)/(i + 1/2)")
+
 print(
     f"resistive direct dump: {n} rows, {nnz} nonzeros, {len(identity_rows)} identity rows, "
     f"blocks {block_sizes[:2].tolist()}; raw asymmetry {raw_asymmetry:.3e}, "
-    f"row-scaled asymmetry {scaled_asymmetry:.3e}, d in [{d.min():.3g}, {d.max():.3g}]"
+    f"row-scaled asymmetry {scaled_asymmetry:.3e}, d in [{d.min():.3g}, {d.max():.3g}], "
+    f"azimuthal radial metric ratio vs analytic {metric_error:.1e} over {len(measured)} pairs"
 )
 assert raw_asymmetry > 1.0e-3, "the raw RZ operator is not symmetric (metric factors)"
 assert scaled_asymmetry < 1.0e-12, "the row-scaled operator must be symmetric to roundoff"

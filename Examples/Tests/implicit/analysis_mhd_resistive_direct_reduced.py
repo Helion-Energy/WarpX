@@ -8,7 +8,7 @@
 
 """Partition gate of the reduced solve of the direct resistive block.
 
-Usage: analysis_mhd_resistive_direct_reduced.py <threshold> <margin> <min dropped fraction>
+Usage: analysis_mhd_resistive_direct_reduced.py <threshold> <margin> <min dropped fraction> <min column-only rows>
 
 ``implicit_mhd.resistive_direct_row_threshold`` splits the assembled rows
 into a factorized sub-system and rows solved as b_i / a_ii. The dump of
@@ -18,10 +18,22 @@ satisfy the rule exactly: a row is kept iff some off-diagonal coupling in
 its ROW or its COLUMN exceeds (threshold / margin) times the diagonal of
 that row/column; the sub-system is the full matrix restricted to the kept
 rows (values bit-equal); the dropped couplings all lie within the build
-bound; and at least the given fraction of the rows is dropped (so the
-partition is not trivial on this deck). Any wrong rule -- the column
-criterion missing, the margin ignored, a row dropped out of order --
-fails the equality checks.
+bound; at least the given fraction of the rows is dropped (so the
+partition is not trivial on this deck); and -- the exactness of the
+trivial rows -- no dropped row is referenced by a kept row beyond the
+bound (at threshold 0: not referenced at all), since a trivial row's
+solution enters the kept rows' equations only through such references.
+
+The COLUMN criterion is what keeps rows that have no couplings of their
+own but are referenced by neighbours (frozen wall faces read by live
+faces; the one-sided emissions of the hyper-resistive chain and the wall
+seam): a row-only rule drops them and truncates O(1) couplings of the
+kept rows. Decks whose coupling pattern is structurally symmetric cannot
+see that (every row referenced is also coupling), so the last argument is
+the number of rows the deck must keep by the column rule ALONE -- the
+test refuses a deck that does not discriminate. On such a deck a missing
+column criterion fails three checks: the kept set (equality with the
+rule), the referenced-dropped-row check, and the count itself.
 """
 
 import struct
@@ -33,6 +45,7 @@ import scipy.sparse as sp
 threshold = float(sys.argv[1])
 margin = float(sys.argv[2])
 min_dropped_fraction = float(sys.argv[3])
+min_column_only_rows = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 prefix = "diags/resistive_direct"
 
 
@@ -69,9 +82,12 @@ assert np.all(diagonal > 0.0)
 coo = a.tocoo()
 off = coo.row != coo.col
 r, c, v = coo.row[off], coo.col[off], np.abs(coo.data[off])
-keep = np.zeros(n, dtype=bool)
-keep[r[v > build_threshold * diagonal[r]]] = True
-keep[c[v > build_threshold * diagonal[c]]] = True
+keep_by_row = np.zeros(n, dtype=bool)
+keep_by_row[r[v > build_threshold * diagonal[r]]] = True
+keep_by_column = np.zeros(n, dtype=bool)
+keep_by_column[c[v > build_threshold * diagonal[c]]] = True
+keep = keep_by_row | keep_by_column
+column_only_rows = int(np.sum(keep_by_column & ~keep_by_row))
 expected_rows = np.flatnonzero(keep)
 assert rows.shape == expected_rows.shape and np.array_equal(rows, expected_rows), (
     len(rows), len(expected_rows))
@@ -97,10 +113,24 @@ if touching.any():
 else:
     worst = 0.0
 
+# exactness of the trivial rows: a kept row may reference a DROPPED row only
+# within the bound (the dumped row list decides what is dropped, so a code
+# that dropped referenced rows fails here independently of the rule check)
+dumped_dropped = np.ones(n, dtype=bool)
+dumped_dropped[rows] = False
+referenced = dumped_dropped[c] & ~dumped_dropped[r]
+if referenced.any():
+    worst_reference = np.max(v[referenced] / diagonal[c[referenced]])
+    assert worst_reference <= build_threshold * (1.0 + 1.0e-12), (
+        worst_reference, build_threshold, "a kept row references a dropped row beyond the bound")
+assert column_only_rows >= min_column_only_rows, (
+    column_only_rows, min_column_only_rows, "the deck does not discriminate the column criterion")
+
 dropped_fraction = 1.0 - len(rows) / n
 print(
     f"reduced solve partition: threshold {threshold:g} (build {build_threshold:g}), "
     f"{len(rows)} of {n} rows kept, dropped fraction {dropped_fraction:.3f}, "
-    f"sub-system nonzeros {sub.nnz} of {a.nnz}, worst dropped coupling {worst:.3e}"
+    f"sub-system nonzeros {sub.nnz} of {a.nnz}, worst dropped coupling {worst:.3e}, "
+    f"rows kept by the column rule alone {column_only_rows}"
 )
 assert dropped_fraction >= min_dropped_fraction, (dropped_fraction, min_dropped_fraction)
