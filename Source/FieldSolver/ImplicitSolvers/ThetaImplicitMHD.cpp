@@ -5338,7 +5338,7 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
                 seg[s].src = src.const_array(mfi);
                 seg[s].src2 = (src2 != nullptr) ? src2->const_array(mfi)
                                                 : amrex::Array4<amrex::Real const>{};
-                seg[s].grown = mfi.fabbox(); // setVal(0) covered the whole FAB
+                seg[s].grown = dst.fabbox(mfi.index()); // the FAB of dst (setVal(0) covered it all)
                 seg[s].valid = mfi.tilebox(dst.ixType().toIntVect());
                 seg[s].dst_stag = field_staggering(dst);
                 seg[s].src_comp = src_comp;

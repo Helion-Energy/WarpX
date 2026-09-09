@@ -3421,6 +3421,11 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_field_freeze_live_pc  # name
     RZ  # dims
     1  # nprocs (the banded elimination is sequential along z: single rank)
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1"  # inputs
+    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 pc ../test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc/diags/diag000005"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc  # dependency
+)
 
 add_warpx_test(
     test_rz_theta_implicit_mhd_fused_residual_identity_wall  # name
@@ -3430,11 +3435,6 @@ add_warpx_test(
     "analysis_mhd_fused_residual_identity.py diags/diag000005 ../test_rz_theta_implicit_mhd_wall_field_freeze_live_pc/diags/diag000005"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_field_freeze_live_pc  # dependency
-)
-    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1"  # inputs
-    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 pc ../test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc/diags/diag000005"  # analysis
-    OFF  # checksum
-    test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc  # dependency
 )
 
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
