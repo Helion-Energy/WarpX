@@ -125,6 +125,39 @@ public:
     ) const;
 
     /**
+     * \brief Embedded-boundary ion-current mask
+     *        (`hybrid_pic_model.eb_zero_ion_current_cells`): zero all three
+     *        components of the deposited ion current J_i at every
+     *        J-staggered location whose signed distance to the embedded
+     *        boundary is at most `eb_zero_ion_current_cells * dx_max`
+     *        (dx_max = the largest cell size of the level) -- the maintained
+     *        standoff band of the insulating wall plus the cut and covered
+     *        cells (distance <= 0). The no-slip analogue of the MHD wall for
+     *        the ion fluid: the shape-function spillover that particles
+     *        collected at the band edge leave in the band (sub-floor
+     *        density, but a finite J_i) no longer enters V_e = (J_i - J)/rho.
+     *
+     *        The nodal level set (distance_to_eb) is interpolated to each
+     *        component's staggering as the average of the nodes bracketing
+     *        the location (exact for a node-centred component; the face
+     *        centre for a cell-centred direction), the same footprint the
+     *        stair-case update mask inspects. rho is NOT touched (the Ohm
+     *        law needs no J_i-consistent rho: with J_i = 0 the band carries
+     *        V_e = -J/rho at the floored density, as the no-slip wall
+     *        intends). Applied on valid + ghost cells (as far as the level
+     *        set reaches); the caller refreshes the ghosts.
+     *
+     *        No-op when the knob is negative (default) or no EB is present.
+     *
+     * \param[in,out] J_i  ion current density (Yee-staggered, 3 components)
+     * \param[in]     lev  mesh-refinement level
+     */
+    void ApplyEBIonCurrentMask (
+        ablastr::fields::VectorField const& J_i,
+        int lev
+    ) const;
+
+    /**
      * \brief
      * Function to update the E-field using Ohm's law (hybrid-PIC model).
      */
@@ -2333,6 +2366,19 @@ public:
 
     /** Plasma density floor - if n < n_floor it will be set to n_floor */
     amrex::Real m_n_floor = 1.0;
+
+    /** Embedded-boundary ion-current mask width, in cells (times the
+     *  largest cell size of the level): J_i is zeroed (all components) at
+     *  every J-staggered location whose distance to the EB is at most this
+     *  many cells, cut and covered cells included. Negative (default) =
+     *  off, bit-identical. Input: eb_zero_ion_current_cells. See
+     *  ApplyEBIonCurrentMask. */
+    amrex::Real m_eb_zero_ion_current_cells = -1.0;
+
+    /** False until ApplyEBIonCurrentMask has run once (one-time level-set
+     *  roof check and mask-footprint print). Mutable: lazily-set cache flag
+     *  inside a const call chain. */
+    mutable bool m_eb_ji_mask_checked = false;
 
     /** Plasma resistivity */
     std::string m_eta_expression = "0.0";

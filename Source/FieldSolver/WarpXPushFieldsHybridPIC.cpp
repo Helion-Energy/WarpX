@@ -387,6 +387,21 @@ void WarpX::HybridPICDepositRhoAndJ ()
     // and apply boundary conditions
     SyncCurrentAndRho();
 
+    // Embedded-boundary ion-current mask (hybrid_pic_model.
+    // eb_zero_ion_current_cells): zero J_i in the wall standoff band and
+    // the cut/covered cells. This is the single point where the ion current
+    // the hybrid solve consumes becomes final for the step -- current_fp
+    // here, and hybrid_current_fp_temp through the copies and linear
+    // combinations of it downstream (J_i^n, the J_i^{n+1} extrapolation and
+    // the next step's J_i^{n-1/2} are all built from masked deposits). The
+    // per-species current_fp_<species> fields (drag / per-species eta
+    // consumers) and rho are left as deposited. Ghosts are refreshed by the
+    // grouped FillBoundary just below. No-op when the knob is off.
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        m_hybrid_pic_model->ApplyEBIonCurrentMask(
+            m_fields.get_alldirs(FieldType::current_fp, lev), lev);
+    }
+
     // SyncCurrent does not include a call to FillBoundary, but it is needed
     // for the hybrid-PIC solver since current values are interpolated to
     // a nodal grid.

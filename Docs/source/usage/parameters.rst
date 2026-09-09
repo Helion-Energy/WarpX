@@ -4688,6 +4688,28 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
 
+.. pp:param:: hybrid_pic_model.eb_zero_ion_current_cells
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Embedded-boundary ion-current mask for the hybrid (Ohm's law) solver. When set to a value
+    :math:`\geq 0` and an embedded boundary is present, all three components of the deposited ion
+    current density :math:`\mathbf{J}_i` are set to zero, after every deposition the solver
+    consumes, at every J-staggered location whose signed distance to the embedded boundary is at
+    most ``eb_zero_ion_current_cells`` times the largest cell size of the level -- the maintained
+    standoff band of an insulating wall (:pp:param:`boundary.eb_type` ``= insulating`` with
+    :pp:param:`boundary.eb_standoff_cells`) plus the cut and covered cells (distance
+    :math:`\leq 0`); ``0`` masks the cut and covered cells only. This is the no-slip analogue of an
+    MHD wall for the ion fluid: the shape-function spillover that particles collected at the band
+    edge leave in the band (a sub-floor density but a finite :math:`\mathbf{J}_i`) no longer enters
+    the electron velocity :math:`\mathbf{V}_e = (\mathbf{J}_i - \mathbf{J})/\rho` at the floored
+    density. The nodal level set is interpolated to each component's staggering as the average
+    of the nodes bracketing the location. The charge density is not modified. Setting the knob to
+    the standoff width masks exactly the collection band; the run aborts if the band reaches the
+    AMReX level-set roof (every location would be masked). Negative values (the default) leave the
+    deposited current untouched.
+
 .. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
     :type: ``bool``
     :default: ``false``

@@ -200,6 +200,18 @@ void HybridPICModel::ReadParameters ()
     m_n_floor_given =
         utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
+    // Embedded-boundary ion-current mask (see ApplyEBIonCurrentMask):
+    // negative (default) = off, bit-identical.
+    utils::parser::queryWithParser(pp_hybrid, "eb_zero_ion_current_cells",
+                                   m_eb_zero_ion_current_cells);
+    if (m_eb_zero_ion_current_cells >= 0.0_rt && !EB::enabled()) {
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPICModel",
+            "hybrid_pic_model.eb_zero_ion_current_cells is set but no "
+            "embedded boundary is enabled: the ion-current mask is inert.",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+
     // Master gate for the electron-energy equation. When enabled, K_e is
     // advected each step by fictitious Lagrangian particles moving with V_e
     // (see Phys. Plasmas 31, 012902 (2024)); T_e is recovered from K_e and n_e
@@ -1299,6 +1311,27 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             << excluded_list << "\n";
     }
 
+    // Boot banner: the EB ion-current mask (ApplyEBIonCurrentMask).
+    if (EB::enabled()) {
+        if (m_eb_zero_ion_current_cells >= 0.0_rt) {
+            auto const & geom0 = WarpX::GetInstance().Geom(0);
+            amrex::Real dx_max = geom0.CellSize(0);
+            for (int d = 1; d < AMREX_SPACEDIM; ++d) {
+                dx_max = amrex::max(dx_max, geom0.CellSize(d));
+            }
+            amrex::Print() << "[HybridPICModel] EB ion-current mask "
+                "(eb_zero_ion_current_cells): " << m_eb_zero_ion_current_cells
+                << " cells x dx_max " << dx_max << " m = "
+                << m_eb_zero_ion_current_cells * dx_max
+                << " m; J_i = 0 (all components) at every J location whose "
+                "level set is <= this (standoff band + cut + covered cells); "
+                "rho untouched\n";
+        } else {
+            amrex::Print() << "[HybridPICModel] EB ion-current mask "
+                "(eb_zero_ion_current_cells): off\n";
+        }
+    }
+
     // Thermal conductivities kappa(n [m^-3], Te [eV], t [s]) in W/(m K) for
     // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)).
     std::string kpar_expression = m_kappa_par_expression;
@@ -2049,6 +2082,135 @@ void HybridPICModel::CalculatePlasmaCurrent (
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         CalculatePlasmaCurrent(Bfield[lev], eb_update_E[lev], lev);
+    }
+}
+
+void HybridPICModel::ApplyEBIonCurrentMask (
+    ablastr::fields::VectorField const& J_i,
+    int const lev) const
+{
+    if (m_eb_zero_ion_current_cells < 0.0_rt || !EB::enabled()) { return; }
+    ABLASTR_PROFILE("HybridPICModel::ApplyEBIonCurrentMask()");
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::MultiFab const & phi =
+        *warpx.m_fields.get(FieldType::distance_to_eb, lev);
+
+    amrex::Real dx_max = geom.CellSize(0);
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) {
+        dx_max = amrex::max(dx_max, geom.CellSize(d));
+    }
+    amrex::Real const threshold = m_eb_zero_ion_current_cells * dx_max;
+    amrex::IntVect const ng_phi = phi.nGrowVect();
+
+    // One-time guard: AMReX caps |distance_to_eb| at the level-set roof
+    // (min(dx) x (EB guard cells + 1)); a threshold at or above the roof
+    // would mask every J location of the level. Also report the footprint
+    // (valid locations zeroed per component) once.
+    bool const first_call = !m_eb_ji_mask_checked;
+    if (first_call) {
+        amrex::Real const phi_max = phi.max(0, 0, false);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            threshold < phi_max,
+            "hybrid_pic_model.eb_zero_ion_current_cells x dx_max = "
+            + std::to_string(threshold) + " m reaches the level-set roof "
+            + std::to_string(phi_max) + " m (max distance_to_eb): every J "
+            "location would be masked. Lower the knob or refine the mesh.");
+        m_eb_ji_mask_checked = true;
+    }
+    // Footprint counters (first call only): [0..2] band (0 < phi <= threshold),
+    // [3..5] cut/covered (phi <= 0), per component.
+    amrex::Long masked_count[6] = {0, 0, 0, 0, 0, 0};
+
+    for (int idim = 0; idim < 3; ++idim) {
+        amrex::MultiFab & J = *J_i[idim];
+        amrex::IntVect const jtype = J.ixType().toIntVect(); // 1 = nodal
+        // The J location at index i sits at node i (nodal direction) or
+        // between nodes i and i+1 (cell-centred direction); with J and the
+        // level set both grown from the same cell box, the level set covers
+        // every J ghost location up to min(ng_J, ng_phi).
+        amrex::IntVect ng_apply;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            ng_apply[d] = amrex::min(J.nGrowVect()[d], ng_phi[d]);
+        }
+        int const di = 1 - jtype[0];
+#if AMREX_SPACEDIM > 1
+        int const dj = 1 - jtype[1];
+#else
+        int const dj = 0;
+#endif
+#if AMREX_SPACEDIM > 2
+        int const dk = 1 - jtype[2];
+#else
+        int const dk = 0;
+#endif
+        amrex::Real const inv_n =
+            1.0_rt / static_cast<amrex::Real>((1 + di) * (1 + dj) * (1 + dk));
+
+        if (first_call) {
+            // No OpenMP here: the tiles share one ReduceData.
+            amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Long, amrex::Long> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (MFIter mfi(J); mfi.isValid(); ++mfi) {
+                amrex::Box const box = mfi.tilebox();
+                auto const & phi_arr = phi.const_array(mfi);
+                reduce_op.eval(box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    amrex::Real phi_loc = 0.0_rt;
+                    for (int kk = 0; kk <= dk; ++kk) {
+                    for (int jj = 0; jj <= dj; ++jj) {
+                    for (int ii = 0; ii <= di; ++ii) {
+                        phi_loc += phi_arr(i + ii, j + jj, k + kk);
+                    }}}
+                    phi_loc *= inv_n;
+                    amrex::Long const in_band =
+                        (phi_loc > 0.0_rt && phi_loc <= threshold) ? 1 : 0;
+                    amrex::Long const covered = (phi_loc <= 0.0_rt) ? 1 : 0;
+                    return {in_band, covered};
+                });
+            }
+            auto const counts = reduce_data.value(reduce_op);
+            masked_count[idim]     = amrex::get<0>(counts);
+            masked_count[3 + idim] = amrex::get<1>(counts);
+        }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(J, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Box const box = mfi.growntilebox(ng_apply);
+            auto const & J_arr = J.array(mfi);
+            auto const & phi_arr = phi.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // Level set at the J location: average of the bracketing
+                // nodes (exact at a node; the face centre otherwise).
+                amrex::Real phi_loc = 0.0_rt;
+                for (int kk = 0; kk <= dk; ++kk) {
+                for (int jj = 0; jj <= dj; ++jj) {
+                for (int ii = 0; ii <= di; ++ii) {
+                    phi_loc += phi_arr(i + ii, j + jj, k + kk);
+                }}}
+                phi_loc *= inv_n;
+                if (phi_loc <= threshold) { J_arr(i, j, k) = 0.0_rt; }
+            });
+        }
+    }
+
+    if (first_call) {
+        amrex::ParallelDescriptor::ReduceLongSum(masked_count, 6);
+        amrex::Long const n_nodes = phi.boxArray().numPts();
+        amrex::Print() << "[HybridPICModel] EB ion-current mask: lev " << lev
+            << ", threshold " << threshold << " m (level-set roof "
+            << phi.max(0, 0, false) << " m); J_i locations zeroed (valid, "
+            "per component x/y/z): band (0 < phi <= threshold) "
+            << masked_count[0] << " / " << masked_count[1] << " / "
+            << masked_count[2] << ", cut+covered (phi <= 0) "
+            << masked_count[3] << " / " << masked_count[4] << " / "
+            << masked_count[5] << ", of ~" << n_nodes << " each\n";
     }
 }
 
