@@ -2290,6 +2290,50 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_conduction_pc  # dependency
 )
 
+# rev19 F4: the layouts most likely to break a ghost-fill fusion -- a box split
+# along z under the z_lo mirror (eight boxes on one rank: mirror + Neumann
+# across z seams, exchanges kept by the box count) and both Green's z caps
+# open (the axial fills' open-face keep_rows clamp). Reference runs first.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_mirror_mgs8_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_half jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=true pc_mhd_block.resistive_threshold=1.0e-6 amr.max_grid_size=8"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_mirror_mgs8  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_half jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=true pc_mhd_block.resistive_threshold=1.0e-6 amr.max_grid_size=8 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000032 ../test_rz_theta_implicit_mhd_fused_residual_identity_mirror_mgs8_ref/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_fused_residual_identity_mirror_mgs8_ref  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_open_caps_ref  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_external_wall_ghost_open_caps  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_identity_open_caps  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost_open_caps implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000002 ../test_rz_theta_implicit_mhd_fused_residual_identity_open_caps_ref/diags/diag000002"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_fused_residual_identity_open_caps_ref  # dependency
+)
+
 add_warpx_test(
     test_rz_theta_implicit_mhd_fused_residual_identity_mirror  # name
     RZ  # dims

@@ -3729,7 +3729,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         block copies, domain-ghost fills, cell-centered interpolations,
         zero fills, frozen-row restores as one kernel over all MultiFabs
         of a stage, and the ghost exchanges that cannot move data (one
-        box, non-periodic) skipped; bit-identical (RZ recast path only)
+        box, non-periodic) skipped; bit-identical. The residual-side
+        fusions act on the RZ conservative-form path only; the
+        preconditioner/solver-vector parts follow the knob everywhere.
     """
 
     def __init__(

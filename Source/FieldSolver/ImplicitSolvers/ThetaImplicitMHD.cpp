@@ -2482,9 +2482,10 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     m_fused_residual = fr::Enabled() && m_use_recast;
 #endif
     if (fr::Enabled() && !m_fused_residual) {
-        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1 has no "
-                          "effect on this path (RZ with implicit_mhd.fluid_flux = hlld "
-                          "or central only)\n";
+        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1: the "
+                          "residual-side fusion is wired into the RZ conservative-form "
+                          "path only and is off here; the preconditioner, direct-solver "
+                          "and solver-vector parts of the knob stay on (exact)\n";
     }
     if (m_resistive_theta < 0.0_rt) {
         // Default: the dissipative Ohm terms keep the global centering.
