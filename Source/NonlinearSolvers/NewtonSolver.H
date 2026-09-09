@@ -467,6 +467,8 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
 
     if (m_linear_solver_type == LinearSolverType::amrex_gmres) {
         m_linear_solver = std::make_unique<AMReXGMRES<Vec,JacobianFunctionMF<Vec,Ops>>>();
+    } else if (m_linear_solver_type == LinearSolverType::packed_gmres) {
+        m_linear_solver = std::make_unique<PackedGMRES<Vec,JacobianFunctionMF<Vec,Ops>>>();
     } else if (m_linear_solver_type == LinearSolverType::petsc_ksp) {
 #ifdef AMREX_USE_PETSC
         m_linear_solver = std::make_unique<PETScKSP<Vec,JacobianFunctionMF<Vec,Ops>>>();
@@ -583,6 +585,19 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
             m_forcing_max < 1.0,
         "newton.forcing_alpha must exceed 1, newton.forcing_gamma must be "
         "in (0, 1], and newton.forcing_max must be in (0, 1)");
+
+    // The packed GMRES is a drop-in for amrex_gmres (same algorithm, same
+    // knobs, a packed Krylov basis): it inherits the amrex_gmres.* keys so
+    // a deck that selects it keeps its solver settings; packed_gmres.* and
+    // the legacy gmres.* keys override in that order.
+    if (m_linear_solver_type == LinearSolverType::packed_gmres) {
+        const amrex::ParmParse pp_ag("amrex_gmres");
+        pp_ag.query("verbose_int",         m_linsol_verbose_int);
+        pp_ag.query("restart_length",      m_linsol_restart_length);
+        pp_ag.query("absolute_tolerance",  m_linsol_atol);
+        pp_ag.query("relative_tolerance",  m_linsol_rtol);
+        pp_ag.query("max_iterations",      m_linsol_maxits);
+    }
 
     const amrex::ParmParse pp_l(amrex::getEnumNameString(m_linear_solver_type));
     pp_l.query("verbose_int",         m_linsol_verbose_int);

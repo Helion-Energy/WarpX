@@ -1115,6 +1115,25 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_probe_edge_flat  # dependency
 )
 
+# Fused-2 twin of the component probe: the same deck and component-scaled
+# probe with implicit_evolve.fused_vector_ops = 2 (fused inner product) and
+# the packed GMRES solver. The component probe sizes its perturbation from
+# the UNWEIGHTED norm dotProduct(X, false); the fused inner product must
+# carry that flag (fusedDot(X, a_apply_block_scales)) -- with it hard-wired
+# to true the norm silently becomes the block-weighted solver norm, the
+# probe is mis-sized by the block scales and the run fails to converge.
+# Same analysis and gates as the component test: the same Newton work up
+# to round-off and the same converged state as the three probe twins.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_probe_edge_component_fused  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_probe_edge newton.jfnk_epsilon_mode=component implicit_evolve.fused_vector_ops=2 newton.linear_solver=packed_gmres"  # inputs
+    "analysis_mhd_probe_edge.py diags/diag000016 ../test_1d_theta_implicit_mhd_probe_edge ../test_1d_theta_implicit_mhd_probe_edge_eps8 ../test_1d_theta_implicit_mhd_probe_edge_flat"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_probe_edge_component  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the
@@ -2202,6 +2221,63 @@ add_warpx_test(
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_validate_assembly=1"  # inputs
     "analysis_mhd_conduction_pc_exact.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004 4 1.0 implicit_mhd_electron_energy"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+# Packed-basis GMRES (newton.linear_solver = packed_gmres) twins of the
+# conduction-block tests: the same decks and solver settings (restart
+# length 100, Newton rtol 1e-10, the block preconditioner) with the Krylov
+# basis packed on the serialized DOF layout and its in-run self test
+# (packed inner products, norms, axpy/lincomb, pack/unpack round trip and
+# GEMV kernels against the solver-vector operations). The RZ run on two
+# ranks exercises the owner-mask deduplication of the shared box faces of
+# the staggered field blocks and the periodic z identification in the
+# packed layout. The analysis compares the Newton/GMRES counts and the
+# converged state with the amrex_gmres run.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_packed_gmres  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000010 ../test_1d_theta_implicit_mhd_conduction_pc/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_packed_gmres  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+# Fused solver-vector operations (implicit_evolve.fused_vector_ops): level 1
+# fuses every elementwise operation into one kernel with unchanged
+# per-element expressions and must reproduce the amrex_gmres run to the
+# bit (newton.txt byte-identical, plotfile fields identical); level 2 also
+# fuses the inner product (summation order changes at round-off) and is
+# checked with the packed solver's self test (packed reference operations
+# against the fused ones) and the twin comparison.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_vector_ops_identity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc implicit_evolve.fused_vector_ops=1"  # inputs
+    "analysis_mhd_fused_identity.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_vector_ops  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc implicit_evolve.fused_vector_ops=2 newton.linear_solver=packed_gmres packed_gmres.self_test=1"  # inputs
+    "analysis_mhd_packed_gmres.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc/diags/diag000004"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_conduction_pc  # dependency
 )

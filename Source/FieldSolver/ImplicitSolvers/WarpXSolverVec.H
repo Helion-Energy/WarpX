@@ -68,6 +68,40 @@ public:
 
     [[nodiscard]] inline bool IsDefined () const { return m_is_defined; }
 
+    /**
+     * \brief Fused-kernel level of the vector operations
+     * (``implicit_evolve.fused_vector_ops``, default 0): 0 = one kernel per
+     * MultiFab (and one host synchronization per MultiFab for inner
+     * products); 1 = the elementwise operations (Copy, increment, linComb,
+     * scale, setVal, +=, -=, copyTo/copyFrom) run as ONE kernel over the
+     * fused layout of the whole state (bit-identical results: the same
+     * per-element expressions, no reductions); 2 = also the inner product
+     * as one kernel plus one reduction (the summation order changes at
+     * round-off level). Read once from ParmParse.
+     */
+    [[nodiscard]] static int FusedLevel ();
+
+    //! true when the fused layout of this vector's type is available
+    [[nodiscard]] bool fusedAvailable () const
+    {
+        return m_dofs != nullptr && m_dofs->m_fused.nseg > 0 && m_num_amr_levels == 1;
+    }
+
+    // one-launch implementations over the fused layout (see FusedLevel);
+    // public because the CUDA extended device lambdas they launch may not
+    // live in private members -- use the regular operations above instead
+    void fusedCopy (const WarpXSolverVec& X);
+    void fusedPlus (const WarpXSolverVec& X, RT sign);
+    void fusedLinComb (RT a, const WarpXSolverVec& X, RT b, const WarpXSolverVec& Y);
+    void fusedIncrement (const WarpXSolverVec& X, RT a);
+    void fusedScale (RT a);
+    void fusedSetVal (RT a);
+    //! inner product over the fused layout; a_apply_block_scales = false
+    //! drops the 1/scale^2 block weights (the unweighted component norm)
+    [[nodiscard]] RT fusedDot (const WarpXSolverVec& X, bool a_apply_block_scales = true) const;
+    void fusedCopyTo (amrex::Real* a_arr) const;
+    void fusedCopyFrom (const amrex::Real* a_arr);
+
     void Define ( WarpX*  a_WarpX,
              const std::string&  a_vector_type_name,
              const std::string&  a_scalar_type_name = "none" );
@@ -94,6 +128,8 @@ public:
         assertIsDefined( a_solver_vec );
         if (IsDefined()) { assertSameType( a_solver_vec ); }
         else { Define(a_solver_vec); }
+
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedCopy(a_solver_vec); return; }
 
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
@@ -141,6 +177,8 @@ public:
             m_num_amr_levels = a_solver_vec.m_num_amr_levels;
             m_WarpX = a_solver_vec.m_WarpX;
             m_dofs = std::move(a_solver_vec.m_dofs);
+            m_fused_arrays = std::move(a_solver_vec.m_fused_arrays);
+            m_fused_arrays_built = a_solver_vec.m_fused_arrays_built;
             m_is_defined = a_solver_vec.m_is_defined;
 
             a_solver_vec.m_array_vec.clear();
@@ -153,6 +191,7 @@ public:
             a_solver_vec.m_scalar_scale = 1.0;
             a_solver_vec.m_num_amr_levels = 0;
             a_solver_vec.m_WarpX = nullptr;
+            a_solver_vec.m_fused_arrays_built = false;
             a_solver_vec.m_is_defined = false;
         }
         return *this;
@@ -163,6 +202,7 @@ public:
     {
         assertIsDefined( a_solver_vec );
         assertSameType( a_solver_vec );
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedPlus(a_solver_vec, 1.0); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 m_array_vec[lev][0]->plus(*(a_solver_vec.getArrayVec()[lev][0]), 0, 1, 0);
@@ -185,6 +225,7 @@ public:
     {
         assertIsDefined( a_solver_vec );
         assertSameType( a_solver_vec );
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedPlus(a_solver_vec, -1.0); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 m_array_vec[lev][0]->minus(*(a_solver_vec.getArrayVec()[lev][0]), 0, 1, 0);
@@ -212,6 +253,7 @@ public:
         assertIsDefined( Y );
         assertSameType( X );
         assertSameType( Y );
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedLinComb(a, X, b, Y); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 for (int n = 0; n < 3; n++) {
@@ -244,6 +286,7 @@ public:
     {
         assertIsDefined( X );
         assertSameType( X );
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedIncrement(X, a); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 for (int n = 0; n < 3; n++) {
@@ -273,6 +316,7 @@ public:
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             IsDefined(),
             "WarpXSolverVec::scale() called on undefined WarpXSolverVec");
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedScale(a_a); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 m_array_vec[lev][0]->mult(a_a, 0, 1);
@@ -297,6 +341,7 @@ public:
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             IsDefined(),
             "WarpXSolverVec::setVal() called on undefined WarpXSolverVec");
+        if (FusedLevel() >= 1 && fusedAvailable()) { fusedSetVal(a_val); return; }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             if (m_array_type != warpx::fields::FieldType::None) {
                 m_array_vec[lev][0]->setVal(a_val);
@@ -486,6 +531,17 @@ private:
      * may use different field blocks and centerings.
      */
     std::shared_ptr<WarpXSolverDOF> m_dofs;
+
+    /**
+     * Fused-kernel table of this vector: the Array4 of every FAB of every
+     * MultiFab in the segment order of m_dofs->m_fused, built on first use
+     * (the MultiFabs are allocated once in DefineData, so the pointers stay
+     * valid for the life of the vector).
+     */
+    mutable amrex::Gpu::DeviceVector<amrex::Array4<amrex::Real>> m_fused_arrays;
+    mutable bool m_fused_arrays_built = false;
+
+    [[nodiscard]] const amrex::Array4<amrex::Real>* fusedArrays () const;
 
     void DefineData (WarpX* a_WarpX,
                      const std::string& a_vector_type_name,

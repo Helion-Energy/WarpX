@@ -9,6 +9,8 @@
 
 #include <AMReX_GpuContainers.H>
 #include <AMReX_Loop.H>
+#include <AMReX_ParallelReduce.H>
+#include <AMReX_Reduce.H>
 
 #include <cmath>
 #include <cstddef>
@@ -16,6 +18,271 @@
 #include <sstream>
 
 using warpx::fields::FieldType;
+
+namespace
+{
+    /**
+     * Segment of the fused index space holding a_idx: the last segment whose
+     * start offset is <= a_idx (binary search over the nseg+1 offsets).
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    int fused_segment (const amrex::Long* a_offsets, const int a_nseg, const amrex::Long a_idx) noexcept
+    {
+        int lo = 0;
+        int hi = a_nseg;
+        while (hi - lo > 1) {
+            const int mid = (lo + hi) / 2;
+            if (a_offsets[mid] <= a_idx) { lo = mid; } else { hi = mid; }
+        }
+        return lo;
+    }
+
+    struct FusedIndex { int i; int j; int k; int n; };
+
+    /**
+     * Grid index and component of the a_local-th entry of a segment: i fastest,
+     * then the other space dimensions, then the component.
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    FusedIndex fused_decode (const amrex::Box& a_box, amrex::Long a_local) noexcept
+    {
+        const auto lo = a_box.smallEnd();
+        const auto len = a_box.length();
+        FusedIndex c{0, 0, 0, 0};
+        c.i = static_cast<int>(a_local % len[0]);
+        a_local /= len[0];
+#if (AMREX_SPACEDIM >= 2)
+        c.j = static_cast<int>(a_local % len[1]);
+        a_local /= len[1];
+#endif
+#if (AMREX_SPACEDIM == 3)
+        c.k = static_cast<int>(a_local % len[2]);
+        a_local /= len[2];
+#endif
+        c.n = static_cast<int>(a_local);
+        c.i += lo[0];
+#if (AMREX_SPACEDIM >= 2)
+        c.j += lo[1];
+#endif
+#if (AMREX_SPACEDIM == 3)
+        c.k += lo[2];
+#endif
+        return c;
+    }
+}
+
+int WarpXSolverVec::FusedLevel ()
+{
+    static int level = -1;
+    if (level < 0) {
+        level = 0;
+        const amrex::ParmParse pp("implicit_evolve");
+        pp.query("fused_vector_ops", level);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            level >= 0 && level <= 2,
+            "implicit_evolve.fused_vector_ops must be 0, 1 or 2");
+    }
+    return level;
+}
+
+const amrex::Array4<amrex::Real>* WarpXSolverVec::fusedArrays () const
+{
+    if (!m_fused_arrays_built) {
+        BL_PROFILE("WarpXSolverVec::fusedArrays(build)");
+        constexpr int lev = 0;
+        std::vector<amrex::Array4<amrex::Real>> table;
+        table.reserve(m_dofs->m_fused.host_segments.size());
+        auto add = [&table] (amrex::MultiFab& mf)
+        {
+            for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) { table.push_back(mf.array(mfi)); }
+        };
+        if (m_array_type != FieldType::None) {
+            for (int n = 0; n < 3; ++n) { add(*m_array_vec[lev][n]); }
+        }
+        if (m_scalar_type != FieldType::None) { add(*m_scalar_vec[lev]); }
+        for (auto const& block : m_multifab_blocks) { add(*block.data[lev]); }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            table.size() == m_dofs->m_fused.host_segments.size(),
+            "WarpXSolverVec: fused layout does not match the vector's MultiFabs");
+        m_fused_arrays.resize(table.size());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, table.begin(), table.end(), m_fused_arrays.begin());
+        amrex::Gpu::streamSynchronize();
+        m_fused_arrays_built = true;
+    }
+    return m_fused_arrays.data();
+}
+
+void WarpXSolverVec::fusedCopy (const WarpXSolverVec& X)
+{
+    BL_PROFILE("WarpXSolverVec::fusedCopy");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    const auto* xa = X.fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        ya[s](c.i, c.j, c.k, c.n) = xa[s](c.i, c.j, c.k, c.n);
+    });
+}
+
+void WarpXSolverVec::fusedPlus (const WarpXSolverVec& X, const RT sign)
+{
+    BL_PROFILE("WarpXSolverVec::fusedPlus");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    const auto* xa = X.fusedArrays();
+    const bool add = (sign > 0.0);
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        if (add) { ya[s](c.i, c.j, c.k, c.n) += xa[s](c.i, c.j, c.k, c.n); }
+        else     { ya[s](c.i, c.j, c.k, c.n) -= xa[s](c.i, c.j, c.k, c.n); }
+    });
+}
+
+void WarpXSolverVec::fusedLinComb (const RT a, const WarpXSolverVec& X, const RT b, const WarpXSolverVec& Y)
+{
+    BL_PROFILE("WarpXSolverVec::fusedLinComb");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* da = fusedArrays();
+    const auto* xa = X.fusedArrays();
+    const auto* yb = Y.fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        da[s](c.i, c.j, c.k, c.n) = a * xa[s](c.i, c.j, c.k, c.n) + b * yb[s](c.i, c.j, c.k, c.n);
+    });
+}
+
+void WarpXSolverVec::fusedIncrement (const WarpXSolverVec& X, const RT a)
+{
+    BL_PROFILE("WarpXSolverVec::fusedIncrement");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    const auto* xa = X.fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        ya[s](c.i, c.j, c.k, c.n) += a * xa[s](c.i, c.j, c.k, c.n);
+    });
+}
+
+void WarpXSolverVec::fusedScale (const RT a)
+{
+    BL_PROFILE("WarpXSolverVec::fusedScale");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        ya[s](c.i, c.j, c.k, c.n) *= a;
+    });
+}
+
+void WarpXSolverVec::fusedSetVal (const RT a)
+{
+    BL_PROFILE("WarpXSolverVec::fusedSetVal");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        ya[s](c.i, c.j, c.k, c.n) = a;
+    });
+}
+
+amrex::Real WarpXSolverVec::fusedDot (const WarpXSolverVec& X, const bool a_apply_block_scales) const
+{
+    BL_PROFILE("WarpXSolverVec::fusedDot");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    const auto* xa = X.fusedArrays();
+    const bool weighted = a_apply_block_scales;
+    amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    reduce_op.eval(layout.total, reduce_data,
+        [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept -> ReduceTuple
+        {
+            const int s = fused_segment(offs, nseg, idx);
+            const auto c = fused_decode(segs[s].box, idx - offs[s]);
+            if (!segs[s].mask(c.i, c.j, c.k)) { return {0.0}; }
+            const amrex::Real weight = weighted ? segs[s].inv_scale2 : 1.0;
+            return {weight * ya[s](c.i, c.j, c.k, c.n) * xa[s](c.i, c.j, c.k, c.n)};
+        });
+    amrex::Real result = amrex::get<0>(reduce_data.value(reduce_op));
+    amrex::ParallelAllReduce::Sum(result, amrex::ParallelContext::CommunicatorSub());
+    return result;
+}
+
+void WarpXSolverVec::fusedCopyTo (amrex::Real* const a_arr) const
+{
+    BL_PROFILE("WarpXSolverVec::fusedCopyTo");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        const int dof = segs[s].dof(c.i, c.j, c.k, 2*c.n); // local
+        if (dof >= 0) { a_arr[dof] = segs[s].inv_scale * ya[s](c.i, c.j, c.k, c.n); }
+    });
+}
+
+void WarpXSolverVec::fusedCopyFrom (const amrex::Real* const a_arr)
+{
+    BL_PROFILE("WarpXSolverVec::fusedCopyFrom");
+    auto const& layout = m_dofs->m_fused;
+    const auto* segs = layout.segments.data();
+    const auto* offs = layout.offsets.data();
+    const int nseg = layout.nseg;
+    const auto* ya = fusedArrays();
+    amrex::ParallelFor(layout.total, [=] AMREX_GPU_DEVICE (amrex::Long idx) noexcept
+    {
+        const int s = fused_segment(offs, nseg, idx);
+        const auto c = fused_decode(segs[s].box, idx - offs[s]);
+        const int dof = segs[s].dof(c.i, c.j, c.k, 2*c.n); // local
+        if (dof >= 0) { ya[s](c.i, c.j, c.k, c.n) = segs[s].scale * a_arr[dof]; }
+    });
+    // duplicates of shared grid points (staggered fields) take the owner's value
+    constexpr int lev = 0;
+    const auto periodicity = m_WarpX->Geom(lev).periodicity();
+    if (m_array_type != FieldType::None) {
+        for (int n = 0; n < 3; ++n) { m_array_vec[lev][n]->FillBoundaryAndSync(periodicity); }
+    }
+    if (m_scalar_type != FieldType::None) { m_scalar_vec[lev]->FillBoundaryAndSync(periodicity); }
+    for (auto& block : m_multifab_blocks) { block.data[lev]->FillBoundaryAndSync(periodicity); }
+}
 
 WarpXSolverVec::~WarpXSolverVec ()
 {
@@ -39,6 +306,8 @@ void WarpXSolverVec::ClearData () noexcept
     m_scalar_vec.clear();
     m_multifab_blocks.clear();
     m_multifab_block_specs.clear();
+    m_fused_arrays.clear();
+    m_fused_arrays_built = false;
 }
 
 void WarpXSolverVec::Define ( WarpX*  a_WarpX,
@@ -70,7 +339,9 @@ void WarpXSolverVec::Define (
         m_num_amr_levels,
         m_vector_type_name,
         m_scalar_type_name,
-        m_multifab_block_specs);
+        m_multifab_block_specs,
+        m_array_scale,
+        m_scalar_scale);
 
     m_is_defined = true;
 }
@@ -334,6 +605,7 @@ void WarpXSolverVec::copyFrom ( const amrex::Real* const a_arr)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_dofs != nullptr),
         "WarpXSolverVec::CopyFrom() DOF object is a nullptr");
+    if (FusedLevel() >= 1 && fusedAvailable()) { fusedCopyFrom(a_arr); return; }
     const amrex::Real array_scale = m_array_scale;
     const amrex::Real scalar_scale = m_scalar_scale;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -410,6 +682,7 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_dofs != nullptr),
         "WarpXSolverVec::CopyTo() DOF object is a nullptr");
+    if (FusedLevel() >= 1 && fusedAvailable()) { fusedCopyTo(a_arr); return; }
     const amrex::Real inverse_array_scale = 1.0 / m_array_scale;
     const amrex::Real inverse_scalar_scale = 1.0 / m_scalar_scale;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -485,6 +758,10 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
 {
     assertIsDefined( a_X );
     assertSameType( a_X );
+    // The fused inner product carries the block-scale flag: with it false
+    // (the component probe's unweighted norm) the fused kernel weights every
+    // segment by 1 instead of 1/scale^2, exactly like the loop below.
+    if (FusedLevel() >= 2 && fusedAvailable()) { return fusedDot(a_X, a_apply_block_scales); }
 
     amrex::Real result = 0.0;
     const bool local = true;

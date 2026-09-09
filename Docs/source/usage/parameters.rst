@@ -251,6 +251,9 @@ Overall simulation parameters
       - **Nonlinear solvers:**
         Advancing the implicit system in time requires solving a nonlinear system. The nonlinear solver options are ``picard`` and ``newton``.
 
+        - ``implicit_evolve.fused_vector_ops`` (``int``, default: 0)
+          Kernel fusion level of the solver-vector operations behind the nonlinear and linear solvers. ``0``: one kernel per MultiFab of the state per vector operation (and one host synchronization per MultiFab for every inner product). ``1``: the elementwise operations (copy, increment, linear combination, scale, set, pack/unpack of the serialized vector) run as ONE kernel over a fused layout of every box of every MultiFab of the state; the per-element expressions are unchanged, so results are bit-identical. ``2``: the inner product also runs as one kernel plus one reduction (the summation order changes, at round-off level). Levels 1 and 2 remove the per-MultiFab launch latency and synchronizations that dominate the Krylov bookkeeping of a multi-block state on a GPU (the theta-implicit MHD state has about a dozen MultiFabs).
+
         - ``implicit_evolve.nonlinear_solver`` (``string``, default: None)
 
         - ``implicit_evolve.nonlinear_solver = picard``: Use a Picard iteration method. Requires small time steps; often non-convergent for large time steps.
@@ -266,7 +269,11 @@ Overall simulation parameters
         - ``implicit_evolve.nonlinear_solver = newton``: Use a PS-JFNK method. Required for large time steps, but efficiency often relies on preconditioning and/or using ``implicit_evolve.use_mass_matrices_jacobian = true``.
 
           - ``newton.verbose`` (``bool``, default: true)
-          - ``newton.linear_solver`` (``string``, default: "gmres") Other excepted value, "petsc_ksp".
+          - ``newton.linear_solver`` (``string``, default: "amrex_gmres") Other accepted values: "packed_gmres", "petsc_ksp".
+            ``packed_gmres`` is the same restarted GMRES algorithm as ``amrex_gmres`` (right preconditioning, two passes of classical Gram-Schmidt, Givens rotations, the same convergence test and restart semantics) run on a packed copy of the solver vector: the Krylov basis is one contiguous device array of ``restart_length + 1`` serialized vectors (owned degrees of freedom only, block scales folded in, so the packed inner product equals the solver vector's inner product up to summation order), and each Gram-Schmidt pass is two matrix-vector products against that array instead of ``2 (it+1)`` inner products and Saxpys of one kernel launch per MultiFab each. The Jacobian-vector product and the preconditioner are applied on solver vectors (unpack, apply, pack). Iteration counts are those of ``amrex_gmres`` up to round-off; the orthogonalization cost no longer grows with the number of MultiFabs in the state. It takes the ``amrex_gmres.*`` keys as its own (a deck that switches solvers keeps its settings), overridden by ``packed_gmres.*`` and then by the legacy ``gmres.*`` keys, plus:
+
+            - ``packed_gmres.gemv`` (``string``, default: ``auto``): ``blas`` (cuBLAS; CUDA builds configured with ``WarpX_CUBLAS=ON``, the default there), ``native`` (portable fused kernels: a deterministic two-stage reduction for the inner products, one fused pass for the updates), or ``auto`` (``blas`` when available).
+            - ``packed_gmres.self_test`` (``bool``, default: false): at the first solve, check the packed inner products, norms, axpy/lincomb, the pack/unpack round trip and the GEMV kernels against the solver-vector operations and abort on a mismatch.
           - ``newton.require_convergence`` (``bool``, default: true).
             When ``false``, a Newton step that reaches ``max_iterations``
             without converging — or whose residual-decreasing line search
