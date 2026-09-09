@@ -159,11 +159,11 @@ public:
      * a_skip_dead_boundary_application the boundary application of that
      * EvolveB is skipped as far as it is dead for a caller that reads the
      * updated B on the valid faces only and re-applies the full boundary
-     * before the next read: whole on a deck without an open z cap or an
-     * insulator boundary (every fill writes ghosts, or a PEC normal face
-     * value the update already holds), the r_hi-only Green's-function fill
-     * otherwise (an open z cap keeps its fill: the next application's source
-     * deposit reads the cap ghost row it wrote). */
+     * before the next read: whole on a deck whose fills all write ghost
+     * cells only (PMC, axis, r_hi Green's: no open z cap, no PEC, no
+     * insulator boundary), the r_hi-only Green's-function fill otherwise (an
+     * open z cap keeps its fill: the next application's source deposit reads
+     * the cap ghost row it wrote; a PEC fill writes the valid normal face). */
     void EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
                                           bool a_exchange_ghosts,
                                           bool a_skip_dead_boundary_application = false );
@@ -1309,7 +1309,8 @@ private:
      * EvolveMagneticFieldAndApplyBCs, whose caller reads the updated valid
      * faces only and re-applies the full boundary before the next read):
      * 0 = nothing; 1 = the r_hi-only Green's-function ghost fill; 2 = the
-     * whole application (no open z cap, no insulator boundary). */
+     * whole application (every fill ghost-only: no open z cap, no PEC, no
+     * insulator boundary). */
     int m_residual_bfield_boundary_skip = 0;
 
     /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields

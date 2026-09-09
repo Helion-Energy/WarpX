@@ -76,15 +76,15 @@ namespace warpx::fused_residual
      * construction. (a) The boundary application inside the residual's
      * Faraday update is dead for the fused residual, which reads B - B^n on
      * the valid faces and re-sets B (valid) and re-applies the full boundary
-     * before anything reads a ghost cell again -- every fill of that
-     * application writes ghost cells, or writes a valid face value the
-     * Faraday update already holds (the PEC normal face, where the
-     * tangential E is zero); it is therefore skipped whole on decks without
-     * an open z cap or an insulator boundary, and reduced to the skip of the
-     * r_hi-only Green's-function refill otherwise. An open z cap always
-     * keeps its own fill: the next application's source deposit reads the
-     * cap ghost row it wrote (a lagged recursion; measured 1e-5 non-exact
-     * when skipped). (b) Where the state's MultiFabs hold ONE box in a
+     * before anything reads a ghost cell again -- it is skipped whole on
+     * decks whose fills all write ghost cells only (PMC, axis, r_hi Green's:
+     * no open z cap, no PEC, no insulator boundary), and reduced to the skip
+     * of the r_hi-only Green's-function refill otherwise. An open z cap
+     * always keeps its own fill: the next application's source deposit reads
+     * the cap ghost row it wrote (a lagged recursion; measured 1e-5 non-exact
+     * when skipped); a PEC fill writes the valid normal face value, which the
+     * update reproduces only where the tangential E is exactly zero
+     * (measured false on two suite decks). (b) Where the state's MultiFabs hold ONE box in a
      * non-periodic domain (every kernel of a stage then runs on one stream
      * in issue order and no ghost exchange can move data) and the solver
      * runs the RZ conservative-form path, AMReX's per-MFIter stream

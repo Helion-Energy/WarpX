@@ -16471,16 +16471,18 @@ void ThetaImplicitMHD::UpdateMagneticFieldFused (const amrex::Real a_thetadt,
     fr::Run(ops);
     // Level >= 2: the boundary application inside this Faraday update is
     // dead for the fused residual and is skipped (WarpX decides how much:
-    // the whole application on a deck without an open z cap or an insulator
-    // boundary, the r_hi-only Green's refill otherwise). The fused residual
-    // reads rhs = B - B^n on the VALID faces (ComputeRHS); every fill of the
-    // application writes ghost cells, or a valid PEC face value the update
-    // already holds (the tangential E is zero there); and the next
-    // evaluation re-sets the valid Bfield_fp from the state and re-applies
-    // the full boundary before anything reads a ghost cell. An open z cap
-    // always keeps its fill: the next application's deposit reads the cap
-    // ghost row it wrote (a lagged recursion; measured: 1e-5 relative
-    // difference when skipped; every other identity deck is identical).
+    // the whole application where every fill writes ghost cells only -- PMC,
+    // axis, r_hi Green's -- the r_hi-only Green's refill otherwise). The
+    // fused residual reads rhs = B - B^n on the VALID faces (ComputeRHS), and
+    // the next evaluation re-sets the valid Bfield_fp from the state and
+    // re-applies the full boundary before anything reads a ghost cell. An
+    // open z cap always keeps its fill (the next application's deposit reads
+    // the cap ghost row it wrote: a lagged recursion, 1e-5 relative
+    // difference when skipped) and so does a PEC face (its fill writes the
+    // valid normal face value; the update reproduces it only where the
+    // tangential E is exactly zero, measured false with a Hall term or a
+    // ramped drive: 9e-12 / 6e-16 when skipped). Every other identity deck
+    // and the whole suite are identical.
     m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange,
                                             m_fused_residual_level >= 2);
 }

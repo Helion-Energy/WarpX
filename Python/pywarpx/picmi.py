@@ -3837,8 +3837,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         preconditioner/solver-vector parts follow the knob everywhere.
         2 = level 1 plus the exact residual-only skips: the dead boundary
         application inside the residual's Faraday update (whole on decks
-        without an open z cap or an insulator boundary, the r_hi-only
-        Green's refill otherwise) and the per-MFIter stream
+        whose fills are ghost-only -- no open z cap, no PEC, no insulator
+        boundary -- the r_hi-only Green's refill otherwise) and the per-MFIter stream
         synchronizations on a single-box, non-periodic layout of the RZ
         conservative-form path (the banner prints the decision). 3 is
         refused (the split face-flux evaluation was measured slower and

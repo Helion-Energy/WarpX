@@ -112,15 +112,18 @@ WarpX::EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start
 {
     // For a caller that reads the updated B on the valid faces only and
     // re-sets B and re-applies the full boundary before the next read, the
-    // boundary application inside this EvolveB is dead: the PEC fill writes
-    // ghosts and the normal face value, which the Faraday update already
-    // holds (the tangential E on a PEC face is zero, so the normal curl is
-    // zero there); the PMC, axis and Green's r_hi fills write ghosts only.
-    // Two exceptions keep their fills: an open z cap (its Green's fill is one
-    // step of a lagged recursion -- the next application's source deposit
-    // reads the cap ghost row it wrote -- so only the r_hi-only Green's fill
-    // is skipped there) and an insulator boundary (not audited: nothing
-    // skipped). The mode lives on the object for the duration of the call.
+    // boundary application inside this EvolveB is dead where every one of
+    // its fills writes ghost cells only: the PMC (E-type) fill, the on-axis
+    // fill and the Green's r_hi fill. Three boundary kinds keep the
+    // application (only the r_hi-only Green's fill is skipped then): an open
+    // z cap (its Green's fill is one step of a lagged recursion -- the next
+    // application's source deposit reads the cap ghost row it wrote); a PEC
+    // face (its fill writes the VALID normal face value to zero, which the
+    // Faraday update reproduces only where the tangential E on the face is
+    // exactly zero -- measured false on two suite decks with a Hall term and
+    // a ramped drive: 9e-12 / 6e-16 relative differences when skipped); and
+    // an insulator boundary (not audited). The mode lives on the object for
+    // the duration of the call.
     struct SkipGuard {
         int& slot; explicit SkipGuard (int& s, int mode) : slot(s) { slot = mode; }
         ~SkipGuard () { slot = 0; }
@@ -133,13 +136,14 @@ WarpX::EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start
         open_z_cap = (field_boundary_lo[1] == FieldBoundaryType::Open) ||
                      (field_boundary_hi[1] == FieldBoundaryType::Open);
 #endif
-        bool insulator = false;
+        bool keep = false;
         for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-            insulator = insulator ||
-                        field_boundary_lo[idim] == FieldBoundaryType::PEC_Insulator ||
-                        field_boundary_hi[idim] == FieldBoundaryType::PEC_Insulator;
+            for (const auto bc : {field_boundary_lo[idim], field_boundary_hi[idim]}) {
+                keep = keep || bc == FieldBoundaryType::PEC ||
+                       bc == FieldBoundaryType::PEC_Insulator;
+            }
         }
-        skip_mode = (open_z_cap || insulator) ? 1 : 2;
+        skip_mode = (open_z_cap || keep) ? 1 : 2;
     }
     {
         const SkipGuard guard(m_residual_bfield_boundary_skip, skip_mode);

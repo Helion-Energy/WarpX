@@ -179,8 +179,9 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     using ablastr::fields::Direction;
 
     // The implicit residual's Faraday update (EvolveMagneticFieldAndApplyBCs
-    // with the skip) on a deck without an open z cap or an insulator
-    // boundary: the whole application is dead for its caller (see there).
+    // with the skip) on a deck whose fills all write ghost cells only (no
+    // open z cap, no PEC, no insulator): the whole application is dead for
+    // its caller (see there).
     if (m_residual_bfield_boundary_skip == 2 && patch_type == PatchType::fine) {
         return;
     }
