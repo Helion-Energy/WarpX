@@ -1828,6 +1828,14 @@ public:
      *  C-infinity here. Off (0) is bit-identical to unset. Input:
      *  qdsmc_conduction_chi_max [m^2/s]. */
     amrex::Real m_cond_chi_max = 0.0;
+    /** Separate PARALLEL ceiling (Eric 2026-09-09: the MHD lane boosted and
+     *  ceilinged chi_par, not chi_perp; its halo ran 18x hot when the
+     *  parallel ceiling throttled the drain, dbe1041bb). When > 0 the
+     *  kappa_par parser is folded at 1.5 kB chi_par_max n and kappa_perp
+     *  at 1.5 kB chi_max n; <= 0 (default) = chi_max caps both, bit-
+     *  identical. The RKL2 stage count scales as sqrt(chi_par_max).
+     *  Input: qdsmc_conduction_chi_par_max [m^2/s]. */
+    amrex::Real m_cond_chi_par_max = -1.0;
     /** FD cross-flux transport reconstruction: 0 = none (unlimited QUICK,
      *  attribution control -- can overshoot), 1 = upwind1 (1st-order
      *  upwind, most diffusive), 2 = smart (Gaskell--Lau SMART, default:

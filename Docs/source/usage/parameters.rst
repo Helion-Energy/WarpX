@@ -4261,6 +4261,18 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` to be positive. Costs one extra pass and two
     ghost exchanges per right-hand-side evaluation. With the bound inactive the result is unchanged.
 
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_chi_par_max
+    :type: ``float``
+    :default: ``-1`` (= ``qdsmc_conduction_chi_max`` on both directions)
+    :optional:
+
+    Separate ceiling, in :math:`m^2/s`, on the PARALLEL conduction diffusivity: when set the
+    ``qdsmc_kappa_par`` parser is folded at :math:`1.5 k_B \chi_{\parallel,\max} n` and ``qdsmc_kappa_perp`` at
+    :math:`1.5 k_B \chi_\max n` (:pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max`, which must be set). The MHD
+    lane's ``conduction_chi_par_max_halo`` analogue: the parallel drain of a hot halo along open field lines must not be
+    throttled by the ceiling meant for the perpendicular direction. The RKL2 stage count scales as
+    :math:`\sqrt{\chi_{\parallel,\max}}`.
+
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form
     :type: ``str``
     :default: ``free_streaming``

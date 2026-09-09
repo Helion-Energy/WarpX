@@ -444,6 +444,12 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cond_chi_max >= 0.0_rt,
             "hybrid_pic_model.qdsmc_conduction_chi_max must be >= 0");
+        utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_chi_par_max",
+                                       m_cond_chi_par_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_cond_chi_par_max > 0.0_rt) || m_cond_chi_max > 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_chi_par_max needs "
+            "qdsmc_conduction_chi_max > 0 (the perpendicular ceiling)");
         utils::parser::queryWithParser(pp_hybrid,
             "qdsmc_conduction_Te_floor", m_cond_te_floor);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -1409,20 +1415,29 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         // hard min against cap(n) = 1.5 kB chi_max n, so chi never
         // exceeds chi_max anywhere the subcycle bound reads it.
         amrex::Real const kcap_c = 1.5_rt * PhysConst::kb * m_cond_chi_max;
+        // separate parallel ceiling (member doc); unset -> the same cap
+        amrex::Real const kcap_par = (m_cond_chi_par_max > 0.0_rt)
+            ? 1.5_rt * PhysConst::kb * m_cond_chi_par_max : kcap_c;
         auto num_lit = [] (amrex::Real v) {
             std::ostringstream os;
             os << std::setprecision(std::numeric_limits<
                    amrex::Real>::max_digits10) << v;
             return os.str();
         };
-        amrex::Print() << "[qdsmc] conduction chi ceiling: "
-            << m_cond_chi_max << " m^2/s (hard min on both kappa "
-            "parsers)\n";
-        auto hard_cap = [&] (std::string const & expr) {
-            return "min(" + expr + ", " + num_lit(kcap_c) + "*n)";
+        if (m_cond_chi_par_max > 0.0_rt) {
+            amrex::Print() << "[qdsmc] conduction chi ceilings: parallel "
+                << m_cond_chi_par_max << " m^2/s, perpendicular "
+                << m_cond_chi_max << " m^2/s (hard min on each kappa parser)\n";
+        } else {
+            amrex::Print() << "[qdsmc] conduction chi ceiling: "
+                << m_cond_chi_max << " m^2/s (hard min on both kappa "
+                "parsers)\n";
+        }
+        auto hard_cap = [&] (std::string const & expr, amrex::Real const kc) {
+            return "min(" + expr + ", " + num_lit(kc) + "*n)";
         };
-        kpar_expression  = hard_cap(kpar_expression);
-        kperp_expression = hard_cap(kperp_expression);
+        kpar_expression  = hard_cap(kpar_expression, kcap_par);
+        kperp_expression = hard_cap(kperp_expression, kcap_c);
     }
     if (m_cond_te_floor > 0.0_rt) {
         amrex::Print() << "[qdsmc] conduction Te floor: "
