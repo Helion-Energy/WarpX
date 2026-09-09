@@ -143,6 +143,31 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * Public for the NVCC extended-lambda requirement. */
     void ResidualHotspotReport (const WarpXSolverVec& residual) const override;
 
+    /** The linear-residual block/region report behind
+     * pc_mhd_block.residual_block_norms (see ImplicitSolver): the scaled
+     * norms (the solver norm's 1/scale weights, so the totals match the
+     * Krylov solver's) of r = b - J dU and of b per state block -- mass,
+     * the momentum components, the energy blocks, the three B staggerings
+     * -- and per region: density classes (core >= 0.1 of the step's peak,
+     * edge >= 0.01, halo below), closed flux (RZ recast only: cells whose
+     * poloidal flux psi = int_0^r B_z r dr, from the TOTAL B_z, has the
+     * sign opposite to the wall flux of the same plane), the two live
+     * cells inboard of the shaped wall's masked band (or of the outer
+     * radial boundary without a shaped wall), the two cells at each
+     * conducting z end (the z-lo end only without the mirror symmetry),
+     * and, per floored block, its pinned components (the active-set masks
+     * of the running solve; the last projection's masks in the plain
+     * Newton mode). Printed on the I/O rank; also appended, one row per
+     * block, to pc_mhd_block.residual_block_norms_file when set. Public
+     * for the NVCC extended-lambda requirement. */
+    void ReportLinearResidualBlocks (const WarpXSolverVec& a_residual,
+                                     const WarpXSolverVec& a_rhs,
+                                     const WarpXSolverVec& a_state,
+                                     int a_linear_iters,
+                                     amrex::Real a_reported_norm,
+                                     int a_newton_iter, int a_step,
+                                     amrex::Real a_time) const override;
+
     /** Project the fluid blocks onto their theta-aware floor images
      * (value >= (1 - theta) old + theta floor, so the extrapolated end
      * state respects the absolute floors) and scrub non-finite values
@@ -484,6 +509,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
     GetMHDHallCoefficientEdgeForPC () const override;
 
+    /** Alfven-Schur coefficients of the block PC (see ImplicitSolver):
+     * eta_A on the electric-field staggerings with the Ohm assembly's own
+     * density/field interpolations (the Hall coefficient's stencils), and
+     * the cell-centered factors; w and d from the residual's Holmstrom
+     * vacuum gate (vacuum_mass_density, vacuum_drag_rate). */
+    [[nodiscard]] bool
+    FillMHDAlfvenSchurCoefficientsForPC (
+        amrex::Real a_h,
+        amrex::Array<const amrex::MultiFab*, 3>& a_eta_alfven_edge,
+        const amrex::MultiFab*& a_cell_factors) const override;
+
     [[nodiscard]] bool GetMHDIncludeElectronInertiaForPC () const override;
 
     [[nodiscard]] amrex::Real
@@ -648,6 +684,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // preconditioner's whistler-rotation coefficients (zeroed and unused
     // when the Ohm law runs without the Hall term). In 1D the transverse
     // components share the z-nodal register.
+    inline static constexpr char AlfvenResistivityE0Name[] =
+        "implicit_mhd_alfven_resistivity_e0";
+    inline static constexpr char AlfvenResistivityE1Name[] =
+        "implicit_mhd_alfven_resistivity_e1";
+    inline static constexpr char AlfvenResistivityE2Name[] =
+        "implicit_mhd_alfven_resistivity_e2";
+    inline static constexpr char AlfvenCellFactorsName[] =
+        "implicit_mhd_alfven_cell_factors";
     inline static constexpr char HallCoefficientE0Name[] =
         "implicit_mhd_hall_coefficient_e0";
     inline static constexpr char HallCoefficientE1Name[] =
@@ -754,6 +798,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     mutable std::array<amrex::iMultiFab, 4> m_projection_masks;
     mutable std::array<amrex::Long, 4> m_projected_per_block = {0, 0, 0, 0};
     mutable amrex::Long m_projected_components = 0;
+    // Region masks of the linear-residual block report
+    // (ReportLinearResidualBlocks): one cell-centered component per
+    // region, allocated on first use and refilled per report; the report
+    // file (pc_mhd_block.residual_block_norms_file, "" = stdout only) is
+    // read once, at the first report.
+    mutable amrex::iMultiFab m_linear_residual_regions;
+    mutable std::string m_linear_residual_report_file;
+    mutable bool m_linear_residual_report_file_read = false;
+    mutable bool m_linear_residual_report_header_written = false;
     // Pinned-cell coordinate dump on the line-search failure path:
     // largest number of cells listed per report (0 disables), and the
     // failure-path call counter driving the rate limit.

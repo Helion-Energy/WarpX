@@ -338,10 +338,34 @@ Overall simulation parameters
           - ``newton.forcing_max`` (``float``, default: 0.5)
           - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6).
             Relative size of the matrix-free Jacobian probe: the state is perturbed by :math:`\epsilon\,\delta U` with :math:`\epsilon = \texttt{jfnk\_epsilon}\,\|U\|/\|\delta U\|` (Pernice-Walker). Because the global state norm is set by the large blocks, the same probe is a large relative perturbation at cells whose state is orders of magnitude smaller (a plasma-vacuum edge), where the difference quotient then averages strongly nonlinear terms instead of differentiating them; the classic choice is the square root of machine epsilon, about 1.5e-8. The default reproduces the historical hard-coded value.
-          - ``newton.jfnk_epsilon_mode`` (``global`` or ``component``, default: ``global``).
+          - ``newton.jfnk_epsilon_mode`` (``global``, ``component`` or ``block_split``, default: ``global``).
+            ``block_split``: one finite difference per BLOCK FAMILY instead of one for the whole direction,
+            :math:`J v \approx \sum_f [F(U + \epsilon_f P_f v) - F(U)]/\epsilon_f`, with :math:`P_f` the projector
+            onto family :math:`f` and :math:`\epsilon_f` the COMPONENT-scaled size of that family alone,
+            :math:`\epsilon_f = \texttt{jfnk\_epsilon}\,\|P_f D^{-1} U\|/\|P_f D^{-1} v\|`, with the diagonal
+            component scale :math:`D = \mathrm{diag}(|U_i| + f_c)` of the ``component`` mode below (the floors
+            ``newton.jfnk_component_floor`` and their per-block overrides apply; a family whose scaled base norm
+            vanishes falls back to its plain Pernice-Walker size). Two families: the field block with the momentum
+            block, and the mass, energy and scalar blocks. Every block of the Krylov vector is then probed at its own
+            scale -- and within a family every component by ``jfnk_epsilon`` of its own magnitude in the
+            root-mean-square sense -- for the price of a second residual evaluation per Jacobian application; measured
+            on the launch-bound production formation step: +50-75 % wall per step (the second residual is not the only
+            cost, the family restrictions and scaled norms are extra kernel launches). Motivation: on that deck's late
+            state the components of one Krylov vector span 1e4-1e7 in magnitude relative to their scale (the auxiliary
+            ion energy at its floor image in the halo against a field-pressure block scale, next to the field rows),
+            and no single epsilon serves them all -- the global size leaves the returned direction with a true residual
+            1.6x (median; up to 5700x) the Krylov solver's estimate, all of it in the halo energy rows
+            (``pc_mhd_block.residual_block_norms`` measures it), while an epsilon sized to those rows starves the field
+            rows into round-off. Exact for a linear residual (the partial differences add to the full one); for a
+            nonlinear residual a consistent Jacobian of the same order as the single difference, not bit-identical to
+            ``global``. A correctness option, off by default (bit-identical): on the production state it changes
+            neither the Newton count nor the solution, and under an active-set hold that keeps the near-floor components
+            pinned across iterations it adds nothing, because those components are the ones a single epsilon misprobes.
+            With a single populated family it reduces to ``global``; ``jfnk_probe_report_file`` is not produced in this
+            mode (asserted).
             Sizing rule of the probe. ``global`` is the rule above: one relative perturbation of the global state (in the solver norm, i.e. with the per-block reference scales) along the Krylov direction. ``component`` is a scalar perturbation sized in component-scaled ("typical value") variables -- the scaling of the unknowns of Dennis & Schnabel (1983, ch. 7); the scalar-epsilon sizing rules are those of Knoll & Keyes, JCP 193 (2004) 357, sec. 2.3.1, eqs. (11)-(14), and the realization is their right-preconditioned finite-difference product, eqs. (25)-(28). It is not a per-component epsilon: with the diagonal component scale :math:`D = \mathrm{diag}(|U_i| + f_c)` the Newton system is solved for the scaled unknown :math:`w = D^{-1}\delta U`, i.e. :math:`(J D)\,w = F`, and the probe is :math:`\epsilon = \texttt{jfnk\_epsilon}\,\|D^{-1}U\|/\|D^{-1}\delta U\|`, so that the relative perturbation :math:`\epsilon\,\delta U_i/(|U_i| + f_c)` has root-mean-square ``jfnk_epsilon`` over the components, whatever the block scales and however the state varies within a block. Because the GMRES solver is right-preconditioned, the column scaling composed with the preconditioner, :math:`(JD)(D^{-1}M^{-1}) = JM^{-1}`, leaves the Krylov space, the iterates :math:`\delta U = Dw` and the linear residual norms unchanged in exact arithmetic: the mode changes only the size of the finite-difference perturbation, and the preconditioner needs no adjustment. ``global`` is bit-identical to the previous behavior.
           - ``newton.jfnk_component_floor`` (``float``, default: 1.0e-3).
-            Additive floor :math:`f_c` of the component probe scale, as a fraction of each field block's reference scale (``implicit_mhd.reference_*`` for the fluid blocks, the field reference scale for the electromagnetic block). Components at or near zero would otherwise demand a vanishing absolute perturbation and dominate the scaled direction norm; below the floor the perturbation is relative to the floor instead. Per-block overrides: ``newton.jfnk_component_floor_<block>`` with ``<block>`` the state block name (for the implicit MHD scheme ``implicit_mhd_mass_density``, ``implicit_mhd_momentum_density``, ``implicit_mhd_electron_energy``, ``implicit_mhd_ion_energy``, ``implicit_mhd_ion_internal_energy``, ``implicit_mhd_ion_parallel_energy``, ``implicit_mhd_ion_perp_energy`` as present, and ``Bfield_fp`` or ``Efield_fp`` for the field block; the names in use are printed with the Newton parameters when ``newton.verbose`` is set). Used by ``newton.jfnk_epsilon_mode = component`` only.
+            Additive floor :math:`f_c` of the component probe scale, as a fraction of each field block's reference scale (``implicit_mhd.reference_*`` for the fluid blocks, the field reference scale for the electromagnetic block). Components at or near zero would otherwise demand a vanishing absolute perturbation and dominate the scaled direction norm; below the floor the perturbation is relative to the floor instead. Per-block overrides: ``newton.jfnk_component_floor_<block>`` with ``<block>`` the state block name (for the implicit MHD scheme ``implicit_mhd_mass_density``, ``implicit_mhd_momentum_density``, ``implicit_mhd_electron_energy``, ``implicit_mhd_ion_energy``, ``implicit_mhd_ion_internal_energy``, ``implicit_mhd_ion_parallel_energy``, ``implicit_mhd_ion_perp_energy`` as present, and ``Bfield_fp`` or ``Efield_fp`` for the field block; the names in use are printed with the Newton parameters when ``newton.verbose`` is set). Used by ``newton.jfnk_epsilon_mode = component`` and ``block_split`` (whose per-family scaled norms use the same :math:`D`); ignored by ``global``.
           - ``newton.jfnk_probe_report_file`` (``string``, default: none; ``none`` or ``off`` disables it, e.g. from the command line).
             Diagnostic (three host copies of the state and three reductions per Newton iteration when enabled, +6-10% on a small 1D run; a no-op when unset): one row per Newton iteration (at the first Jacobian application of each linear solve) with the statistics of the effective relative perturbation :math:`\epsilon\,|\delta U_i|/(|U_i| + f_c)` of the probe over the components the Krylov direction touches -- count, root-mean-square and maximum over all of them, over the *small* components (below :math:`10^{-2}` of their block's reference scale) and over the large ones. Shows where a probe over-perturbs (a global probe at a plasma-vacuum edge: the small components' maximum is orders of magnitude above ``jfnk_epsilon``). Works in either mode; the floors of the component scale are those of ``newton.jfnk_component_floor``.
           - ``newton.active_set`` (``bool``, default: false).
@@ -1143,6 +1167,111 @@ Overall simulation parameters
               transposed band tensor fails it on the z-end deck). Used by
               the ``conduction_pc_*_banded`` and ``conduction_pc_validate``
               tests.
+            - ``pc_mhd_block.coupling_block`` (``string``, default: ``none``),
+              ``pc_mhd_block.coupling_threshold`` (``real``, default: 1.0),
+              ``pc_mhd_block.coupling_include_current`` (``bool``, default:
+              false, reserved): the ideal momentum-field coupling block of the
+              recast path. ``none`` keeps today's composition (identity fluid
+              rows, the one-sided Faraday corrector from the reference density,
+              standing down at reference Alfven CFL >= 1). ``alfven_schur``
+              eliminates the momentum row from the momentum <-> B system on the
+              exactly inverted B block: with the momentum row
+              :math:`J_{MM} \approx I + h d` (the residual's vacuum drag d) and
+              the Lorentz force weighted by the residual's vacuum weight
+              :math:`w(\rho)`, the Schur complement is
+              :math:`S_B = J_{BB} + h^2\,\nabla\times(T\,\nabla\times\delta B)`,
+              :math:`T = \frac{w}{1 + h d}\,\frac{B^2 I - B B^T}{\mu_0\rho}`.
+              This first version takes the LOW-BETA form: the fast wave at
+              :math:`\beta \to 0` has the Alfven speed in every direction, so
+              :math:`T` is replaced by its isotropic part and the term becomes an
+              "Alfven resistivity"
+              :math:`\eta_A = \frac{\theta}{\theta_r}\,\frac{h\,w}{1 + h d}\,\frac{B^2}{\rho}`
+              folded into the resistive rows on every electric-field
+              staggering (frozen at the update with the Ohm assembly's own
+              interpolations): one emission, the direct/banded/Chebyshev
+              inverses and ``resistive_validate_assembly`` unchanged; exact for
+              a 1D Alfven wave, the fast-wave Schur where :math:`\beta` is small
+              (the stiff open-line halo), an over-damping of the compressive
+              channel in the core (where the coupling number is small). The
+              Faraday corrector then uses the local coefficient
+              :math:`h/((1 + h d)\rho)` at any Alfven CFL, and after the B
+              solve the momentum row is recovered,
+              :math:`\delta M = \frac{b_M}{1 + h d} + \frac{h w}{(1 + h d)\mu_0}\,(\nabla\times\delta B)\times B`
+              (cell-centered curl of the solved faces; wall-frozen rows
+              untouched). The grid Alfven-Schur number
+              :math:`\theta_r\Delta t\,\max(\eta_A)/\mu_0/\Delta x^2` joins the
+              B block's activation gate and engages it when it reaches
+              ``coupling_threshold`` even where :math:`\eta` alone would not;
+              the momentum wave Schur is switched off with this block (it would
+              double-count the coupling). Requires ``include_ideal_mhd_coupling``.
+              Motivation: on the production formation state, with the linear
+              model made consistent, the Krylov solve reduces the B rows 2-4x
+              less than every fluid row and leaves their residual on the open
+              low-density field lines, where the grid Alfven coupling number is
+              30-60 against the reference number 0.17 the block gates on. The
+              anisotropic tensor rows and the frozen-current piece are the
+              documented follow-ups. Test: the recast stiff Alfven deck
+              (``stiff_alfven_recast``: 320 GMRES per solve with today's block,
+              which is the identity there). MEASURED ON THE PRODUCTION FORMATION
+              STATE the block is a documented NEGATIVE RESULT: GMRES per Newton
+              solve nearly doubles (63-84 against 34-36), the line-search
+              stagnations 2.5x, wall 1.9-2.6x -- do not use it in production;
+              it is kept as an opt-in for the 1D tests and as the scaffold of
+              the follow-up. The error is wavelength-dependent, not a
+              coefficient: single-mode 1D scans show the block helping 3x at
+              the longest wavelength and hurting 2x at the grid scale, because
+              the compact curl-curl fold is 2-9x too strong at short wavelength
+              against the recast's face-averaged coupling; no rescale fixes it.
+              The follow-up block takes the coupling from the residual's frozen
+              face-flux linearization.
+            - ``pc_mhd_block.coupling_debug_scale`` (``real``, default: 1.0),
+              ``pc_mhd_block.coupling_debug_recovery`` (``bool``, default:
+              true), ``pc_mhd_block.coupling_debug_corrector`` (``bool``,
+              default: true): TEST-ONLY knobs of the coupling block, used by
+              its sabotage checks -- a multiplier on the folded Alfven
+              resistivity (-1: wrong sign, 0: fold off) and switches for the
+              momentum recovery and the Faraday right-hand-side correction.
+              They have no effect unless ``coupling_block = alfven_schur``; not
+              for production decks.
+            - ``pc_mhd_block.residual_block_norms`` (``bool``, default: false),
+              ``pc_mhd_block.residual_block_norms_min_iters`` (``int``,
+              default: 30), ``pc_mhd_block.residual_block_norms_interval``
+              (``int``, default: 1), ``pc_mhd_block.residual_block_norms_file``
+              (``string``, default: none): diagnostic of what the
+              preconditioned Krylov solve did NOT reduce, and where. After
+              every linear (Newton direction) solve that took more than
+              ``min_iters`` iterations, on every ``interval``-th step, the
+              Newton solver forms the TRUE linear residual
+              :math:`r = b - J\,\delta U` with one extra matrix-free
+              Jacobian application (the same active-set masked operator and
+              right-hand side the solve used) and the theta-implicit MHD
+              operator prints, on the I/O rank, the scaled norms (the solver
+              norm's block weights, so the totals match the Krylov solver's
+              own residual norm, which is printed beside them as a
+              consistency check) of :math:`r` and of :math:`b` per state
+              block -- mass, each momentum component, the energy blocks and
+              the three magnetic-field staggerings -- with each block's share
+              of :math:`\|r\|^2` and its reduction :math:`\|r\|/\|b\|`,
+              and per region: the density classes core (:math:`\ge 0.1` of
+              the step's peak density), edge (:math:`\ge 0.01`) and halo
+              (below), the closed flux (RZ recast: cells whose poloidal flux
+              :math:`\psi = \int_0^r B_z r\,dr` from the total
+              :math:`B_z` has the sign opposite to the plane's wall flux),
+              the two live cells inboard of the shaped wall's masked band
+              (or of the outer radial boundary without a shaped wall), the
+              two cells at each conducting z end (the low end only without
+              the mirror symmetry), and per floored block its pinned
+              components (the active-set masks of the running solve; the
+              last projection's masks in the plain Newton mode). With a
+              ``file`` the same numbers are appended as tab-separated rows
+              (one per block per report; header in the file). Cost when on:
+              one Jacobian application plus a few reductions per reported
+              solve; off (the default) it adds no operation and is
+              bit-identical. The knob is read by the Newton solver and works
+              with any ``jacobian.pc_type``; it lives under ``pc_mhd_block``
+              because it grades that preconditioner's composition (the block
+              and region the slow error lives in decide which block to add).
+              Used by the ``linear_residual_blocks`` test.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)

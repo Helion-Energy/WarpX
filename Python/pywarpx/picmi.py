@@ -1971,6 +1971,34 @@ class MHDBlockPreconditioner(PreconditionerBase):
         own application to roundoff at every preconditioner update
         (diagnostic; costly)
 
+    coupling_block: {"none", "alfven_schur"}, optional
+        Ideal momentum-field coupling block of the recast path (default
+        none; alfven_schur = the Alfven Schur term inside the exact B
+        block: a documented NEGATIVE RESULT on the production formation
+        state -- GMRES per Newton nearly doubles -- opt-in for tests only)
+
+    coupling_threshold: float, optional
+        Local coupling number at which the coupling block engages (default 1)
+
+    coupling_include_current: bool, optional
+        Include the frozen-current piece of the coupling linearization
+
+    residual_block_norms: bool, optional
+        Diagnostic: after every linear solve that took more than
+        residual_block_norms_min_iters iterations, print the true linear
+        residual r = b - J dU per state block and per region (density
+        classes, closed flux, wall rows, z-end rows, pinned components),
+        with the block shares and reductions (default off)
+
+    residual_block_norms_min_iters: int, optional
+        Iteration threshold of the residual block report (default 30)
+
+    residual_block_norms_interval: int, optional
+        Report only on every N-th step (default 1)
+
+    residual_block_norms_file: str, optional
+        Also append the report rows, tab separated, to this file
+
     resistive_threshold: float, optional
         Grid-scale resistive diffusion number below which the resistive
         block is the exact identity at zero cost
@@ -2013,6 +2041,13 @@ class MHDBlockPreconditioner(PreconditionerBase):
         conduction_cross_terms=None,
         conduction_solver=None,
         conduction_validate_assembly=None,
+        residual_block_norms=None,
+        residual_block_norms_min_iters=None,
+        residual_block_norms_interval=None,
+        residual_block_norms_file=None,
+        coupling_block=None,
+        coupling_threshold=None,
+        coupling_include_current=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -2036,6 +2071,13 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.conduction_cross_terms = conduction_cross_terms
         self.conduction_solver = conduction_solver
         self.conduction_validate_assembly = conduction_validate_assembly
+        self.residual_block_norms = residual_block_norms
+        self.residual_block_norms_min_iters = residual_block_norms_min_iters
+        self.residual_block_norms_interval = residual_block_norms_interval
+        self.residual_block_norms_file = residual_block_norms_file
+        self.coupling_block = coupling_block
+        self.coupling_threshold = coupling_threshold
+        self.coupling_include_current = coupling_include_current
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -2066,6 +2108,13 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.conduction_cross_terms = self.conduction_cross_terms
         pc_mhd_block.conduction_solver = self.conduction_solver
         pc_mhd_block.conduction_validate_assembly = self.conduction_validate_assembly
+        pc_mhd_block.residual_block_norms = self.residual_block_norms
+        pc_mhd_block.residual_block_norms_min_iters = self.residual_block_norms_min_iters
+        pc_mhd_block.residual_block_norms_interval = self.residual_block_norms_interval
+        pc_mhd_block.residual_block_norms_file = self.residual_block_norms_file
+        pc_mhd_block.coupling_block = self.coupling_block
+        pc_mhd_block.coupling_threshold = self.coupling_threshold
+        pc_mhd_block.coupling_include_current = self.coupling_include_current
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):
@@ -2209,10 +2258,17 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         component perturbed by jfnk_epsilon of its own magnitude in the
         root-mean-square sense, realized as a column scaling of the Jacobian
         that leaves the right-preconditioned GMRES iteration unchanged).
+        'block_split': one finite difference per block family (the field
+        and momentum blocks; the mass, energy and scalar blocks), each
+        sized by jfnk_epsilon of its own component-scaled family norm (the
+        component floors apply) -- every block probed at its own scale for
+        a second residual evaluation per Jacobian application, measured
+        +50-75 % wall per step on the production formation step
+        (correctness option; see the parameters documentation)
 
     jfnk_component_floor: float, default=1.e-3
         Additive floor of the component probe scale, as a fraction of each
-        state block's reference scale (component mode only).
+        state block's reference scale (component and block_split modes).
 
     jfnk_component_floors: dict, optional
         Per-block overrides of jfnk_component_floor, {block_name: fraction},

@@ -2170,6 +2170,93 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# The linear-residual block report (pc_mhd_block.residual_block_norms) on the
+# ions-on arm in the active-set Newton mode, four steps, threshold 0 (every
+# solve reported): the explicit r = b - J dU must reproduce the Krylov
+# solver's residual norm (a sign error gives ~2 |b|), the density classes
+# must partition every block, the pinned columns must vanish (the free
+# solve's residual is exactly zero on the active set), and every block of
+# the dual-energy RZ state must be listed.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_linear_residual_blocks  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.evolve_ion_fluid=true implicit_mhd.ion_closure=dual_energy implicit_mhd.reference_ion_pressure=n_core*q_e*50.0 implicit_mhd.ion_pressure_floor=floor_frac*n_ref*q_e*Te_halo implicit_mhd.ion_pressure(x,y,z)=q_e*n_halo*exp(log(n_core/n_halo)*0.5*(1.0-tanh((abs(z)-z_edge)/w_n)))*(Te_halo+(50.0-Te_halo)*0.5*(1.0-tanh((abs(z)-z_front)/w_T))) implicit_mhd.electron_ion_equilibration=1.0 implicit_mhd.wall_heat_flux_cap_factor_ion=2.5 newton.active_set=1 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt max_step=4"  # inputs
+    "analysis_mhd_linear_residual_blocks.py diags/residual_blocks.txt diags/newton.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The same report on the 1D active-set dual-energy deck (the engineered
+# deadlock of test_1d_theta_implicit_mhd_active_set_dual): the active set
+# engages from step 14 on, so the pinned-column gate is exercised where it
+# matters (every row with a floor mask must carry r2_pinned = b2_pinned = 0
+# exactly; a wrong right-hand side in the reduced mode would fail it; at least
+# 50 such rows are required). Every linear solve of this small deck converges
+# to round-off (210 of 210 reports below 1e-8 |b|), which exercises the
+# absolute floor of the explicit-vs-reported gate; its ratio branch is covered
+# by the RZ test above.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_linear_residual_blocks_active_set  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_active_set_rescue implicit_mhd.ion_closure=dual_energy newton.active_set=1 newton.active_set_tolerance=1.0e-5 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt"  # inputs
+    "analysis_mhd_linear_residual_blocks.py diags/residual_blocks.txt diags/newton.txt 1d 50"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The block-split JFNK probe (newton.jfnk_epsilon_mode = block_split): the
+# ions-on oblique-edge arm with the energy block scale widened 10x
+# (my_constants.B_ref 0.05 -> 0.5, the norm weights only; the physics is
+# unchanged) and a deliberately coarse probe (jfnk_epsilon 1e-5), so that the
+# components of one Krylov vector span the production state's dynamic range
+# and a single epsilon cannot serve them: the true residual of the returned
+# direction (the residual-block report) must agree with the Krylov solver's
+# estimate -- median ratio <= 2.5, p90 <= 6, none above 15 (measured 1.8 /
+# 4.6 / 10.2). Sabotage: the same run with jfnk_epsilon_mode = global gives
+# 12.5 / 22 / 63 (FAIL); component gives 1.3 / 5.6 / 43 (fails the tail gate).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_jfnk_block_split  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.evolve_ion_fluid=true implicit_mhd.ion_closure=dual_energy implicit_mhd.reference_ion_pressure=n_core*q_e*50.0 implicit_mhd.ion_pressure_floor=floor_frac*n_ref*q_e*Te_halo implicit_mhd.ion_pressure(x,y,z)=q_e*n_halo*exp(log(n_core/n_halo)*0.5*(1.0-tanh((abs(z)-z_edge)/w_n)))*(Te_halo+(50.0-Te_halo)*0.5*(1.0-tanh((abs(z)-z_front)/w_T))) implicit_mhd.electron_ion_equilibration=1.0 implicit_mhd.wall_heat_flux_cap_factor_ion=2.5 my_constants.B_ref=0.5 newton.jfnk_epsilon=1e-5 newton.jfnk_epsilon_mode=block_split newton.active_set=1 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt max_step=4"  # inputs
+    "analysis_mhd_jfnk_block_split.py diags/residual_blocks.txt diags/newton.txt 2.5 6.0 15.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The recast stiff Alfven wave (Alfven CFL 20 on the central-flux recast; the
+# stiff_alfven deck with fluid_flux = central + viscous number 0.01): today's
+# block preconditioner is the identity there (the Faraday corrector stands down
+# at that reference CFL, eta = 0 leaves the resistive block inactive) and the
+# solve takes 2 Newton / 311-320 GMRES per step -- the baseline the coupling
+# block is graded on. The physics gates are those of analysis_mhd_stiff_alfven.py.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_recast  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_alfven_recast gmres.relative_tolerance=1e-6"  # inputs
+    "analysis_mhd_stiff_alfven_recast.py diags/diag000000 diags/diag000001 baseline"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The Alfven-Schur coupling block (pc_mhd_block.coupling_block = alfven_schur,
+# banded exact inverse), both arms at gmres.relative_tolerance 1e-6 (at the
+# deck's 1e-9 the ~450-unknown system terminates finitely and no
+# preconditioner changes the count): the GMRES total must be at most 0.65x
+# the baseline arm's (measured 98 vs 182 on step 1: the block is the low-beta
+# Schur complement built from continuum stencils against the recast's
+# reconstructed face fluxes, an approximate inverse, not the exact one),
+# Newton at most the baseline's + 1, the same wave physics. Sabotage (test-only
+# knobs, documented in the report): coupling_debug_scale=-1 (wrong sign) 479,
+# coupling_debug_scale=0 (fold off) 200, both FAIL the gate; recovery off 107.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_recast_coupling  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_alfven_recast gmres.relative_tolerance=1e-6 pc_mhd_block.coupling_block=alfven_schur pc_mhd_block.resistive_solver=banded"  # inputs
+    "analysis_mhd_stiff_alfven_recast.py diags/diag000000 diags/diag000001 coupling ../test_1d_theta_implicit_mhd_stiff_alfven_recast/diags/newton.txt 0.65"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_stiff_alfven_recast  # dependency
+)
 # The frozen cross-term registers and their MLMG consumer on top of the
 # weight: the gate on the register contents (sign-sensitive: 40 / 266
 # measured, 46 / 616 with the sign of b_n b_t flipped).

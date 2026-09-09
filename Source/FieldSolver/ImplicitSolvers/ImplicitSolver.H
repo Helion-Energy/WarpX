@@ -374,6 +374,28 @@ public:
     }
 
     /**
+     * \brief Report the TRUE residual r = b - J dU of a linear (Newton
+     * direction) solve by state block and by region: the diagnostic behind
+     * pc_mhd_block.residual_block_norms. The Newton solver forms r with one
+     * extra Jacobian application after a solve that exceeded the knob's
+     * iteration threshold and passes it here with the right-hand side b,
+     * the base state, the solve's iteration count and its own residual
+     * norm estimate (for the consistency check). Base implementation is a
+     * no-op; solvers with block structure override.
+     */
+    virtual void
+    ReportLinearResidualBlocks (const WarpXSolverVec& /*a_residual*/,
+                                const WarpXSolverVec& /*a_rhs*/,
+                                const WarpXSolverVec& /*a_state*/,
+                                int /*a_linear_iters*/,
+                                amrex::Real /*a_reported_norm*/,
+                                int /*a_newton_iter*/,
+                                int /*a_step*/,
+                                amrex::Real /*a_time*/) const
+    {
+    }
+
+    /**
      * \brief Project a solver state onto the operator's admissible set
      * (positivity floors), scrubbing non-finite values. Called by
      * NewtonSolver on the stagnation-accept path so a non-converged
@@ -586,6 +608,29 @@ public:
     GetMHDHallCoefficientEdgeForPC () const
     {
         return {nullptr, nullptr, nullptr};
+    }
+
+    /**
+     * \brief Alfven-Schur coefficients of the MHD block preconditioner
+     * (pc_mhd_block.coupling_block = alfven_schur), frozen at the update
+     * state. On the electric-field staggerings the "Alfven resistivity"
+     *     eta_A = (theta/theta_r) h w/(1 + h d) |B|^2/rho
+     * (the low-beta fast-wave Schur complement of the ideal momentum <->
+     * field coupling folded into the resistive rows, with the residual's
+     * vacuum weight w and drag d; theta/theta_r converts the reactive
+     * staging to the resistive rows' scale), and per cell the factors
+     * [0] 1/(1 + h d), [1] h/((1 + h d) rho) (the Faraday right-hand-side
+     * coefficient) and [2] h w/((1 + h d) mu0) (the momentum recovery's
+     * Lorentz factor). a_h = theta dt. Returns false when the operator
+     * does not provide them (the block then aborts).
+     */
+    [[nodiscard]] virtual bool
+    FillMHDAlfvenSchurCoefficientsForPC (
+        amrex::Real /*a_h*/,
+        amrex::Array<const amrex::MultiFab*, 3>& /*a_eta_alfven_edge*/,
+        const amrex::MultiFab*& /*a_cell_factors*/) const
+    {
+        return false;
     }
 
     /**

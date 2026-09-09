@@ -37,6 +37,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -1847,6 +1848,10 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HallCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenCellFactorsName, lev, ba, dm, 3, amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(InertiaCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
@@ -1878,6 +1883,16 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HallCoefficientE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenResistivityE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(AlfvenCellFactorsName, lev, ba, dm, 3, amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(InertiaCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
@@ -3138,6 +3153,186 @@ ThetaImplicitMHD::GetMHDMagneticFieldCCForPC () const
     // the residual evaluation at the preconditioner's update state; includes
     // the external contribution under the split-field scheme.
     return m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+}
+
+namespace
+{
+    // Alfven-Schur coefficient of the block preconditioner at one point: the
+    // residual's Holmstrom vacuum weight w(rho) and drag d(rho), then
+    //     eta_A = stage_ratio h w/(1 + h d) |B|^2 / max(rho, guard)
+    // (an "Alfven resistivity": eta_A/mu0 = (theta/theta_r) h w v_A^2/(1 + h d)).
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+    alfven_weight_and_drag (const amrex::Real rho, const bool vacuum_gate,
+                            const amrex::Real rho_vac, const amrex::Real drag_rate,
+                            const amrex::Real h, amrex::Real& w, amrex::Real& inverse_one_plus_hd)
+    {
+        w = vacuum_gate ? 0.5_rt * (1.0_rt + std::tanh((rho - rho_vac) / (0.3_rt * rho_vac)))
+                        : 1.0_rt;
+        inverse_one_plus_hd = 1.0_rt / (1.0_rt + h * drag_rate * (1.0_rt - w));
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+    alfven_resistivity (const amrex::Real rho, const amrex::Real b2, const amrex::Real h,
+                        const amrex::Real stage_ratio, const bool vacuum_gate,
+                        const amrex::Real rho_vac, const amrex::Real drag_rate,
+                        const amrex::Real density_guard)
+    {
+        amrex::Real w = 1.0_rt;
+        amrex::Real inverse_one_plus_hd = 1.0_rt;
+        alfven_weight_and_drag(rho, vacuum_gate, rho_vac, drag_rate, h, w, inverse_one_plus_hd);
+        return stage_ratio * h * w * inverse_one_plus_hd * b2 /
+               amrex::max(rho, density_guard);
+    }
+}
+
+bool
+ThetaImplicitMHD::FillMHDAlfvenSchurCoefficientsForPC (
+    const amrex::Real a_h, amrex::Array<const amrex::MultiFab*, 3>& a_eta_alfven_edge,
+    const amrex::MultiFab*& a_cell_factors) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD Alfven-Schur coefficients requested before Define()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_use_recast,
+        "pc_mhd_block.coupling_block = alfven_schur requires the conservative-form "
+        "recast (implicit_mhd.fluid_flux = hlld or central)");
+    // Frozen at the update state, with the Ohm assembly's own interpolations
+    // (the Hall coefficient's stencils): cell-centered TOTAL B averaged to
+    // the electric-field staggerings, the density averaged the same way.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const amrex::Real h = a_h;
+    const amrex::Real stage_ratio = m_theta / m_resistive_theta;
+    const bool vacuum_gate = m_vacuum_mass_density > 0.0_rt;
+    const amrex::Real rho_vac = m_vacuum_mass_density;
+    const amrex::Real drag_rate = m_vacuum_drag_rate;
+    const amrex::Real density_guard =
+        (m_mass_density_floor > 0.0_rt) ? m_mass_density_floor
+                                         : 1.0e-12_rt * m_reference_mass_density;
+    const amrex::Real inverse_mu0 = 1.0_rt / PhysConst::mu0;
+
+    amrex::MultiFab& cell_factors = *m_WarpX->m_fields.get(AlfvenCellFactorsName, 0);
+    for (amrex::MFIter mfi(cell_factors); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto factors = cell_factors.array(mfi);
+        const auto rho = density.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real w = 1.0_rt;
+            amrex::Real inverse_one_plus_hd = 1.0_rt;
+            alfven_weight_and_drag(rho(i, j, k), vacuum_gate, rho_vac, drag_rate, h,
+                                   w, inverse_one_plus_hd);
+            factors(i, j, k, 0) = inverse_one_plus_hd;
+            factors(i, j, k, 1) =
+                h * inverse_one_plus_hd / amrex::max(rho(i, j, k), density_guard);
+            factors(i, j, k, 2) = h * w * inverse_one_plus_hd * inverse_mu0;
+        });
+    }
+    a_cell_factors = &cell_factors;
+
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_eta =
+        *m_WarpX->m_fields.get(AlfvenResistivityE0Name, 0);
+    for (amrex::MFIter mfi(node_eta); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto eta_a = node_eta.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real rho_node = 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
+            amrex::Real b2 = 0.0_rt;
+            for (int component = 0; component < 3; ++component) {
+                const amrex::Real b = 0.5_rt * (b_cc(i - 1, j, k, component) +
+                                                b_cc(i, j, k, component));
+                b2 += b * b;
+            }
+            eta_a(i, j, k) = alfven_resistivity(rho_node, b2, h, stage_ratio, vacuum_gate,
+                                                rho_vac, drag_rate, density_guard);
+        });
+    }
+    // Ex and Ey share the z-nodal staggering; the cell-centered Ez never
+    // enters the 1D curl.
+    a_eta_alfven_edge = {&node_eta, &node_eta, nullptr};
+    return true;
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_eta = *m_WarpX->m_fields.get(AlfvenResistivityE0Name, 0);
+    amrex::MultiFab& azimuthal_eta =
+        *m_WarpX->m_fields.get(AlfvenResistivityE1Name, 0);
+    amrex::MultiFab& axial_eta = *m_WarpX->m_fields.get(AlfvenResistivityE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_eta); mfi.isValid(); ++mfi) {
+        const auto eta_radial = radial_eta.array(mfi);
+        const auto eta_azimuthal = azimuthal_eta.array(mfi);
+        const auto eta_axial = axial_eta.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        // E_theta corners: the nodal density and the four-cell field average.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const amrex::Real rho_node =
+                    0.25_rt * (rho(i - 1, j - 1, k) + rho(i, j - 1, k) +
+                               rho(i - 1, j, k) + rho(i, j, k));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b =
+                        0.25_rt * (b_cc(i - 1, j - 1, k, component) +
+                                   b_cc(i, j - 1, k, component) +
+                                   b_cc(i - 1, j, k, component) +
+                                   b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_azimuthal(i, j, k) = alfven_resistivity(
+                    rho_node, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+        // Er z-faces: nodes averaged in r; B from the two axially adjacent cells.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real rho_face =
+                    0.5_rt * (node_density(i, j) + node_density(i + 1, j));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b = 0.5_rt * (b_cc(i, j - 1, k, component) +
+                                                    b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_radial(i, j, k) = alfven_resistivity(
+                    rho_face, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+        // Ez r-faces: nodes averaged in z; B from the two radially adjacent cells.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real rho_face =
+                    0.5_rt * (node_density(i, j) + node_density(i, j + 1));
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real b = 0.5_rt * (b_cc(i - 1, j, k, component) +
+                                                    b_cc(i, j, k, component));
+                    b2 += b * b;
+                }
+                eta_axial(i, j, k) = alfven_resistivity(
+                    rho_face, b2, h, stage_ratio, vacuum_gate, rho_vac, drag_rate,
+                    density_guard);
+            });
+    }
+    a_eta_alfven_edge = {&radial_eta, &azimuthal_eta, &axial_eta};
+    return true;
+#else
+    amrex::ignore_unused(magnetic_cc, stage_ratio, a_eta_alfven_edge);
+    return false;
+#endif
 }
 
 bool
@@ -6817,6 +7012,407 @@ void ThetaImplicitMHD::ResidualHotspotReport (const WarpXSolverVec& residual) co
         harvest(*residual.getArrayVec()[0][component], face_labels[component]);
     }
     amrex::AllPrint() << report.str();
+}
+
+namespace
+{
+    // Regions of the linear-residual block report (ReportLinearResidualBlocks):
+    // three exclusive density classes, then overlays.
+    constexpr int kLinearResidualRegions = 6;
+    constexpr int kRegionCore = 0;
+    constexpr int kRegionEdge = 1;
+    constexpr int kRegionHalo = 2;
+    constexpr int kRegionClosed = 3;
+    constexpr int kRegionWall = 4;
+    constexpr int kRegionZEnd = 5;
+    // Extra column indices of the report: the pinned components and the total.
+    constexpr int kRegionPinned = kLinearResidualRegions;
+    constexpr int kRegionTotal = kLinearResidualRegions + 1;
+    constexpr int kLinearResidualColumns = kLinearResidualRegions + 2;
+}
+
+void ThetaImplicitMHD::ReportLinearResidualBlocks (
+    const WarpXSolverVec& a_residual, const WarpXSolverVec& a_rhs,
+    const WarpXSolverVec& a_state, const int a_linear_iters,
+    const amrex::Real a_reported_norm, const int a_newton_iter,
+    const int a_step, const amrex::Real a_time) const
+{
+    BL_PROFILE("ThetaImplicitMHD::ReportLinearResidualBlocks()");
+    using ablastr::fields::Direction;
+
+    // ---- Region classification, cell-centered, one component per region.
+    const amrex::MultiFab& density = a_state.getMultiFabBlock(MassDensityName, 0);
+    if (!m_linear_residual_regions.ok()) {
+        m_linear_residual_regions.define(density.boxArray(),
+                                         density.DistributionMap(),
+                                         kLinearResidualRegions, 0);
+    }
+    amrex::iMultiFab& regions = m_linear_residual_regions;
+    regions.setVal(0);
+    const amrex::Real density_peak = density.max(0, 0, false);
+    const amrex::Real core_threshold = 0.1_rt * density_peak;
+    const amrex::Real edge_threshold = 0.01_rt * density_peak;
+    const amrex::Box domain = m_WarpX->Geom(0).Domain();
+    constexpr int axial_dim = AMREX_SPACEDIM - 1;
+    const int z_lo_cell = domain.smallEnd(axial_dim);
+    const int z_hi_cell = domain.bigEnd(axial_dim);
+    const bool z_lo_mirror = GetMHDZLoMirrorForPC();
+    const auto fluid_freeze = m_wall_mask.FluidFreezeView();
+    const int r_hi_cell = domain.bigEnd(0);
+    amrex::ignore_unused(fluid_freeze, r_hi_cell);
+
+#if defined(WARPX_DIM_RZ)
+    // Poloidal flux psi(r, z) = int_0^r B_z r' dr' per z plane from the TOTAL
+    // B_z of the base state (the recast's array block is B; the split-field
+    // drive keeps the external part in its own register): closed flux =
+    // psi with the sign opposite to the plane's wall flux. Host prefix sum
+    // over the gathered per-cell contributions (all ranks).
+    amrex::Gpu::DeviceVector<amrex::Real> psi_device;
+    amrex::Gpu::DeviceVector<amrex::Real> psi_wall_device;
+    const amrex::Real* psi_ptr = nullptr;
+    const amrex::Real* psi_wall_ptr = nullptr;
+    const int r_lo_cell = domain.smallEnd(0);
+    const int radial_cells = domain.length(0);
+    const int axial_cells = domain.length(1);
+    if (m_use_recast && a_state.getArrayVecType() != FieldType::None) {
+        amrex::Gpu::DeviceVector<amrex::Real> contribution_device(
+            static_cast<std::size_t>(radial_cells) * axial_cells, 0.0_rt);
+        amrex::Real* const contribution_ptr = contribution_device.data();
+        const amrex::MultiFab& bz_face = *a_state.getArrayVec()[0][2];
+        const amrex::MultiFab* const bz_external =
+            (m_hybrid_pic_model != nullptr &&
+             m_hybrid_pic_model->m_add_external_fields)
+                ? m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external,
+                                        Direction{2}, 0)
+                : nullptr;
+        const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+        const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+        for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto bz = bz_face.const_array(mfi);
+            const auto bz_ext = bz_external
+                                    ? bz_external->const_array(mfi)
+                                    : amrex::Array4<const amrex::Real>{};
+            amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    amrex::Real bz_center =
+                        0.5_rt * (bz(i, j, k) + bz(i, j + 1, k));
+                    if (bz_ext) {
+                        bz_center += 0.5_rt * (bz_ext(i, j, k) +
+                                               bz_ext(i, j + 1, k));
+                    }
+                    const amrex::Real r_center =
+                        radial_lower +
+                        (i - r_lo_cell + 0.5_rt) * radial_cell_size;
+                    contribution_ptr[(i - r_lo_cell) * axial_cells +
+                                     (j - z_lo_cell)] =
+                        bz_center * r_center * radial_cell_size;
+                });
+        }
+        amrex::Vector<amrex::Real> contribution(
+            static_cast<std::size_t>(radial_cells) * axial_cells, 0.0_rt);
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                         contribution_device.begin(),
+                         contribution_device.end(), contribution.begin());
+        amrex::ParallelAllReduce::Sum(
+            contribution.data(), static_cast<int>(contribution.size()),
+            amrex::ParallelContext::CommunicatorSub());
+        amrex::Vector<amrex::Real> psi(contribution.size(), 0.0_rt);
+        amrex::Vector<amrex::Real> psi_wall(axial_cells, 0.0_rt);
+        for (int plane = 0; plane < axial_cells; ++plane) {
+            amrex::Real accumulated = 0.0_rt;
+            for (int ir = 0; ir < radial_cells; ++ir) {
+                const amrex::Real cell_flux =
+                    contribution[static_cast<std::size_t>(ir) * axial_cells +
+                                 plane];
+                psi[static_cast<std::size_t>(ir) * axial_cells + plane] =
+                    accumulated + 0.5_rt * cell_flux;
+                accumulated += cell_flux;
+            }
+            psi_wall[plane] = accumulated;
+        }
+        psi_device.resize(psi.size());
+        psi_wall_device.resize(psi_wall.size());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, psi.begin(), psi.end(),
+                         psi_device.begin());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, psi_wall.begin(),
+                         psi_wall.end(), psi_wall_device.begin());
+        psi_ptr = psi_device.data();
+        psi_wall_ptr = psi_wall_device.data();
+    }
+#endif
+
+    for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density.const_array(mfi);
+        const auto reg = regions.array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real n = rho(i, j, k);
+            reg(i, j, k, kRegionCore) = (n >= core_threshold) ? 1 : 0;
+            reg(i, j, k, kRegionEdge) =
+                (n < core_threshold && n >= edge_threshold) ? 1 : 0;
+            reg(i, j, k, kRegionHalo) = (n < edge_threshold) ? 1 : 0;
+#if defined(WARPX_DIM_RZ)
+            if (psi_ptr != nullptr) {
+                const amrex::Real psi =
+                    psi_ptr[(i - r_lo_cell) * axial_cells + (j - z_lo_cell)];
+                const amrex::Real psi_wall = psi_wall_ptr[j - z_lo_cell];
+                reg(i, j, k, kRegionClosed) = (psi * psi_wall < 0.0_rt) ? 1 : 0;
+            }
+            int first_masked = r_hi_cell + 1;
+            if (fluid_freeze.active) {
+                const int jc = amrex::min(amrex::max(j, fluid_freeze.z_lo),
+                                          fluid_freeze.z_hi);
+                first_masked = fluid_freeze.first_masked_cc[jc];
+            }
+            reg(i, j, k, kRegionWall) =
+                (i >= first_masked - 2 && i < first_masked) ? 1 : 0;
+            const int axial_index = j;
+#else
+            const int axial_index = i;
+#endif
+            const bool z_end = (axial_index >= z_hi_cell - 1) ||
+                               (!z_lo_mirror && axial_index <= z_lo_cell + 1);
+            reg(i, j, k, kRegionZEnd) = z_end ? 1 : 0;
+        });
+    }
+
+    // ---- Rows: every component of every state block.
+    struct Row
+    {
+        std::string label;
+        const amrex::MultiFab* residual = nullptr;
+        const amrex::MultiFab* rhs = nullptr;
+        int comp = 0;
+        amrex::Real scale = 1.0;
+        const amrex::iMultiFab* dot_mask = nullptr;
+        const amrex::iMultiFab* pinned = nullptr;
+    };
+    std::vector<Row> rows;
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_floored_blocks = (cgl_closure || dual_energy_closure)
+                                       ? 4
+                                       : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> floored_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+#if defined(WARPX_DIM_RZ)
+    const std::array<const char*, 3> component_suffix = {"_r", "_theta", "_z"};
+#else
+    const std::array<const char*, 3> component_suffix = {"_x", "_y", "_z"};
+#endif
+    const std::string block_prefix = "implicit_mhd_";
+    for (auto const& spec : a_residual.getMultiFabBlockSpecs()) {
+        const amrex::MultiFab& residual_mf = a_residual.getMultiFabBlock(spec.name, 0);
+        const amrex::MultiFab& rhs_mf = a_rhs.getMultiFabBlock(spec.name, 0);
+        std::string base = spec.name;
+        if (base.rfind(block_prefix, 0) == 0) { base = base.substr(block_prefix.size()); }
+        const amrex::iMultiFab* pinned = nullptr;
+        for (int block = 0; block < num_floored_blocks; ++block) {
+            if (spec.name == floored_names[block] &&
+                m_projected_per_block[block] > 0 &&
+                m_projection_masks[block].ok()) {
+                pinned = &m_projection_masks[block];
+            }
+        }
+        const int ncomp = residual_mf.nComp();
+        for (int comp = 0; comp < ncomp; ++comp) {
+            Row row;
+            row.label = (ncomp == 1) ? base
+                                     : base + (comp < 3 ? component_suffix[comp]
+                                                        : "_" + std::to_string(comp));
+            row.residual = &residual_mf;
+            row.rhs = &rhs_mf;
+            row.comp = comp;
+            row.scale = spec.scale;
+            row.pinned = pinned;
+            rows.push_back(row);
+        }
+    }
+    if (a_residual.getArrayVecType() != FieldType::None) {
+        const amrex::Real array_scale = a_residual.blockScales().front();
+        const std::string array_label = m_use_recast ? "B" : "E";
+        for (int component = 0; component < 3; ++component) {
+            Row row;
+            row.label = array_label + component_suffix[component];
+            row.residual = a_residual.getArrayVec()[0][component];
+            row.rhs = a_rhs.getArrayVec()[0][component];
+            row.comp = 0;
+            row.scale = array_scale;
+            row.dot_mask = m_WarpX->getFieldDotMaskPointer(
+                a_residual.getArrayVecType(), 0, Direction{component});
+            rows.push_back(row);
+        }
+    }
+
+    // ---- Sums: per row and column (region, pinned, total), r^2 and b^2 in
+    // the solver's scaled metric; one two-term reduction per (row, column).
+    const std::size_t num_rows = rows.size();
+    std::vector<amrex::Real> sums(num_rows * kLinearResidualColumns * 2, 0.0_rt);
+    for (std::size_t irow = 0; irow < num_rows; ++irow) {
+        const Row& row = rows[irow];
+        const amrex::Real inverse_scale = 1.0_rt / row.scale;
+        const int comp = row.comp;
+        for (int column = 0; column < kLinearResidualColumns; ++column) {
+            if (column == kRegionPinned && row.pinned == nullptr) { continue; }
+            amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (amrex::MFIter mfi(*row.residual); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox();
+                const amrex::Dim3 cell_hi = amrex::ubound(amrex::enclosedCells(box));
+                const auto r = row.residual->const_array(mfi);
+                const auto b = row.rhs->const_array(mfi);
+                const auto reg = regions.const_array(mfi);
+                const auto dot = row.dot_mask ? row.dot_mask->const_array(mfi)
+                                              : amrex::Array4<const int>{};
+                const auto pin = row.pinned ? row.pinned->const_array(mfi)
+                                            : amrex::Array4<const int>{};
+                reduce_op.eval(
+                    box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                        if (dot && dot(i, j, k) == 0) { return {0.0_rt, 0.0_rt}; }
+                        const int ic = amrex::min(i, cell_hi.x);
+                        const int jc = amrex::min(j, cell_hi.y);
+                        const int kc = amrex::min(k, cell_hi.z);
+                        bool inside = true;
+                        if (column < kLinearResidualRegions) {
+                            inside = reg(ic, jc, kc, column) != 0;
+                        } else if (column == kRegionPinned) {
+                            inside = pin && pin(ic, jc, kc) != 0;
+                        }
+                        if (!inside) { return {0.0_rt, 0.0_rt}; }
+                        const amrex::Real rv = r(i, j, k, comp) * inverse_scale;
+                        const amrex::Real bv = b(i, j, k, comp) * inverse_scale;
+                        return {rv * rv, bv * bv};
+                    });
+            }
+            const ReduceTuple result = reduce_data.value(reduce_op);
+            sums[2 * (irow * kLinearResidualColumns + column)] = amrex::get<0>(result);
+            sums[2 * (irow * kLinearResidualColumns + column) + 1] = amrex::get<1>(result);
+        }
+    }
+    amrex::ParallelAllReduce::Sum(sums.data(), static_cast<int>(sums.size()),
+                                  amrex::ParallelContext::CommunicatorSub());
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+
+    auto r2 = [&](std::size_t irow, int column) {
+        return sums[2 * (irow * kLinearResidualColumns + column)];
+    };
+    auto b2 = [&](std::size_t irow, int column) {
+        return sums[2 * (irow * kLinearResidualColumns + column) + 1];
+    };
+    amrex::Real total_r2 = 0.0_rt;
+    amrex::Real total_b2 = 0.0_rt;
+    std::array<amrex::Real, kLinearResidualColumns> column_r2{};
+    std::array<amrex::Real, kLinearResidualColumns> column_b2{};
+    for (std::size_t irow = 0; irow < num_rows; ++irow) {
+        total_r2 += r2(irow, kRegionTotal);
+        total_b2 += b2(irow, kRegionTotal);
+        for (int column = 0; column < kLinearResidualColumns; ++column) {
+            column_r2[column] += r2(irow, column);
+            column_b2[column] += b2(irow, column);
+        }
+    }
+    const std::array<const char*, kLinearResidualColumns> column_names = {
+        "core", "edge", "halo", "closed", "wall", "zend", "pinned", "total"};
+    auto safe_ratio = [](amrex::Real num, amrex::Real den) {
+        return (den > 0.0_rt) ? num / den : 0.0_rt;
+    };
+
+    std::stringstream report;
+    report << std::scientific << std::setprecision(3);
+    report << "pc_mhd_block linear residual blocks: step " << a_step + 1
+           << " t " << a_time << " newton_iter " << a_newton_iter
+           << " gmres_iters " << a_linear_iters
+           << " |b| " << std::sqrt(total_b2) << " |r| " << std::sqrt(total_r2)
+           << " (gmres reported " << a_reported_norm << ") r/b "
+           << safe_ratio(std::sqrt(total_r2), std::sqrt(total_b2))
+           << " rho_peak " << density_peak
+           << " wall_rows " << (fluid_freeze.active ? "shaped-wall band" : "outer boundary")
+           << "\n";
+    for (std::size_t irow = 0; irow < num_rows; ++irow) {
+        const amrex::Real row_r2 = r2(irow, kRegionTotal);
+        const amrex::Real row_b2 = b2(irow, kRegionTotal);
+        report << "  " << std::setw(20) << std::left << rows[irow].label << std::right
+               << " r " << std::sqrt(row_r2)
+               << " share " << std::fixed << std::setprecision(3)
+               << safe_ratio(row_r2, total_r2) << std::scientific << std::setprecision(3)
+               << " b " << std::sqrt(row_b2)
+               << " r/b " << safe_ratio(std::sqrt(row_r2), std::sqrt(row_b2));
+        for (int column = 0; column < kLinearResidualRegions + 1; ++column) {
+            if (column == kRegionPinned && rows[irow].pinned == nullptr) {
+                report << " | " << column_names[column] << " -";
+                continue;
+            }
+            report << " | " << column_names[column] << " "
+                   << std::fixed << std::setprecision(3)
+                   << safe_ratio(r2(irow, column), row_r2)
+                   << std::scientific << std::setprecision(2)
+                   << " r/b " << safe_ratio(std::sqrt(r2(irow, column)),
+                                           std::sqrt(b2(irow, column)));
+        }
+        report << "\n";
+    }
+    report << "  " << std::setw(20) << std::left << "all rows" << std::right
+           << std::scientific << std::setprecision(3);
+    for (int column = 0; column < kLinearResidualRegions + 1; ++column) {
+        report << " | " << column_names[column] << " share "
+               << std::fixed << std::setprecision(3)
+               << safe_ratio(column_r2[column], total_r2)
+               << std::scientific << std::setprecision(3)
+               << " r " << std::sqrt(column_r2[column])
+               << " b " << std::sqrt(column_b2[column]);
+    }
+    report << "\n";
+    amrex::Print() << report.str();
+
+    // ---- Optional file: one row per block per report, tab separated.
+    if (!m_linear_residual_report_file_read) {
+        m_linear_residual_report_file_read = true;
+        const amrex::ParmParse pp("pc_mhd_block");
+        pp.query("residual_block_norms_file", m_linear_residual_report_file);
+    }
+    if (m_linear_residual_report_file.empty()) { return; }
+    if (!m_linear_residual_report_header_written) {
+        m_linear_residual_report_header_written = true;
+        std::filesystem::path const path(m_linear_residual_report_file);
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(path.parent_path());
+        }
+        std::ofstream header{m_linear_residual_report_file,
+                             std::ofstream::out | std::ofstream::trunc};
+        header << "#[0]step [1]time [2]newton_iter [3]gmres_iters "
+                  "[4]gmres_reported_norm [5]row";
+        int column_index = 6;
+        for (int column = 0; column < kLinearResidualColumns; ++column) {
+            header << " [" << column_index << "]r2_" << column_names[column];
+            ++column_index;
+            header << " [" << column_index << "]b2_" << column_names[column];
+            ++column_index;
+        }
+        header << "   (scaled squared norms; pinned columns are -1 for rows "
+                  "without a floor mask)\n";
+    }
+    std::ofstream out{m_linear_residual_report_file,
+                      std::ofstream::out | std::ofstream::app};
+    out << std::setprecision(10) << std::scientific;
+    for (std::size_t irow = 0; irow < num_rows; ++irow) {
+        out << a_step + 1 << "\t" << a_time << "\t" << a_newton_iter << "\t"
+            << a_linear_iters << "\t" << a_reported_norm << "\t" << rows[irow].label;
+        for (int column = 0; column < kLinearResidualColumns; ++column) {
+            if (column == kRegionPinned && rows[irow].pinned == nullptr) {
+                out << "\t-1\t-1";
+            } else {
+                out << "\t" << r2(irow, column) << "\t" << b2(irow, column);
+            }
+        }
+        out << "\n";
+    }
 }
 
 void ThetaImplicitMHD::ProjectStateToAdmissibleSet (WarpXSolverVec& a_U) const
