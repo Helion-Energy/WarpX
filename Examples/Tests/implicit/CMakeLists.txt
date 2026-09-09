@@ -538,6 +538,29 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref  # dependency
 )
 
+# ... and the single-box layout of a one-GPU production run (1 rank: the
+# fused bookkeeping skips the ghost exchanges that cannot move data), same
+# identity gate.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold amr.max_grid_size=64 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold amr.max_grid_size=64 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref  # dependency
+)
+
 # Offset-density advection (implicit_mhd.advection_density_offset_fraction,
 # The reference code's subtract/advect/re-add density advance), NULL TWIN: a
 # two-cell-edged top-hat entropy wave advecting across a featureless
