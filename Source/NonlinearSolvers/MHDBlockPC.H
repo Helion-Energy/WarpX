@@ -296,6 +296,27 @@ class MHDBlockPC : public Preconditioner<T, Ops>
 
         bool m_include_wave_schur = true;
         bool m_wave_schur_active = false;
+        // Coupling block of the recast path (pc_mhd_block.coupling_block,
+        // default "none" = bit-identical). "alfven_schur" is the design
+        // of the ideal momentum <-> field Schur complement taken on the
+        // exactly inverted B block with local frozen coefficients,
+        //     S_B = J_BB + h^2 curl(T curl dB),
+        //     T = w/(1 + h d) (B^2 I - B B^T)/(mu0 rho),
+        // engaged when the local coupling number 4 h^2 |T|/dx^2 reaches
+        // coupling_threshold; the momentum then recovers from dB and the
+        // one-sided Faraday corrector stands down. Motivation (measured on
+        // the production formation state with the residual-block report,
+        // linear model made consistent by the component-scaled probe): the
+        // B rows are reduced 2-4x less than every fluid row by the Krylov
+        // solve and their residual sits on the open low-density field
+        // lines, where the grid Alfven coupling number is 30-60 while the
+        // reference number the block gates on is 0.17. NOT IMPLEMENTED
+        // YET: requesting alfven_schur aborts at ParmParse time (design
+        // stage; the knob, docs and PICMI plumbing land first so the block
+        // commit is the block alone).
+        std::string m_coupling_block = "none";
+        RT m_coupling_threshold = 1.0;
+        bool m_coupling_include_current = false;
         bool m_signal_diffusion_active = false;
         bool m_faraday_active = false;
         bool m_resistive_active = false;
@@ -736,6 +757,18 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("include_electron_inertia_coupling",
              m_include_electron_inertia_coupling);
     pp.query("include_wave_schur", m_include_wave_schur);
+    pp.query("coupling_block", m_coupling_block);
+    utils::parser::queryWithParser(pp, "coupling_threshold", m_coupling_threshold);
+    pp.query("coupling_include_current", m_coupling_include_current);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupling_block == "none" || m_coupling_block == "alfven_schur",
+        "pc_mhd_block.coupling_block must be 'none' or 'alfven_schur'");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupling_threshold >= 0.0,
+                                     "pc_mhd_block.coupling_threshold cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupling_block == "none",
+        "pc_mhd_block.coupling_block = alfven_schur is not implemented yet (design stage: "
+        "the knob, documentation and PICMI plumbing precede the block)");
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
     utils::parser::queryWithParser(pp, "resistive_iterations", m_resistive_iterations);
@@ -4219,6 +4252,8 @@ MHDBlockPC<T, Ops>::printParameters () const
     amrex::Print() << name << " conduction validate:  "
                    << (m_conduction_validate_assembly ? "true" : "false") << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";
+    amrex::Print() << name << " coupling block:       " << m_coupling_block << "\n";
+    amrex::Print() << name << " coupling threshold:   " << m_coupling_threshold << "\n";
     amrex::Print() << name << " agglomeration:        " << (m_agglomeration ? "true" : "false")
                    << "\n";
     amrex::Print() << name << " consolidation:        " << (m_consolidation ? "true" : "false")

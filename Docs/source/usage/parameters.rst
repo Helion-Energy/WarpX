@@ -1047,6 +1047,34 @@ Overall simulation parameters
               transposed band tensor fails it on the z-end deck). Used by
               the ``conduction_pc_*_banded`` and ``conduction_pc_validate``
               tests.
+            - ``pc_mhd_block.coupling_block`` (``string``, default: ``none``),
+              ``pc_mhd_block.coupling_threshold`` (``real``, default: 1.0),
+              ``pc_mhd_block.coupling_include_current`` (``bool``, default:
+              false): the ideal momentum-field coupling block of the recast
+              path. ``none`` keeps today's composition (identity fluid rows,
+              the one-sided Faraday corrector from the reference density).
+              ``alfven_schur`` (DESIGN STAGE: requesting it aborts until the
+              block lands) takes the Schur complement of the ideal
+              momentum <-> B coupling on the exactly inverted B block with
+              LOCAL frozen coefficients,
+              :math:`S_B = J_{BB} + h^2\,\nabla\times(T\,\nabla\times\delta B)`,
+              :math:`T = \frac{w}{1 + h d}\,\frac{B^2 I - B B^T}{\mu_0\rho}`
+              on the electric-field staggerings (an anisotropic "Alfven
+              resistivity" :math:`h v_A^2` perpendicular to :math:`B`; w and
+              d the residual's vacuum weight and drag), emitted with the Hall
+              rows into the direct/banded assembly, followed by the momentum
+              recovery from :math:`\delta B`; the Faraday corrector stands
+              down. Engaged when the largest local coupling number
+              :math:`4 h^2 |T| / \Delta x^2` reaches ``coupling_threshold``.
+              ``coupling_include_current`` adds the :math:`J_0 \times \delta B`
+              piece of the linearization (off: the frozen-current
+              approximation, exact where the current vanishes). Motivation:
+              on the production formation state, with the linear model made
+              consistent by ``newton.jfnk_epsilon_mode = component``, the
+              Krylov solve reduces the B rows 2-4x less than every fluid row
+              and leaves their residual on the open low-density field lines,
+              where the grid Alfven coupling number is 30-60 against the
+              reference number 0.17 the block gates on.
             - ``pc_mhd_block.residual_block_norms`` (``bool``, default: false),
               ``pc_mhd_block.residual_block_norms_min_iters`` (``int``,
               default: 30), ``pc_mhd_block.residual_block_norms_interval``

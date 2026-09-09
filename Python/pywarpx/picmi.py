@@ -1971,6 +1971,17 @@ class MHDBlockPreconditioner(PreconditionerBase):
         own application to roundoff at every preconditioner update
         (diagnostic; costly)
 
+    coupling_block: {"none", "alfven_schur"}, optional
+        Ideal momentum-field coupling block of the recast path (default
+        none; alfven_schur = the Alfven Schur term inside the exact B
+        block, design stage)
+
+    coupling_threshold: float, optional
+        Local coupling number at which the coupling block engages (default 1)
+
+    coupling_include_current: bool, optional
+        Include the frozen-current piece of the coupling linearization
+
     residual_block_norms: bool, optional
         Diagnostic: after every linear solve that took more than
         residual_block_norms_min_iters iterations, print the true linear
@@ -2033,6 +2044,9 @@ class MHDBlockPreconditioner(PreconditionerBase):
         residual_block_norms_min_iters=None,
         residual_block_norms_interval=None,
         residual_block_norms_file=None,
+        coupling_block=None,
+        coupling_threshold=None,
+        coupling_include_current=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -2060,6 +2074,9 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.residual_block_norms_min_iters = residual_block_norms_min_iters
         self.residual_block_norms_interval = residual_block_norms_interval
         self.residual_block_norms_file = residual_block_norms_file
+        self.coupling_block = coupling_block
+        self.coupling_threshold = coupling_threshold
+        self.coupling_include_current = coupling_include_current
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -2094,6 +2111,9 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.residual_block_norms_min_iters = self.residual_block_norms_min_iters
         pc_mhd_block.residual_block_norms_interval = self.residual_block_norms_interval
         pc_mhd_block.residual_block_norms_file = self.residual_block_norms_file
+        pc_mhd_block.coupling_block = self.coupling_block
+        pc_mhd_block.coupling_threshold = self.coupling_threshold
+        pc_mhd_block.coupling_include_current = self.coupling_include_current
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):
