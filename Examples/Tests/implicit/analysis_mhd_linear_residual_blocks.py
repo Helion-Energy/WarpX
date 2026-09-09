@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate of the linear-residual block report (pc_mhd_block.residual_block_norms).
 
-usage: analysis_mhd_linear_residual_blocks.py <residual_blocks.txt> <newton.txt>
+usage: analysis_mhd_linear_residual_blocks.py <residual_blocks.txt> <newton.txt> [rz|1d] [min_pinned_rows]
 
 The report file holds, per linear solve that exceeded the iteration threshold
 and per state block, the scaled squared norms of the TRUE linear residual
@@ -11,7 +11,12 @@ the report against quantities the solver computes independently:
 1. the explicit residual norm sqrt(sum_blocks r2_total) reproduces the Krylov
    solver's own final residual norm (its Arnoldi recurrence estimate): the
    MEDIAN mismatch over the reported solves is below 1e-3 of |b| and every
-   report's explicit/reported ratio lies in [0.5, 4]. The recurrence assumes a
+   report's explicit/reported ratio lies in [0.5, 4] -- for the solves whose
+   reported norm is at least 1e-8 |b|. Below that a solve has converged to
+   round-off and both numbers are noise (measured on the 1D active-set dual
+   deck: explicit 4.8e-14 vs reported 2.1e-15 at |b| 2.6e-3, ratio 23), so the
+   gate asks instead that the explicit residual is negligible too (<= 1e-6 |b|;
+   a sign error gives ~2 |b| there as well). The recurrence assumes a
    linear operator; the finite-difference Jacobian is not exactly linear over a
    Krylov basis that crosses limiter kinks, so single solves can show a true
    residual up to ~2x the estimate (measured: the first solve of the ions-on
@@ -24,11 +29,16 @@ the report against quantities the solver computes independently:
    are finite;
 3. the pinned columns of the floored blocks vanish in the active-set mode (the
    free solve has an exactly zero residual on the active set by construction:
-   masked right-hand side, masked operator); rows without a floor mask carry -1;
-4. every block of the dual-energy RZ state is reported (mass_density,
-   momentum_density r/theta/z, electron_energy, ion_energy, ion_internal_energy,
-   B_r/theta/z), and the number of reports equals the number of Newton iterations
-   of newton.txt (threshold 0).
+   masked right-hand side, masked operator); rows without a floor mask carry -1.
+   The optional 4th argument is the minimum number of rows that must carry a
+   pinned column, so that a test on which the active set engages proves the
+   gate is not vacuous (a wrong right-hand side in the reduced mode -- the full
+   F instead of the masked one -- would fail it); default 0;
+4. every block of the dual-energy state is reported (mass_density,
+   momentum_density, electron_energy, ion_energy, ion_internal_energy and B,
+   the vector blocks per component: r/theta/z for "rz" (default), x/y/z for
+   "1d"), and the number of reports equals the number of Newton iterations of
+   newton.txt (threshold 0).
 """
 import sys
 from collections import defaultdict
@@ -37,6 +47,8 @@ import numpy as np
 
 report_file = sys.argv[1]
 newton_file = sys.argv[2]
+geometry = sys.argv[3] if len(sys.argv) > 3 else "rz"
+min_pinned_rows = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 
 columns = ["core", "edge", "halo", "closed", "wall", "zend", "pinned", "total"]
 reports = defaultdict(dict)  # (step, newton_iter) -> row label -> dict
@@ -62,15 +74,17 @@ assert len(reports) >= 3, f"only {len(reports)} reports found in {report_file}"
 
 # Row labels are the solver-vector block names without their "implicit_mhd_"
 # prefix, multi-component blocks suffixed per component.
-expected_rows = {"mass_density", "momentum_density_r", "momentum_density_theta",
-                 "momentum_density_z", "electron_energy", "ion_energy",
-                 "ion_internal_energy", "B_r", "B_theta", "B_z"}
+components = {"rz": ("r", "theta", "z"), "1d": ("x", "y", "z")}[geometry]
+expected_rows = ({"mass_density", "electron_energy", "ion_energy", "ion_internal_energy"}
+                 | {f"momentum_density_{c}" for c in components}
+                 | {f"B_{c}" for c in components})
 floored_rows = {"mass_density", "electron_energy", "ion_energy", "ion_internal_energy"}
 worst_mismatch = 0.0
 mismatches = []
 worst_partition = 0.0
 worst_pinned = 0.0
 pinned_rows_seen = 0
+roundoff_reports = 0
 for key in sorted(reports):
     rows = reports[key]
     assert set(rows) == expected_rows, (key, sorted(rows))
@@ -82,10 +96,20 @@ for key in sorted(reports):
     mismatch = abs(explicit - reported) / np.sqrt(total_b2)
     worst_mismatch = max(worst_mismatch, mismatch)
     mismatches.append(mismatch)
-    ratio = explicit / reported if reported > 0.0 else np.inf
-    assert 0.5 <= ratio <= 4.0, (
-        f"step {key[0]} newton_iter {key[1]}: explicit |r| {explicit:.6e} vs "
-        f"reported {reported:.6e} (|b| {np.sqrt(total_b2):.6e}, gmres {gmres_iters[key]})")
+    b_norm = np.sqrt(total_b2)
+    if reported >= 1.0e-8 * b_norm:
+        ratio = explicit / reported
+        assert 0.5 <= ratio <= 4.0, (
+            f"step {key[0]} newton_iter {key[1]}: explicit |r| {explicit:.6e} vs "
+            f"reported {reported:.6e} (|b| {b_norm:.6e}, gmres {gmres_iters[key]})")
+    else:
+        # Converged to round-off: the recurrence estimate and the explicit
+        # residual are both noise and their ratio is meaningless; the explicit
+        # residual must still be negligible (a sign error gives ~2 |b|).
+        roundoff_reports += 1
+        assert explicit <= 1.0e-6 * b_norm, (
+            f"step {key[0]} newton_iter {key[1]}: round-off solve (reported {reported:.3e}) "
+            f"with explicit |r| {explicit:.6e} at |b| {b_norm:.6e}")
     for label, row in rows.items():
         for kind in ("r2", "b2"):
             v = row[kind]
@@ -108,6 +132,9 @@ for key in sorted(reports):
 
 median_mismatch = float(np.median(mismatches))
 assert median_mismatch <= 1.0e-3, ("median explicit-vs-reported mismatch", median_mismatch)
+assert pinned_rows_seen >= min_pinned_rows, ("rows with a pinned column", pinned_rows_seen, min_pinned_rows)
+print(f"pinned gate: {pinned_rows_seen} rows with a pinned column (>= {min_pinned_rows} required), "
+      f"worst pinned share {worst_pinned:.3e}; round-off solves {roundoff_reports} of {len(reports)} reports")
 
 # One report per Newton iteration (threshold 0): newton.txt column [2] = iters per step.
 newton = np.loadtxt(newton_file, comments="#", ndmin=2)

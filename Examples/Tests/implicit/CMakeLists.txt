@@ -2161,6 +2161,22 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# The same report on the 1D active-set dual-energy deck (the engineered
+# deadlock of test_1d_theta_implicit_mhd_active_set_dual): the active set
+# engages from step 14 on, so the pinned-column gate is exercised where it
+# matters (every row with a floor mask must carry r2_pinned = b2_pinned = 0
+# exactly; a wrong right-hand side in the reduced mode would fail it; at least
+# 50 such rows are required), and the first 13 steps converge to round-off,
+# which exercises the absolute floor of the explicit-vs-reported gate.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_linear_residual_blocks_active_set  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_active_set_rescue implicit_mhd.ion_closure=dual_energy newton.active_set=1 newton.active_set_tolerance=1.0e-5 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt"  # inputs
+    "analysis_mhd_linear_residual_blocks.py diags/residual_blocks.txt diags/newton.txt 1d 50"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
 # The block-split JFNK probe (newton.jfnk_epsilon_mode = block_split): the
 # ions-on oblique-edge arm with the energy block scale widened 10x
 # (my_constants.B_ref 0.05 -> 0.5, the norm weights only; the physics is
