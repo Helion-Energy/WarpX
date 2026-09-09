@@ -2192,6 +2192,11 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     line_search_min_step: float, default=2**-12
         Smallest step the polynomial line-search rules may try.
 
+    globalization_diagnostics: bool, default=False
+        Record the globalization counters (entrants, released, held,
+        re-solves, damped steps, rejected trials) in the Newton diagnostic
+        file without changing any arithmetic.
+
     jfnk_epsilon: float, default=1.e-6
         Relative size of the matrix-free Jacobian probe (the state is
         perturbed by eps*dU with eps = jfnk_epsilon ||U||/||dU|| in the
@@ -2250,6 +2255,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         line_search_resolve=None,
         line_search=None,
         line_search_min_step=None,
+        globalization_diagnostics=None,
         jfnk_epsilon=None,
         jfnk_epsilon_mode=None,
         jfnk_component_floor=None,
@@ -2284,6 +2290,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.line_search_resolve = line_search_resolve
         self.line_search = line_search
         self.line_search_min_step = line_search_min_step
+        self.globalization_diagnostics = globalization_diagnostics
         self.jfnk_epsilon = jfnk_epsilon
         self.jfnk_epsilon_mode = jfnk_epsilon_mode
         self.jfnk_component_floor = jfnk_component_floor
@@ -2338,6 +2345,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.line_search_resolve = self.line_search_resolve
         newton.line_search = self.line_search
         newton.line_search_min_step = self.line_search_min_step
+        newton.globalization_diagnostics = self.globalization_diagnostics
         newton.jfnk_epsilon = self.jfnk_epsilon
         newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
         newton.jfnk_component_floor = self.jfnk_component_floor

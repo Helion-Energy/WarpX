@@ -342,11 +342,15 @@ private:
     amrex::Real m_line_search_min_step = 1.0 / 4096.0;
 
     /**
-     * \brief Any of the globalization knobs above is non-default: the
-     * diagnostic file then carries six more columns per solve (entrants,
-     * released, held, re-solves, damped steps, rejected trials).
+     * \brief Any of the globalization knobs above is non-default, or
+     * newton.globalization_diagnostics is set: the diagnostic file then
+     * carries six more columns per solve (entrants, released, held,
+     * re-solves, damped steps, rejected trials). The diagnostics flag
+     * alone changes no arithmetic (a control run can record the counters
+     * of the plain rules).
      */
     bool m_globalization_knobs = false;
+    bool m_globalization_diagnostics = false;
 
     /**
      * \brief Consecutive zero-progress (frozen) solve counter.
@@ -724,10 +728,11 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_line_search_min_step > 0.0 && m_line_search_min_step < 1.0,
         "newton.line_search_min_step must be in (0, 1)");
+    pp_newton.query("globalization_diagnostics", m_globalization_diagnostics);
     m_globalization_knobs =
         (m_active_set_hysteresis > 0) || m_line_search_resolve ||
         (m_line_search != NewtonLineSearchType::backtrack) ||
-        (m_line_search_min_step != 1.0 / 4096.0);
+        (m_line_search_min_step != 1.0 / 4096.0) || m_globalization_diagnostics;
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
     pp_newton.query("adaptive_forcing",    m_adaptive_forcing);

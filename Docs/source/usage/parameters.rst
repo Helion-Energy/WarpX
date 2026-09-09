@@ -479,10 +479,16 @@ Overall simulation parameters
             the search is declared failed (the same floor the 12-rung
             halving ladder reaches).
 
+          - ``newton.globalization_diagnostics`` (``bool``, default: false).
+            Record the globalization counters below in the Newton
+            diagnostic file without changing any arithmetic (for a control
+            run of the plain rules).
+
             With any of ``newton.active_set_hysteresis``,
             ``newton.line_search_resolve``, ``newton.line_search`` or
-            ``newton.line_search_min_step`` at a non-default value the
-            Newton diagnostic file carries six more columns per solve:
+            ``newton.line_search_min_step`` at a non-default value, or with
+            ``newton.globalization_diagnostics``, the Newton diagnostic file
+            carries six more columns per solve:
             ``entrants`` (components the projection clamped into the set
             during the solve), ``released`` and ``held`` (at the
             identifications), ``resolves`` (entrant re-solves),
