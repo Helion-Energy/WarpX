@@ -7899,6 +7899,78 @@ Jacobian probes.
     (:math:`\le 4` ULP; exact equality expected, the allowance absorbs
     device FMA contraction only) at every update.
 
+.. pp:param:: implicit_mhd.resistive_direct_cudss_options
+    :type: ``list of strings``
+    :default: (empty)
+
+    ``name=value`` pairs forwarded to the cuDSS configuration of the
+    direct resistive preconditioner block before its one-time analysis
+    (``pc_mhd_block.resistive_solver = direct``): ``reordering_alg``
+    (``default``, ``btf_colamd``, ``colamd``, ``amd``,
+    ``nested_dissection``, ``none``), ``factorization_alg`` (``default``,
+    ``multiblock``, ``general``), ``solve_alg`` (``default``,
+    ``general``), ``matching_alg`` (``none``, ``max_diag_count``,
+    ``max_min_diag``, ``max_min_diag_alt``, ``max_diag_sum``,
+    ``max_diag_product``, ``auto``), ``pivot_type`` (``auto``, ``none``,
+    ``global_col``, ``global_row``, ``diagonal``, ``local_block``), and
+    the integers ``ir_n_steps``, ``nd_nlevels``, ``nd_ubfactor``,
+    ``use_superpanels``, ``deterministic_mode``, ``host_nthreads``.
+    Empty (the default) keeps the library defaults, i.e. today's
+    factorization and solve. Unknown names or values abort. A setting
+    that changes the factorization changes the block inverse only by
+    roundoff (the direct solve stays exact), but it is not bit-identical
+    to the default.
+
+.. pp:param:: implicit_mhd.resistive_direct_solve_phases
+    :type: ``bool``
+    :default: ``0``
+
+    Measurement mode of the direct resistive block: run each application
+    as the cuDSS solve sub-phases (forward permutation, forward
+    substitution, diagonal, backward substitution, backward permutation,
+    refinement), each inside its own profiler region closed by a stream
+    synchronization, so the profiler table splits the per-application
+    device time by sub-phase. Same arithmetic as the single-phase solve;
+    slower (the synchronizations).
+
+.. pp:param:: implicit_mhd.resistive_direct_solve_host_sync
+    :type: ``bool``
+    :default: ``1``
+
+    Whether every application of the direct resistive block ends with a
+    host-side stream synchronization (the legacy behaviour). The packed
+    right-hand side, the solve and the scatter of the solution are
+    stream ordered before every consumer, so ``0`` only lets the host
+    enqueue the following kernels while the solve runs (no numerical
+    effect).
+
+.. pp:param:: implicit_mhd.resistive_direct_dump_prefix
+    :type: ``string``
+    :default: (empty)
+
+    When set, the I/O rank writes the assembled sparse matrix of the
+    direct resistive block at the assembly counted by
+    :pp:param:`implicit_mhd.resistive_direct_dump_assembly` to
+    ``<prefix>_matrix.bin`` (binary CSR: magic ``WXCSR001``, int64 rows
+    and nonzeros, int32 space dimension and component count, per
+    component the active flag, canonical offset and index ranges, then
+    int32 row offsets and column indices and float64 values; a text twin
+    ``<prefix>_meta.txt`` repeats the header), and the right-hand side
+    and solution of the first application after it to
+    ``<prefix>_rhs.bin`` / ``<prefix>_solution.bin`` (magic ``WXVEC001``,
+    int64 length, float64 values). Input for offline solver benchmarks;
+    the matrix dump also works on builds without a factorization backend
+    (``pc_mhd_block.resistive_validate_assembly`` assembles the matrix).
+
+.. pp:param:: implicit_mhd.resistive_direct_dump_assembly
+    :type: ``int``
+    :default: ``1``
+
+    1-based count of the assembly whose matrix
+    :pp:param:`implicit_mhd.resistive_direct_dump_prefix` writes (with
+    ``pc_mhd_block.resistive_refreeze = step`` one assembly per time
+    step, so ``N`` selects the matrix frozen at step ``N``).
+
 .. pp:param:: implicit_mhd.conduction_theta
     :type: ``float``
     :default: :pp:param:`implicit_evolve.theta`

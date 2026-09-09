@@ -38,11 +38,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace warpx::mhd_pc
 {
@@ -293,6 +295,24 @@ ZeroIntScalar (int* const a_data)
  * The numeric backend is NVIDIA cuDSS (CUDA builds configured with
  * WarpX_CUDSS=ON). Assembly and the roundoff matvec validation against
  * the matrix-free operator are portable and available on every build.
+ *
+ * Measurement and tuning knobs (implicit_mhd.resistive_direct_*, every
+ * default = the behaviour above):
+ *  - cudss_options: "name=value" pairs forwarded to cudssConfigSet
+ *    before the analysis (reordering_alg, factorization_alg, solve_alg,
+ *    matching_alg, pivot_type, ir_n_steps, nd_nlevels, nd_ubfactor,
+ *    use_superpanels, deterministic_mode, host_nthreads);
+ *  - solve_phases: run the solve as its cuDSS sub-phases (forward
+ *    permutation, forward, diagonal, backward, backward permutation,
+ *    refinement), each in its own profiler region with a stream
+ *    synchronization, so the profiler splits the solve cost;
+ *  - solve_host_sync: the host synchronization that closes every
+ *    application (0 lets the host run ahead; the results are stream
+ *    ordered either way);
+ *  - dump_prefix / dump_assembly: write the assembled CSR matrix of the
+ *    given assembly (1-based count) and the right-hand side and
+ *    solution of the first application after it, as binary files for an
+ *    offline solver benchmark (I/O rank; see DumpMatrix for the format).
  */
 class ResistiveDirectSolver
 {
@@ -502,8 +522,38 @@ class ResistiveDirectSolver
                                        : (bits | 0x8000000000000000ULL);
         }
 
+        /** \brief Write the assembled CSR matrix (I/O rank) for the
+         * offline benchmark; binary little-endian: magic "WXCSR001",
+         * int64 rows, int64 nonzeros, int32 space dimension, int32 3
+         * (components), per component {int32 active, int64 offset,
+         * int32 low[3], int32 high[3]}, int32 row_offsets[rows + 1],
+         * int32 columns[nonzeros], float64 values[nonzeros]; a text
+         * twin "<prefix>_meta.txt" repeats the header. */
+        void DumpMatrix () const;
+
+        /** \brief Write one canonical-length vector (magic "WXVEC001",
+         * int64 length, float64 values). */
+        static void DumpVector (const std::string& a_path,
+                                const amrex::Real* a_values, amrex::Long a_size);
+
+#if defined(WARPX_USE_CUDSS)
+        /** \brief Forward implicit_mhd.resistive_direct_cudss_options to
+         * cudssConfigSet (unknown names or values abort). */
+        void ApplyCudssOptions () const;
+#endif
+
         bool m_is_defined = false;
         bool m_pattern_built = false;
+
+        // Measurement / tuning knobs (implicit_mhd.resistive_direct_*, see
+        // the class comment).
+        std::vector<std::string> m_cudss_options;
+        bool m_split_solve_phases = false;
+        bool m_host_sync_after_solve = true;
+        std::string m_dump_prefix;
+        int m_dump_assembly = 1;
+        int m_assembly_count = 0;
+        bool m_dump_solve_pending = false;
 
         amrex::Geometry m_geometry;
         amrex::Array<ComponentMap, 3> m_component_map;
@@ -670,6 +720,18 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
             "single-rank run (multi-rank assembles through the host gather)");
         m_use_device_assembly =
             device_assembly == "on" || (device_assembly == "auto" && single_rank);
+
+        // Measurement / tuning knobs (defaults: today's behaviour).
+        pp_implicit_mhd.queryarr("resistive_direct_cudss_options", m_cudss_options);
+        pp_implicit_mhd.query("resistive_direct_solve_phases", m_split_solve_phases);
+        pp_implicit_mhd.query("resistive_direct_solve_host_sync",
+                              m_host_sync_after_solve);
+        pp_implicit_mhd.query("resistive_direct_dump_prefix", m_dump_prefix);
+        pp_implicit_mhd.query("resistive_direct_dump_assembly", m_dump_assembly);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_dump_assembly >= 1,
+            "implicit_mhd.resistive_direct_dump_assembly must be >= 1 (the "
+            "1-based count of the assembly whose matrix is written)");
     }
 
     // Device-copyable twin of WrapPoint/GlobalIndex for the kernels.
@@ -1136,6 +1198,125 @@ ResistiveDirectSolver::AssembleValues (
             CheckAssemblyParity();
         }
     }
+
+    ++m_assembly_count;
+    if (!m_dump_prefix.empty() && m_assembly_count == m_dump_assembly)
+    {
+        DumpMatrix();
+        m_dump_solve_pending = true;
+    }
+}
+
+inline void
+ResistiveDirectSolver::DumpVector (const std::string& a_path,
+                                   const amrex::Real* const a_values,
+                                   const amrex::Long a_size)
+{
+    static_assert(sizeof(amrex::Real) == 8, "the dump format stores float64 values");
+    std::ofstream out(a_path, std::ios::binary | std::ios::trunc);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver could not open the dump file " + a_path);
+    const char magic[9] = "WXVEC001";
+    out.write(magic, 8);
+    const auto size = static_cast<std::int64_t>(a_size);
+    out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    out.write(reinterpret_cast<const char*>(a_values),
+              static_cast<std::streamsize>(sizeof(amrex::Real) * a_size));
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver failed writing the dump file " + a_path);
+}
+
+inline void
+ResistiveDirectSolver::DumpMatrix () const
+{
+    if (!amrex::ParallelDescriptor::IOProcessor())
+    {
+        return;
+    }
+    // The current values: the device refresh updates m_values_device in
+    // place (single-rank device path); the host fold fills
+    // m_matrix_values otherwise.
+    amrex::Vector<amrex::Real> values;
+    const amrex::Real* value_data = m_matrix_values.data();
+    if (m_use_device_assembly)
+    {
+        values.resize(m_values_device.size());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_values_device.begin(),
+                         m_values_device.end(), values.begin());
+        value_data = values.data();
+    }
+    const auto num_rows = static_cast<std::int64_t>(m_num_rows);
+    const auto num_values = static_cast<std::int64_t>(m_column_indices.size());
+    const std::string path = m_dump_prefix + "_matrix.bin";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            out.good(), "ResistiveDirectSolver could not open the dump file " + path);
+        const char magic[9] = "WXCSR001";
+        out.write(magic, 8);
+        out.write(reinterpret_cast<const char*>(&num_rows), sizeof(num_rows));
+        out.write(reinterpret_cast<const char*>(&num_values), sizeof(num_values));
+        const std::int32_t spacedim = AMREX_SPACEDIM;
+        const std::int32_t num_components = 3;
+        out.write(reinterpret_cast<const char*>(&spacedim), sizeof(spacedim));
+        out.write(reinterpret_cast<const char*>(&num_components),
+                  sizeof(num_components));
+        for (int component = 0; component < 3; ++component)
+        {
+            const ComponentMap& map = m_component_map[component];
+            const std::int32_t active = map.active ? 1 : 0;
+            const auto offset = static_cast<std::int64_t>(map.offset);
+            std::int32_t low[3] = {0, 0, 0};
+            std::int32_t high[3] = {0, 0, 0};
+            for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+            {
+                low[direction] = map.active ? map.low[direction] : 0;
+                high[direction] = map.active ? map.high[direction] : 0;
+            }
+            out.write(reinterpret_cast<const char*>(&active), sizeof(active));
+            out.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
+            out.write(reinterpret_cast<const char*>(low), sizeof(low));
+            out.write(reinterpret_cast<const char*>(high), sizeof(high));
+        }
+        static_assert(sizeof(int) == 4, "the dump format stores int32 indices");
+        out.write(reinterpret_cast<const char*>(m_row_offsets.data()),
+                  static_cast<std::streamsize>(sizeof(int) * m_row_offsets.size()));
+        out.write(reinterpret_cast<const char*>(m_column_indices.data()),
+                  static_cast<std::streamsize>(sizeof(int) * m_column_indices.size()));
+        out.write(reinterpret_cast<const char*>(value_data),
+                  static_cast<std::streamsize>(sizeof(amrex::Real) * num_values));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            out.good(), "ResistiveDirectSolver failed writing the dump file " + path);
+    }
+    {
+        std::ofstream meta(m_dump_prefix + "_meta.txt", std::ios::trunc);
+        meta << "rows " << num_rows << "\nnonzeros " << num_values << "\nspacedim "
+             << AMREX_SPACEDIM << "\nassembly " << m_assembly_count << "\nvalues "
+             << (m_use_device_assembly ? "device" : "host") << "\n";
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            meta << "periodic" << direction << " "
+                 << (m_geometry.isPeriodic(direction) ? 1 : 0) << "\n";
+        }
+        for (int component = 0; component < 3; ++component)
+        {
+            const ComponentMap& map = m_component_map[component];
+            meta << "component" << component << " active " << (map.active ? 1 : 0)
+                 << " offset " << map.offset;
+            if (map.active)
+            {
+                for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+                {
+                    meta << " low" << direction << " " << map.low[direction] << " high"
+                         << direction << " " << map.high[direction];
+                }
+            }
+            meta << "\n";
+        }
+    }
+    amrex::Print() << "pc_mhd_block resistive direct: wrote the assembled matrix ("
+                   << num_rows << " rows, " << num_values << " nonzeros, assembly "
+                   << m_assembly_count << ") to " << path << "\n";
 }
 
 inline void
@@ -1228,6 +1409,153 @@ ResistiveDirectSolver::CheckAssemblyParity () const
         "assembly beyond FMA contraction (> 4 ULP)");
 }
 
+#if defined(WARPX_USE_CUDSS)
+inline void
+ResistiveDirectSolver::ApplyCudssOptions () const
+{
+    // "name=value" pairs from implicit_mhd.resistive_direct_cudss_options,
+    // applied once before the analysis (the phase that consumes the
+    // reordering/pivoting/algorithm choices).
+    const auto set_enum = [&] (const cudssConfigParam_t a_param, const int a_value)
+    {
+        WARPX_CUDSS_CHECK(cudssConfigSet(m_cudss_config, a_param, &a_value,
+                                         sizeof(a_value)));
+    };
+    const auto parse_int = [] (const std::string& a_name, const std::string& a_text)
+    {
+        std::size_t consumed = 0;
+        int value = 0;
+        try
+        {
+            value = std::stoi(a_text, &consumed);
+        }
+        catch (const std::exception&)
+        {
+            consumed = 0;
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            consumed == a_text.size() && !a_text.empty(),
+            "implicit_mhd.resistive_direct_cudss_options: '" + a_name +
+                "' expects an integer, got '" + a_text + "'");
+        return value;
+    };
+    const auto match = [] (const std::string& a_name, const std::string& a_text,
+                           const std::vector<std::pair<std::string, int>>& a_table)
+    {
+        for (const auto& entry : a_table)
+        {
+            if (entry.first == a_text)
+            {
+                return entry.second;
+            }
+        }
+        std::string allowed;
+        for (const auto& entry : a_table)
+        {
+            allowed += (allowed.empty() ? "" : ", ") + entry.first;
+        }
+        WARPX_ABORT_WITH_MESSAGE("implicit_mhd.resistive_direct_cudss_options: '" +
+                                 a_name + "' does not accept '" + a_text +
+                                 "' (allowed: " + allowed + ")");
+        return 0;
+    };
+    for (const std::string& option : m_cudss_options)
+    {
+        const std::size_t separator = option.find('=');
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            separator != std::string::npos && separator > 0 &&
+                separator + 1 < option.size(),
+            "implicit_mhd.resistive_direct_cudss_options entries are name=value "
+            "pairs, got '" + option + "'");
+        const std::string name = option.substr(0, separator);
+        const std::string text = option.substr(separator + 1);
+        if (name == "reordering_alg")
+        {
+            set_enum(CUDSS_CONFIG_REORDERING_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_REORDERING_ALG_DEFAULT},
+                            {"btf_colamd", CUDSS_REORDERING_ALG_BTF_COLAMD},
+                            {"colamd", CUDSS_REORDERING_ALG_COLAMD},
+                            {"amd", CUDSS_REORDERING_ALG_AMD},
+                            {"nested_dissection", CUDSS_REORDERING_ALG_NESTED_DISSECTION},
+                            {"none", CUDSS_REORDERING_ALG_NONE}}));
+        }
+        else if (name == "factorization_alg")
+        {
+            set_enum(CUDSS_CONFIG_FACTORIZATION_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_FACTORIZATION_ALG_DEFAULT},
+                            {"multiblock", CUDSS_FACTORIZATION_ALG_MULTIBLOCK},
+                            {"general", CUDSS_FACTORIZATION_ALG_GENERAL}}));
+        }
+        else if (name == "solve_alg")
+        {
+            set_enum(CUDSS_CONFIG_SOLVE_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_SOLVE_ALG_DEFAULT},
+                            {"general", CUDSS_SOLVE_ALG_GENERAL}}));
+        }
+        else if (name == "matching_alg")
+        {
+            set_enum(CUDSS_CONFIG_MATCHING_ALG,
+                     match(name, text,
+                           {{"none", CUDSS_MATCHING_ALG_NONE},
+                            {"max_diag_count", CUDSS_MATCHING_ALG_MAX_DIAG_COUNT},
+                            {"max_min_diag", CUDSS_MATCHING_ALG_MAX_MIN_DIAG},
+                            {"max_min_diag_alt", CUDSS_MATCHING_ALG_MAX_MIN_DIAG_ALT},
+                            {"max_diag_sum", CUDSS_MATCHING_ALG_MAX_DIAG_SUM},
+                            {"max_diag_product", CUDSS_MATCHING_ALG_MAX_DIAG_PRODUCT},
+                            {"auto", CUDSS_MATCHING_ALG_AUTO}}));
+        }
+        else if (name == "pivot_type")
+        {
+            set_enum(CUDSS_CONFIG_PIVOT_TYPE,
+                     match(name, text,
+                           {{"auto", CUDSS_PIVOT_AUTO},
+                            {"none", CUDSS_PIVOT_NONE},
+                            {"global_col", CUDSS_PIVOT_GLOBAL_COL},
+                            {"global_row", CUDSS_PIVOT_GLOBAL_ROW},
+                            {"diagonal", CUDSS_PIVOT_DIAGONAL},
+                            {"local_block", CUDSS_PIVOT_LOCAL_BLOCK}}));
+        }
+        else if (name == "ir_n_steps")
+        {
+            set_enum(CUDSS_CONFIG_IR_N_STEPS, parse_int(name, text));
+        }
+        else if (name == "nd_nlevels")
+        {
+            set_enum(CUDSS_CONFIG_ND_NLEVELS, parse_int(name, text));
+        }
+        else if (name == "nd_ubfactor")
+        {
+            set_enum(CUDSS_CONFIG_ND_UBFACTOR, parse_int(name, text));
+        }
+        else if (name == "use_superpanels")
+        {
+            set_enum(CUDSS_CONFIG_USE_SUPERPANELS, parse_int(name, text));
+        }
+        else if (name == "deterministic_mode")
+        {
+            set_enum(CUDSS_CONFIG_DETERMINISTIC_MODE, parse_int(name, text));
+        }
+        else if (name == "host_nthreads")
+        {
+            set_enum(CUDSS_CONFIG_HOST_NTHREADS, parse_int(name, text));
+        }
+        else
+        {
+            WARPX_ABORT_WITH_MESSAGE(
+                "implicit_mhd.resistive_direct_cudss_options: unknown option '" + name +
+                "' (known: reordering_alg, factorization_alg, solve_alg, "
+                "matching_alg, pivot_type, ir_n_steps, nd_nlevels, nd_ubfactor, "
+                "use_superpanels, deterministic_mode, host_nthreads)");
+        }
+        amrex::Print() << "pc_mhd_block resistive direct: cuDSS option " << name << " = "
+                       << text << "\n";
+    }
+}
+#endif
+
 inline void
 ResistiveDirectSolver::Factorize ()
 {
@@ -1252,6 +1580,7 @@ ResistiveDirectSolver::Factorize ()
         WARPX_CUDSS_CHECK(cudssSetStream(m_cudss_handle, amrex::Gpu::gpuStream()));
         WARPX_CUDSS_CHECK(cudssConfigCreate(&m_cudss_config));
         WARPX_CUDSS_CHECK(cudssDataCreate(m_cudss_handle, &m_cudss_data));
+        ApplyCudssOptions();
 
         // Device assembly refreshes m_values_device in place, so the CSR
         // wraps it directly; the host path stages through m_device_values.
@@ -1424,14 +1753,72 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
             amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_rhs.begin(),
                                   m_rhs.end(), m_device_rhs.begin());
         }
-        WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
-                                       m_cudss_config, m_cudss_data, m_cudss_matrix,
-                                       m_cudss_solution, m_cudss_rhs));
+        if (m_split_solve_phases)
+        {
+            // The same sub-phases cuDSS runs inside CUDSS_PHASE_SOLVE, each
+            // closed by a stream synchronization so the profiler regions
+            // carry the device time of one sub-phase (measurement mode).
+            const auto run_phase = [&] (const int a_phase)
+            {
+                WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, a_phase, m_cudss_config,
+                                               m_cudss_data, m_cudss_matrix,
+                                               m_cudss_solution, m_cudss_rhs));
+                amrex::Gpu::streamSynchronize();
+            };
+            {
+                BL_PROFILE("ResistiveDirect::Solve(fwd_perm)");
+                run_phase(CUDSS_PHASE_SOLVE_FWD_PERM);
+            }
+            {
+                BL_PROFILE("ResistiveDirect::Solve(fwd)");
+                run_phase(CUDSS_PHASE_SOLVE_FWD);
+            }
+            {
+                BL_PROFILE("ResistiveDirect::Solve(diag)");
+                run_phase(CUDSS_PHASE_SOLVE_DIAG);
+            }
+            {
+                BL_PROFILE("ResistiveDirect::Solve(bwd)");
+                run_phase(CUDSS_PHASE_SOLVE_BWD);
+            }
+            {
+                BL_PROFILE("ResistiveDirect::Solve(bwd_perm)");
+                run_phase(CUDSS_PHASE_SOLVE_BWD_PERM);
+            }
+            {
+                BL_PROFILE("ResistiveDirect::Solve(refinement)");
+                run_phase(CUDSS_PHASE_SOLVE_REFINEMENT);
+            }
+        }
+        else
+        {
+            WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
+                                           m_cudss_config, m_cudss_data,
+                                           m_cudss_matrix, m_cudss_solution,
+                                           m_cudss_rhs));
+        }
         if (!m_use_device_assembly)
         {
             amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, m_device_solution.begin(),
                                   m_device_solution.end(), m_solution.begin());
             amrex::Gpu::streamSynchronize();
+        }
+        if (m_dump_solve_pending)
+        {
+            // The right-hand side and solution of the first application
+            // after the dumped assembly (the benchmark's check vectors).
+            amrex::Vector<amrex::Real> rhs(m_num_rows);
+            amrex::Vector<amrex::Real> solution(m_num_rows);
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_device_rhs.begin(),
+                             m_device_rhs.end(), rhs.begin());
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_device_solution.begin(),
+                             m_device_solution.end(), solution.begin());
+            DumpVector(m_dump_prefix + "_rhs.bin", rhs.data(), m_num_rows);
+            DumpVector(m_dump_prefix + "_solution.bin", solution.data(), m_num_rows);
+            amrex::Print() << "pc_mhd_block resistive direct: wrote the right-hand "
+                              "side and solution of one application to "
+                           << m_dump_prefix << "_{rhs,solution}.bin\n";
+            m_dump_solve_pending = false;
         }
     }
 #else
@@ -1477,7 +1864,14 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
                                                     m_device_solution.data(),
                                                     *a_faces[component]);
         }
-        amrex::Gpu::streamSynchronize();
+        if (m_host_sync_after_solve)
+        {
+            // Legacy close of the application; the scatter is stream
+            // ordered before every consumer, so the synchronization only
+            // keeps the host from running ahead
+            // (implicit_mhd.resistive_direct_solve_host_sync = 0 skips it).
+            amrex::Gpu::streamSynchronize();
+        }
         return;
     }
 
