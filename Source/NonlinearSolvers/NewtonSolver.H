@@ -299,6 +299,25 @@ private:
     amrex::Real m_residual_block_share = 0.5;
 
     /**
+     * \brief Linear-residual block report (pc_mhd_block.residual_block_norms,
+     * default off = no extra work, bit-identical): after every linear solve
+     * that took more than pc_mhd_block.residual_block_norms_min_iters
+     * iterations (on every pc_mhd_block.residual_block_norms_interval-th
+     * step), form the TRUE linear residual r = b - J dU with one more
+     * matrix-free Jacobian application -- the same (active-set masked)
+     * operator and right-hand side the solve used -- and hand r, b and the
+     * base state to the operator's ReportLinearResidualBlocks, which prints
+     * the per-block, per-region scaled norms: what the preconditioned Krylov
+     * solve did NOT reduce, and where. The knob lives under pc_mhd_block
+     * because it grades that preconditioner's composition, but the linear
+     * residual is only available here; it works with any pc_type.
+     */
+    bool m_report_linear_residual_blocks = false;
+    int m_report_linear_residual_min_iters = 30;
+    int m_report_linear_residual_interval = 1;
+    mutable Vec m_linear_residual;
+
+    /**
      * \brief Relative tolerance for the Newton solver.
      */
     amrex::Real m_rtol = 1.0e-6;
@@ -426,6 +445,7 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
     m_R.Define(a_U); // right hand side function R(U)
     m_trial_U.Define(a_U);
     m_trial_F.Define(a_U);
+    if (m_report_linear_residual_blocks) { m_linear_residual.Define(a_U); }
 
     m_ops = a_ops;
 
@@ -628,6 +648,20 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_residual_block_share > 0.0 && m_residual_block_share < 1.0,
             "WARPX_MHD_RESIDUAL_BLOCK_SHARE must be in (0, 1)");
+    }
+
+    {
+        const amrex::ParmParse pp_pcb("pc_mhd_block");
+        pp_pcb.query("residual_block_norms", m_report_linear_residual_blocks);
+        pp_pcb.query("residual_block_norms_min_iters",
+                     m_report_linear_residual_min_iters);
+        pp_pcb.query("residual_block_norms_interval",
+                     m_report_linear_residual_interval);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_report_linear_residual_min_iters >= 0 &&
+                m_report_linear_residual_interval >= 1,
+            "pc_mhd_block.residual_block_norms_min_iters must be >= 0 and "
+            "pc_mhd_block.residual_block_norms_interval >= 1");
     }
 }
 
@@ -918,6 +952,22 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         }
         linear_solver_iters += m_linear_solver->getNumIters();
+
+        if (m_report_linear_residual_blocks &&
+            m_linear_solver->getNumIters() > m_report_linear_residual_min_iters &&
+            (a_step + 1) % m_report_linear_residual_interval == 0) {
+            // The TRUE residual of the linear solve just done, r = b - J dU,
+            // with the right-hand side and the (active-set masked) operator
+            // the solve used: one extra matrix-free Jacobian application.
+            const bool reduced = m_active_set && active_num_pinned > 0;
+            const Vec& linear_rhs = reduced ? m_F_free : m_F;
+            m_linear_function->apply(m_linear_residual, m_dU);
+            m_linear_residual.scale(-1.0_rt);
+            m_linear_residual.increment(linear_rhs, 1.0_rt);
+            m_ops->ReportLinearResidualBlocks(
+                m_linear_residual, linear_rhs, a_U, m_linear_solver->getNumIters(),
+                m_linear_solver->getResidualNorm(), iter, a_step, a_time);
+        }
 
         // Update solution
         // Update solution, allowing the operator to enforce its admissible

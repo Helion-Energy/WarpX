@@ -1971,6 +1971,22 @@ class MHDBlockPreconditioner(PreconditionerBase):
         own application to roundoff at every preconditioner update
         (diagnostic; costly)
 
+    residual_block_norms: bool, optional
+        Diagnostic: after every linear solve that took more than
+        residual_block_norms_min_iters iterations, print the true linear
+        residual r = b - J dU per state block and per region (density
+        classes, closed flux, wall rows, z-end rows, pinned components),
+        with the block shares and reductions (default off)
+
+    residual_block_norms_min_iters: int, optional
+        Iteration threshold of the residual block report (default 30)
+
+    residual_block_norms_interval: int, optional
+        Report only on every N-th step (default 1)
+
+    residual_block_norms_file: str, optional
+        Also append the report rows, tab separated, to this file
+
     resistive_threshold: float, optional
         Grid-scale resistive diffusion number below which the resistive
         block is the exact identity at zero cost
@@ -2013,6 +2029,10 @@ class MHDBlockPreconditioner(PreconditionerBase):
         conduction_cross_terms=None,
         conduction_solver=None,
         conduction_validate_assembly=None,
+        residual_block_norms=None,
+        residual_block_norms_min_iters=None,
+        residual_block_norms_interval=None,
+        residual_block_norms_file=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -2036,6 +2056,10 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.conduction_cross_terms = conduction_cross_terms
         self.conduction_solver = conduction_solver
         self.conduction_validate_assembly = conduction_validate_assembly
+        self.residual_block_norms = residual_block_norms
+        self.residual_block_norms_min_iters = residual_block_norms_min_iters
+        self.residual_block_norms_interval = residual_block_norms_interval
+        self.residual_block_norms_file = residual_block_norms_file
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -2066,6 +2090,10 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.conduction_cross_terms = self.conduction_cross_terms
         pc_mhd_block.conduction_solver = self.conduction_solver
         pc_mhd_block.conduction_validate_assembly = self.conduction_validate_assembly
+        pc_mhd_block.residual_block_norms = self.residual_block_norms
+        pc_mhd_block.residual_block_norms_min_iters = self.residual_block_norms_min_iters
+        pc_mhd_block.residual_block_norms_interval = self.residual_block_norms_interval
+        pc_mhd_block.residual_block_norms_file = self.residual_block_norms_file
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):

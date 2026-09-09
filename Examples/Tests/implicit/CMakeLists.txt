@@ -2145,6 +2145,22 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# The linear-residual block report (pc_mhd_block.residual_block_norms) on the
+# ions-on arm in the active-set Newton mode, four steps, threshold 0 (every
+# solve reported): the explicit r = b - J dU must reproduce the Krylov
+# solver's residual norm (a sign error gives ~2 |b|), the density classes
+# must partition every block, the pinned columns must vanish (the free
+# solve's residual is exactly zero on the active set), and every block of
+# the dual-energy RZ state must be listed.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_linear_residual_blocks  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge pc_mhd_block.conduction_density_weight=1 implicit_mhd.evolve_ion_fluid=true implicit_mhd.ion_closure=dual_energy implicit_mhd.reference_ion_pressure=n_core*q_e*50.0 implicit_mhd.ion_pressure_floor=floor_frac*n_ref*q_e*Te_halo implicit_mhd.ion_pressure(x,y,z)=q_e*n_halo*exp(log(n_core/n_halo)*0.5*(1.0-tanh((abs(z)-z_edge)/w_n)))*(Te_halo+(50.0-Te_halo)*0.5*(1.0-tanh((abs(z)-z_front)/w_T))) implicit_mhd.electron_ion_equilibration=1.0 implicit_mhd.wall_heat_flux_cap_factor_ion=2.5 newton.active_set=1 pc_mhd_block.residual_block_norms=1 pc_mhd_block.residual_block_norms_min_iters=0 pc_mhd_block.residual_block_norms_file=diags/residual_blocks.txt max_step=4"  # inputs
+    "analysis_mhd_linear_residual_blocks.py diags/residual_blocks.txt diags/newton.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
 # The frozen cross-term registers and their MLMG consumer on top of the
 # weight: the gate on the register contents (sign-sensitive: 40 / 266
 # measured, 46 / 616 with the sign of b_n b_t flipped).

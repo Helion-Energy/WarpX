@@ -1047,6 +1047,45 @@ Overall simulation parameters
               transposed band tensor fails it on the z-end deck). Used by
               the ``conduction_pc_*_banded`` and ``conduction_pc_validate``
               tests.
+            - ``pc_mhd_block.residual_block_norms`` (``bool``, default: false),
+              ``pc_mhd_block.residual_block_norms_min_iters`` (``int``,
+              default: 30), ``pc_mhd_block.residual_block_norms_interval``
+              (``int``, default: 1), ``pc_mhd_block.residual_block_norms_file``
+              (``string``, default: none): diagnostic of what the
+              preconditioned Krylov solve did NOT reduce, and where. After
+              every linear (Newton direction) solve that took more than
+              ``min_iters`` iterations, on every ``interval``-th step, the
+              Newton solver forms the TRUE linear residual
+              :math:`r = b - J\,\delta U` with one extra matrix-free
+              Jacobian application (the same active-set masked operator and
+              right-hand side the solve used) and the theta-implicit MHD
+              operator prints, on the I/O rank, the scaled norms (the solver
+              norm's block weights, so the totals match the Krylov solver's
+              own residual norm, which is printed beside them as a
+              consistency check) of :math:`r` and of :math:`b` per state
+              block -- mass, each momentum component, the energy blocks and
+              the three magnetic-field staggerings -- with each block's share
+              of :math:`\|r\|^2` and its reduction :math:`\|r\|/\|b\|`,
+              and per region: the density classes core (:math:`\ge 0.1` of
+              the step's peak density), edge (:math:`\ge 0.01`) and halo
+              (below), the closed flux (RZ recast: cells whose poloidal flux
+              :math:`\psi = \int_0^r B_z r\,dr` from the total
+              :math:`B_z` has the sign opposite to the plane's wall flux),
+              the two live cells inboard of the shaped wall's masked band
+              (or of the outer radial boundary without a shaped wall), the
+              two cells at each conducting z end (the low end only without
+              the mirror symmetry), and per floored block its pinned
+              components (the active-set masks of the running solve; the
+              last projection's masks in the plain Newton mode). With a
+              ``file`` the same numbers are appended as tab-separated rows
+              (one per block per report; header in the file). Cost when on:
+              one Jacobian application plus a few reductions per reported
+              solve; off (the default) it adds no operation and is
+              bit-identical. The knob is read by the Newton solver and works
+              with any ``jacobian.pc_type``; it lives under ``pc_mhd_block``
+              because it grades that preconditioner's composition (the block
+              and region the slow error lives in decide which block to add).
+              Used by the ``linear_residual_blocks`` test.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)
