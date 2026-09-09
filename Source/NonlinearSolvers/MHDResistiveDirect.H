@@ -232,6 +232,55 @@ ScatterComponentSolution (const DirectIndexView& a_view, const int a_component,
     }
 }
 
+/** \brief Gather the reduced sub-system's values from the global CSR
+ * values through the frozen slot map (reduced solve). */
+inline void
+GatherReducedValues (const amrex::Real* const a_values, const int* const a_slots,
+                     amrex::Real* const a_reduced, const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long entry)
+                       {
+                           a_reduced[entry] = a_values[a_slots[entry]];
+                       });
+}
+
+/** \brief Maximum over the dropped rows' couplings of |a_ij| / |a_ii|
+ * (slots whose row or column is a dropped row; reduced solve). */
+inline amrex::Real
+DroppedCouplingMax (const amrex::Real* const a_values, const int* const a_slot_row,
+                    const int* const a_slot_column, const int* const a_diag_slot,
+                    const int* const a_keep, const amrex::Long a_num_slots)
+{
+    amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    reduce_op.eval(a_num_slots, reduce_data,
+                   [=] AMREX_GPU_DEVICE (amrex::Long slot) -> ReduceTuple
+                   {
+                       const int row = a_slot_row[slot];
+                       const int column = a_slot_column[slot];
+                       amrex::Real ratio = 0.0;
+                       if (row != column)
+                       {
+                           const amrex::Real magnitude = std::abs(a_values[slot]);
+                           if (a_keep[row] == 0)
+                           {
+                               ratio = amrex::max(
+                                   ratio, magnitude / std::abs(a_values[a_diag_slot[row]]));
+                           }
+                           if (a_keep[column] == 0)
+                           {
+                               ratio = amrex::max(
+                                   ratio,
+                                   magnitude / std::abs(a_values[a_diag_slot[column]]));
+                           }
+                       }
+                       return {ratio};
+                   });
+    return amrex::get<0>(reduce_data.value(reduce_op));
+}
+
 /** \brief Zero a device vector of matrix values. */
 inline void
 ZeroRealVector (amrex::Real* const a_data, const std::size_t a_size)
@@ -1497,38 +1546,10 @@ ResistiveDirectSolver::DroppedCouplingMax () const
     {
         return 0.0;
     }
-    const amrex::Real* const values = m_values_device.data();
-    const int* const slot_row = m_slot_row_device.data();
-    const int* const columns = m_slot_column_device.data();
-    const int* const diag_slot = m_diag_slot_device.data();
-    const int* const keep = m_keep_device.data();
-    const auto num_slots = static_cast<amrex::Long>(m_values_device.size());
-    amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
-    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
-    using ReduceTuple = typename decltype(reduce_data)::Type;
-    reduce_op.eval(num_slots, reduce_data,
-                   [=] AMREX_GPU_DEVICE (amrex::Long slot) -> ReduceTuple
-                   {
-                       const int row = slot_row[slot];
-                       const int column = columns[slot];
-                       amrex::Real ratio = 0.0;
-                       if (row != column)
-                       {
-                           const amrex::Real magnitude = std::abs(values[slot]);
-                           if (keep[row] == 0)
-                           {
-                               ratio = amrex::max(
-                                   ratio, magnitude / std::abs(values[diag_slot[row]]));
-                           }
-                           if (keep[column] == 0)
-                           {
-                               ratio = amrex::max(
-                                   ratio, magnitude / std::abs(values[diag_slot[column]]));
-                           }
-                       }
-                       return {ratio};
-                   });
-    return amrex::get<0>(reduce_data.value(reduce_op));
+    return direct_detail::DroppedCouplingMax(
+        m_values_device.data(), m_slot_row_device.data(), m_slot_column_device.data(),
+        m_diag_slot_device.data(), m_keep_device.data(),
+        static_cast<amrex::Long>(m_values_device.size()));
 }
 
 inline void
@@ -1947,16 +1968,10 @@ ResistiveDirectSolver::FactorizeReduced ()
 
     // Sub-system values gathered from the refreshed global values (stream
     // ordered after the refresh).
-    {
-        const amrex::Real* const values = m_values_device.data();
-        const int* const slots = m_reduced_slots_device.data();
-        amrex::Real* const reduced = m_reduced_values_device.data();
-        amrex::ParallelFor(static_cast<amrex::Long>(m_reduced_slots_device.size()),
-                           [=] AMREX_GPU_DEVICE (amrex::Long entry)
-                           {
-                               reduced[entry] = values[slots[entry]];
-                           });
-    }
+    direct_detail::GatherReducedValues(
+        m_values_device.data(), m_reduced_slots_device.data(),
+        m_reduced_values_device.data(),
+        static_cast<amrex::Long>(m_reduced_slots_device.size()));
     if (m_reduced_rows == 0)
     {
         // Every row is trivial: nothing to factorize.
