@@ -5686,6 +5686,25 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         contam_cc.setVal(0.0_rt);
     }
 
+    // Sigma_s rho_fp_s over the charged species: the species-fraction
+    // denominator for the kick cap and the contamination tally (n_s = f_s n_e /
+    // Z_s). Computed locally, exactly as the relaxation and Joule-heating legs
+    // do: no registered field carries this sum, and the former lookup of
+    // "hybrid_rho_species_sum_fp" aborted at the first armed kick (any run with
+    // joule_redirect_kick_cap_vth_frac > 0 or a contamination boundary;
+    // 2026-09-09).
+    amrex::MultiFab rhos_sum_local;
+    if (kick_cap_armed || contam_kicks_on) {
+        rhos_sum_local.define(rho.boxArray(), rho.DistributionMap(), 1, rho.nGrowVect());
+        rhos_sum_local.setVal(0.0_rt);
+        for (auto const & spec_name : species_names) {
+            auto & pc = mypc.GetParticleContainerFromName(spec_name);
+            if (pc.getCharge() == 0._prt) { continue; }
+            amrex::MultiFab const & rho_s = *warpx.m_fields.get("rho_fp_" + spec_name, lev);
+            amrex::MultiFab::Add(rhos_sum_local, rho_s, 0, 0, 1, rho.nGrowVect());
+        }
+    }
+
     // Charged-species component index for redirect_E (matches QDSMCAddJouleHeating:
     // incremented for every charged species before the mass check).
     int ion_comp = -1;
@@ -5728,7 +5747,7 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         amrex::MultiFab const * rhos_sum_mf = nullptr;
         if (kick_cap_armed || contam_kicks_on) {
             rho_s_mf    = warpx.m_fields.get("rho_fp_" + spec_name, lev);
-            rhos_sum_mf = warpx.m_fields.get("hybrid_rho_species_sum_fp", lev);
+            rhos_sum_mf = &rhos_sum_local;
         }
         amrex::Real const Z_s = pc.getCharge() / PhysConst::q_e;
 
