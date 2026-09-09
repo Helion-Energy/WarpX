@@ -28,18 +28,36 @@ sibling arms of the churn deck (same binary, same deck):
               release pass reported on every solve that held a member
               (hold_releases > 0 with held == 0 after the pass, entrants and
               releases equal to the control's).
-  hold     -- bound 1e9 (never reached on this deck: the held defect is of
-              order 1e-6 of the iteration-0 norm): the whole-solve hold must
-              be untouched -- the first 16 columns and the counters identical
-              to the STICKY arm (hysteresis 30), the plotfile identical, and
-              hold_releases == 0 on every row.
+  hold     -- bound 1e9 (never reached on this deck, whose held defect
+              spans 4e-6 .. 2.8e-2 of the iteration-0 norm over the ten
+              holding identifications, median 1.7e-3): the whole-solve hold
+              must be untouched -- the first 16 columns and the counters
+              identical to the STICKY arm (hysteresis 30), the plotfile
+              identical, and hold_releases == 0 on every row.
 
-A sabotage that inverts the bound test (release below the bound) fails the
-release arm (nothing released: identical to sticky, not to the control) and
-the hold arm (released: identical to the control, not to sticky); one that
-skips the recount after the release leaves stale pinned counts in column 11.
+  inside   -- bound 0.01, INSIDE the deck's held-defect distribution (the
+              eleven holding identifications carry 4e-6 .. 4.6e-2 of the
+              iteration-0 norm; three of them exceed 0.01): the release pass
+              must fire exactly 3 times and hold exactly 80 member-
+              identifications (the plain rule's counters otherwise: entrants
+              336, released 320), Newton 49-51 and GMRES within 3 % of 11255,
+              the physics within 1e-5 of the control. Every one of these
+              counters moves when the bound's arithmetic is wrong -- the
+              block scale dropped from the held norm, the bound referred to
+              the current instead of the iteration-0 norm, the comparison
+              inverted -- while the two exactness arms above cannot see such
+              a sabotage (bound 0 releases unconditionally through its own
+              clause, bound 1e9 never fires).
 
-Usage: analysis_mhd_active_set_debt_bound.py <release|hold> <final plotfile>
+Sabotage: an inverted bound test (release below the bound) fails the hold
+arm (releases at 1e9: identical to the control, not to sticky) and the
+inside arm (8 passes instead of 3), but PASSES the release arm (the bound-0
+clause releases unconditionally); a dropped block scale or a wrong reference
+norm fails only the inside arm (measured: 7 or 11 passes, held 0-64); one
+that skips the recount after the release leaves stale pinned counts in
+column 11.
+
+Usage: analysis_mhd_active_set_debt_bound.py <release|hold|inside> <final plotfile>
 """
 
 import sys
@@ -52,7 +70,15 @@ yt.set_log_level(50)
 REFERENCE = {
     "release": "../test_rz_theta_implicit_mhd_wall_active_set_churn",
     "hold": "../test_rz_theta_implicit_mhd_wall_active_set_sticky",
+    "inside": "../test_rz_theta_implicit_mhd_wall_active_set_churn",
 }
+# The inside arm (bound 0.01), measured on the reference CPU build (2 ranks):
+# exact counter values and the work band.
+INSIDE_EXPECTED = {"hold_releases": 3, "held": 80, "entrants": 336, "released": 320}
+INSIDE_NEWTON = (49, 51)
+INSIDE_GMRES = 11255
+INSIDE_GMRES_TOLERANCE = 0.03
+INSIDE_PHYSICS_TOLERANCE = 1.0e-5
 NUM_COLUMNS = 24
 NUM_SOLVER_COLUMNS = 16  # step .. max_bound_excess: the arithmetic of the solve
 COL_ENTRANTS, COL_RELEASED, COL_HELD, COL_RESOLVES, COL_DAMPED, COL_REJECTED, COL_MOVED, COL_HOLD_RELEASES = range(16, 24)
@@ -102,6 +128,33 @@ reference_directory = REFERENCE[mode]
 mine = load_newton_tokens(".")
 reference = load_newton_tokens(reference_directory)
 assert len(mine) == len(reference), (len(mine), len(reference))
+
+if mode == "inside":
+    counters = np.array([[float(v) for v in r[NUM_SOLVER_COLUMNS:]] for r in mine])
+    totals = {
+        "entrants": int(counters[:, COL_ENTRANTS - NUM_SOLVER_COLUMNS].sum()),
+        "released": int(counters[:, COL_RELEASED - NUM_SOLVER_COLUMNS].sum()),
+        "held": int(counters[:, COL_HELD - NUM_SOLVER_COLUMNS].sum()),
+        "hold_releases": int(counters[:, COL_HOLD_RELEASES - NUM_SOLVER_COLUMNS].sum()),
+    }
+    newton = int(sum(int(r[2]) for r in mine))
+    gmres = int(sum(int(r[6]) for r in mine))
+    print(f"inside: {totals}, Newton {newton}, GMRES {gmres}")
+    for key, expected in INSIDE_EXPECTED.items():
+        assert totals[key] == expected, (key, totals[key], expected)
+    assert INSIDE_NEWTON[0] <= newton <= INSIDE_NEWTON[1], (newton, INSIDE_NEWTON)
+    assert abs(gmres - INSIDE_GMRES) <= INSIDE_GMRES_TOLERANCE * INSIDE_GMRES, (gmres, INSIDE_GMRES)
+    statuses = {int(r[13]) for r in mine}
+    assert statuses <= {2, 3, 4}, statuses
+    mine_fields = get_fields(final_plotfile)
+    reference_fields = get_fields(f"{reference_directory}/{final_plotfile}")
+    for name in FLUID_FIELDS:
+        ref = reference_fields[name]
+        diff = np.linalg.norm(mine_fields[name] - ref) / np.linalg.norm(ref)
+        print(f"{name:40s} relative L2 difference from the control {diff:.3e}")
+        assert diff <= INSIDE_PHYSICS_TOLERANCE, (name, diff)
+    print("debt-bounded hold (inside): exact counters PASS")
+    sys.exit(0)
 
 # Exactness of the solve: the first 16 columns token-identical on every row.
 for row_mine, row_reference in zip(mine, reference):

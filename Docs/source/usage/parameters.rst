@@ -574,6 +574,11 @@ Overall simulation parameters
             it the witness of the hold's bound-resident guard -- the
             ``max_bound_excess`` column is measured after the move and is not)
             and ``hold_releases`` (release passes of the debt-bounded hold).
+            The columns are appended only when one of these knobs is set: a
+            run restarted with a different globalization setting into the
+            same directory appends rows of a different width to an existing
+            ``newton.diagnostic_file`` (the shipped analyses keep the last
+            session; column-array readers should start a new file).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
@@ -6919,7 +6924,11 @@ Jacobian probes.
     scrub); the first step of a run or of a restart keeps the legacy
     guess. A guess nearer the solution shrinks the first Newton update
     and, with it, the nonlinear defect of the first iteration (measured
-    at ~60% of the residual on the production formation deck).
+    at ~60% of the residual on the production formation deck). The
+    extrapolation assumes a constant time step (the dt_n/dt_{n-1} ratio is
+    not applied); measured on the production deck the predictor stagnated
+    78-81% of the steps of the 13-16 us windows and stays a documented
+    negative.
 
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``

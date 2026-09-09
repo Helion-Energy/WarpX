@@ -3805,23 +3805,45 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
 )
-# The PRODUCTION combination of the bounded hold: the churn deck with the
-# candidate globalization (newton.active_set_hysteresis = 30 +
-# newton.active_set_hold_defect_bound = 0.03) alone and with the rest of the
-# production stack (packed GMRES, fused vector ops, fused residual). The
-# bounded hold must not cost work against the plain-rule control and must
-# leave the converged physics within 1e-5 of it (the whole-solve hold's
-# class); the full stack must reproduce the amrex-GMRES bounded-hold arm
-# to the packed solver's round-off class (physics 1e-6, Newton within 5%,
-# linear work within 10%). analysis_mhd_newton_knob_vs_control.py.
+# The bound INSIDE the churn deck's held-defect distribution (0.01: three of
+# the deck's eleven holding identifications exceed it): the release pass
+# must fire exactly 3 times and hold exactly 80 member-identifications, with
+# the plain rule's entrants/releases otherwise (336 / 320), Newton 49-51,
+# GMRES within 3% of 11255, physics within 1e-5 of the control. This is the
+# CI witness of the bound's arithmetic: a dropped block scale in the held
+# norm, a bound referred to the current instead of the iteration-0 norm, or
+# an inverted comparison each change these counters (measured 7-11 passes
+# instead of 3), while the exactness arms above cannot see them.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_inside  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.01"  # inputs
+    "analysis_mhd_active_set_debt_bound.py inside diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+
+# The PRODUCTION combination: the churn deck with the candidate globalization
+# (newton.active_set_hysteresis = 30 + newton.active_set_hold_defect_bound =
+# 0.03) alone and with the rest of the production stack (packed GMRES, fused
+# vector ops, fused residual). On this deck the held defect peaks at 0.028 of
+# the iteration-0 norm, so the 0.03 bound never fires and the arm IS the
+# whole-solve hold: it therefore asserts identity with the sticky arm (first
+# 16 columns, counters, plotfile; a release pass would be a visible failure)
+# rather than a bound behaviour -- the bound's arithmetic is gated by the
+# inside arm above. The full stack must reproduce the amrex-GMRES arm to the
+# packed solver's round-off class (physics 1e-6, Newton within 5%, linear
+# work within 10%). analysis_mhd_active_set_debt_bound.py /
+# analysis_mhd_newton_knob_vs_control.py.
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_active_set_debt_prod  # name
     RZ  # dims
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.03"  # inputs
-    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_churn --newton-max 1.0 --gmres-max 1.02 --physics 1e-5 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob newton.active_set_hold_defect_bound=0.03"  # analysis
+    "analysis_mhd_active_set_debt_bound.py hold diags/diag000016"  # analysis
     OFF  # checksum
-    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
 )
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_active_set_debt_prod_packed  # name
