@@ -31,10 +31,6 @@
 #define WARPX_PACKED_GMRES_HAS_BLAS 0
 #endif
 
-#ifdef AMREX_USE_OMP
-#include <omp.h>
-#endif
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -74,6 +70,17 @@
  * Jacobian) and the preconditioner are applied on solver vectors: each
  * iteration unpacks the current basis vector, applies P^-1 and A through
  * the operator class, and packs the result (two copies per iteration).
+ * The unpack writes the owner value of every shared grid point into its
+ * duplicates (FillBoundaryAndSync), where the unpacked solver keeps what the
+ * operator wrote there: the two agree only if the operator's output is
+ * consistent on duplicate faces, which the twin tests (two ranks, shared
+ * faces, periodic identification) and the production twins confirm to
+ * round-off.
+ *
+ * Backends: cuBLAS on CUDA builds configured with WarpX_CUBLAS; otherwise the
+ * native kernels (CUDA/HIP device kernels, an OpenMP host path) are selected
+ * silently (the banner printed by define() names the backend); SYCL builds
+ * abort at define().
  *
  * The template parameters follow LinearSolver<Vec,Ops>: V is the solver
  * vector class (WarpXSolverVec), M the linear operator (JacobianFunctionMF)
@@ -316,6 +323,11 @@ void PackedGMRES<V,M>::define (M& linop)
     m_v_tmp_lhs.reset();
     m_packed_allocated = false;
     m_linop = &linop;
+#if defined(AMREX_USE_SYCL)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_use_blas,
+        "PackedGMRES: the native GEMV kernels are not implemented for SYCL builds");
+#endif
     amrex::Print() << "PackedGMRES: packed Krylov basis, CGS2 orthogonalization through "
                    << gemvBackend() << " kernels"
                    << (m_self_test ? ", self test at the first solve" : "") << "\n";
@@ -373,6 +385,9 @@ void PackedGMRES<V,M>::solve (V& a_sol, V const& a_rhs, RT a_tol_rel, RT a_tol_a
     if (!m_packed_allocated) {
         allocate_packed(a_rhs);
     }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_rhs.nDOF_local() == static_cast<amrex::Long>(m_n),
+        "PackedGMRES: the packed vector length changed after the basis was allocated");
     if (m_self_test && !m_self_test_done) {
         run_self_test(a_rhs);
         m_self_test_done = true;
@@ -687,33 +702,28 @@ void PackedGMRES<V,M>::dot_many (const RT* a_basis, int a_ncols, const RT* a_w, 
     }
 #endif
 #else
-    // host: static chunks per thread, partials summed in thread order
-    int nthreads = 1;
+    // host: a FIXED number of chunks independent of the OpenMP thread count
+    // (so the packed result does not depend on OMP_NUM_THREADS), one partial
+    // sum per chunk and column, summed in chunk order
+    constexpr int nchunks = 64;
+    const int chunk = (n + nchunks - 1) / nchunks;
+    std::vector<RT> part(std::size_t(nchunks) * std::size_t(a_ncols), RT(0.0));
 #ifdef AMREX_USE_OMP
-    nthreads = omp_get_max_threads();
+#pragma omp parallel for schedule(static)
 #endif
-    std::vector<RT> part(std::size_t(nthreads) * std::size_t(a_ncols), RT(0.0));
-#ifdef AMREX_USE_OMP
-#pragma omp parallel num_threads(nthreads)
-#endif
-    {
-        int tid = 0;
-#ifdef AMREX_USE_OMP
-        tid = omp_get_thread_num();
-#endif
-        const int chunk = (n + nthreads - 1) / nthreads;
-        const int i0 = std::min(n, tid * chunk);
+    for (int c = 0; c < nchunks; ++c) {
+        const int i0 = std::min(n, c * chunk);
         const int i1 = std::min(n, i0 + chunk);
         for (int j = 0; j < a_ncols; ++j) {
             const RT* const bcol = a_basis + static_cast<std::size_t>(j) * static_cast<std::size_t>(n);
             RT s = RT(0.0);
             for (int i = i0; i < i1; ++i) { s += bcol[i] * a_w[i]; }
-            part[std::size_t(tid) * std::size_t(a_ncols) + std::size_t(j)] = s;
+            part[std::size_t(c) * std::size_t(a_ncols) + std::size_t(j)] = s;
         }
     }
     for (int j = 0; j < a_ncols; ++j) {
         RT s = RT(0.0);
-        for (int t = 0; t < nthreads; ++t) { s += part[std::size_t(t) * std::size_t(a_ncols) + std::size_t(j)]; }
+        for (int c = 0; c < nchunks; ++c) { s += part[std::size_t(c) * std::size_t(a_ncols) + std::size_t(j)]; }
         a_out[j] = s;
     }
 #endif
@@ -900,6 +910,37 @@ void PackedGMRES<V,M>::run_self_test (V const& a_model)
     amrex::ParallelAllReduce::Max(gemv_axpy_scale, amrex::ParallelContext::CommunicatorSub());
     gemv_axpy_err = (gemv_axpy_scale > 0._rt) ? gemv_axpy_err / gemv_axpy_scale : gemv_axpy_err;
 
+    // Orthogonality of a Krylov basis built by the solver's own Gram-Schmidt
+    // on an ill-conditioned set: candidates c_j = u + 1e-8 w_j (w_j
+    // pseudo-random), processed exactly as cycle() does (orthogonalize against
+    // the previous vectors, normalize). The Gram matrix of the result must be
+    // the identity to round-off: one classical Gram-Schmidt pass leaves
+    // |V^T V - I| ~ eps * condition ~ 1e-8 on this set, two passes ~1e-15.
+    const int kmax = std::min(m_restrtlen, 8);
+    std::vector<RT> u(nsz), wv(nsz);
+    fill(u, 5u);
+    amrex::Gpu::copy(amrex::Gpu::hostToDevice, u.begin(), u.end(), basis(0));
+    scale(basis(0), RT(1.0) / std::sqrt(norm2_squared(basis(0))));
+    int built = 1;
+    for (int it = 0; it < kmax; ++it) {
+        fill(wv, 100u + static_cast<unsigned int>(it));
+        for (std::size_t i = 0; i < nsz; ++i) { wv[i] = u[i] + RT(1.0e-8) * wv[i]; }
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, wv.begin(), wv.end(), basis(it + 1));
+        gram_schmidt_orthogonalization(it);
+        const RT tt = std::sqrt(norm2_squared(basis(it + 1)));
+        if (tt < RT(1.0e-99)) { break; }
+        scale(basis(it + 1), RT(1.0) / tt);
+        ++built;
+    }
+    RT ortho_err = 0._rt;
+    std::vector<RT> gram(static_cast<std::size_t>(built));
+    for (int j = 0; j < built; ++j) {
+        dot_many(basis(0), built, basis(j), gram.data());
+        for (int i = 0; i < built; ++i) {
+            ortho_err = std::max(ortho_err, std::abs(gram[std::size_t(i)] - ((i == j) ? RT(1.0) : RT(0.0))));
+        }
+    }
+
     int failures = 0;
     auto report = [&] (const char* name, RT value, RT bound)
     {
@@ -921,6 +962,7 @@ void PackedGMRES<V,M>::run_self_test (V const& a_model)
     report("linComb(vec) vs packed lincomb, rel. max error", lin_err, ulps);
     report("dot_many kernel vs host, rel. to sum|xy| (max over columns)", gemv_dot_err, reduce_bound);
     report("axpy_many kernel vs host, rel. max error", gemv_axpy_err, RT(64) * ulps);
+    report("|V^T V - I| max of the solver's Gram-Schmidt basis (ill-conditioned set)", ortho_err, RT(1.0e-12));
     amrex::Print() << "PackedGMRES self test: dot vec/host/kernel = " << dot_vec << " " << dot_host
                    << " " << dot_kernel << "; norm vec/host/kernel = " << nrm_vec << " "
                    << nrm_host << " " << nrm_kernel << "\n";
