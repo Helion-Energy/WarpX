@@ -1571,6 +1571,22 @@ public:
      * (back-compat: gate inactive). */
     amrex::Real m_joule_heating_n_min = -1.0;
 
+    /** C^1 taper of the Joule heating gate (Eric 2026-09-09: "not do the
+     *  ohmic heating of the pedestal"). Off (default): the hard gate above.
+     *  On: the heat AND the Te-threshold redirect energy staged to the ions
+     *  are multiplied by w(n) = smoothstep((n - n_g)/n_g), n_g =
+     *  max(joule_heating_n_min, n_floor): 0 at/below n_g, 1 at/above 2 n_g;
+     *  the withheld (1 - w) share goes to the heat_gate tally. Input:
+     *  joule_heating_taper. */
+    bool m_joule_heating_taper = false;
+
+    /** Thin-cell Joule attribution [J] (cells with n < 2 n_g): total
+     *  source and the part delivered to the ELECTRONS (after the taper, the
+     *  redirect and the gates). Accumulated only when a halo valve is
+     *  armed; printed as thin_joule_tot / thin_joule_e. */
+    mutable amrex::Real m_joule_thin_total_J = 0.0;
+    mutable amrex::Real m_joule_thin_e_J = 0.0;
+
     /** Graceful failure mode for Te runaways: abort with a clear message
      * when max(Te) exceeds this ceiling [eV] after the energy sources
      * (>700 keV runaways otherwise end in SEGV). Checked at the end of
@@ -2380,6 +2396,68 @@ public:
      *  that does not set it is bit-for-bit inert.
      *  Input: qdsmc_te_n_floor. */
     amrex::Real m_qdsmc_te_n_floor = 1.0;
+
+    /** Halo valves (Eric 2026-09-09: "I don't want to freeze the halo. I
+     *  want it to conduct the heat away and also not do the ohmic heating
+     *  of the pedestal"; "30 keV electrons are a deal breaker. They
+     *  should be O(100 eV)"). All default off and bit-identical unset.
+     *
+     *  qdsmc_halo_unfreeze: today a node whose deposited marker weight is
+     *  at or below m_qdsmc_n_floor keeps its previous T_e, and the FD
+     *  conduction open set is n > m_qdsmc_n_floor with zero-flux faces
+     *  into the closed set. On, both gates drop to strict positivity: the
+     *  K -> T_e recovery runs wherever ANY marker weight was deposited (the
+     *  recovery is the deposited-weight mean of K, well defined for any
+     *  positive weight; a node with exactly zero deposit still keeps its
+     *  T_e), and the FD conduction open set is every node with n > 0.
+     *  Exactly-zero-density and EB-covered nodes stay closed (chi = 0,
+     *  faces zero-flux, T_e held). Heat capacity and chi of the newly open
+     *  nodes use the FLOORED density b_ne = max(n, m_qdsmc_n_floor) exactly
+     *  as before, so chi <= chi_max still holds there (the kappa cap is
+     *  1.5 kB chi_max n at that n) and the face conductance across the
+     *  density cliff is the harmonic one. The K <-> T_e positivity floor
+     *  m_qdsmc_te_n_floor is untouched. FD operator + marker transport only:
+     *  the SDE conduction path and the grid (fluxform) transport keep the
+     *  freeze. */
+    bool m_qdsmc_halo_unfreeze = false;
+
+    /** qdsmc_source_taper_n [m^-3] (< 0 = off): C^1 taper of the QDSMC
+     *  transport update (the advective + polytropic-compression work the
+     *  marker recovery carries) and of the Joule source in thin cells:
+     *  w(n) = smoothstep((n - n_t)/n_t), 0 at/below n_t, 1 at/above 2 n_t.
+     *  In QDSMCUpdateTe the recovered T_e is blended as T_old + w (T_rec -
+     *  T_old); the withheld energy 1.5 max(n, te_n_floor) kB (1 - w)(T_rec -
+     *  T_old) is booked in m_source_taper_J (positive = heating withheld).
+     *  Conduction and the e-i relaxation are NOT scaled. Explicit
+     *  (euler/leapfrog/pc) schemes only. */
+    amrex::Real m_qdsmc_source_taper_n = -1.0;
+    mutable amrex::Real m_source_taper_J = 0.0;
+
+    /** Rectified pedestal cap on T_e (the MHD lane's rung-J form, hybrid
+     *  version): in cells below n_ped T_e may not exceed T_cap; the cap
+     *  fades with w(n) = 1 - smoothstep((n - n_ped)/n_ped) (1 at/below
+     *  n_ped, 0 at/above 2 n_ped); drain-only (only where T_e > T_cap);
+     *  exact decay T_e -= w (T_e - T_cap)(1 - exp(-rate dt)) per source
+     *  application, rate < 0 = pinned (hard cap). NOT a freeze: the cell
+     *  still updates and conducts. Removed energy is booked in
+     *  m_te_pedestal_J. T_cap = qdsmc_te_pedestal_cap_ev [eV] (< 0 = off)
+     *  and/or, with qdsmc_te_pedestal_image = 1, the MHD pedestal-STATE
+     *  image max(U_e)/(1.5 kB max(n)) over the live cells (n > 2 n_ped) --
+     *  the f-scaled image of the instantaneous peak of every block
+     *  (0d360c960), whose temperature is the ratio of the peaks; when both
+     *  are set the smaller applies. qdsmc_te_pedestal_n defaults to
+     *  qdsmc_n_floor. */
+    amrex::Real m_qdsmc_te_pedestal_cap_eV = -1.0;
+    bool m_qdsmc_te_pedestal_image = false;
+    amrex::Real m_qdsmc_te_pedestal_n = -1.0;
+    amrex::Real m_qdsmc_te_pedestal_rate = -1.0;
+    mutable amrex::Real m_te_pedestal_J = 0.0;
+    /** Last applied cap [K] (image form updates it per application). */
+    mutable amrex::Real m_te_pedestal_cap_last_K = -1.0;
+
+    /** Apply the pedestal cap (see m_qdsmc_te_pedestal_cap_eV). Runs inside
+     *  ApplyQdsmcEnergySources after the ion-heating step. */
+    void QDSMCRelaxPedestalTe (int lev, amrex::Real dt_src) const;
 
     /** False until the adiabat T_e seed (SeedTeAdiabat, PR #7128) has run
      *  once. HybridPICInitializeRhoJandB executes at step == step_begin of

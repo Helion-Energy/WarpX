@@ -4140,8 +4140,85 @@ Maxwell solver: kinetic-fluid hybrid
     deposited marker weight is at or below this value are skipped and keep their previous electron temperature
     (guarding the division by the deposited weight in cells no QDSMC marker reached). It also gates the
     conduction open set. The density floor used in the :math:`K_e \leftrightarrow T_e` conversion itself is
-    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`.
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`. Both gates drop to strict positivity under
+    :pp:param:`hybrid_pic_model.qdsmc_halo_unfreeze`.
     Defaults to :pp:param:`hybrid_pic_model.n_floor`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_halo_unfreeze
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Unfreeze the halo of the electron-energy equation. Off: nodes whose deposited marker weight is at or
+    below :pp:param:`hybrid_pic_model.qdsmc_n_floor` keep their previous :math:`T_e`, and the finite-difference
+    conduction open set is :math:`n > \texttt{qdsmc\_n\_floor}` with zero-flux faces into the closed set (the
+    frozen halo is a perfect insulator). On: the :math:`K_e \rightarrow T_e` recovery runs wherever any marker
+    weight was deposited (the recovery is the weight-mean of the deposited entropy, well defined for any
+    positive weight; a node with exactly zero deposit still keeps its :math:`T_e`), and the conduction open set is
+    every node with :math:`n > 0`. Exactly-zero-density and EB-covered nodes stay closed (:math:`\chi = 0`,
+    zero-flux faces, :math:`T_e` held). The heat capacity and :math:`\chi` of the newly open nodes use the floored
+    density :math:`\max(n, \texttt{qdsmc\_n\_floor})` exactly as before, so
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max` still bounds :math:`\chi` there (the
+    :math:`\kappa` cap is :math:`1.5 k_B \chi_\max n` at that density) and the face conductance across the density
+    cliff is the harmonic one; the sub-floor halo is therefore a conducting reservoir of capacity
+    :math:`1.5\,\texttt{qdsmc\_n\_floor}\,k_B` per volume. The positivity floor
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor` is untouched. Applies to the FD conduction operator and the
+    marker transport only; the SDE conduction path and the grid (fluxform) transport keep the freeze.
+
+.. pp:param:: hybrid_pic_model.qdsmc_source_taper_n
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Optional :math:`C^1` taper, in :math:`m^{-3}`, of the QDSMC transport update (the advective and
+    polytropic-compression work the marker recovery carries) and of the Joule source in thin cells:
+    :math:`w(n) = \mathrm{smoothstep}((n - n_t)/n_t)`, 0 at or below :math:`n_t`, 1 at or above :math:`2 n_t`.
+    The recovered temperature is blended as :math:`T_\mathrm{old} + w (T_\mathrm{rec} - T_\mathrm{old})` and the
+    Joule heat (and redirect stage) is multiplied by :math:`w`; the withheld transport energy
+    :math:`1.5 \max(n, \texttt{qdsmc\_te\_n\_floor}) k_B (1 - w)(T_\mathrm{rec} - T_\mathrm{old})` is booked in the
+    dropped-energy print as ``source_taper`` (positive = heating withheld), the withheld Joule share in
+    ``heat_gate``. Conduction and the electron-ion relaxation are not scaled. Explicit time-advance schemes only.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_cap_ev
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Rectified pedestal cap on :math:`T_e` [eV] in thin cells (the hybrid form of the MHD lane's rung-J pedestal
+    energy relaxation): in cells below :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_n` the temperature may not
+    exceed the cap; the cap fades with :math:`w(n) = 1 - \mathrm{smoothstep}((n - n_\mathrm{ped})/n_\mathrm{ped})`
+    (1 at or below :math:`n_\mathrm{ped}`, 0 at or above :math:`2 n_\mathrm{ped}`); drain-only (only where
+    :math:`T_e > T_\mathrm{cap}`); exact decay :math:`T_e \mathrel{-}= w (T_e - T_\mathrm{cap})(1 - e^{-\nu \Delta t})`
+    per source application with :math:`\nu` = :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_rate` (default
+    pinned = a hard cap). This is a blow-off valve, not a freeze: the cell still updates and conducts. The removed
+    energy :math:`1.5 \max(n, \texttt{qdsmc\_te\_n\_floor}) k_B \Delta T` is booked as ``te_pedestal`` in the
+    dropped-energy print (with the cap actually applied as ``te_pedestal_cap_eV``).
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_image
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Use the MHD lane's pedestal-STATE image as the cap: :math:`T_\mathrm{cap} = \max(U_e)/(1.5 k_B \max n)` over
+    the live cells (:math:`n > 2 n_\mathrm{ped}`, so the capped halo never defines its own cap) -- the
+    :math:`f`-scaled image of the instantaneous peak of every block whose temperature is the ratio of the peaks.
+    Combined with :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_cap_ev` the smaller cap applies.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_n
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.qdsmc_n_floor`
+    :optional:
+
+    Pedestal density :math:`n_\mathrm{ped}` [:math:`m^{-3}`] of the cap: full at or below it, off at or above
+    :math:`2 n_\mathrm{ped}`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_rate
+    :type: ``float``
+    :default: ``-1`` (pinned)
+    :optional:
+
+    Relaxation rate [1/s] of the pedestal cap; negative = pinned (full relaxation per source application, a
+    hard cap).
 
 .. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
     :type: ``float``
@@ -4309,6 +4386,19 @@ Maxwell solver: kinetic-fluid hybrid
     below :math:`\max(\texttt{joule\_heating\_n\_min}, n_\mathrm{floor})` receive no Joule heat, and the
     declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
     physical-resistivity region without moving the solver floor.
+
+.. pp:param:: hybrid_pic_model.joule_heating_taper
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Make the Joule heating gate a :math:`C^1` taper instead of a hard cutoff (no Ohmic heating of the
+    pedestal): the heat, and the Te-threshold redirect energy staged to the ions, are multiplied by
+    :math:`w(n) = \mathrm{smoothstep}((n - n_g)/n_g)` with :math:`n_g = \max(\texttt{joule\_heating\_n\_min},
+    n_\mathrm{floor})`: 0 at or below :math:`n_g`, 1 at or above :math:`2 n_g`. The withheld share goes to the
+    ``heat_gate`` tally. When any halo valve is armed the dropped-energy print also carries the thin-cell
+    (:math:`n < 2 n_g`) attribution ``thin_joule_tot`` / ``thin_joule_e`` (total Joule source there and the part
+    delivered to the electrons).
 
 .. pp:param:: hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t)
     :type: ``float`` or ``str``

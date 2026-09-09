@@ -241,6 +241,28 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.qdsmc_te_n_floor must be > 0 (it is a "
         "positivity floor for the electron-energy representation)");
 
+    // Halo valves (Eric 2026-09-09; member docs). All default off and
+    // bit-identical unset. qdsmc_n_floor is parsed above, so the pedestal
+    // density default picks up the deck's gate.
+    pp_hybrid.query("qdsmc_halo_unfreeze", m_qdsmc_halo_unfreeze);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_source_taper_n",
+                                   m_qdsmc_source_taper_n);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_pedestal_cap_ev",
+                                   m_qdsmc_te_pedestal_cap_eV);
+    pp_hybrid.query("qdsmc_te_pedestal_image", m_qdsmc_te_pedestal_image);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_pedestal_n",
+                                   m_qdsmc_te_pedestal_n);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_pedestal_rate",
+                                   m_qdsmc_te_pedestal_rate);
+    if (m_qdsmc_te_pedestal_n <= 0.0_rt) {
+        m_qdsmc_te_pedestal_n = m_qdsmc_n_floor;
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(m_qdsmc_te_pedestal_cap_eV >= 0.0_rt || m_qdsmc_te_pedestal_image)
+        || m_qdsmc_te_pedestal_n > 0.0_rt,
+        "hybrid_pic_model.qdsmc_te_pedestal_n must be > 0 when the pedestal "
+        "cap is armed (it defaults to qdsmc_n_floor, which is 1 m^-3 unset)");
+
     pp_hybrid.query("implicit_push_excludes_resistive_field",
                     m_implicit_push_excludes_resistive_field);
 
@@ -867,6 +889,7 @@ void HybridPICModel::ReadParameters ()
     m_has_heating_resistivity =
         pp_hybrid.query("joule_heating_resistivity(rho,J,Te,t)", m_eta_heating_expression);
     utils::parser::queryWithParser(pp_hybrid, "joule_heating_n_min", m_joule_heating_n_min);
+    pp_hybrid.query("joule_heating_taper", m_joule_heating_taper);
 
     // Volumetric electron-energy sink S(rho,Te,B,t) [W/m^3] (armed by
     // presence; S > 0 removes energy -- radiative-loss closures expressed
@@ -1419,6 +1442,40 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
                 << ((m_cond_rkl2_post_step == 1) ? "super-step" : "stage");
         }
         amrex::Print() << "\n";
+    }
+    if (m_solve_electron_energy_equation) {
+        // Halo valves boot line (the A/B over these knobs is unverifiable
+        // from the outputs otherwise; same rationale as the integrator line).
+        auto fmt = [] (amrex::Real v) {
+            std::ostringstream os; os << std::setprecision(4) << v; return os.str();
+        };
+        amrex::Print() << "[qdsmc] halo valves: unfreeze "
+            << (m_qdsmc_halo_unfreeze
+                ? "ON (T_e update wherever deposited weight > 0; FD conduction "
+                  "open set n > 0; capacity/chi at n floored to qdsmc_n_floor)"
+                : "OFF (T_e held and faces closed at/below qdsmc_n_floor)")
+            << "; joule gate "
+            << (m_joule_heating_taper
+                ? "C^1 taper (0 at/below " + fmt(std::max(m_joule_heating_n_min, m_n_floor))
+                  + " m^-3, 1 at 2x; redirect follows)"
+                : "hard at " + fmt(std::max(m_joule_heating_n_min, m_n_floor)) + " m^-3")
+            << "; source taper "
+            << (m_qdsmc_source_taper_n > 0.0_rt
+                ? "ON (transport + Joule x smoothstep, 0 at " + fmt(m_qdsmc_source_taper_n)
+                  + " m^-3, 1 at 2x)"
+                : "OFF")
+            << "; Te pedestal cap "
+            << ((m_qdsmc_te_pedestal_cap_eV >= 0.0_rt || m_qdsmc_te_pedestal_image)
+                ? "ON (" + (m_qdsmc_te_pedestal_cap_eV >= 0.0_rt
+                              ? fmt(m_qdsmc_te_pedestal_cap_eV) + " eV" : std::string("no fixed cap"))
+                  + (m_qdsmc_te_pedestal_image ? ", MHD pedestal-state image max(U_e)/(1.5 kB max n)" : "")
+                  + "; full at/below n_ped = " + fmt(m_qdsmc_te_pedestal_n)
+                  + " m^-3, off at 2x; "
+                  + (m_qdsmc_te_pedestal_rate > 0.0_rt
+                     ? "rate " + fmt(m_qdsmc_te_pedestal_rate) + " /s" : std::string("pinned = hard cap"))
+                  + "; drain-only, ledger te_pedestal)"
+                : "OFF")
+            << "\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -4179,6 +4236,19 @@ void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
         << (full ? "" : " LATCHED") << "\n";
 }
 
+namespace
+{
+    // C^1 smoothstep gate of the halo valves: 0 at/below n_ped, 1 at/above
+    // 2 n_ped (the MHD lane's floor_outflow_limiter form, TIM K.H).
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real halo_valve_weight (amrex::Real const n, amrex::Real const n_ped)
+    {
+        amrex::Real x = (n - n_ped) / n_ped;
+        x = amrex::min(amrex::max(x, 0.0_rt), 1.0_rt);
+        return x*x*(3.0_rt - 2.0_rt*x);
+    }
+}
+
 void HybridPICModel::QDSMCUpdateTe (int const lev) const
 {
     auto & warpx = WarpX::GetInstance();
@@ -4222,8 +4292,19 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
     // which is why that site moved to the same knob.
     auto const n_floor    = m_qdsmc_te_n_floor;
     // Deposited-weight guard: cells no QDSMC marker reached keep their T_e.
-    auto const w_floor    = m_qdsmc_n_floor;
+    // Halo unfreeze: any positive deposited weight updates (the recovery is
+    // the weight-mean of the deposited K); exactly-zero deposits keep T_e.
+    auto const w_floor    = m_qdsmc_halo_unfreeze ? 0.0_rt : m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
+    // Optional source taper of the transport update (member doc): the
+    // withheld energy density is tallied on the valid nodes only.
+    bool const taper_on = (m_qdsmc_source_taper_n > 0.0_rt);
+    amrex::Real const n_taper = m_qdsmc_source_taper_n;
+    amrex::MultiFab taper_mf;
+    if (taper_on) {
+        taper_mf.define(Te.boxArray(), Te.DistributionMap(), 1, 0);
+        taper_mf.setVal(0.0_rt);
+    }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -4234,6 +4315,8 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
         amrex::Array4<amrex::Real const> const & Ke_arr      = Ke.const_array(mfi);
         amrex::Array4<amrex::Real const> const & weights_arr = weights.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr     = rho.const_array(mfi);
+        amrex::Array4<amrex::Real> tp_arr;
+        if (taper_on) { tp_arr = taper_mf.array(mfi); }
 
         amrex::Box const tbox = amrex::convert(mfi.tilebox(), Te.ixType().toIntVect());
         amrex::Box       box  = tbox;
@@ -4250,14 +4333,26 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
             // exactly.
             amrex::Real const ne =
                 amrex::max(rho_arr(i,j,k) / PhysConst::q_e, n_floor);
-            Te_arr(i,j,k) = Ke_arr(i,j,k)
+            amrex::Real const Te_rec = Ke_arr(i,j,k)
                           / std::pow(ne, 1.0_rt - gamma)
                           / w
                           / kb_over_qe;
+            if (!taper_on) { Te_arr(i,j,k) = Te_rec; return; }
+            // Source taper: blend the transport update toward no-change in
+            // thin cells; book the withheld energy (valid nodes only).
+            amrex::Real const wS =
+                halo_valve_weight(rho_arr(i,j,k) / PhysConst::q_e, n_taper);
+            amrex::Real const Te_old = Te_arr(i,j,k);
+            Te_arr(i,j,k) = Te_old + wS * (Te_rec - Te_old);
+            if (tbox.contains(amrex::IntVect(AMREX_D_DECL(i,j,k)))) {
+                tp_arr(i,j,k) += 1.5_rt * ne * PhysConst::kb
+                               * (1.0_rt - wS) * (Te_rec - Te_old);
+            }
         });
     }
 
     Te.FillBoundary(Te.nGrowVect(), period);
+    if (taper_on) { m_source_taper_J += EnergyVolumeIntegral(taper_mf, 0, lev); }
 }
 
 
@@ -4617,7 +4712,15 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     // measured runaway feedback vector).
     amrex::Real const rho_heat_gate =
         PhysConst::q_e * std::max(m_joule_heating_n_min, m_n_floor);
-    bool const heat_gate_armed  = (rho_heat_gate > rho_floor);
+    // Halo valves: the C^1 gate taper, the optional source taper, and the
+    // thin-cell (n < 2 n_gate) attribution tallies (armed with any valve).
+    bool const joule_taper = m_joule_heating_taper;
+    bool const src_taper   = (m_qdsmc_source_taper_n > 0.0_rt);
+    amrex::Real const n_taper = m_qdsmc_source_taper_n;
+    amrex::Real const n_gate  = rho_heat_gate / PhysConst::q_e;
+    bool const thin_tally = joule_taper || src_taper || m_qdsmc_halo_unfreeze ||
+        (m_qdsmc_te_pedestal_cap_eV >= 0.0_rt) || m_qdsmc_te_pedestal_image;
+    bool const heat_gate_armed  = (rho_heat_gate > rho_floor) || thin_tally;
     amrex::Real const rho_redir_gate =
         PhysConst::q_e * (m_joule_redirect_n_min_factor * m_n_floor);
     bool const redir_gate_armed =
@@ -4631,7 +4734,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     bool const any_drop_tally = heat_gate_armed || redir_gate_armed;
     amrex::MultiFab dropped_mf;
     if (any_drop_tally) {
-        dropped_mf.define(Te.boxArray(), Te.DistributionMap(), 2, 0);
+        // comps 2/3: thin-cell total source / thin-cell electron delivery
+        dropped_mf.define(Te.boxArray(), Te.DistributionMap(), 4, 0);
         dropped_mf.setVal(0.0_rt);
     }
 
@@ -4808,8 +4912,19 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // source goes to the audit tally (only reachable when armed).
                 if (rho_val <= rho_heat_gate) {
                     dropped_arr(i,j,k,0) += du_s;
+                    if (thin_tally) { dropped_arr(i,j,k,2) += du_s; }
                     return;
                 }
+                // C^1 gate taper (joule_heating_taper) and the optional
+                // source taper: heat and redirect stage both scale by wJ in
+                // (0, 1]; the withheld share goes to heat_gate. wJ = 1 exactly
+                // with both off (x 1.0 is exact), so the default is bit-identical.
+                amrex::Real wJ = 1.0_rt;
+                if (joule_taper) { wJ *= halo_valve_weight(ne, n_gate); }
+                if (src_taper)   { wJ *= halo_valve_weight(ne, n_taper); }
+                if (wJ < 1.0_rt) { dropped_arr(i,j,k,0) += (1.0_rt - wJ) * du_s; }
+                bool const thin = thin_tally && (ne < 2.0_rt * n_gate);
+                if (thin) { dropped_arr(i,j,k,2) += du_s; }
                 // Te-threshold redirection: below threshold heat electrons (the
                 // usual Joule deposit); at/above it write this species'
                 // m_i-independent redirected energy E_s = (2/3) n_e Z_s e^2 eta
@@ -4818,13 +4933,14 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // case the source is dropped to the tally instead.
                 if (do_redirect && Te_arr(i,j,k) >= Te_thresh_K) {
                     if (redir_gate_armed && rho_val <= rho_redir_gate) {
-                        dropped_arr(i,j,k,1) += du_s;
+                        dropped_arr(i,j,k,1) += wJ * du_s;
                     } else {
-                        redirect_arr(i,j,k,ion_comp) = (2.0_rt/3.0_rt) * ne
+                        redirect_arr(i,j,k,ion_comp) = wJ * (2.0_rt/3.0_rt) * ne
                             * Z_s * PhysConst::q_e * PhysConst::q_e * eta_s_eff * dv2 * dt;
                     }
                 } else {
-                    Te_arr(i,j,k) += dTe_s;
+                    Te_arr(i,j,k) += wJ * dTe_s;
+                    if (thin) { dropped_arr(i,j,k,3) += wJ * du_s; }
                 }
             });
         }
@@ -4837,6 +4953,10 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     if (any_drop_tally) {
         m_joule_dropped_heat_gate_J     += EnergyVolumeIntegral(dropped_mf, 0, lev);
         m_joule_dropped_redirect_gate_J += EnergyVolumeIntegral(dropped_mf, 1, lev);
+        if (thin_tally) {
+            m_joule_thin_total_J += EnergyVolumeIntegral(dropped_mf, 2, lev);
+            m_joule_thin_e_J     += EnergyVolumeIntegral(dropped_mf, 3, lev);
+        }
     }
 
     Te.FillBoundary(Te.nGrowVect(), period);
@@ -5247,6 +5367,96 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
 
     m_te_shunt_J += EnergyVolumeIntegral(tally_mf, 0, lev);
     m_joule_dropped_redirect_gate_J += EnergyVolumeIntegral(tally_mf, 1, lev);
+}
+
+
+void HybridPICModel::QDSMCRelaxPedestalTe (int const lev, amrex::Real const dt_src) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QDSMCRelaxPedestalTe()");
+
+    using warpx::fields::FieldType;
+
+    // Rectified pedestal cap (member doc): in cells below n_ped, T_e above
+    // T_cap decays toward it with the exact factor (1 - exp(-rate dt)) (1 =
+    // pinned, a hard cap), weighted by w(n) = 1 - smoothstep((n - n_ped)/
+    // n_ped) so the cap fades into the plasma; drain-only. The removed
+    // energy 1.5 max(n, te_n_floor) kB dT is booked (te_pedestal); the
+    // floored density is the representation's capacity, the same one the
+    // K <-> T_e round trip uses in those cells.
+    auto & warpx = WarpX::GetInstance();
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+
+    amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    amrex::Real const qe = PhysConst::q_e;
+    amrex::Real const kb = PhysConst::kb;
+    amrex::Real const K_per_eV = qe / kb;
+    amrex::Real const n_ped = m_qdsmc_te_pedestal_n;
+    amrex::Real const n_cap = m_qdsmc_te_n_floor;
+    amrex::Real const decay = (m_qdsmc_te_pedestal_rate > 0.0_rt)
+        ? (1.0_rt - std::exp(-m_qdsmc_te_pedestal_rate * dt_src)) : 1.0_rt;
+
+    // Cap: the fixed value and/or the MHD pedestal-STATE image
+    // max(U_e)/(1.5 kB max(n)) over the LIVE cells (n > 2 n_ped, so the
+    // capped halo never defines its own cap); the smaller applies.
+    amrex::Real T_cap_K = (m_qdsmc_te_pedestal_cap_eV >= 0.0_rt)
+        ? m_qdsmc_te_pedestal_cap_eV * K_per_eV
+        : std::numeric_limits<amrex::Real>::max();
+    if (m_qdsmc_te_pedestal_image) {
+        amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+            reduce_op.eval(mfi.tilebox(), reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                amrex::Real const ne = rho_arr(i,j,k) / qe;
+                if (ne <= 2.0_rt * n_ped) { return {0.0_rt, 0.0_rt}; }
+                return {1.5_rt * ne * kb * amrex::max(Te_arr(i,j,k), 0.0_rt), ne};
+            });
+        }
+        auto tup = reduce_data.value(reduce_op);
+        amrex::Real u_max = amrex::get<0>(tup);
+        amrex::Real n_max = amrex::get<1>(tup);
+        amrex::ParallelDescriptor::ReduceRealMax(u_max);
+        amrex::ParallelDescriptor::ReduceRealMax(n_max);
+        if (n_max > 0.0_rt) {
+            T_cap_K = amrex::min(T_cap_K, u_max / (1.5_rt * kb * n_max));
+        }
+    }
+    m_te_pedestal_cap_last_K = T_cap_K;
+    if (!(T_cap_K < std::numeric_limits<amrex::Real>::max())) { return; }
+
+    amrex::MultiFab tally_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
+    tally_mf.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real>       const & tly_arr = tally_mf.array(mfi);
+
+        amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne = rho_arr(i,j,k) / qe;
+            if (ne >= 2.0_rt * n_ped) { return; }          // outside the window
+            amrex::Real const Te_K = Te_arr(i,j,k);
+            if (Te_K <= T_cap_K) { return; }                // rectified: drain only
+            amrex::Real const w  = 1.0_rt - halo_valve_weight(ne, n_ped);
+            amrex::Real const dT = w * decay * (Te_K - T_cap_K);
+            Te_arr(i,j,k) = Te_K - dT;
+            tly_arr(i,j,k) += 1.5_rt * amrex::max(ne, n_cap) * kb * dT;
+        });
+    }
+
+    Te.FillBoundary(Te.nGrowVect(), period);
+    m_te_pedestal_J += EnergyVolumeIntegral(tally_mf, 0, lev);
 }
 
 
@@ -6613,6 +6823,14 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         QdsmcPhaseMinTe(lev, "sources_ion_heating");
     }
 
+    // Step 6d: rectified pedestal cap on thin-cell T_e (blow-off valve, not a
+    // freeze; member doc). After the ion heating so the shunt/redirect see
+    // the uncapped state first and the cap is the last word this half.
+    if (m_qdsmc_te_pedestal_cap_eV >= 0.0_rt || m_qdsmc_te_pedestal_image) {
+        QDSMCRelaxPedestalTe(lev, dt_src);
+        QdsmcPhaseMinTe(lev, "sources_te_pedestal");
+    }
+
     // The source kernels write valid cells only; the Strang pre-half runs
     // right before the K_e initialization, which reads T_e ghosts, so
     // refresh them here (the euler control path skips this to stay
@@ -6635,6 +6853,9 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     }
     bool const any_decline_armed =
         (m_joule_heating_n_min > m_n_floor) ||
+        m_joule_heating_taper || m_qdsmc_halo_unfreeze ||
+        (m_qdsmc_source_taper_n > 0._rt) ||
+        (m_qdsmc_te_pedestal_cap_eV >= 0._rt) || m_qdsmc_te_pedestal_image ||
         (m_te_shunt_eV > 0._rt) ||
         (m_cond_eb_bc == 1) ||
         any_wall_bc ||
@@ -6662,6 +6883,13 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
             << " wall_pin=" << wall_pin
+            << " source_taper=" << m_source_taper_J
+            << " te_pedestal=" << m_te_pedestal_J
+            << " te_pedestal_cap_eV="
+            << (m_te_pedestal_cap_last_K > 0._rt
+                ? m_te_pedestal_cap_last_K * PhysConst::kb / PhysConst::q_e : -1._rt)
+            << " thin_joule_tot=" << m_joule_thin_total_J
+            << " thin_joule_e=" << m_joule_thin_e_J
             << " (cumulative; wall_bath > 0 = into plasma; wall_pin as "
                "stored, node-u x dual-cell volume for J)\n";
     }
@@ -7103,6 +7331,9 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     auto const kappa_par_ex  = m_kappa_par;
     auto const kappa_perp_ex = m_kappa_perp;
     amrex::Real const n_floor = m_qdsmc_n_floor;
+    // Halo unfreeze: the open set becomes every node with n > 0; b_ne (heat
+    // capacity, chi, harmonic face density) stays floored at n_floor.
+    amrex::Real const n_open  = m_qdsmc_halo_unfreeze ? 0.0_rt : n_floor;
     amrex::Real const f_lim   = m_cond_flux_limit_factor;
     bool const iso_full       = m_cond_isotropic;
     amrex::Real const iso_B   = m_cond_iso_B;
@@ -7207,7 +7438,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             b_arr(i,j,k,BNE::b_B2)   = B2;
             b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
             b_arr(i,j,k,BNE::b_open) =
-                (ne_raw > n_floor && !covered) ? 1.0_rt : 0.0_rt;
+                (ne_raw > n_open && !covered) ? 1.0_rt : 0.0_rt;
             b_arr(i,j,k,BNE::b_ebm)  = covered ? 0.0_rt : 1.0_rt;
         });
     }
