@@ -4429,7 +4429,9 @@ Maxwell solver: kinetic-fluid hybrid
     applied (after every accepted conduction substep, or per RKL2 stage / super-step following
     :pp:param:`hybrid_pic_model.qdsmc_conduction_rkl2_post_step`). The exchange is booked in a tally of its
     own and printed as ``wall_leg`` next to ``wall_pin`` on the ``[qdsmc] step N joule_dropped_J:`` line
-    (same units and sign; the token appears only when a ``leg`` face is armed); Python:
+    (same units and sign: the stored node-u sum, RZ weighted by :math:`2\pi r/\Delta r`), followed by
+    ``wall_leg_J`` = the same tally in Joules (times the node dual-cell volume: :math:`\Delta r\,\Delta z` in RZ,
+    the product of the cell sizes in Cartesian); both tokens appear only when a ``leg`` face is armed. Python:
     ``warpx.get_qdsmc_leg_tally(dim, side)``. Boot line ``[qdsmc] conduction z_hi BC: LEG (L = 6 m,
     T_wall = 0.5 eV, iterations 2)``. The domain-face cap
     :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit` does not apply to ``leg`` faces. The knobs
