@@ -9,6 +9,7 @@
 
 #include "ElectronInertiaElliptic.H"
 
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/WarpX_PEC.H"
 #include "Fields.H"
 // The finite-difference algorithm headers stub out the operators that a given
@@ -106,6 +107,57 @@ namespace
             if (WarpX::field_boundary_hi[idim] == t) { return true; }
         }
         return false;
+    }
+
+    /** Zero-gradient continuation of the outermost valid value into the
+     *  iterate's ghost layer on every domain face of type Open -- the RZ
+     *  hybrid Green's-function free-space boundary. That face imposes no
+     *  wall condition on E: the explicit path leaves E free there and
+     *  continues the outermost valid ring outward at r_hi
+     *  (GreensFunctionOpenBC::FillGhostsZeroGradientRhi, applied by
+     *  WarpX::ApplyEfieldBoundary), and writes nothing at an open z cap,
+     *  whose E ghosts no explicit stencil reads. The elliptic operator does
+     *  read them (the intermediate curl is formed one cell beyond the
+     *  domain), so the correction is given the same homogeneous
+     *  continuation on all open faces: it is linear, maps zero to zero, and
+     *  leaves E = E0 + dE obeying the same ghost rule as E0. */
+    void FillOpenFaceGhosts (ElectronInertiaElliptic::EVec& X,
+                             Geometry const& geom)
+    {
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+            for (int side = 0; side < 2; ++side) {
+                auto const bc = (side == 0) ? WarpX::field_boundary_lo[idim]
+                                            : WarpX::field_boundary_hi[idim];
+                if (bc != FieldBoundaryType::Open) { continue; }
+                for (int d = 0; d < 3; ++d) {
+                    const Box domain = amrex::convert(
+                        geom.Domain(), X[d].ixType().toIntVect());
+                    const int iface = (side == 0) ? domain.smallEnd(idim)
+                                                  : domain.bigEnd(idim);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                    for (MFIter mfi(X[d], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                    {
+                        Box gbx = mfi.growntilebox();
+                        if (side == 0) {
+                            if (gbx.smallEnd(idim) >= iface) { continue; }
+                            gbx.setBig(idim, iface - 1);
+                        } else {
+                            if (gbx.bigEnd(idim) <= iface) { continue; }
+                            gbx.setSmall(idim, iface + 1);
+                        }
+                        auto const& arr = X[d].array(mfi);
+                        amrex::ParallelFor(gbx,
+                            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                                IntVect iv(AMREX_D_DECL(i, j, k));
+                                iv[idim] = iface;
+                                arr(i, j, k) = arr(iv);
+                            });
+                    }
+                }
+            }
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -307,18 +359,27 @@ ElectronInertiaElliptic::CheckBoundarySupport ()
         for (int side = 0; side < 2; ++side) {
             auto const bc = (side == 0) ? warpx.field_boundary_lo[idim]
                                         : warpx.field_boundary_hi[idim];
+            // Open is accepted only as the RZ hybrid Green's-function
+            // free-space boundary, which forces nothing on E; its ghost
+            // rule (zero-gradient continuation) is linear and homogeneous
+            // and is what FillOpenFaceGhosts applies to the iterate.
             const bool supported =
                    (bc == FieldBoundaryType::Periodic)
                 || (bc == FieldBoundaryType::PEC)
                 || (bc == FieldBoundaryType::PMC)   // == Neumann
-                || (bc == FieldBoundaryType::None);
+                || (bc == FieldBoundaryType::None)
+                || (bc == FieldBoundaryType::Open
+                    && GreensFunctionOpenBC::IsActive());
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 supported,
                 "hybrid_pic_model.include_electron_inertia_elliptic requires "
                 "field boundaries that have a homogeneous linear form, so "
                 "that they can be imposed on the correction inside the "
                 "elliptic solve. Supported: periodic, pec, pmc/neumann, none "
-                "(the r=0 axis). The boundary condition set on dimension "
+                "(the r=0 axis), and open when it is the RZ hybrid "
+                "Green's-function boundary (no wall condition on E; "
+                "zero-gradient ghost continuation). The boundary condition "
+                "set on dimension "
                 + std::to_string(idim) + " is not one of these; it is either "
                 "affine in E or carries its own auxiliary state, and no "
                 "homogeneous counterpart exists that could legitimately be "
@@ -566,6 +627,32 @@ ElectronInertiaElliptic::ApplyHomogeneousBC (EVec& X, int lev)
             FieldBoundaryType::PMC, ng, warpx.Geom(lev), lev,
             PatchType::fine, warpx.refRatio());
     }
+
+    // Rows the embedded boundary freezes are forced values too: the
+    // explicit Ohm's-law solve never writes an E location whose
+    // eb_update_E flag is 0 (stair-case wall rows), so those values are set
+    // by the EB treatment, not by Ohm's law, and they are not unknowns of
+    // the elliptic system either. Project them out exactly like the PEC
+    // rows above -- on the iterate, the operator output and the right-hand
+    // side alike -- so dE = 0 there. Without this the correction would move
+    // E at the wall rows, which the explicit solve never rewrites, and they
+    // would drift by one correction per substep.
+    for (int d = 0; d < 3; ++d) {
+        if (m_eb_update_E[d] == nullptr) { continue; }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(X[d], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box tb = mfi.tilebox(X[d].ixType().toIntVect());
+            auto const& x = X[d].array(mfi);
+            auto const& m = m_eb_update_E[d]->const_array(mfi);
+            amrex::ParallelFor(tb,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (m(i, j, k) == 0) { x(i, j, k) = 0._rt; }
+                });
+        }
+    }
 }
 
 void
@@ -576,6 +663,7 @@ ElectronInertiaElliptic::FillIterateBoundary (EVec& X, int lev)
     ablastr::utils::communication::FillBoundary(
         {&X[0], &X[1], &X[2]}, WarpX::do_single_precision_comms,
         warpx.Geom(lev).periodicity(), /*nodal_sync=*/true);
+    FillOpenFaceGhosts(X, warpx.Geom(lev));
     ApplyHomogeneousBC(X, lev);
 }
 

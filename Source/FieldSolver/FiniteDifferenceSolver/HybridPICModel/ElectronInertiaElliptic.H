@@ -15,6 +15,9 @@
 #include <AMReX_Array.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_REAL.H>
+#include <AMReX_iMultiFab.H>
+
+#include <array>
 
 /**
  * \brief Electron inertia in the generalized Ohm's law, in elliptic form.
@@ -92,11 +95,23 @@
  *   Neumann   -> PEC::ApplyPECtoBfield applied to E, likewise linear.
  *   None      -> no-op; this is the r = 0 cylindrical axis, where the
  *                regularisations are carried inside the curl stencils.
+ *   Open      -> accepted only as the RZ hybrid Green's-function free-space
+ *                boundary (GreensFunctionOpenBC::IsActive). It forces no
+ *                value of E; the explicit path continues the outermost
+ *                valid ring into the ghosts at r_hi and never reads the E
+ *                ghosts of an open z cap. The iterate gets the same linear,
+ *                homogeneous zero-gradient continuation on every open face.
  * Every other FieldBoundaryType (PML, Damped, Absorbing_Silver_Mueller,
- * Open, PEC_Insulator) is REJECTED at setup with an explicit message rather
- * than silently approximated: those conditions are either affine in E or
- * carry their own auxiliary state, and neither has a homogeneous linear
- * counterpart that could be applied to a Krylov iterate.
+ * PEC_Insulator, and Open outside the RZ hybrid Green's context) is
+ * REJECTED at setup with an explicit message rather than silently
+ * approximated: those conditions are either affine in E or carry their own
+ * auxiliary state, and neither has a homogeneous linear counterpart that
+ * could be applied to a Krylov iterate.
+ *
+ * EMBEDDED BOUNDARY. E locations whose eb_update_E flag is 0 (the
+ * stair-case wall rows the explicit Ohm's-law solve skips) are forced
+ * values inside the domain, exactly like tangential E at a PEC face, and
+ * are projected out of the system the same way (SetEBUpdateMask).
  */
 class ElectronInertiaElliptic
 {
@@ -183,9 +198,23 @@ public:
     /** Validate that every field boundary has a homogeneous linear form. */
     static void CheckBoundarySupport ();
 
+    /** Rows frozen by the embedded boundary (eb_update_E == 0, the rows the
+     *  explicit Ohm's-law solve never writes) are forced values and are
+     *  projected out of the system like PEC rows. Pass nullptrs when no EB
+     *  is enabled. Set before every Solve; the pointers are not owned. */
+    void SetEBUpdateMask (std::array<amrex::iMultiFab const*, 3> const& mask)
+    {
+        m_eb_update_E = mask;
+    }
+
 private:
     bool m_defined = false;
     bool m_coefs_valid = false;
+
+    /** Update flags of the E field at the embedded boundary (0 = frozen row,
+     *  not an unknown); nullptr when no EB is enabled. Not owned. */
+    std::array<amrex::iMultiFab const*, 3> m_eb_update_E =
+        {nullptr, nullptr, nullptr};
 
     /** d_e^2 = m_e / (mu0 e rho_floored), at the E-field staggering. */
     EVec m_de2;

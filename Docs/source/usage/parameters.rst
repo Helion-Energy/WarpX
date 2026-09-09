@@ -4839,8 +4839,14 @@ Maxwell solver: kinetic-fluid hybrid
 
     Available in 1D, 2D (XZ), 3D and RZ (:math:`m = 0`) on the staggered (Yee) grid. Field
     boundaries must have a homogeneous linear form -- ``periodic``, ``pec``, ``pmc``/``neumann``,
-    or ``none`` (the :math:`r=0` axis); any other type is rejected at setup rather than silently
-    approximated.
+    ``none`` (the :math:`r=0` axis), or ``open`` when it is the RZ hybrid Green's-function
+    free-space boundary (it forces no value of :math:`\mathbf{E}`; the correction is continued
+    zero-gradient into the ghost layer on every open face, the rule the explicit path applies to
+    :math:`\mathbf{E}` at :math:`r_\mathrm{hi}`); any other type is rejected at setup rather than
+    silently approximated. With an embedded boundary, the :math:`\mathbf{E}` locations the
+    stair-case wall freezes (the rows the Ohm's-law solve skips) are treated as forced values and
+    projected out of the elliptic system like the tangential field at a ``pec`` face, so the
+    correction never moves them.
 
 .. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
     :type: ``float``

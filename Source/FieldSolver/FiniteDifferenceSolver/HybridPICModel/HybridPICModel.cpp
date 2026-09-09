@@ -2366,6 +2366,14 @@ void HybridPICModel::HybridPICSolveE (
         }
         m_inertia_elliptic->PrepareCoefficients(
             rhofield, PhysConst::q_e * m_n_floor, lev);
+        // The E rows the stair-case EB freezes (eb_update_E == 0, skipped by
+        // the Ohm's-law solve above) are not unknowns of the elliptic
+        // system; hand the flags over so the solve projects them out.
+        std::array<amrex::iMultiFab const*, 3> eb_mask = {nullptr, nullptr, nullptr};
+        if (EB::enabled()) {
+            for (int d = 0; d < 3; ++d) { eb_mask[d] = eb_update_E[d].get(); }
+        }
+        m_inertia_elliptic->SetEBUpdateMask(eb_mask);
         m_inertia_elliptic->Solve(Efield, lev);
         warpx.ApplyEfieldBoundary(lev, patch_type, time);
     }
