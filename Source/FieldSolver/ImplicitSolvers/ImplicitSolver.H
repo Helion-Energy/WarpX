@@ -283,6 +283,29 @@ public:
     }
 
     /**
+     * \brief Debt-bounded hold (newton.active_set_hold_defect_bound):
+     * the norm, in the solver's block-scaled inner product, of a_F over
+     * the active-set members currently HELD by the release hysteresis
+     * (their inward defect). Zero for operators without a projection.
+     */
+    [[nodiscard]] virtual amrex::Real
+    HeldDefectNorm (const WarpXSolverVec& a_F) const
+    {
+        amrex::ignore_unused(a_F);
+        return 0.0;
+    }
+
+    /**
+     * \brief Debt-bounded hold: release every member the last
+     * identification HELD (mask cleared, hold counter reset), recount the
+     * set, and return the global number released. No-op default.
+     */
+    virtual amrex::Long ReleaseHeldMembers () const
+    {
+        return 0;
+    }
+
+    /**
      * \brief Number of components currently in the active set (global),
      * as recorded by the last IdentifyActiveSet / projection call. Zero
      * for operators without a projection.
@@ -370,6 +393,27 @@ public:
      */
     virtual void
     ResidualHotspotReport (const WarpXSolverVec& /*a_residual*/) const
+    {
+    }
+
+    /**
+     * \brief Report the NONLINEAR defect of a Newton line-search trial,
+     * d = F(U - l dU) - F(U) + l J dU (what the linear model did not
+     * predict of the trial residual), by state block and by region, with
+     * the residual F(U) as the reference norm, plus the floor-band census
+     * of the base and trial states: the diagnostic behind
+     * newton.line_search_report. No-op default.
+     */
+    virtual void
+    ReportNonlinearDefectBlocks (const WarpXSolverVec& /*a_defect*/,
+                                 const WarpXSolverVec& /*a_residual*/,
+                                 const WarpXSolverVec& /*a_state*/,
+                                 const WarpXSolverVec& /*a_trial_state*/,
+                                 amrex::Real /*a_step_length*/, int /*a_trial*/,
+                                 amrex::Real /*a_trial_norm*/,
+                                 amrex::Real /*a_reference_norm*/,
+                                 int /*a_newton_iter*/, int /*a_step*/,
+                                 amrex::Real /*a_time*/) const
     {
     }
 

@@ -472,6 +472,30 @@ Overall simulation parameters
             line reports the held count; the diagnostic file gains the
             columns below.
 
+          - ``newton.active_set_hold_defect_bound`` (``float``, default: -1 = unbounded; requires ``newton.active_set_hysteresis > 0``).
+            Debt bound of the release hysteresis. A held member sits on its
+            bound while its equations want to lift it, so the hold books an
+            inward (negative) defect at the exit; the whole-solve hold
+            (``hysteresis >= max_iterations``) measured on the production
+            formation deck kept ~27 electron-energy wall components the
+            iteration-0 projection had just clamped, with an inward defect
+            of 3.2 against a full residual of ~5 and -16 J booked in one
+            step, from which the run never recovered, while the wall-row
+            churn the hold is meant to suppress carries a held defect of
+            order 1e-3 of the full norm. With a non-negative bound, at
+            every identification after iteration 0 the norm of the
+            residual over the held members (the solver norm) is compared
+            with the larger of ``newton.active_set_tolerance`` times the
+            iteration-0 free norm and the bound times the iteration-0 full
+            norm; above it every held member is released for that
+            identification (counters cleared, the plain rule decides) and
+            the solve continues on the enlarged free set -- the
+            free-subspace exit is never granted while a held defect above
+            the bound hides in the pinned part. 0 releases the held
+            members at every identification (the plain rule, for testing
+            the release pass). The diagnostic file gains the column
+            ``hold_releases`` (release passes per solve).
+
           - ``newton.line_search_resolve`` (``bool``, default: false; requires ``newton.active_set = 1``).
             Entrant re-solve. When the projection clamps NEW components into
             the active set at a Newton iteration and the full step then
@@ -515,16 +539,31 @@ Overall simulation parameters
             the search is declared failed (the same floor the 12-rung
             halving ladder reaches).
 
+          - ``newton.line_search_report`` (``bool``, default: false).
+            Report every line-search trial: the Jacobian-vector product
+            :math:`J\,dU` is formed once per Newton iteration (one more
+            matrix-free application with the operator and masks the solve
+            used) and each trial prints its Armijo grade, the nonlinear
+            defect :math:`d = F(U - \lambda dU) - F(U) + \lambda J dU` --
+            the part of the trial residual the linear model did not
+            predict -- by state block and region in the layout of the
+            ``pc_mhd_block.residual_block_norms`` report (with :math:`F(U)`
+            as the reference), and a floor-band census of the floored
+            fluid blocks (cells on their admissibility bound, within 1.2
+            and within 2 times it, for the base and the trial state, and
+            the cells that change band). Off is bit-identical.
+
           - ``newton.globalization_diagnostics`` (``bool``, default: false).
             Record the globalization counters below in the Newton
             diagnostic file without changing any arithmetic (for a control
             run of the plain rules).
 
             With any of ``newton.active_set_hysteresis``,
+            ``newton.active_set_hold_defect_bound``,
             ``newton.line_search_resolve``, ``newton.line_search`` or
             ``newton.line_search_min_step`` at a non-default value, or with
             ``newton.globalization_diagnostics``, the Newton diagnostic file
-            carries seven more columns per solve:
+            carries eight more columns per solve:
             ``entrants`` (components the projection clamped into the set
             during the solve), ``released`` and ``held`` (at the
             identifications), ``resolves`` (entrant re-solves),
@@ -533,7 +572,13 @@ Overall simulation parameters
             (components the identification moved down onto their bounds; a
             member held while off its bound would show up here, which makes
             it the witness of the hold's bound-resident guard -- the
-            ``max_bound_excess`` column is measured after the move and is not).
+            ``max_bound_excess`` column is measured after the move and is not)
+            and ``hold_releases`` (release passes of the debt-bounded hold).
+            The columns are appended only when one of these knobs is set: a
+            run restarted with a different globalization setting into the
+            same directory appends rows of a different width to an existing
+            ``newton.diagnostic_file`` (the shipped analyses keep the last
+            session; column-array readers should start a new file).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
@@ -6836,6 +6881,54 @@ Jacobian probes.
     keying the width to the local kinetic-energy scale. The asymptotes
     stay exact (floor below, :math:`E_i - \rho u^2/2` above); the corner
     inflation is width/2, confined to near-corner cells.
+
+.. pp:param:: implicit_mhd.pressure_floor_width_factor
+    :type: ``float``
+    :default: ``1``
+
+    Width factor of the smooth ion-pressure floors: multiplies the
+    corner width of the :math:`C^1` smooth-max recoveries
+    :math:`p_i(E_i)` (the recast's pressure recovery and the dual-energy
+    blend), of the :math:`C^\infty` floor of the internal pressure
+    :math:`p_i(U_i)` and of the guarded energy of the dual-energy kinetic
+    fraction; the ``pressure_corner_width_fraction`` term still applies
+    on top (the width is the larger of the two). The default 1 is the
+    legacy width (the floor itself) and is bit-identical. A wider corner
+    has a smaller second derivative (:math:`\propto 1/\text{width}`), so a
+    Newton step that carries a near-floor ion energy across the corner is
+    better predicted by its linear model, at the price of a larger
+    inflation at the corner (width/2, decaying as
+    :math:`\text{floor}^2/(4\,\text{excess})` above it). Asymptotes stay
+    exact.
+
+.. pp:param:: implicit_mhd.dual_energy_fk_width
+    :type: ``float``
+    :default: ``0.05``
+
+    Rectifier width of the dual-energy kinetic fraction
+    :math:`f_k = \max(0, 1 - \rho u^2/(2\gamma_i E_i))` (the
+    :math:`C^\infty` smooth-max of this width; the default is the legacy
+    compile-time value, bit-identical). Wider rectifiers smooth the
+    thermal/kinetic switch of the blended ion pressure over a wider band
+    of kinetic fractions.
+
+.. pp:param:: implicit_mhd.newton_predictor
+    :type: ``string``
+    :default: ``none``
+
+    Newton initial guess of the theta-implicit MHD solve. ``none`` starts
+    every solve from the step-start state (the legacy guess,
+    bit-identical). ``linear`` starts from the linear extrapolation
+    :math:`2U^n - U^{n-1}` of the two previous step-start states,
+    projected onto the admissible set (the theta-image floors, non-finite
+    scrub); the first step of a run or of a restart keeps the legacy
+    guess. A guess nearer the solution shrinks the first Newton update
+    and, with it, the nonlinear defect of the first iteration (measured
+    at ~60% of the residual on the production formation deck). The
+    extrapolation assumes a constant time step (the dt_n/dt_{n-1} ratio is
+    not applied); measured on the production deck the predictor stagnated
+    78-81% of the steps of the 13-16 us windows and stays a documented
+    negative.
 
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``

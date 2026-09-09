@@ -168,6 +168,47 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                      int a_newton_iter, int a_step,
                                      amrex::Real a_time) const override;
 
+    /** The nonlinear defect of a line-search trial (newton.line_search_report):
+     * the block/region report above with d = F(U - l dU) - F(U) + l J dU
+     * as the residual and F(U) as the reference, followed by the floor-band
+     * census of the base and trial states (ReportFloorBandCensus). Public
+     * for the NVCC extended-lambda requirement. */
+    void ReportNonlinearDefectBlocks (const WarpXSolverVec& a_defect,
+                                      const WarpXSolverVec& a_residual,
+                                      const WarpXSolverVec& a_state,
+                                      const WarpXSolverVec& a_trial_state,
+                                      amrex::Real a_step_length, int a_trial,
+                                      amrex::Real a_trial_norm,
+                                      amrex::Real a_reference_norm,
+                                      int a_newton_iter, int a_step,
+                                      amrex::Real a_time) const override;
+
+    /** Shared body of the two block reports: a_label names the report,
+     * a_aux_int / a_aux_real are printed under a_aux_int_name /
+     * a_aux_real_name (the GMRES iteration count and its reported norm for
+     * the linear report; the trial index and the step length for the
+     * nonlinear one); a_to_file appends the rows to
+     * pc_mhd_block.residual_block_norms_file when set. */
+    void ReportResidualBlocksImpl (const char* a_label,
+                                   const char* a_aux_int_name, int a_aux_int,
+                                   const char* a_aux_real_name,
+                                   amrex::Real a_aux_real,
+                                   const WarpXSolverVec& a_residual,
+                                   const WarpXSolverVec& a_rhs,
+                                   const WarpXSolverVec& a_state,
+                                   int a_newton_iter, int a_step,
+                                   amrex::Real a_time, bool a_to_file) const;
+
+    /** Floor-band census of the floored fluid blocks for the line-search
+     * report: per block, the cells on their admissibility bound, in
+     * (1, 1.2) and [1.2, 2) times the bound (the engagement band of the
+     * floor-consistency source and the smoothstep band of the drain gates),
+     * for the base and the trial state, and the cells that change band. */
+    void ReportFloorBandCensus (const WarpXSolverVec& a_state,
+                                const WarpXSolverVec& a_trial_state,
+                                amrex::Real a_step_length, int a_trial,
+                                int a_newton_iter, int a_step) const;
+
     /** Project the fluid blocks onto their theta-aware floor images
      * (value >= (1 - theta) old + theta floor, so the extrapolated end
      * state respects the absolute floors) and scrub non-finite values
@@ -201,6 +242,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     {
         return m_projected_components;
     }
+    [[nodiscard]] amrex::Real
+    HeldDefectNorm (const WarpXSolverVec& a_F) const override;
+    amrex::Long ReleaseHeldMembers () const override;
     amrex::Long MoveActiveSetToBounds (WarpXSolverVec& a_U) const override;
     void ZeroActiveSetComponents (WarpXSolverVec& a_v) const override;
     void CopyActiveSetComponents (WarpXSolverVec& a_dst,
@@ -2394,6 +2438,27 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).
     amrex::Real m_pressure_corner_width_fraction = 0.0;
+    // Width factor of the smooth ion-pressure floors and rectifier width
+    // of the dual-energy kinetic fraction (see FluxParameters::
+    // pressure_floor_width_factor / dual_energy_fk_width; inputs
+    // implicit_mhd.pressure_floor_width_factor (default 1, bit-identical)
+    // and implicit_mhd.dual_energy_fk_width (default 0.05, bit-identical)).
+    amrex::Real m_pressure_floor_width_factor = 1.0;
+    amrex::Real m_dual_energy_fk_width = 0.05;  // = dual_energy_fk_width_default (ThetaImplicitMHD_K.H)
+    // Newton initial guess (implicit_mhd.newton_predictor): "none" (the
+    // step-old state, the legacy guess, bit-identical) or "linear" (the
+    // linear extrapolation 2 U^n - U^{n-1} of the two previous step-start
+    // states, projected onto the admissible set; the first step of a run
+    // or a restart keeps the legacy guess). Measured motivation: on the
+    // production formation deck the first Newton step of every solve
+    // carries a nonlinear defect of ~60% of the residual (the linear
+    // model of a step from U^n mispredicts F(U^n - dU) in the halo ion
+    // energy rows); a predictor that starts nearer the solution shrinks
+    // the first update and, with it, the quadratic defect.
+    std::string m_newton_predictor = "none";
+    WarpXSolverVec m_state_prev;
+    bool m_predictor_ready = false;
+    bool m_state_old_valid = false;
     // C-infinity smoothing widths of the HLLD wave fan (see FluxParameters
     // in ThetaImplicitMHD_K.H); inputs implicit_mhd.hlld_kappa_*.
     amrex::Real m_hlld_kappa_signal = 0.05;

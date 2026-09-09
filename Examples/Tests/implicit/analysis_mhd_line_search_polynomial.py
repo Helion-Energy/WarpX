@@ -38,7 +38,7 @@ Two modes:
 
 newton.txt (plain layout + the seven globalization counters):
   [2] iters [6] gmres [12] entrants [13] released [14] held [15] resolves
-  [16] damped_steps [17] rejected_trials [18] moved
+  [16] damped_steps [17] rejected_trials [18] moved [19] hold_releases
 
 Usage: analysis_mhd_line_search_polynomial.py <control|cubic> <final plotfile>
 """
@@ -51,7 +51,7 @@ import yt
 control_directory = "../test_rz_theta_implicit_mhd_braginskii_oblique_edge_line_search_control"
 
 MAX_STEP = 10
-NUM_COLUMNS = 19
+NUM_COLUMNS = 20  # 12 base columns + the eight globalization counters
 COL_ITERS, COL_GMRES = 2, 6
 COL_DAMPED, COL_REJECTED = 16, 17
 WORK_RATIO = 1.3

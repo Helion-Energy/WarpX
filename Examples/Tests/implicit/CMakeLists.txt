@@ -349,6 +349,25 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The linear Newton predictor (implicit_mhd.newton_predictor = linear: the
+# initial guess 2 U^n - U^{n-1}, projected onto the admissible set) on the
+# temperature-floor deck: it must REDUCE the Newton work (measured 396 vs
+# 421 iterations, -6%; a predictor with the wrong sign or an unprojected
+# guess raises it), not grow the linear work, and leave the converged
+# physics within 5e-3 relative L2 of the control (the same nonlinear system
+# solved to the same tolerance from a different start: measured 1.3e-3 on
+# the electron energy, the deck's tolerance class). Default none is
+# bit-identical.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_temperature_floor_predictor  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_temperature_floor implicit_mhd.newton_predictor=linear"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000200 --control ../test_1d_theta_implicit_mhd_temperature_floor --newton-reduction 0.98 --gmres-max 1.02 --physics 5e-3 --require-knob implicit_mhd.newton_predictor=linear"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_temperature_floor  # dependency
+)
+
 # offset-density halo pedestal: the sub-pedestal halo of a static contact
 # is raised exactly onto the dynamic (peak-keyed) pedestal and rides
 # there, while the bulk state is exactly invariant
@@ -3756,6 +3775,113 @@ add_warpx_test(
     "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref/diags/diag000016"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # dependency
+)
+
+# The debt-bounded hold (newton.active_set_hold_defect_bound) on the churn
+# deck, gated at its two exactness limits against the sibling arms: bound 0
+# releases every held member at every identification, so the solve must
+# reproduce the plain-rule control exactly (first 16 newton.txt columns and
+# the plotfile identical; the release pass reported on every holding solve);
+# bound 1e9 is never reached, so the whole-solve hold (sticky arm) must be
+# untouched (columns, counters and plotfile identical, zero release passes).
+# The production combination -- the bounded hold with the fused residual
+# bookkeeping -- must be bit-identical to the bounded hold alone.
+# analysis_mhd_active_set_debt_bound.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0"  # inputs
+    "analysis_mhd_active_set_debt_bound.py release diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_hold  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=1e9"  # inputs
+    "analysis_mhd_active_set_debt_bound.py hold diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
+)
+# The bound INSIDE the churn deck's held-defect distribution (0.01: three of
+# the deck's eleven holding identifications exceed it): the release pass
+# must fire exactly 3 times and hold exactly 80 member-identifications, with
+# the plain rule's entrants/releases otherwise (336 / 320), Newton 49-51,
+# GMRES within 3% of 11255, physics within 1e-5 of the control. This is the
+# CI witness of the bound's arithmetic: a dropped block scale in the held
+# norm, a bound referred to the current instead of the iteration-0 norm, or
+# an inverted comparison each change these counters (measured 7-11 passes
+# instead of 3), while the exactness arms above cannot see them.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_inside  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.01"  # inputs
+    "analysis_mhd_active_set_debt_bound.py inside diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+
+# The PRODUCTION combination: the churn deck with the candidate globalization
+# (newton.active_set_hysteresis = 30 + newton.active_set_hold_defect_bound =
+# 0.03) alone and with the rest of the production stack (packed GMRES, fused
+# vector ops, fused residual). On this deck the held defect peaks at 0.028 of
+# the iteration-0 norm, so the 0.03 bound never fires and the arm IS the
+# whole-solve hold: it therefore asserts identity with the sticky arm (first
+# 16 columns, counters, plotfile; a release pass would be a visible failure)
+# rather than a bound behaviour -- the bound's arithmetic is gated by the
+# inside arm above. The full stack must reproduce the amrex-GMRES arm to the
+# packed solver's round-off class (physics 1e-6, Newton within 5%, linear
+# work within 10%). analysis_mhd_active_set_debt_bound.py /
+# analysis_mhd_newton_knob_vs_control.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.03"  # inputs
+    "analysis_mhd_active_set_debt_bound.py hold diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod_packed  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.03 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_debt_prod --newton-max 1.05 --newton-min 0.95 --gmres-max 1.10 --physics 1e-6 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob newton.linear_solver=packed_gmres"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod  # dependency
+)
+
+# The smooth-floor widths (implicit_mhd.pressure_floor_width_factor,
+# implicit_mhd.dual_energy_fk_width) on the churn deck, where the wall row
+# rides its floor every solve: the wider corners must leave the converged
+# physics within 5e-3 relative L2 of the control on every fluid block
+# (measured 4e-5 .. 1.2e-3 at factor 4 / width 0.2; the radial momentum is
+# ~0 on this deck and is not compared) and must not grow the Newton or
+# linear work by more than 10% (measured 53 vs 52 Newton, +3% GMRES). The
+# defaults are bit-identical (the byte-identity gate of the branch report).
+# analysis_mhd_newton_knob_vs_control.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_churn_wide_floor  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.globalization_diagnostics=1 implicit_mhd.pressure_floor_width_factor=4 implicit_mhd.dual_energy_fk_width=0.2"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_churn --newton-max 1.10 --gmres-max 1.10 --physics 5e-3 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob implicit_mhd.pressure_floor_width_factor=4"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release_fused  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_debt_release/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_debt_release  # dependency
 )
 
 # The conduction block with the conductive z-end exchange, at 200x the

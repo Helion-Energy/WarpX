@@ -2225,6 +2225,14 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         consecutive identifications before it is released (anti-cycling;
         0 = released on the sign of its residual, the plain rule).
 
+    active_set_hold_defect_bound: float, default=-1 (unbounded)
+        Debt bound of the release hysteresis (requires active_set_hysteresis
+        > 0): at every identification after iteration 0, when the residual
+        norm over the held members exceeds the larger of active_set_tolerance
+        times the iteration-0 free norm and this fraction of the iteration-0
+        full norm, every held member is released (0 = release at every
+        identification, the plain rule).
+
     line_search_resolve: bool, default=False
         Entrant re-solve (requires active_set): when the projection clamps
         new components into the set and the full step then fails the
@@ -2241,10 +2249,16 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     line_search_min_step: float, default=2**-12
         Smallest step the polynomial line-search rules may try.
 
+    line_search_report: bool, default=False
+        Report every Newton line-search trial (Armijo grade, the nonlinear
+        defect of the trial by state block and region, a floor-band census
+        of the floored fluid blocks); one more Jacobian application per
+        Newton iteration when on, bit-identical when off.
+
     globalization_diagnostics: bool, default=False
         Record the globalization counters (entrants, released, held,
-        re-solves, damped steps, rejected trials) in the Newton diagnostic
-        file without changing any arithmetic.
+        re-solves, damped steps, rejected trials, moved, hold releases) in
+        the Newton diagnostic file without changing any arithmetic.
 
     jfnk_epsilon: float, default=1.e-6
         Relative size of the matrix-free Jacobian probe (the state is
@@ -2308,10 +2322,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         active_set=None,
         active_set_tolerance=None,
         active_set_hysteresis=None,
+        active_set_hold_defect_bound=None,
         line_search_resolve=None,
         line_search=None,
         line_search_min_step=None,
         globalization_diagnostics=None,
+        line_search_report=None,
         jfnk_epsilon=None,
         jfnk_epsilon_mode=None,
         jfnk_component_floor=None,
@@ -2343,10 +2359,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.active_set = active_set
         self.active_set_tolerance = active_set_tolerance
         self.active_set_hysteresis = active_set_hysteresis
+        self.active_set_hold_defect_bound = active_set_hold_defect_bound
         self.line_search_resolve = line_search_resolve
         self.line_search = line_search
         self.line_search_min_step = line_search_min_step
         self.globalization_diagnostics = globalization_diagnostics
+        self.line_search_report = line_search_report
         self.jfnk_epsilon = jfnk_epsilon
         self.jfnk_epsilon_mode = jfnk_epsilon_mode
         self.jfnk_component_floor = jfnk_component_floor
@@ -2398,10 +2416,12 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.active_set = self.active_set
         newton.active_set_tolerance = self.active_set_tolerance
         newton.active_set_hysteresis = self.active_set_hysteresis
+        newton.active_set_hold_defect_bound = self.active_set_hold_defect_bound
         newton.line_search_resolve = self.line_search_resolve
         newton.line_search = self.line_search
         newton.line_search_min_step = self.line_search_min_step
         newton.globalization_diagnostics = self.globalization_diagnostics
+        newton.line_search_report = self.line_search_report
         newton.jfnk_epsilon = self.jfnk_epsilon
         newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
         newton.jfnk_component_floor = self.jfnk_component_floor
@@ -2839,6 +2859,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     conduction_qs_reference_temperature: float, optional
         Load-envelope temperature T0 [eV] of the quasi-shorting
         pseudo-entropy. Required (positive) when conduction_qs_chi > 0.
+
+    pressure_floor_width_factor: float, default=1 (legacy width, bit-identical)
+        Width factor of the smooth ion-pressure floors (the smooth-max
+        recoveries p_i(E_i), the internal-pressure floor p_i(U_i) and the
+        guarded energy of the dual-energy kinetic fraction); wider corners
+        have less curvature per unit Newton update at the price of a larger
+        inflation at the corner.
+
+    dual_energy_fk_width: float, default=0.05 (legacy, bit-identical)
+        Rectifier width of the dual-energy kinetic fraction.
+
+    newton_predictor: string, default='none'
+        Newton initial guess: 'none' (the step-start state) or 'linear'
+        (2 U^n - U^{n-1} projected onto the admissible set).
 
     pressure_corner_width_fraction: float, default=0 (legacy width)
         Corner width of the smooth-max internal-energy floor in the
@@ -3931,6 +3965,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_pc_cross_terms=None,
         braginskii_cross_term_scale=None,
         pressure_corner_width_fraction=None,
+        pressure_floor_width_factor=None,
+        dual_energy_fk_width=None,
+        newton_predictor=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
         z_wall_temperature=None,
@@ -4076,6 +4113,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_pc_cross_terms = conduction_pc_cross_terms
         self.braginskii_cross_term_scale = braginskii_cross_term_scale
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
+        self.pressure_floor_width_factor = pressure_floor_width_factor
+        self.dual_energy_fk_width = dual_energy_fk_width
+        self.newton_predictor = newton_predictor
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
         self.z_wall_temperature = z_wall_temperature
@@ -4276,6 +4316,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )
+        implicit_mhd.pressure_floor_width_factor = self.pressure_floor_width_factor
+        implicit_mhd.dual_energy_fk_width = self.dual_energy_fk_width
+        implicit_mhd.newton_predictor = self.newton_predictor
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.z_boundary_fluid = self.z_boundary_fluid
         implicit_mhd.z_wall_temperature = self.z_wall_temperature

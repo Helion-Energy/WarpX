@@ -884,6 +884,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                                : legacy_wall_cap_factor));
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
+    utils::parser::queryWithParser(pp, "pressure_floor_width_factor",
+                                   m_pressure_floor_width_factor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pressure_floor_width_factor > 0.0_rt,
+        "implicit_mhd.pressure_floor_width_factor must be positive");
+    utils::parser::queryWithParser(pp, "dual_energy_fk_width",
+                                   m_dual_energy_fk_width);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_dual_energy_fk_width > 0.0_rt,
+        "implicit_mhd.dual_energy_fk_width must be positive");
+    pp.query("newton_predictor", m_newton_predictor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_newton_predictor == "none" || m_newton_predictor == "linear",
+        "implicit_mhd.newton_predictor must be 'none' or 'linear'");
     pp.query("r_open_fluid", m_r_open_fluid);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
@@ -3861,6 +3875,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << (m_conduction_coefficient_step_old ? "step_old"
                                                          : "theta")
                    << "\n"
+                   << "Pressure floor width factor:   "
+                   << m_pressure_floor_width_factor
+                   << (m_pressure_floor_width_factor == 1.0_rt
+                           ? " (legacy: width = floor)" : " x floor")
+                   << "\n"
+                   << "Dual-energy fk width:          " << m_dual_energy_fk_width
+                   << "\n"
+                   << "Newton predictor:              " << m_newton_predictor
+                   << "\n"
                    << "Thermal conduction model:      "
                    << m_thermal_conduction_model
                    << (m_conduction_braginskii
@@ -5258,7 +5281,19 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
     RefreshHaloPedestal();
     RefreshVacuumReferenceDensity(step);
+    if (m_newton_predictor == "linear") {
+        // Keep the previous step-start state for the linear predictor
+        // below (m_state_old is about to become this step's start).
+        if (!m_state_prev.IsDefined()) {
+            m_state_prev.Define(m_state);
+        }
+        if (m_state_old_valid) {
+            m_state_prev.Copy(m_state_old);
+            m_predictor_ready = true;
+        }
+    }
     m_state_old.Copy(m_state);
+    m_state_old_valid = true;
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
     // limiters (theta-extrapolated end-of-step donor gating needs old
@@ -5338,6 +5373,17 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         rho_n_frozen.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     }
 
+    if (m_newton_predictor == "linear" && m_predictor_ready) {
+        // Linear predictor: the Newton initial guess is the extrapolation
+        // 2 U^n - U^{n-1} of the two previous step-start states (the
+        // solver otherwise starts from U^n), projected onto the
+        // admissible set (theta-image floors, non-finite scrub) so the
+        // first identification and residual see an admissible state.
+        m_state.Copy(m_state_old);
+        m_state.increment(m_state_old, 1.0_rt);
+        m_state.increment(m_state_prev, -1.0_rt);
+        ProjectStateToAdmissibleSet(m_state);
+    }
     m_nlsolver->Solve(m_state, m_state_old, start_time, m_dt, step);
     const int exit_status = m_nlsolver->GetExitStatus();
     if (exit_status < 0) {
@@ -7037,7 +7083,165 @@ void ThetaImplicitMHD::ReportLinearResidualBlocks (
     const amrex::Real a_reported_norm, const int a_newton_iter,
     const int a_step, const amrex::Real a_time) const
 {
-    BL_PROFILE("ThetaImplicitMHD::ReportLinearResidualBlocks()");
+    ReportResidualBlocksImpl("pc_mhd_block linear residual blocks",
+                             "gmres_iters", a_linear_iters, "gmres reported",
+                             a_reported_norm, a_residual, a_rhs, a_state,
+                             a_newton_iter, a_step, a_time, true);
+}
+
+void ThetaImplicitMHD::ReportNonlinearDefectBlocks (
+    const WarpXSolverVec& a_defect, const WarpXSolverVec& a_residual,
+    const WarpXSolverVec& a_state, const WarpXSolverVec& a_trial_state,
+    const amrex::Real a_step_length, const int a_trial,
+    const amrex::Real a_trial_norm, const amrex::Real a_reference_norm,
+    const int a_newton_iter, const int a_step, const amrex::Real a_time) const
+{
+    // The linear model predicts the trial residual F(U) - l J dU; the
+    // reported quantity is what it did not predict. The header line also
+    // carries the Armijo grade of the trial (trial norm over the reference
+    // norm: the free norms in the active-set mode).
+    amrex::Print() << "newton line-search trial: step " << a_step + 1
+                   << " newton_iter " << a_newton_iter << " trial " << a_trial
+                   << " step_length " << std::scientific << std::setprecision(4)
+                   << a_step_length << " trial_norm " << a_trial_norm
+                   << " reference_norm " << a_reference_norm << " ratio "
+                   << ((a_reference_norm > 0.0_rt) ? a_trial_norm / a_reference_norm
+                                                   : 0.0_rt)
+                   << "\n";
+    ReportResidualBlocksImpl("newton nonlinear defect blocks", "trial",
+                             a_trial, "step_length", a_step_length, a_defect,
+                             a_residual, a_state, a_newton_iter, a_step, a_time,
+                             false);
+    ReportFloorBandCensus(a_state, a_trial_state, a_step_length, a_trial,
+                          a_newton_iter, a_step);
+}
+
+void ThetaImplicitMHD::ReportFloorBandCensus (
+    const WarpXSolverVec& a_state, const WarpXSolverVec& a_trial_state,
+    const amrex::Real a_step_length, const int a_trial,
+    const int a_newton_iter, const int a_step) const
+{
+    // Per floored block (the projection's blocks and bounds): band index of
+    // every cell from value / bound with bound = (1 - theta) old + theta
+    // cell_floor -- 0: on the bound (within 2 margins), 1: (1, 1.2) (the
+    // floor-consistency source's engagement band), 2: [1.2, 2) (the drain
+    // gates' smoothstep band), 3: >= 2 -- for the base and the trial state,
+    // plus the cells whose band differs between the two (the cells the step
+    // carries across a change of the residual's local law).
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    const std::array<const char*, 4> block_labels = {
+        "mass_density", "electron_energy",
+        cgl_closure ? "ion_par_energy" : "ion_energy",
+        dual_energy_closure ? "ion_internal_energy" : "ion_perp_energy"};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::Real theta = m_theta;
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
+    std::array<amrex::Long, 4 * 9> counts{};
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::Real floor = bounds.floors[block];
+        const amrex::Real temperature_coefficient =
+            bounds.temperature_coefficients[block];
+        const amrex::MultiFab& value_mf =
+            a_state.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& trial_mf =
+            a_trial_state.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& old_mf =
+            m_state_old.getMultiFabBlock(block_names[block], 0);
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Long, amrex::Long, amrex::Long, amrex::Long,
+                          amrex::Long, amrex::Long, amrex::Long, amrex::Long,
+                          amrex::Long> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto value = value_mf.const_array(mfi);
+            const auto trial = trial_mf.const_array(mfi);
+            const auto old_value = old_mf.const_array(mfi);
+            const auto old_density = old_density_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    const amrex::Real temperature_bound =
+                        temperature_coefficient * old_density(i, j, k);
+                    const amrex::Real cell_floor =
+                        old_value(i, j, k) >= temperature_bound
+                            ? std::max(floor, temperature_bound)
+                            : floor;
+                    const amrex::Real bound =
+                        (1.0 - theta) * old_value(i, j, k) + theta * cell_floor;
+                    const amrex::Real margin =
+                        1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
+                    auto band = [&](amrex::Real v) -> int {
+                        if (v <= bound + 2.0_rt * margin) { return 0; }
+                        const amrex::Real ratio =
+                            (bound > 0.0_rt) ? v / bound : 1.0e30_rt;
+                        return (ratio < 1.2_rt) ? 1 : ((ratio < 2.0_rt) ? 2 : 3);
+                    };
+                    const int b0 = band(value(i, j, k));
+                    const int b1 = band(trial(i, j, k));
+                    return {static_cast<amrex::Long>(b0 == 0),
+                            static_cast<amrex::Long>(b0 == 1),
+                            static_cast<amrex::Long>(b0 == 2),
+                            static_cast<amrex::Long>(b0 == 3),
+                            static_cast<amrex::Long>(b1 == 0),
+                            static_cast<amrex::Long>(b1 == 1),
+                            static_cast<amrex::Long>(b1 == 2),
+                            static_cast<amrex::Long>(b1 == 3),
+                            static_cast<amrex::Long>(b0 != b1)};
+                });
+        }
+        const ReduceTuple result = reduce_data.value(reduce_op);
+        counts[9 * block + 0] = amrex::get<0>(result);
+        counts[9 * block + 1] = amrex::get<1>(result);
+        counts[9 * block + 2] = amrex::get<2>(result);
+        counts[9 * block + 3] = amrex::get<3>(result);
+        counts[9 * block + 4] = amrex::get<4>(result);
+        counts[9 * block + 5] = amrex::get<5>(result);
+        counts[9 * block + 6] = amrex::get<6>(result);
+        counts[9 * block + 7] = amrex::get<7>(result);
+        counts[9 * block + 8] = amrex::get<8>(result);
+    }
+    amrex::ParallelAllReduce::Sum(counts.data(), 9 * num_blocks,
+                                  amrex::ParallelContext::CommunicatorSub());
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+    std::stringstream report;
+    report << "newton floor-band census: step " << a_step + 1 << " newton_iter "
+           << a_newton_iter << " trial " << a_trial << " step_length "
+           << std::scientific << std::setprecision(4) << a_step_length << "\n";
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::Long* c = counts.data() + 9 * block;
+        report << "  " << std::setw(20) << std::left << block_labels[block]
+               << std::right << " base: on_bound " << c[0] << " (1,1.2) " << c[1]
+               << " [1.2,2) " << c[2] << " >=2 " << c[3] << " | trial: on_bound "
+               << c[4] << " (1,1.2) " << c[5] << " [1.2,2) " << c[6] << " >=2 "
+               << c[7] << " | band changes " << c[8] << "\n";
+    }
+    amrex::Print() << report.str();
+}
+
+void ThetaImplicitMHD::ReportResidualBlocksImpl (
+    const char* a_label, const char* a_aux_int_name, const int a_aux_int,
+    const char* a_aux_real_name, const amrex::Real a_aux_real,
+    const WarpXSolverVec& a_residual, const WarpXSolverVec& a_rhs,
+    const WarpXSolverVec& a_state, const int a_newton_iter,
+    const int a_step, const amrex::Real a_time, const bool a_to_file) const
+{
+    BL_PROFILE("ThetaImplicitMHD::ReportResidualBlocksImpl()");
     using ablastr::fields::Direction;
 
     // ---- Region classification, cell-centered, one component per region.
@@ -7326,11 +7530,11 @@ void ThetaImplicitMHD::ReportLinearResidualBlocks (
 
     std::stringstream report;
     report << std::scientific << std::setprecision(3);
-    report << "pc_mhd_block linear residual blocks: step " << a_step + 1
+    report << a_label << ": step " << a_step + 1
            << " t " << a_time << " newton_iter " << a_newton_iter
-           << " gmres_iters " << a_linear_iters
+           << " " << a_aux_int_name << " " << a_aux_int
            << " |b| " << std::sqrt(total_b2) << " |r| " << std::sqrt(total_r2)
-           << " (gmres reported " << a_reported_norm << ") r/b "
+           << " (" << a_aux_real_name << " " << a_aux_real << ") r/b "
            << safe_ratio(std::sqrt(total_r2), std::sqrt(total_b2))
            << " rho_peak " << density_peak
            << " wall_rows " << (fluid_freeze.active ? "shaped-wall band" : "outer boundary")
@@ -7372,6 +7576,7 @@ void ThetaImplicitMHD::ReportLinearResidualBlocks (
     amrex::Print() << report.str();
 
     // ---- Optional file: one row per block per report, tab separated.
+    if (!a_to_file) { return; }
     if (!m_linear_residual_report_file_read) {
         m_linear_residual_report_file_read = true;
         const amrex::ParmParse pp("pc_mhd_block");
@@ -7403,7 +7608,7 @@ void ThetaImplicitMHD::ReportLinearResidualBlocks (
     out << std::setprecision(10) << std::scientific;
     for (std::size_t irow = 0; irow < num_rows; ++irow) {
         out << a_step + 1 << "\t" << a_time << "\t" << a_newton_iter << "\t"
-            << a_linear_iters << "\t" << a_reported_norm << "\t" << rows[irow].label;
+            << a_aux_int << "\t" << a_aux_real << "\t" << rows[irow].label;
         for (int column = 0; column < kLinearResidualColumns; ++column) {
             if (column == kRegionPinned && rows[irow].pinned == nullptr) {
                 out << "\t-1\t-1";
@@ -7758,6 +7963,134 @@ ThetaImplicitMHD::MoveActiveSetToBounds (WarpXSolverVec& a_U) const
         moved_total += moved[block];
     }
     return moved_total;
+}
+
+amrex::Real
+ThetaImplicitMHD::HeldDefectNorm (const WarpXSolverVec& a_F) const
+{
+    // Debt-bounded hold (newton.active_set_hold_defect_bound): the norm of
+    // the residual over the members the last identification HELD -- the
+    // cells whose hold counter is positive (IdentifyActiveSet writes a
+    // positive count exactly for the held members and zero for every
+    // other cell) -- in the same per-block scaling as
+    // WarpXSolverVec::dotProduct, i.e. the held part of the pinned defect.
+    if (m_projected_components == 0 || m_active_set_hysteresis <= 0) {
+        return 0.0_rt;
+    }
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    amrex::Real held_sq = 0.0_rt;
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::iMultiFab& mask_mf = m_projection_masks[block];
+        const amrex::iMultiFab& hold_mf = m_release_holds[block];
+        if (m_projected_per_block[block] == 0 || !mask_mf.ok() ||
+            !hold_mf.ok()) {
+            continue;
+        }
+        const amrex::MultiFab& residual_mf =
+            a_F.getMultiFabBlock(block_names[block], 0);
+        amrex::Real block_scale = 1.0_rt;
+        for (const auto& spec : a_F.getMultiFabBlockSpecs()) {
+            if (spec.name == block_names[block]) {
+                block_scale = spec.scale;
+            }
+        }
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(residual_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto residual = residual_mf.const_array(mfi);
+            const auto mask = mask_mf.const_array(mfi);
+            const auto hold = hold_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    return {(mask(i, j, k) != 0 && hold(i, j, k) > 0)
+                                ? residual(i, j, k) * residual(i, j, k)
+                                : 0.0_rt};
+                });
+        }
+        const amrex::Real inverse_scale = 1.0_rt / block_scale;
+        held_sq += inverse_scale * inverse_scale *
+                   amrex::get<0>(reduce_data.value(reduce_op));
+    }
+    amrex::ParallelAllReduce::Sum(held_sq,
+                                  amrex::ParallelContext::CommunicatorSub());
+    return std::sqrt(held_sq);
+}
+
+amrex::Long ThetaImplicitMHD::ReleaseHeldMembers () const
+{
+    // Debt-bounded hold: release every member the last identification
+    // held (hold counter positive): mask cleared, counter reset -- the
+    // plain release rule's outcome for that identification -- then recount
+    // the set from the masks (global sums, like the projection's recount).
+    if (m_projected_components == 0 || m_active_set_hysteresis <= 0) {
+        return 0;
+    }
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    std::array<amrex::Long, 4> released = {0, 0, 0, 0};
+    for (int block = 0; block < num_blocks; ++block) {
+        amrex::iMultiFab& mask_mf = m_projection_masks[block];
+        amrex::iMultiFab& hold_mf = m_release_holds[block];
+        if (m_projected_per_block[block] == 0 || !mask_mf.ok() ||
+            !hold_mf.ok()) {
+            continue;
+        }
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Long, amrex::Long> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(mask_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto mask = mask_mf.array(mfi);
+            const auto hold = hold_mf.array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    amrex::Long freed = 0;
+                    if (hold(i, j, k) > 0) {
+                        freed = (mask(i, j, k) != 0) ? 1 : 0;
+                        mask(i, j, k) = 0;
+                        hold(i, j, k) = 0;
+                    }
+                    return {freed, static_cast<amrex::Long>(
+                                       mask(i, j, k) != 0 ? 1 : 0)};
+                });
+        }
+        const ReduceTuple counts = reduce_data.value(reduce_op);
+        released[block] = amrex::get<0>(counts);
+        m_projected_per_block[block] = amrex::get<1>(counts);
+    }
+    amrex::ParallelAllReduce::Sum(released.data(),
+                                  static_cast<int>(released.size()),
+                                  amrex::ParallelContext::CommunicatorSub());
+    amrex::ParallelAllReduce::Sum(
+        m_projected_per_block.data(),
+        static_cast<int>(m_projected_per_block.size()),
+        amrex::ParallelContext::CommunicatorSub());
+    m_projected_components = 0;
+    amrex::Long released_total = 0;
+    for (int block = 0; block < num_blocks; ++block) {
+        m_projected_components += m_projected_per_block[block];
+        released_total += released[block];
+    }
+    return released_total;
 }
 
 void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
@@ -8194,6 +8527,9 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_dual_energy_internal_old_max;
     flux_parameters.pressure_corner_width_fraction =
         m_pressure_corner_width_fraction;
+    flux_parameters.pressure_floor_width_factor =
+        m_pressure_floor_width_factor;
+    flux_parameters.dual_energy_fk_width = m_dual_energy_fk_width;
     flux_parameters.fluid_reconstruction = m_fluid_reconstruction_mode;
     flux_parameters.reconstruction_kappa = m_reconstruction_kappa;
     flux_parameters.central_dissipation = m_central_dissipation;
@@ -14929,7 +15265,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     const amrex::Real excess =
                         ion_e(i, j, k) - kinetic_energy - ion_energy_floor;
                     const amrex::Real corner_width = std::max(
-                        ion_energy_floor,
+                        flux_parameters.pressure_floor_width_factor *
+                            ion_energy_floor,
                         flux_parameters.pressure_corner_width_fraction *
                             kinetic_energy);
                     pressure_i =

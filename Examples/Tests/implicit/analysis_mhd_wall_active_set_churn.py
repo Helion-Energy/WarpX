@@ -58,11 +58,11 @@ Three modes, one script (the control is a dependency of the other two):
               4e-10: a one-identification hold does not change the converged
               state).
 
-newton.txt columns (active-set layout + the seven globalization counters):
+newton.txt columns (active-set layout + the eight globalization counters):
   [2] iters [5] norm_rel [6] gmres [11] num_pinned [12] free_norm_rel
   [13] exit_status [14] max_pinned_direction [15] max_bound_excess
   [16] entrants [17] released [18] held [19] resolves [20] damped_steps
-  [21] rejected_trials [22] moved
+  [21] rejected_trials [22] moved [23] hold_releases
 
 Usage: analysis_mhd_wall_active_set_churn.py <control|sticky|resolve> <final plotfile>
 """
@@ -75,10 +75,13 @@ import yt
 control_directory = "../test_rz_theta_implicit_mhd_wall_active_set_churn"
 
 MAX_STEP = 16
-NUM_COLUMNS = 23
+NUM_COLUMNS = 24
 COL_ITERS, COL_NORM_REL, COL_GMRES, COL_PINNED = 2, 5, 6, 11
 COL_FREE_REL, COL_STATUS, COL_LEAK, COL_EXCESS = 12, 13, 14, 15
 COL_ENTRANTS, COL_RELEASED, COL_HELD, COL_RESOLVES, COL_DAMPED, COL_REJECTED, COL_MOVED = range(16, 23)
+# The debt-bounded hold's release passes (newton.active_set_hold_defect_bound,
+# unset in every arm here): must stay 0.
+COL_HOLD_RELEASES = 23
 CONVERGED_STATUSES = {2, 3, 4}
 STATUS_UNION_EXIT = 5
 # Measured on the control (16 steps, 2 ranks): 16 or 32 components released
@@ -189,6 +192,11 @@ moved = int(rows[:, COL_MOVED].sum())
 # identification and appear here: the witness of the hold's bound-resident
 # guard (max_bound_excess is measured after the move and cannot see it).
 assert moved == 0, f"{moved} components were moved onto their bounds: a member was held off its bound"
+# The debt-bounded hold is unset in every arm here: its release pass must
+# never run (the arms with the bound have their own gate,
+# analysis_mhd_active_set_debt_bound.py).
+hold_releases = int(rows[:, COL_HOLD_RELEASES].sum())
+assert hold_releases == 0, f"{hold_releases} hold release passes with newton.active_set_hold_defect_bound unset"
 
 if mode == "control":
     # The churn: the projection clamps the wall row into the set and the
