@@ -75,7 +75,7 @@ def field(data, name):
 
 
 mode = sys.argv[1]
-assert mode in ("reset", "floor", "total_energy", "cgl", "static"), mode
+assert mode in ("reset", "floor", "total_energy", "cgl", "static", "cov"), mode
 initial_ds, initial = get_data(sys.argv[2])
 final_ds, final = get_data(sys.argv[3])
 
@@ -166,11 +166,17 @@ else:
     ion_image_booked = ion_image
 
 # Momentum and fields are exactly zero throughout (static contact, no
-# drive): the raise never touches momentum.
+# drive): the raise never touches momentum. Under the change of variables
+# the sanitize parks the lifted halo a 2e-6 slack above the background,
+# a 2e-6 pressure step that drives a correspondingly tiny flow: momentum
+# is bounded by 1e-5 of rho_ped c_s there instead.
+sound_speed = np.sqrt(gamma * (electron_pressure_bulk + ion_pressure_bulk) / rho0)
 for data in (initial, final):
-    np.testing.assert_allclose(
-        data["boxlib", "implicit_mhd_momentum_density"].value, 0.0, rtol=0.0, atol=0.0
-    )
+    momentum = data["boxlib", "implicit_mhd_momentum_density"].value
+    if mode == "cov" and data is final:
+        assert np.max(np.abs(momentum)) < 1.0e-5 * pedestal * sound_speed, np.max(np.abs(momentum))
+    else:
+        np.testing.assert_allclose(momentum, 0.0, rtol=0.0, atol=0.0)
     for field_name in ("Bx", "By", "Bz", "Ex", "Ey", "Ez"):
         np.testing.assert_allclose(
             data["boxlib", field_name].value, 0.0, rtol=0.0, atol=1.0e-20
@@ -189,7 +195,15 @@ for band in (cold_band, hot_band, bulk):
 # untouched. Exact on the static column; on the floor mode's dynamic
 # column the contact-adjacent cells move at the 1e-7 level in one step,
 # so the exact check is restricted to the band interiors there.
-if mode == "floor":
+if mode == "cov":
+    # Change of variables: the sanitize lifted the halo onto the background
+    # (its slack margin: 2e-6, a pressure step that moves the contact cells
+    # at the 1e-5 level), the pedestal never raised anything.
+    np.testing.assert_allclose(final_density[interior & bulk], rho0, rtol=1.0e-9)
+    np.testing.assert_allclose(final_density[bulk], rho0, rtol=1.0e-4)
+    np.testing.assert_allclose(final_density[interior & halo], pedestal, rtol=1.0e-5)
+    np.testing.assert_allclose(final_density[halo], pedestal, rtol=1.0e-3)
+elif mode == "floor":
     np.testing.assert_allclose(final_density[interior & bulk], rho0, rtol=1.0e-9)
     np.testing.assert_allclose(final_density[interior & halo], pedestal, rtol=1.0e-9)
     np.testing.assert_allclose(final_density[halo], pedestal, rtol=1.0e-5)
@@ -201,6 +215,33 @@ ledger = np.loadtxt(ledger_file, ndmin=2)
 print("ledger rows:\n", ledger)
 assert ledger.shape == (steps, 5), ledger.shape
 assert int(ledger[0, 0]) == 1 and int(ledger[-1, 0]) == steps
+if mode == "cov":
+    # No raise ever: every row books zero cells and zero totals; the
+    # injected fields are identically zero; the halo rides on the
+    # background (within the sanitize slack) at the image temperatures.
+    assert np.all(ledger[:, 1] == 0) and np.all(ledger[:, 2:] == 0.0), ledger
+    for name in ("implicit_mhd_pedestal_injected_mass",
+                 "implicit_mhd_pedestal_injected_electron_energy",
+                 "implicit_mhd_pedestal_injected_ion_energy"):
+        assert np.all(field(final, name) == 0.0), name
+    # No reset under the change of variables: the COLD band (loaded below
+    # the background) was lifted onto it by the sanitize; the HOT band
+    # (loaded at 3x the image) keeps its energy -- the floor form -- and
+    # drives a slow flow into its neighbours, so the checks sit on the band
+    # interiors after the first step.
+    final_internal = field(final, "implicit_mhd_ion_internal_energy")
+    np.testing.assert_allclose(final_electron[interior & cold_band], electron_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_ion[interior & cold_band], ion_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_internal[interior & cold_band], ion_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_electron[interior & hot_band], 3.0 * electron_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_ion[interior & hot_band], 3.0 * ion_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_internal[interior & hot_band], 3.0 * ion_image, rtol=1.0e-5)
+    # (the bulk sits one ulp below the background image in floating point,
+    # so the sanitize lifts it by its 2e-6 slack as well)
+    np.testing.assert_allclose(final_electron[interior & bulk], electron_image, rtol=1.0e-5)
+    np.testing.assert_allclose(final_ion[interior & bulk], ion_image, rtol=1.0e-5)
+    print("cov: cold band lifted onto the background by the sanitize, hot band kept, no injection, ledger zero")
+    sys.exit(0)
 assert int(ledger[0, 1]) == 32, ledger[0]
 injected_mass = 32 * (pedestal - rho_halo) * cell_size
 np.testing.assert_allclose(ledger[0, 2], injected_mass, rtol=1.0e-12)

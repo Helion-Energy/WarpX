@@ -1316,6 +1316,77 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_halo_pedestal_injected_mass = 0.0;
     amrex::Real m_halo_pedestal_energy_e = 0.0;
     amrex::Real m_halo_pedestal_energy_i = 0.0;
+    // ---- THE PEDESTAL AS A CHANGE OF VARIABLES (pedestal_fraction = 0 =
+    // off, bit-identical). A uniform, static, cold background
+    //     n_ped     = pedestal_fraction x pedestal_reference_density (en0),
+    //     rho_ped   = n_ped m_i,
+    //     U_e,ped   = n_ped kB T_e,ped / (gamma_e - 1),
+    //     e_i,ped   = n_ped kB T_i,ped / (gamma_i - 1)   (cgl: U_par = n kB T/2,
+    //                                                         U_perp = n kB T),
+    //     momentum  = 0,
+    // is SUBTRACTED from every advected fluid quantity, the rectified
+    // deviation is transported and the background added back -- the
+    // reference code's subtract / advect / re-add advance (en -= f en0;
+    // advect; MAX(en, 0); en += f en0) applied to every fluid channel,
+    // written in flux form (see pedestal_deviation_shift and the offset
+    // proof above it: every advective channel is linear in the transported
+    // cell quantity at frozen wave speeds, so the whole transformation is
+    // an additive face-flux shift that is exactly zero when off). The
+    // background's compression work is dropped from the pointwise
+    // pressure-work sources through the same rectified deviation
+    // pressures; wave speeds, dissipation jumps, the momentum equation
+    // (p_ped is gradient-free; rho_total carries the inertia) and every
+    // closure coefficient (T, chi, eta, exchange, the wall hooks) see the
+    // TOTALS, which remain the solver's state (a constant-shift
+    // reparameterization: identical Jacobians). Consequences: the halo is
+    // a cold static floor of density n_ped at T_ped that never moves, is
+    // never compressed and injects nothing (the per-cell injected fields
+    // stay identically zero; the only lift is the load-time sanitize onto
+    // the background, banner-booked); the near-vacuum Alfven and
+    // conduction stiffness is bounded by n_ped without any peak keying;
+    // temperature T = (gamma - 1) U_total / (n_total kB) reads T_ped where
+    // the deviation is zero. Admissibility (pedestal_floor = background,
+    // the default): the deviations are non-negative, so the background is
+    // also the floor of every block (a te >= T_ped-class floor, an
+    // active-set population where a sink -- a colder wall -- would cool a
+    // cell below it); pedestal_floor = positivity keeps the tiny
+    // positivity guards instead. pedestal_reference_density_update =
+    // reference_rule follows the reference code's en0_upd = 1 (en0 =
+    // max(en00, vacuum_reference_peak_fraction x step-old peak), refreshed
+    // every step, frozen for the solve): when en0 rises, the cells below
+    // the risen background are lifted onto it (the reference's MAX(en, 0)
+    // after the re-add) by the shared raise kernel in the FLOOR form, so
+    // that injection is booked in halo_pedestal_ledger_file and the
+    // injected fields and printed, never silent. Mutually exclusive with
+    // the halo_pedestal_* machinery and advection_density_offset_fraction
+    // (asserted). ----
+    amrex::Real m_pedestal_fraction = 0.0;
+    // en0 [m^-3]: default (unset) = vacuum_reference_base_density converted
+    // to a number density; an explicit 0 gives a zero background (the
+    // bit-identical null of the machinery).
+    amrex::Real m_pedestal_reference_density = 0.0;
+    bool m_pedestal_reference_density_set = false;
+    bool m_pedestal_reference_rule = false;
+    amrex::Real m_pedestal_temperature_e = 0.5;
+    amrex::Real m_pedestal_temperature_i = 0.1;
+    bool m_pedestal_floor_background = true;
+    // The background (per-solve constants; refreshed per step only under
+    // the reference rule): [kg/m^3], [J/m^3].
+    amrex::Real m_pedestal_en0_mass_density = 0.0;
+    amrex::Real m_pedestal_mass_density = 0.0;
+    amrex::Real m_pedestal_electron_energy = 0.0;
+    amrex::Real m_pedestal_ion_internal = 0.0;
+    amrex::Real m_pedestal_ion_parallel = 0.0;
+    amrex::Real m_pedestal_ion_perp = 0.0;
+    [[nodiscard]] bool PedestalChangeOfVariables () const
+    {
+        return m_pedestal_fraction > 0.0;
+    }
+    /** Set the change-of-variables background from the reference density
+     * en0 = max(base, peak_fraction x density_peak) (the peak enters only
+     * under the reference rule; pass 0 for the static default). Returns
+     * true when the background density changed. */
+    bool UpdatePedestalBackground (amrex::Real density_peak);
     // ---- Windowed halo temperature-relaxation outlet (0 = off,
     // bit-identical when off): relaxes BOTH species' internal energies
     // toward the prescribed cold-medium temperature

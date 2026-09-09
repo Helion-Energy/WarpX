@@ -3359,6 +3359,51 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         U_e, E_i or U_par + U_perp; the auxiliary U_i is not booked).
         First write of a run truncates a stale file.
 
+    pedestal_fraction: float, default=0 (off, bit-identical)
+        The pedestal as a CHANGE OF VARIABLES: a uniform, static, cold
+        background n_ped = pedestal_fraction x pedestal_reference_density
+        (density; electron energy n_ped kB T_e,ped / (gamma_e - 1); ion
+        internal energy n_ped kB T_i,ped / (gamma_i - 1), or the CGL pair;
+        no momentum) is subtracted from every advected fluid quantity, the
+        rectified deviation transported and the background added back (the
+        reference code's subtract / advect / re-add advance for every
+        channel, in flux form); the background's compression work leaves
+        the pressure-work sources; wave speeds, dissipation, momentum and
+        every closure coefficient see the totals. The halo is then a cold
+        static floor that is never transported, never compressed and
+        injects nothing. Requires fluid_flux="central" or "hlld"; excludes
+        halo_pedestal_fraction, halo_pedestal_density and
+        advection_density_offset_fraction (the deck arms the old pedestal
+        with any thermal wall: pass its fraction and rates as 0). The
+        reference code's value is 1e-3 (f_en_mn).
+
+    pedestal_reference_density: float, optional
+        en0 in m^-3 for the change-of-variables pedestal, fixed at boot.
+        Default (unset): the solver's vacuum reference base density (the
+        deck's vacuum reference n0, the reference code's card en0). An
+        explicit 0 gives a zero background (the machinery's null).
+
+    pedestal_reference_density_update: {"off", "reference_rule"}, default="off"
+        "reference_rule" follows the reference code's en0_upd = 1: en0 =
+        max(en00, vacuum_reference_peak_fraction x step-old density peak),
+        refreshed every step and frozen for the solve; when en0 rises the
+        cells below the risen background are lifted onto it (the
+        reference's MAX(en, 0) after the re-add) by the shared raise kernel
+        in the floor form, booked in halo_pedestal_ledger_file and the
+        implicit_mhd_pedestal_injected_* fields and printed.
+
+    pedestal_temperature_e: float, default=0.5 (eV)
+    pedestal_temperature_i: float, default=0.1 (eV)
+        The background's electron / ion temperatures (the reference code's
+        floors); must be positive when the change of variables is on.
+
+    pedestal_floor: {"background", "positivity"}, default="background"
+        Admissible set under the change of variables: "background" makes
+        the deviations non-negative (the background is also the floor of
+        every block -- a te >= T_ped-class floor, an active-set population
+        where a colder wall would cool a cell below it); "positivity" keeps
+        the tiny positivity guards.
+
     advection_density_offset_fraction: float, default=0 (off, bit-identical)
         Offset-density advection (requires fluid_flux="central" or
         "hlld"): fraction f_off of the shared vacuum reference density
@@ -3921,6 +3966,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_density=None,
         halo_pedestal_cold_raise=None,
         halo_pedestal_ledger_file=None,
+        pedestal_fraction=None,
+        pedestal_reference_density=None,
+        pedestal_reference_density_update=None,
+        pedestal_temperature_e=None,
+        pedestal_temperature_i=None,
+        pedestal_floor=None,
         advection_density_offset_fraction=None,
         halo_relaxation_rate=None,
         halo_relaxation_target=None,
@@ -4069,6 +4120,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_density = halo_pedestal_density
         self.halo_pedestal_cold_raise = halo_pedestal_cold_raise
         self.halo_pedestal_ledger_file = halo_pedestal_ledger_file
+        self.pedestal_fraction = pedestal_fraction
+        self.pedestal_reference_density = pedestal_reference_density
+        self.pedestal_reference_density_update = pedestal_reference_density_update
+        self.pedestal_temperature_e = pedestal_temperature_e
+        self.pedestal_temperature_i = pedestal_temperature_i
+        self.pedestal_floor = pedestal_floor
         self.advection_density_offset_fraction = advection_density_offset_fraction
         self.halo_relaxation_rate = halo_relaxation_rate
         self.halo_relaxation_target = halo_relaxation_target
@@ -4227,6 +4284,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_density = self.halo_pedestal_density
         implicit_mhd.halo_pedestal_cold_raise = self.halo_pedestal_cold_raise
         implicit_mhd.halo_pedestal_ledger_file = self.halo_pedestal_ledger_file
+        implicit_mhd.pedestal_fraction = self.pedestal_fraction
+        implicit_mhd.pedestal_reference_density = self.pedestal_reference_density
+        implicit_mhd.pedestal_reference_density_update = (
+            self.pedestal_reference_density_update
+        )
+        implicit_mhd.pedestal_temperature_e = self.pedestal_temperature_e
+        implicit_mhd.pedestal_temperature_i = self.pedestal_temperature_i
+        implicit_mhd.pedestal_floor = self.pedestal_floor
         implicit_mhd.advection_density_offset_fraction = (
             self.advection_density_offset_fraction
         )

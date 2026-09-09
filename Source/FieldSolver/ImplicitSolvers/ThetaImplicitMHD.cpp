@@ -260,6 +260,29 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_halo_pedestal_cold_reset = (cold_raise == "reset");
     }
     pp.query("halo_pedestal_ledger_file", m_halo_pedestal_ledger_file);
+    // The pedestal as a change of variables (see m_pedestal_fraction).
+    utils::parser::queryWithParser(pp, "pedestal_fraction", m_pedestal_fraction);
+    m_pedestal_reference_density_set = utils::parser::queryWithParser(
+        pp, "pedestal_reference_density", m_pedestal_reference_density);
+    {
+        std::string update = "off";
+        pp.query("pedestal_reference_density_update", update);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            update == "off" || update == "reference_rule",
+            "implicit_mhd.pedestal_reference_density_update must be off or "
+            "reference_rule");
+        m_pedestal_reference_rule = (update == "reference_rule");
+        std::string floor = "background";
+        pp.query("pedestal_floor", floor);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            floor == "background" || floor == "positivity",
+            "implicit_mhd.pedestal_floor must be background or positivity");
+        m_pedestal_floor_background = (floor == "background");
+    }
+    utils::parser::queryWithParser(pp, "pedestal_temperature_e",
+                                   m_pedestal_temperature_e);
+    utils::parser::queryWithParser(pp, "pedestal_temperature_i",
+                                   m_pedestal_temperature_i);
     // Offset-density advection (the reference code's step_en subtract/advect/
     // re-add; see m_advection_density_offset_fraction).
     utils::parser::queryWithParser(pp, "advection_density_offset_fraction",
@@ -1553,10 +1576,70 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_halo_pedestal_ledger_file.empty() ||
-            m_halo_pedestal_fraction > 0.0_rt,
+            m_halo_pedestal_fraction > 0.0_rt || m_pedestal_fraction > 0.0_rt,
         "implicit_mhd.halo_pedestal_ledger_file requires a positive "
-        "implicit_mhd.halo_pedestal_fraction (the ledger books the pedestal "
-        "refresh, which does not exist without a pedestal)");
+        "implicit_mhd.halo_pedestal_fraction or implicit_mhd.pedestal_fraction "
+        "(the ledger books the pedestal refresh, which does not exist without "
+        "a pedestal)");
+    // ---- The pedestal as a change of variables (m_pedestal_fraction). ----
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pedestal_fraction >= 0.0_rt && m_pedestal_fraction < 1.0_rt,
+        "implicit_mhd.pedestal_fraction must be in [0, 1)");
+    if (m_pedestal_fraction > 0.0_rt) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_recast,
+            "implicit_mhd.pedestal_fraction requires implicit_mhd.fluid_flux = "
+            "central or hlld (the change of variables lives in the recast "
+            "face-flux channels)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_fraction == 0.0_rt &&
+                m_halo_pedestal_number_density == 0.0_rt,
+            "implicit_mhd.pedestal_fraction (the pedestal as a change of "
+            "variables) excludes the halo_pedestal_* raise machinery: set "
+            "implicit_mhd.halo_pedestal_fraction = 0 (and no "
+            "halo_pedestal_density); the deck arms the old pedestal with any "
+            "thermal wall -- pass --halo-pedestal-fraction 0 "
+            "--halo-pedestal-drag-rate 0 --halo-pedestal-energy-rate 0");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_advection_density_offset_fraction == 0.0_rt,
+            "implicit_mhd.pedestal_fraction supersedes "
+            "implicit_mhd.advection_density_offset_fraction (the mass channel "
+            "of the same change of variables): set the latter to 0");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_pedestal_reference_density >= 0.0_rt,
+            "implicit_mhd.pedestal_reference_density cannot be negative");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_pedestal_temperature_e > 0.0_rt && m_pedestal_temperature_i > 0.0_rt,
+            "implicit_mhd.pedestal_temperature_e / _i must be positive (the "
+            "background carries a fixed cold internal energy; the reference "
+            "code's floors 0.5 eV / 0.1 eV are the defaults)");
+        // en0: explicit, else the shared vacuum reference BASE density
+        // (the deck's vacuum reference n0, the reference code's card en0),
+        // converted to a number density through the ion charge-to-mass.
+        m_pedestal_en0_mass_density =
+            m_pedestal_reference_density_set
+                ? m_pedestal_reference_density * PhysConst::q_e /
+                      m_ion_charge_to_mass
+                : m_vacuum_reference_base_density;
+        UpdatePedestalBackground(0.0_rt);
+        if (m_pedestal_mass_density > 0.0_rt) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_pedestal_mass_density > m_mass_density_floor,
+                "implicit_mhd.pedestal_fraction x the reference density must "
+                "exceed implicit_mhd.mass_density_floor (the background is "
+                "the halo's operating point; it must sit above the positivity "
+                "guard)");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_pedestal_electron_energy * (m_gamma_e - 1.0_rt) >
+                        m_electron_pressure_floor &&
+                    (m_ion_closure == "cgl" ||
+                     m_pedestal_ion_internal * (m_gamma_i - 1.0_rt) >
+                         m_ion_pressure_floor),
+                "implicit_mhd.pedestal_temperature_e / _i: the background "
+                "pressures n_ped kB T must exceed the electron / ion pressure "
+                "floors");
+        }
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_halo_relaxation_rate >= 0.0_rt,
         "implicit_mhd.halo_relaxation_rate cannot be negative");
@@ -4107,6 +4190,32 @@ void ThetaImplicitMHD::PrintParameters () const
                                : m_halo_pedestal_ledger_file)
                        << "\n";
     }
+    if (m_pedestal_fraction > 0.0_rt) {
+        amrex::Print() << "PEDESTAL (change of variables): n_ped = "
+                       << m_pedestal_fraction << " x en0 "
+                       << m_pedestal_en0_mass_density * m_ion_charge_to_mass /
+                              PhysConst::q_e
+                       << " m^-3 = "
+                       << m_pedestal_mass_density * m_ion_charge_to_mass /
+                              PhysConst::q_e
+                       << " m^-3 (rho_ped " << m_pedestal_mass_density
+                       << " kg/m^3), T_e/T_i " << m_pedestal_temperature_e
+                       << "/" << m_pedestal_temperature_i
+                       << " eV; background U_e " << m_pedestal_electron_energy
+                       << ", e_i " << m_pedestal_ion_internal
+                       << " J/m^3 (cgl U_par " << m_pedestal_ion_parallel
+                       << ", U_perp " << m_pedestal_ion_perp << "); en0 "
+                       << (m_pedestal_reference_rule
+                               ? "follows the reference rule max(en00, "
+                                 "peak_fraction x step-old peak) -- lifts "
+                                 "booked in the pedestal ledger"
+                               : "fixed at boot")
+                       << "; floors: "
+                       << (m_pedestal_floor_background
+                               ? "background (deviations >= 0)"
+                               : "positivity guards")
+                       << "\n";
+    }
     if (m_halo_pedestal_number_density > 0.0_rt) {
         amrex::Print() << "Halo pedestal density:         static "
                        << m_halo_pedestal_number_density << " m^-3 ("
@@ -6515,10 +6624,26 @@ ThetaImplicitMHD::MakeAdmissibilityBounds () const
     // Block 3 is U_perp under cgl (pressure-valued bounds) and the
     // auxiliary internal energy U_i under dual_energy (internal-energy-
     // valued bounds, the exact twins of the E_i block's internal image).
+    amrex::Real mass_floor = m_mass_density_floor;
+    amrex::Real electron_floor = energy_floor;
+    amrex::Real third_floor =
+        cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor;
+    amrex::Real fourth_floor =
+        dual_energy_closure ? ion_energy_floor : m_ion_pressure_floor;
+    if (PedestalChangeOfVariables() && m_pedestal_floor_background) {
+        // The change of variables' admissible set: deviations >= 0, i.e.
+        // the background is the floor of every block (the third / fourth
+        // blocks are e_i / U_i under total_energy / dual_energy and the
+        // CGL pair under cgl).
+        mass_floor = std::max(mass_floor, m_pedestal_mass_density);
+        electron_floor = std::max(electron_floor, m_pedestal_electron_energy);
+        third_floor = std::max(third_floor, cgl_closure ? m_pedestal_ion_parallel
+                                                        : m_pedestal_ion_internal);
+        fourth_floor = std::max(fourth_floor, cgl_closure ? m_pedestal_ion_perp
+                                                          : m_pedestal_ion_internal);
+    }
     return {
-        {m_mass_density_floor, energy_floor,
-         cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
-         dual_energy_closure ? ion_energy_floor : m_ion_pressure_floor},
+        {mass_floor, electron_floor, third_floor, fourth_floor},
         {0.0_rt, electron_pressure_per_density / (m_gamma_e - 1.0_rt),
          cgl_closure
              ? 0.5_rt * ion_pressure_per_density
@@ -8366,6 +8491,13 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_advection_density_offset_fraction > 0.0_rt
             ? m_advection_density_offset_fraction * VacuumReferenceMassDensity()
             : 0.0_rt;
+    // The pedestal as a change of variables (per-solve constants).
+    flux_parameters.pedestal_cov = PedestalChangeOfVariables();
+    flux_parameters.pedestal_mass_density = m_pedestal_mass_density;
+    flux_parameters.pedestal_electron_energy = m_pedestal_electron_energy;
+    flux_parameters.pedestal_ion_internal = m_pedestal_ion_internal;
+    flux_parameters.pedestal_ion_parallel = m_pedestal_ion_parallel;
+    flux_parameters.pedestal_ion_perp = m_pedestal_ion_perp;
     return flux_parameters;
 }
 
@@ -8467,6 +8599,17 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // work sources taper C^1-smoothly to zero below twice the pedestal;
     // identically 1 when the pedestal is off.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
+    // The pedestal as a change of variables: the background's compression
+    // work leaves the pointwise pressure-work sources through the rectified
+    // deviation pressures (gamma - 1) D(U) (see pedestal_deviation_shift);
+    // exactly zero when off.
+    const bool pedestal_cov = PedestalChangeOfVariables();
+    const amrex::Real pedestal_electron_energy = m_pedestal_electron_energy;
+    const amrex::Real pedestal_ion_internal = m_pedestal_ion_internal;
+    const amrex::Real pedestal_ion_parallel = m_pedestal_ion_parallel;
+    const amrex::Real pedestal_ion_perp = m_pedestal_ion_perp;
+    const amrex::Real pedestal_gamma_e_minus_one = m_gamma_e - 1.0_rt;
+    const amrex::Real pedestal_gamma_i_minus_one = m_gamma_i - 1.0_rt;
     const bool joule_halo_taper = m_joule_halo_taper;
     // Corner temperature pin (see m_wall_corner_temperature_pin_rate).
     // n kB T_wall = rho (q/m) T_wall[eV] for the quasi-neutral single-ion
@@ -8812,8 +8955,15 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 }
                 joule_heating = eta_joule * square_current;
             }
+            const amrex::Real pedestal_shift_pressure_e =
+                pedestal_cov
+                    ? pedestal_gamma_e_minus_one *
+                          theta_implicit_mhd::pedestal_deviation_shift(
+                              energy(i, j, k), pedestal_electron_energy)
+                    : 0.0_rt;
             amrex::Real pressure_work =
-                -pressure_e * divergence_electron_velocity;
+                -(pressure_e + pedestal_shift_pressure_e) *
+                divergence_electron_velocity;
             const bool guard_floors =
                 flux_parameters.use_hllc || flux_parameters.use_rusanov;
             const amrex::Real energy_end =
@@ -8968,7 +9118,8 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // telescoping face fluxes and is conserved exactly on a
                 // periodic mesh.
                 amrex::Real ion_pressure_work =
-                    pressure_e * divergence_electron_velocity;
+                    (pressure_e + pedestal_shift_pressure_e) *
+                    divergence_electron_velocity;
                 if (guard_floors && ion_pressure_work < 0.0_rt) {
                     // close the compression sink as U_i approaches
                     // its floor, mirroring the electron pdV treatment.
@@ -14710,6 +14861,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // the STEP-OLD density like the vacuum cell switch, so the taper is
     // a per-solve constant mask.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
+    // The pedestal as a change of variables: the background's compression
+    // work leaves the pointwise pressure-work sources through the rectified
+    // deviation pressures (gamma - 1) D(U) (see pedestal_deviation_shift);
+    // exactly zero when off.
+    const bool pedestal_cov = PedestalChangeOfVariables();
+    const amrex::Real pedestal_electron_energy = m_pedestal_electron_energy;
+    const amrex::Real pedestal_ion_internal = m_pedestal_ion_internal;
+    const amrex::Real pedestal_ion_parallel = m_pedestal_ion_parallel;
+    const amrex::Real pedestal_ion_perp = m_pedestal_ion_perp;
+    const amrex::Real pedestal_gamma_e_minus_one = m_gamma_e - 1.0_rt;
+    const amrex::Real pedestal_gamma_i_minus_one = m_gamma_i - 1.0_rt;
     // Pedestal-band velocity relaxation (see m_halo_pedestal_drag_rate):
     // engages with weight 1 - halo_source_taper, i.e. full rate at the
     // pedestal and exactly zero at/above twice it.
@@ -15430,8 +15592,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 joule_ion_share = f_ohmi * joule_heating;
                 joule_heating -= joule_ion_share;
             }
+            const amrex::Real pedestal_shift_pressure_e =
+                pedestal_cov
+                    ? pedestal_gamma_e_minus_one *
+                          theta_implicit_mhd::pedestal_deviation_shift(
+                              energy(i, j, k), pedestal_electron_energy)
+                    : 0.0_rt;
             amrex::Real pressure_work =
-                -pressure_e * divergence_electron_velocity;
+                -(pressure_e + pedestal_shift_pressure_e) *
+                divergence_electron_velocity;
             const amrex::Real energy_end =
                 energy(i, j, k) * (1.0_rt + extrapolation_weight) -
                 energy_old(i, j, k) * extrapolation_weight;
@@ -15557,7 +15726,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
                 lorentz_work /= safe_density;
                 amrex::Real ion_pressure_work =
-                    pressure_e * divergence_electron_velocity;
+                    (pressure_e + pedestal_shift_pressure_e) *
+                    divergence_electron_velocity;
                 const amrex::Real ion_limiter =
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_proxy_end, ion_energy_floor);
@@ -15711,8 +15881,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 const amrex::Real internal_limiter =
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_end, dual_ion_internal_floor);
+                const amrex::Real pedestal_shift_pressure_i =
+                    pedestal_cov
+                        ? pedestal_gamma_i_minus_one *
+                              theta_implicit_mhd::pedestal_deviation_shift(
+                                  ion_int(i, j, k), pedestal_ion_internal)
+                        : 0.0_rt;
                 amrex::Real pdv_work =
-                    -pressure_blend * divergence_velocity;
+                    -(pressure_blend + pedestal_shift_pressure_i) *
+                    divergence_velocity;
                 pdv_work = halo_source_taper *
                            drain_gate(pdv_work,
                                       divergence_ion_internal_flux,
@@ -15962,8 +16139,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // integrates -- and the (1/3, 2/3) split keeps isotropy
                 // a fixed point of pure compression at w = 0.
                 const amrex::Real pressure_parallel =
-                    2.0_rt * upar(i, j, k);
-                const amrex::Real pressure_perp = uperp(i, j, k);
+                    2.0_rt * (upar(i, j, k) +
+                              (pedestal_cov
+                                   ? theta_implicit_mhd::pedestal_deviation_shift(
+                                         upar(i, j, k), pedestal_ion_parallel)
+                                   : 0.0_rt));
+                const amrex::Real pressure_perp =
+                    uperp(i, j, k) +
+                    (pedestal_cov ? theta_implicit_mhd::pedestal_deviation_shift(
+                                        uperp(i, j, k), pedestal_ion_perp)
+                                  : 0.0_rt);
                 const amrex::Real number_density =
                     safe_density * inverse_ion_mass;
                 const amrex::Real pressure_effective =
@@ -16587,6 +16772,9 @@ void ThetaImplicitMHD::UpdateMagneticFieldFused (const amrex::Real a_thetadt,
 
 void ThetaImplicitMHD::SanitizeLoadedState ()
 {
+    // The admissibility floors (the change-of-variables background when
+    // that pedestal is on).
+    const AdmissibilityBounds sanitize_bounds = MakeAdmissibilityBounds();
     // One-time admissibility raise of the beginning-of-run fluid state.
     //
     // InitializeFluidState clamps the parser-filled state at the
@@ -16629,9 +16817,8 @@ void ThetaImplicitMHD::SanitizeLoadedState ()
                        << block_floor << " + slack\n";
     };
 
-    raise_scalar_block(MassDensityName, m_mass_density_floor);
-    raise_scalar_block(ElectronEnergyName,
-                       m_electron_pressure_floor / (m_gamma_e - 1.0_rt));
+    raise_scalar_block(MassDensityName, sanitize_bounds.floors[0]);
+    raise_scalar_block(ElectronEnergyName, sanitize_bounds.floors[1]);
 
     if (m_ion_closure == "total_energy" || m_ion_closure == "dual_energy") {
         // E_i >= KE + U_i_floor with the (raised) density in the KE
@@ -16644,8 +16831,7 @@ void ThetaImplicitMHD::SanitizeLoadedState ()
             m_state.getMultiFabBlock(MassDensityName, 0);
         const amrex::MultiFab& momentum_block =
             m_state.getMultiFabBlock(MomentumDensityName, 0);
-        const amrex::Real internal_floor =
-            m_ion_pressure_floor / (m_gamma_i - 1.0_rt);
+        const amrex::Real internal_floor = sanitize_bounds.floors[2];
         const amrex::Real density_floor = m_mass_density_floor;
         const amrex::Real before_min = ion_energy_block.min(0);
         for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
@@ -16672,14 +16858,11 @@ void ThetaImplicitMHD::SanitizeLoadedState ()
                        << " (min " << before_min
                        << ") to KE + its internal floor + slack\n";
         if (m_ion_closure == "dual_energy") {
-            raise_scalar_block(IonInternalEnergyName,
-                               m_ion_pressure_floor /
-                                   (m_gamma_i - 1.0_rt));
+            raise_scalar_block(IonInternalEnergyName, sanitize_bounds.floors[3]);
         }
     } else if (m_ion_closure == "cgl") {
-        raise_scalar_block(IonParallelEnergyName,
-                           0.5_rt * m_ion_pressure_floor);
-        raise_scalar_block(IonPerpEnergyName, m_ion_pressure_floor);
+        raise_scalar_block(IonParallelEnergyName, sanitize_bounds.floors[2]);
+        raise_scalar_block(IonPerpEnergyName, sanitize_bounds.floors[3]);
     }
 
     m_state.CopyMultiFabBlocksToFields();
@@ -16903,9 +17086,33 @@ void ThetaImplicitMHD::ClampWallExteriorState ()
 #endif
 }
 
+bool ThetaImplicitMHD::UpdatePedestalBackground (const amrex::Real density_peak)
+{
+    // en0 = max(en00, peak_fraction x peak) under the reference rule (the
+    // reference code's en0_upd = 1), else the fixed base; the background
+    // energies follow n_ped through n kB T = rho (q/m) T[eV].
+    amrex::Real reference = m_pedestal_en0_mass_density;
+    if (m_pedestal_reference_rule) {
+        reference = std::max(reference,
+                             m_vacuum_reference_peak_fraction * density_peak);
+    }
+    const amrex::Real before = m_pedestal_mass_density;
+    m_pedestal_mass_density = m_pedestal_fraction * reference;
+    const amrex::Real pressure_e =
+        m_pedestal_mass_density * m_ion_charge_to_mass * m_pedestal_temperature_e;
+    const amrex::Real pressure_i =
+        m_pedestal_mass_density * m_ion_charge_to_mass * m_pedestal_temperature_i;
+    m_pedestal_electron_energy = pressure_e / (m_gamma_e - 1.0_rt);
+    m_pedestal_ion_internal = pressure_i / (m_gamma_i - 1.0_rt);
+    m_pedestal_ion_parallel = 0.5_rt * pressure_i;
+    m_pedestal_ion_perp = pressure_i;
+    return m_pedestal_mass_density != before;
+}
+
 void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
 {
-    if (m_halo_pedestal_fraction <= 0.0_rt) {
+    const bool change_of_variables = PedestalChangeOfVariables();
+    if (m_halo_pedestal_fraction <= 0.0_rt && !change_of_variables) {
         return;
     }
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
@@ -16916,15 +17123,39 @@ void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
     // species, the energy image is the cold image at the pedestal
     // density instead of f times the instantaneous peak; the raise then
     // resets onto it (default) or floors at it.
-    const bool cold_electron_image = m_halo_pedestal_temperature_e > 0.0_rt;
-    const bool cold_ion_image = m_halo_pedestal_temperature_i > 0.0_rt;
+    const bool cold_electron_image =
+        change_of_variables || m_halo_pedestal_temperature_e > 0.0_rt;
+    const bool cold_ion_image =
+        change_of_variables || m_halo_pedestal_temperature_i > 0.0_rt;
+    // The change of variables lifts in the FLOOR form only (never a reset).
     const bool electron_reset =
-        cold_electron_image && m_halo_pedestal_cold_reset;
-    const bool ion_reset = cold_ion_image && m_halo_pedestal_cold_reset;
+        !change_of_variables && cold_electron_image && m_halo_pedestal_cold_reset;
+    const bool ion_reset =
+        !change_of_variables && cold_ion_image && m_halo_pedestal_cold_reset;
     const bool book_ledger = !m_halo_pedestal_ledger_file.empty();
     amrex::MultiFab& density_block = m_state.getMultiFabBlock(MassDensityName, 0);
     amrex::MultiFab& electron_energy_block =
         m_state.getMultiFabBlock(ElectronEnergyName, 0);
+    if (change_of_variables) {
+        // Background refresh (the reference rule needs the step-old peak;
+        // the static default is unchanged). Nothing to raise unless en0
+        // rose: the sanitize put the loaded state on the background and
+        // the transport never takes a cell below it (D = 0 there); the
+        // admissibility floors hold it against sinks. The halo_pedestal_*
+        // gate anchors / tapers stay at zero: the CoV needs none.
+        const bool rose = UpdatePedestalBackground(
+            m_pedestal_reference_rule ? density_block.max(0) : 0.0_rt);
+        if (!rose) {
+            if (book_ledger) {
+                WriteHaloPedestalLedgerRow(step, 0);
+            }
+            return;
+        }
+        amrex::Print() << "ThetaImplicitMHD: pedestal reference rule raised "
+                          "the background to rho_ped "
+                       << m_pedestal_mass_density << " kg/m^3 at step "
+                       << step + 1 << "; cells below it are lifted (booked)\n";
+    }
     // Dynamic pedestal STATE -- an f-scaled image of the instantaneous
     // peak state, one value per fluid block; the density is never below
     // the same fraction of the reference density (so a globally decaying
@@ -16933,7 +17164,9 @@ void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
     // so the drain-gate anchors and the source taper are per-solve
     // constants (no O(1/width) Jacobian coupling through the pedestal
     // itself).
-    if (m_halo_pedestal_number_density > 0.0_rt) {
+    if (change_of_variables) {
+        // (m_halo_pedestal_density stays 0: no gates, no tapers)
+    } else if (m_halo_pedestal_number_density > 0.0_rt) {
         // Static pedestal density (see m_halo_pedestal_number_density):
         // an absolute floor, rho_ped = n m_i through the ion
         // charge-to-mass; no peak reduction.
@@ -16945,7 +17178,8 @@ void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
             m_halo_pedestal_fraction *
             std::max(density_peak, m_reference_mass_density);
     }
-    const amrex::Real pedestal = m_halo_pedestal_density;
+    const amrex::Real pedestal =
+        change_of_variables ? m_pedestal_mass_density : m_halo_pedestal_density;
     // Cold image pressures n_ped kB T_ped = rho_ped (q/m) T[eV] (the
     // z-wall ghost-fill identity, as the halo relaxation outlet uses it).
     const amrex::Real cold_pressure_e =
@@ -16959,7 +17193,11 @@ void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
     m_halo_pedestal_ion_internal = 0.0_rt;
     m_halo_pedestal_ion_parallel = 0.0_rt;
     m_halo_pedestal_ion_perp = 0.0_rt;
-    if (total_energy_closure) {
+    if (change_of_variables) {
+        // The images are the background; the halo-pedestal members stay at
+        // zero (they feed the gate anchors and tapers).
+        m_halo_pedestal_electron_energy = 0.0_rt;
+    } else if (total_energy_closure) {
         if (cold_ion_image) {
             m_halo_pedestal_ion_internal =
                 cold_pressure_i / (m_gamma_i - 1.0_rt);
@@ -17065,10 +17303,16 @@ void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
             ? &m_state.getMultiFabBlock(IonInternalEnergyName, 0)
             : nullptr;
     const amrex::Real electron_energy_pedestal =
-        m_halo_pedestal_electron_energy;
-    const amrex::Real ion_internal_pedestal = m_halo_pedestal_ion_internal;
-    const amrex::Real ion_parallel_pedestal = m_halo_pedestal_ion_parallel;
-    const amrex::Real ion_perp_pedestal = m_halo_pedestal_ion_perp;
+        change_of_variables ? m_pedestal_electron_energy
+                            : m_halo_pedestal_electron_energy;
+    const amrex::Real ion_internal_pedestal =
+        change_of_variables ? m_pedestal_ion_internal
+                            : m_halo_pedestal_ion_internal;
+    const amrex::Real ion_parallel_pedestal =
+        change_of_variables ? m_pedestal_ion_parallel
+                            : m_halo_pedestal_ion_parallel;
+    const amrex::Real ion_perp_pedestal =
+        change_of_variables ? m_pedestal_ion_perp : m_halo_pedestal_ion_perp;
     // The rigid-conductor band is NOT fluid: under an active thermal
     // wall the masked cells keep their frozen load state, so the raise
     // must skip them -- without this the refresh repopulates the band

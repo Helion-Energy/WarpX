@@ -1,0 +1,23 @@
+# The three-band cold-floor column under the CHANGE-OF-VARIABLES pedestal
+# (implicit_mhd.pedestal_fraction) instead of the halo pedestal raise:
+# n_ped = 0.1 n0 with the same pressure-balance images. The loaded halo
+# (1e-3 n0) sits below the background, so today's raise WOULD fire every
+# step; here the load-time sanitize lifts it onto the background once
+# (banner-booked) and the pedestal machinery injects nothing afterwards:
+# the ledger books zero raised cells every step, the injected fields are
+# identically zero, and the column rides on the background.
+FILE = inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold
+implicit_mhd.halo_pedestal_fraction = 0
+implicit_mhd.halo_pedestal_temperature_e = 0
+implicit_mhd.halo_pedestal_temperature_i = 0
+implicit_mhd.pedestal_fraction = pedestal_fraction
+implicit_mhd.pedestal_reference_density = n0
+implicit_mhd.pedestal_temperature_e = T_ped_e
+implicit_mhd.pedestal_temperature_i = T_ped_i
+# The background is the admissibility floor and the sanitize parks the
+# lifted halo a slack margin above it: the bounded Newton solve then has a
+# bound-resident population by design, which the active set (the
+# production setting) resolves.
+newton.active_set = 1
+newton.max_iterations = 20
+newton.relative_tolerance = 1.0e-9

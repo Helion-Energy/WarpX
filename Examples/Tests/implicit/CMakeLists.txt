@@ -590,6 +590,70 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# ============ The pedestal as a CHANGE OF VARIABLES (implicit_mhd.pedestal_fraction) ============
+# (the NULL twins depend on decks registered further down and sit at the end of this file)
+
+# The discriminant: a hot dense bump expanding into a pure cold background
+# on a 256-cell periodic line -- the cells the deviation has not reached stay
+# BITWISE on the background (never transported, never compressed), the mass
+# is conserved, the ledger and the injected fields stay zero.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_bump  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_bump diag1.intervals=1"  # inputs
+    "analysis_mhd_pedestal_cov_bump.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The cold-floor column where today's raise fires every step: under the
+# change of variables the sanitize lifts the halo once and the machinery
+# injects nothing afterwards (ledger zero, injected fields zero).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_cov  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_cov  # inputs
+    "analysis_mhd_halo_pedestal_cold.py cov diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ dynamic column under the change of variables with the production fluid
+# stack (no injection, mass conserved, background intact), plain, under the
+# production solver stack minus the fused residual, and the fused-residual
+# identity on top of it.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_pedestal_cov  # inputs
+    "analysis_mhd_pedestal_cov_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_stack_ref  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_stack  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_pedestal_cov_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_pedestal_cov_stack_ref  # dependency
+)
+
 # Offset-density advection (implicit_mhd.advection_density_offset_fraction,
 # The reference code's subtract/advect/re-add density advance), NULL TWIN: a
 # two-cell-edged top-hat entropy wave advecting across a featureless
@@ -4671,3 +4735,27 @@ if(WarpX_FFT)
         OFF  # dependency
     )
 endif()
+
+# ============ The change-of-variables pedestal, NULL twins (dependencies registered above) ============
+# NULL: a zero background arms every branch of the change of variables with
+# shifts that are exactly 0.0 and floors at the positivity guards -- byte-
+# identical to the plain twin (1D dynamic relaxation deck; RZ wall churn deck).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_null  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_relaxation implicit_mhd.pedestal_fraction=1.0e-3 implicit_mhd.pedestal_reference_density=0"  # inputs
+    "analysis_mhd_pedestal_cov_null.py diags/diag000008 ../test_1d_theta_implicit_mhd_halo_relaxation/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_halo_relaxation  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_null  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.globalization_diagnostics=1 implicit_mhd.pedestal_fraction=1.0e-3 implicit_mhd.pedestal_reference_density=0"  # inputs
+    "analysis_mhd_pedestal_cov_null.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_churn/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)

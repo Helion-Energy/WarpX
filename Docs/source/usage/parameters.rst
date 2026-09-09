@@ -5454,6 +5454,91 @@ Jacobian probes.
     nothing was sub-pedestal); the first write of a run truncates a stale
     file. Without the file the totals are never read.
 
+.. pp:param:: implicit_mhd.pedestal_fraction
+    :type: ``float``
+    :default: ``0`` (off, bit-identical)
+
+    **The pedestal as a change of variables.** A uniform, static, cold
+    background
+
+    .. math::
+
+       n_\mathrm{ped} = f\,\mathrm{en0},\quad
+       U_{e,\mathrm{ped}} = n_\mathrm{ped} k_B T_{e,\mathrm{ped}}/(\gamma_e - 1),\quad
+       e_{i,\mathrm{ped}} = n_\mathrm{ped} k_B T_{i,\mathrm{ped}}/(\gamma_i - 1)
+
+    (the CGL pair :math:`U_\parallel = n k_B T/2`, :math:`U_\perp = n k_B T`;
+    no momentum) is subtracted from every advected fluid quantity, the
+    rectified deviation :math:`D(X) = (X - X_\mathrm{ped})\,
+    \mathrm{smoothstep}((X - X_\mathrm{ped})/(0.1 X_\mathrm{ped}))` is
+    transported and the background added back -- the reference code's
+    ``en -= f en0; advect; MAX(en, 0); en += f en0`` advance for every
+    channel, written in flux form (every advective channel is linear in
+    the transported cell quantity at frozen wave speeds, so the
+    transformation is an additive face-flux shift that is exactly zero
+    when off). The background's compression work leaves the pointwise
+    pressure-work sources through the same rectified deviation pressures
+    :math:`(\gamma - 1) D(U)`; wave speeds, dissipation jumps, the
+    momentum equation (a uniform :math:`p_\mathrm{ped}` is gradient-free,
+    :math:`\rho_\mathrm{total}` carries the inertia) and every closure
+    coefficient (:math:`T`, :math:`\chi`, :math:`\eta`, exchange, the wall
+    hooks) see the **totals**, which remain the solver's state. The halo is
+    then a cold static floor of density :math:`n_\mathrm{ped}` at
+    :math:`T_\mathrm{ped}` that is never transported, never compressed
+    and injects nothing (the ``implicit_mhd_pedestal_injected_*`` fields
+    stay identically zero; the only lift is the load-time sanitize onto
+    the background, banner-booked). Requires ``implicit_mhd.fluid_flux =
+    central`` or ``hlld``; excludes :pp:param:`implicit_mhd.halo_pedestal_fraction`,
+    :pp:param:`implicit_mhd.halo_pedestal_density` and
+    :pp:param:`implicit_mhd.advection_density_offset_fraction` (asserted).
+    The reference code's fraction is :math:`10^{-3}`.
+
+.. pp:param:: implicit_mhd.pedestal_reference_density
+    :type: ``float``
+    :unit: m^-3
+    :default: the vacuum reference base density (:pp:param:`implicit_mhd.vacuum_reference_base_density` as a number density)
+
+    en0 of the change-of-variables pedestal, fixed at boot. An explicit
+    ``0`` gives a zero background (the machinery's bit-identical null).
+
+.. pp:param:: implicit_mhd.pedestal_reference_density_update
+    :type: ``string``
+    :default: ``off``
+
+    ``reference_rule``: the reference code's ``en0_upd = 1``, en0 =
+    max(en00, :pp:param:`implicit_mhd.vacuum_reference_peak_fraction`
+    :math:`\times` step-old density peak), refreshed every step and frozen
+    for the solve. When en0 rises, the cells below the risen background are
+    lifted onto it (the reference's ``MAX(en, 0)`` after the re-add) by the
+    pedestal raise kernel in the floor form, booked in
+    :pp:param:`implicit_mhd.halo_pedestal_ledger_file` and the
+    ``implicit_mhd_pedestal_injected_*`` fields and printed -- reproducible,
+    never silent.
+
+.. pp:param:: implicit_mhd.pedestal_temperature_e
+    :type: ``float``
+    :unit: eV
+    :default: ``0.5``
+
+.. pp:param:: implicit_mhd.pedestal_temperature_i
+    :type: ``float``
+    :unit: eV
+    :default: ``0.1``
+
+    The background's electron and ion temperatures (the reference code's
+    floors); positive when the change of variables is on.
+
+.. pp:param:: implicit_mhd.pedestal_floor
+    :type: ``string``
+    :default: ``background``
+
+    The admissible set under the change of variables. ``background``: the
+    deviations are non-negative, i.e. the background is also the floor of
+    every block (a :math:`T_e \ge T_{e,\mathrm{ped}}`-class floor at the
+    background density; an active-set population where a sink -- a colder
+    wall -- would cool a cell below it). ``positivity``: the tiny positivity
+    guards stay the floors.
+
 .. pp:param:: implicit_mhd.advection_density_offset_fraction
     :type: ``float``
     :default: ``0`` (off, bit-identical)
