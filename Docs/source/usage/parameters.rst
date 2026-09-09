@@ -390,8 +390,10 @@ Overall simulation parameters
             ``newton.diagnostic_file`` gains four columns,
             ``free_norm_rel`` (the exit free norm over its iteration-0
             value), ``exit_status`` (2 absolute tolerance, 3 relative
-            tolerance, 4 active-set tolerance on the free subspace, 1
-            line-search stagnation accepted, 0 iteration cap accepted,
+            tolerance, 4 active-set tolerance on the free subspace, 5
+            active-set tolerance on the set enlarged by the last projection
+            after a failed line search -- ``newton.line_search_resolve``
+            only, 1 line-search stagnation accepted, 0 iteration cap accepted,
             negative = failure), ``max_pinned_direction`` (the largest
             norm of the Newton direction restricted to the active set in
             the solve -- exactly 0 by construction) and
@@ -417,6 +419,97 @@ Overall simulation parameters
             Relative tolerance of the free-subspace residual in the
             active-set mode, measured against the free norm at iteration 0
             of the solve (the pinned defect is excluded from both).
+
+          - ``newton.active_set_hysteresis`` (``int``, default: 0; requires ``newton.active_set = 1``).
+            Release hysteresis of the active set. With the plain rule (0) a
+            pinned component is released as soon as its residual turns
+            inward (:math:`F_i \le 0`). Measured on the production
+            formation deck the floored wall-row rows are not diagonally
+            dominant: a member released on the sign of its own residual is
+            driven back through its bound by the same iteration's free
+            direction (its neighbours' update) and re-clamped by the
+            projection, so the set is re-formed every iteration (170
+            releases and 169 entrants per step on a set of ~125 in the
+            14-17 us windows); every re-clamp truncates the direction the
+            free solve assumed, the full step fails the Armijo test, the
+            ladder settles at 0.25 or stalls (25% damped iterations, 17%
+            stagnation exits, two wasted iterations per step). With
+            hysteresis :math:`N > 0`, after iteration 0 of a solve a member
+            resting on its bound whose residual has turned inward is held
+            in the set for up to :math:`N` consecutive identifications
+            before it is released (1 = the "two consecutive iterations"
+            rule; a value at or above ``newton.max_iterations`` never
+            releases within a solve). Iteration 0 rebuilds the set from the
+            state and resets the counters, so the hold never outlives the
+            solve. A member held while its residual points inward books a
+            signed inward (negative) defect to the pinned-defect ledger at
+            the exit, which is where the churn would have left it (re-clamped
+            on its bound) at a fraction of the cost. The verbose active-set
+            line reports the held count; the diagnostic file gains the
+            columns below.
+
+          - ``newton.line_search_resolve`` (``bool``, default: false; requires ``newton.active_set = 1``).
+            Entrant re-solve. When the projection clamps NEW components into
+            the active set at a Newton iteration and the full step then
+            fails the Armijo test, the reduced linear system is solved once
+            more with the enlarged set (same base state and frozen
+            preconditioner) and the full step is retried before the ladder
+            backtracks: the truncated direction is replaced by one that is
+            consistent with the entrants held at their bounds. At most one
+            re-solve per Newton iteration; its linear iterations count in
+            the step's total. Also: a ladder that fails while the free
+            residual with respect to the enlarged set is already within
+            ``newton.active_set_tolerance`` exits as converged on that set
+            with its own exit status, 5, instead of as a stagnation-accept
+            (status 1): unlike a status-4 exit the entrants of that iteration
+            were not moved onto their bounds (they sit at or above the
+            projection's landing point with a demanding residual, which the
+            pinned-defect ledger books in full) and the returned state is the
+            last accepted iterate. The freeze-guard accounting is the same as
+            for status 4 (an exit granted by the round-off gate alone at
+            iteration 0 with nothing moved counts as a frozen step).
+
+          - ``newton.line_search`` (``backtrack``, ``quadratic`` or ``cubic``, default: ``backtrack``).
+            Step-length rule of the Newton line search. ``backtrack`` halves
+            the step after every rejected trial (12 rungs down to
+            :math:`2^{-12}`, the historical ladder, bit-identical).
+            ``quadratic`` minimises the quadratic model of the merit
+            function :math:`f(\lambda) = \tfrac{1}{2}\|F(U - \lambda\,\delta U)\|^2`
+            through :math:`f(0)`, :math:`f'(0) = -\|F\|^2` and the rejected
+            trial; ``cubic`` uses the cubic through the last two rejected
+            trials from the second backtrack on (Dennis & Schnabel 1983,
+            sec. 6.3.2; Kelley 1995, sec. 8.3.1). Both are safeguarded to
+            :math:`[0.1, 0.5]` of the rejected step and give up below
+            ``newton.line_search_min_step``. In the active-set mode the
+            merit is the free-subspace norm. A polynomial rule saves
+            residual evaluations on damped iterations (the halving ladder
+            spends two per 0.25 acceptance); it does not change the number
+            of linear solves, which is the cost of a Newton iteration.
+
+          - ``newton.line_search_min_step`` (``float``, default: :math:`2^{-12}`).
+            Smallest step the polynomial line-search rules may try before
+            the search is declared failed (the same floor the 12-rung
+            halving ladder reaches).
+
+          - ``newton.globalization_diagnostics`` (``bool``, default: false).
+            Record the globalization counters below in the Newton
+            diagnostic file without changing any arithmetic (for a control
+            run of the plain rules).
+
+            With any of ``newton.active_set_hysteresis``,
+            ``newton.line_search_resolve``, ``newton.line_search`` or
+            ``newton.line_search_min_step`` at a non-default value, or with
+            ``newton.globalization_diagnostics``, the Newton diagnostic file
+            carries seven more columns per solve:
+            ``entrants`` (components the projection clamped into the set
+            during the solve), ``released`` and ``held`` (at the
+            identifications), ``resolves`` (entrant re-solves),
+            ``damped_steps`` (accepted steps below 1), ``rejected_trials``
+            (line-search trials that failed the Armijo test) and ``moved``
+            (components the identification moved down onto their bounds; a
+            member held while off its bound would show up here, which makes
+            it the witness of the hold's bound-resident guard -- the
+            ``max_bound_excess`` column is measured after the move and is not).
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 

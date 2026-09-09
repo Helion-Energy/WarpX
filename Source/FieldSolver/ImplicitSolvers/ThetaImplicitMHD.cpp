@@ -6869,7 +6869,8 @@ ThetaImplicitMHD::IdentifyActiveSet (const WarpXSolverVec& a_U,
                                      const WarpXSolverVec& a_F,
                                      const bool a_keep_clamped,
                                      amrex::Long& a_entered,
-                                     amrex::Long& a_released) const
+                                     amrex::Long& a_released,
+                                     amrex::Long& a_held) const
 {
     // Reduced-space Newton (newton.active_set): the active set at this
     // iterate, block by block over the floored fluid blocks, with the
@@ -6887,6 +6888,23 @@ ThetaImplicitMHD::IdentifyActiveSet (const WarpXSolverVec& a_U,
     // equations now want to lift it) is released to the free subspace.
     // The masks replace the previous ones -- at iteration 0 of a solve
     // the set is rebuilt from the state alone.
+    //
+    // Release hysteresis (newton.active_set_hysteresis = N > 0, after
+    // iteration 0 only): a member resting on its bound whose residual
+    // has turned inward is HELD for up to N consecutive identifications
+    // before it is released. Measured on the production formation deck
+    // the wall-row rows are not diagonally dominant: a member released on
+    // the sign of its own residual is driven back through its bound by
+    // the same iteration's free direction (the neighbours' update), the
+    // projection re-clamps it, and the set is re-formed every iteration
+    // (170 releases and 169 entrants per step on a set of ~125 in the
+    // 14-17 us windows), which truncates the direction and damps or
+    // stalls the line search. Holding the member one more iteration
+    // keeps the free system consistent; if it still wants to lift at the
+    // next identification it is released (a wrongly held member books a
+    // signed, inward defect at the exit, exactly where the churn would
+    // have left it anyway: re-clamped on its bound). Iteration 0
+    // rebuilds the set from the state and resets the hold counters.
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -6903,8 +6921,15 @@ ThetaImplicitMHD::IdentifyActiveSet (const WarpXSolverVec& a_U,
     const amrex::MultiFab& old_density_mf =
         m_state_old.getMultiFabBlock(MassDensityName, 0);
     const int keep_clamped = a_keep_clamped ? 1 : 0;
-    // Per block: pinned, entered, released (global sums below).
-    std::array<amrex::Long, 12> counts = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    // The hold counters act after iteration 0 only; iteration 0 resets
+    // them (the plain rule, m_active_set_hysteresis == 0, never touches
+    // them: that path is unchanged).
+    const bool use_hysteresis = m_active_set_hysteresis > 0;
+    const int hysteresis = (use_hysteresis && a_keep_clamped)
+                               ? m_active_set_hysteresis : 0;
+    // Per block: pinned, entered, released, held (global sums below).
+    std::array<amrex::Long, 16> counts = {0, 0, 0, 0, 0, 0, 0, 0,
+                                          0, 0, 0, 0, 0, 0, 0, 0};
     for (int block = 0; block < num_blocks; ++block) {
         const amrex::Real floor = bounds.floors[block];
         const amrex::Real temperature_coefficient =
@@ -6921,10 +6946,16 @@ ThetaImplicitMHD::IdentifyActiveSet (const WarpXSolverVec& a_U,
                            1, 0);
             mask_mf.setVal(0);
         }
+        amrex::iMultiFab& hold_mf = m_release_holds[block];
+        if (use_hysteresis && !hold_mf.ok()) {
+            hold_mf.define(value_mf.boxArray(), value_mf.DistributionMap(),
+                           1, 0);
+            hold_mf.setVal(0);
+        }
         amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
-                         amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Long, amrex::Long, amrex::Long> reduce_data(
-            reduce_op);
+                         amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Long, amrex::Long, amrex::Long, amrex::Long>
+            reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
         for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
             const amrex::Box box = mfi.validbox();
@@ -6933,54 +6964,112 @@ ThetaImplicitMHD::IdentifyActiveSet (const WarpXSolverVec& a_U,
             const auto old_value = old_mf.const_array(mfi);
             const auto old_density = old_density_mf.const_array(mfi);
             const auto mask = mask_mf.array(mfi);
-            reduce_op.eval(
-                box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                    const amrex::Real temperature_bound =
-                        temperature_coefficient * old_density(i, j, k);
-                    const amrex::Real cell_floor =
-                        old_value(i, j, k) >= temperature_bound
-                            ? std::max(floor, temperature_bound)
-                            : floor;
-                    const amrex::Real bound =
-                        (1.0 - theta) * old_value(i, j, k) +
-                        theta * cell_floor;
-                    const amrex::Real margin =
-                        1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
-                    const int was = mask(i, j, k);
-                    const bool demands_sub_bound = residual(i, j, k) > 0.0_rt;
-                    const bool on_bound =
-                        value(i, j, k) <= bound + 2.0_rt * margin;
-                    const int now =
-                        (demands_sub_bound &&
-                         (on_bound || (keep_clamped != 0 && was != 0)))
-                            ? 1
-                            : 0;
-                    mask(i, j, k) = now;
-                    return {static_cast<amrex::Long>(now),
-                            static_cast<amrex::Long>(
-                                (now != 0 && was == 0) ? 1 : 0),
-                            static_cast<amrex::Long>(
-                                (was != 0 && now == 0) ? 1 : 0)};
-                });
+            if (!use_hysteresis) {
+                reduce_op.eval(
+                    box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                        const amrex::Real temperature_bound =
+                            temperature_coefficient * old_density(i, j, k);
+                        const amrex::Real cell_floor =
+                            old_value(i, j, k) >= temperature_bound
+                                ? std::max(floor, temperature_bound)
+                                : floor;
+                        const amrex::Real bound =
+                            (1.0 - theta) * old_value(i, j, k) +
+                            theta * cell_floor;
+                        const amrex::Real margin =
+                            1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
+                        const int was = mask(i, j, k);
+                        const bool demands_sub_bound = residual(i, j, k) > 0.0_rt;
+                        const bool on_bound =
+                            value(i, j, k) <= bound + 2.0_rt * margin;
+                        const int now =
+                            (demands_sub_bound &&
+                             (on_bound || (keep_clamped != 0 && was != 0)))
+                                ? 1
+                                : 0;
+                        mask(i, j, k) = now;
+                        return {static_cast<amrex::Long>(now),
+                                static_cast<amrex::Long>(
+                                    (now != 0 && was == 0) ? 1 : 0),
+                                static_cast<amrex::Long>(
+                                    (was != 0 && now == 0) ? 1 : 0),
+                                static_cast<amrex::Long>(0)};
+                    });
+            } else {
+                const auto hold = hold_mf.array(mfi);
+                reduce_op.eval(
+                    box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                        const amrex::Real temperature_bound =
+                            temperature_coefficient * old_density(i, j, k);
+                        const amrex::Real cell_floor =
+                            old_value(i, j, k) >= temperature_bound
+                                ? std::max(floor, temperature_bound)
+                                : floor;
+                        const amrex::Real bound =
+                            (1.0 - theta) * old_value(i, j, k) +
+                            theta * cell_floor;
+                        const amrex::Real margin =
+                            1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
+                        const int was = mask(i, j, k);
+                        const bool demands_sub_bound = residual(i, j, k) > 0.0_rt;
+                        const bool on_bound =
+                            value(i, j, k) <= bound + 2.0_rt * margin;
+                        int now =
+                            (demands_sub_bound &&
+                             (on_bound || (keep_clamped != 0 && was != 0)))
+                                ? 1
+                                : 0;
+                        int held = 0;
+                        // Hysteresis: a bound-resident member whose
+                        // residual turned inward is held for up to
+                        // `hysteresis` consecutive identifications; a
+                        // demanding member, a released one, and every
+                        // component at iteration 0 (hysteresis == 0
+                        // there) reset the counter.
+                        int count = 0;
+                        if (hysteresis > 0 && was != 0 && !demands_sub_bound &&
+                            on_bound) {
+                            count = hold(i, j, k) + 1;
+                            if (count <= hysteresis) {
+                                now = 1;
+                                held = 1;
+                            } else {
+                                count = 0;
+                            }
+                        }
+                        hold(i, j, k) = count;
+                        mask(i, j, k) = now;
+                        return {static_cast<amrex::Long>(now),
+                                static_cast<amrex::Long>(
+                                    (now != 0 && was == 0) ? 1 : 0),
+                                static_cast<amrex::Long>(
+                                    (was != 0 && now == 0) ? 1 : 0),
+                                static_cast<amrex::Long>(held)};
+                    });
+            }
         }
         const ReduceTuple block_counts = reduce_data.value(reduce_op);
-        counts[3 * block + 0] = amrex::get<0>(block_counts);
-        counts[3 * block + 1] = amrex::get<1>(block_counts);
-        counts[3 * block + 2] = amrex::get<2>(block_counts);
+        counts[4 * block + 0] = amrex::get<0>(block_counts);
+        counts[4 * block + 1] = amrex::get<1>(block_counts);
+        counts[4 * block + 2] = amrex::get<2>(block_counts);
+        counts[4 * block + 3] = amrex::get<3>(block_counts);
     }
-    amrex::ParallelAllReduce::Sum(counts.data(), 3 * num_blocks,
+    amrex::ParallelAllReduce::Sum(counts.data(), 4 * num_blocks,
                                   amrex::ParallelContext::CommunicatorSub());
     m_projected_components = 0;
     a_entered = 0;
     a_released = 0;
+    a_held = 0;
     for (int block = 0; block < 4; ++block) {
         m_projected_per_block[block] =
-            block < num_blocks ? counts[3 * block + 0] : 0;
+            block < num_blocks ? counts[4 * block + 0] : 0;
         m_projected_components += m_projected_per_block[block];
         if (block < num_blocks) {
-            a_entered += counts[3 * block + 1];
-            a_released += counts[3 * block + 2];
+            a_entered += counts[4 * block + 1];
+            a_released += counts[4 * block + 2];
+            a_held += counts[4 * block + 3];
         }
     }
     return m_projected_components;

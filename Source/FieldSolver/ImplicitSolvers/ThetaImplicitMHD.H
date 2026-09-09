@@ -166,7 +166,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Long
     IdentifyActiveSet (const WarpXSolverVec& a_U, const WarpXSolverVec& a_F,
                        bool a_keep_clamped, amrex::Long& a_entered,
-                       amrex::Long& a_released) const override;
+                       amrex::Long& a_released,
+                       amrex::Long& a_held) const override;
+    void SetActiveSetHysteresis (int a_count) override
+    {
+        m_active_set_hysteresis = a_count;
+    }
+    [[nodiscard]] amrex::Long ActiveSetSize () const override
+    {
+        return m_projected_components;
+    }
     amrex::Long MoveActiveSetToBounds (WarpXSolverVec& a_U) const override;
     void ZeroActiveSetComponents (WarpXSolverVec& a_v) const override;
     void CopyActiveSetComponents (WarpXSolverVec& a_dst,
@@ -757,6 +766,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // ProjectAndLimitSolverStep; the Jacobian-vector products and the
     // preconditioner are masked through Zero/CopyActiveSetComponents.
     mutable bool m_active_set_mode = false;
+    // Release hysteresis of the active-set mode
+    // (newton.active_set_hysteresis, set by the Newton solver at Define;
+    // 0 = the plain release rule): per fluid block, the number of
+    // consecutive identifications (after iteration 0) at which a member
+    // resting on its bound has NOT demanded the sub-bound update and was
+    // held anyway; the member is released once the count exceeds the
+    // hysteresis. Allocated with the masks on first use; reset at
+    // iteration 0 of every solve. Only touched when the hysteresis is
+    // positive (the plain mode never allocates or reads it).
+    int m_active_set_hysteresis = 0;
+    mutable std::array<amrex::iMultiFab, 4> m_release_holds;
     // Pinned-defect ledger (active-set mode): cumulative mass [kg] and
     // fluid energy [J] ([kg/m^2], [J/m^2] in 1D) the floors CREATED by
     // holding pinned components on their bounds against the equations'

@@ -2131,6 +2131,31 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_braginskii_oblique_edge  # dependency
 )
+
+# Newton line-search step rule (newton.line_search) on the deck with genuine
+# free-subspace damping (13 damped of 69 Newton iterations at default, nothing
+# pinned): the halving ladder with the globalization counters recorded (no
+# arithmetic change), then the safeguarded cubic/quadratic rule against it
+# (analysis_mhd_line_search_polynomial.py: engaged and distinct from halving,
+# no more rejected trials, work within 1.3x, physics to 1e-4).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_line_search_control  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge newton.globalization_diagnostics=1"  # inputs
+    "analysis_mhd_line_search_polynomial.py control diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_line_search_cubic  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique_edge newton.line_search=cubic"  # inputs
+    "analysis_mhd_line_search_polynomial.py cubic diags/diag000010"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_edge_line_search_control  # dependency
+)
 # Ions evolving (dual-energy pair, hot-ion front, equilibration, ion sonic
 # cap) with the density weight: the only arm whose non-energy rows carry a
 # right-hand side, i.e. the gate on the weight's identity-row premultiply
@@ -3564,6 +3589,46 @@ add_warpx_test(
     "analysis_mhd_z_wall_conduction.py diags on ../test_rz_theta_implicit_mhd_z_wall_conduction_off/diags"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency
+)
+
+# Engineered active-set churn on the z-end wall (the production wall-row
+# mechanism: the pinned wall row is released by the identification and
+# re-clamped by the same iteration's free direction, solve after solve), see
+# the deck header. The plain reduced-space Newton with the globalization
+# counters recorded is the control. The whole-solve hold
+# (newton.active_set_hysteresis = 30, THE PRODUCTION CANDIDATE measured on the
+# formation deck) must hold the wall row without outliving the solve
+# (two-sided counter gates), cut the churn, move nothing onto a bound after
+# iteration 0, not grow the work and stay within 1e-5 of the control's
+# physics; the one-identification hold + entrant re-solve is the mechanics
+# arm of the re-solve knob (no damped step on this deck: re-solves and
+# status-5 exits must stay 0). analysis_mhd_wall_active_set_churn.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.globalization_diagnostics=1"  # inputs
+    "analysis_mhd_wall_active_set_churn.py control diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30"  # inputs
+    "analysis_mhd_wall_active_set_churn.py sticky diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_resolve  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=1 newton.line_search_resolve=1"  # inputs
+    "analysis_mhd_wall_active_set_churn.py resolve diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
 )
 
 # The conduction block with the conductive z-end exchange, at 200x the
