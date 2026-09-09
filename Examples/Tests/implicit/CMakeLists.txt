@@ -3718,6 +3718,46 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
 )
 
+# The two production knobs together (newton.active_set_hysteresis = 30 AND
+# implicit_evolve.fused_residual = 1): each had its own gate above -- the
+# hold's behaviour on this deck, the fused bookkeeping's identity on decks
+# without the hold -- but no test ran them combined, and the production
+# recipe carries both. The fused bookkeeping under the whole-solve hold must
+# be bit-identical to the hold alone: Newton diagnostic file byte-equal (the
+# same Newton and GMRES counts, entrants, releases, holds, moves), plotfile
+# fields identical to the last bit -- on the deck's two-box layout (2 ranks,
+# real ghost exchanges) and on the single-box layout of a one-GPU production
+# run (1 rank: the exchanges that cannot move data are skipped).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_fused  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_fused  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # dependency
+)
+
 # The conduction block with the conductive z-end exchange, at 200x the
 # resolved step (bulk conduction number 100, end-face exchange diagonal
 # 200): the preconditioner must own the end exchange through its Dirichlet
