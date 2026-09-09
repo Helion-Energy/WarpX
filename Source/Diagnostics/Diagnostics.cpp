@@ -276,7 +276,8 @@ Diagnostics::BaseReadParameters ()
     // Loop over all fields stored in m_varnames
     for (const auto& var : m_varnames) {
         // Check if m_varnames contains a string of the form rho_<species_name>
-        if (var.starts_with("rho_")) {
+        // (rho_pedestal is the hybrid density-pedestal field, not a species)
+        if (var.starts_with("rho_") && var != "rho_pedestal") {
             // Extract species name from the string rho_<species_name>
             const std::string species = var.substr(var.find("rho_") + 4);
             // Boolean used to check if species name was misspelled

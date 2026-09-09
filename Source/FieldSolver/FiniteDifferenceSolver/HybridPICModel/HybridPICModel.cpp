@@ -259,6 +259,24 @@ void HybridPICModel::ReadParameters ()
     // bit-identical unset. qdsmc_n_floor is parsed above, so the pedestal
     // density default picks up the deck's gate.
     pp_hybrid.query("qdsmc_halo_unfreeze", m_qdsmc_halo_unfreeze);
+
+    // Density pedestal as a change of variables (member doc). Default off
+    // and bit-identical; the profile defaults to the uniform n_floor.
+    pp_hybrid.query("density_pedestal", m_density_pedestal);
+    pp_hybrid.query("density_pedestal_profile(x,y,z)",
+                    m_density_pedestal_expression);
+    utils::parser::queryWithParser(pp_hybrid, "density_pedestal_eb_taper_cells",
+                                   m_density_pedestal_eb_taper_cells);
+    if (m_density_pedestal) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_n_floor > 0.0_rt || !m_density_pedestal_expression.empty(),
+            "hybrid_pic_model.density_pedestal = 1 needs a positive n_floor "
+            "(the default uniform pedestal value) or an explicit "
+            "density_pedestal_profile(x,y,z)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_density_pedestal_eb_taper_cells >= 0.0_rt,
+            "hybrid_pic_model.density_pedestal_eb_taper_cells must be >= 0");
+    }
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_source_taper_n",
                                    m_qdsmc_source_taper_n);
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_pedestal_cap_ev",
@@ -1261,6 +1279,15 @@ void HybridPICModel::AllocateLevelMFs (
         lev, amrex::convert(ba, rho_nodal_flag),
         dm, ncomps, ngRho, 0.0_rt);
 
+    // Density pedestal q_e n_ped(x,y,z) (change of variables, member doc):
+    // nodal like rho, static, (re)filled on demand -- this allocation runs
+    // at init, restart and regrid, so mark the field stale here.
+    if (m_density_pedestal) {
+        fields.alloc_init("hybrid_rho_pedestal_fp",
+            lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho, 0.0_rt);
+        m_density_pedestal_stale = true;
+    }
+
     // The "hybrid_current_fp_temp" multifab is used to store the ion current density
     // interpolated or extrapolated to appropriate timesteps.
     fields.alloc_init(FieldType::hybrid_current_fp_temp, Direction{0},
@@ -1389,6 +1416,33 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
                           "the EB; particles/QDSMC EB fill unchanged)\n";
     }
 
+    if (m_density_pedestal) {
+        // Density pedestal (change of variables): compile the profile, fill
+        // every level, and print the inventory so the ledger has the
+        // pedestal's electron count and thermal stock at T_e0.
+        if (!m_density_pedestal_expression.empty()) {
+            m_density_pedestal_parser = std::make_unique<amrex::Parser>(
+                utils::parser::makeParser(m_density_pedestal_expression,
+                                          {"x", "y", "z"}));
+            m_density_pedestal_profile = m_density_pedestal_parser->compile<3>();
+        }
+        EnsureDensityPedestal();
+        amrex::Real const u_ped = 1.5_rt * m_density_pedestal_inventory * m_elec_temp;
+        amrex::Print() << "[hybrid] density pedestal: ON (CoV n_eff = n + n_ped; profile "
+            << (m_density_pedestal_expression.empty()
+                ? "uniform n_floor = " + std::to_string(m_n_floor) + " m^-3"
+                : "n_ped(x,y,z) = " + m_density_pedestal_expression)
+            << "; EB body "
+            << (m_density_pedestal_eb_taper_cells > 0.0_rt
+                ? "excluded, C^1 taper over " + std::to_string(m_density_pedestal_eb_taper_cells)
+                  + " cells"
+                : "excluded (hard, the MHD masked-band rule)")
+            << "; inventory sum n_ped dV = " << m_density_pedestal_inventory
+            << " electrons, U_ped(Te0) = " << u_ped
+            << " J; freeze gate off, V_e live everywhere; gates/eta keep n_dep; "
+               "rho record = deposited, rho_pedestal = n_ped)\n";
+    }
+
     // Electron-ion energy-equilibration rate nu_ei(rho,Te,Ti,t) for the Q_ei term.
     m_nu_ei_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_nu_ei_expression, {"rho","Te","Ti","t"}));
@@ -1498,7 +1552,11 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             std::ostringstream os; os << std::setprecision(4) << v; return os.str();
         };
         amrex::Print() << "[qdsmc] halo valves: unfreeze "
-            << (m_qdsmc_halo_unfreeze
+            << (m_density_pedestal
+                ? "ON by the density pedestal (T_e update wherever deposited "
+                  "weight > 0, pedestal-weighted; FD conduction open set "
+                  "n + n_ped > 0; capacity/chi at n + n_ped)"
+                : m_qdsmc_halo_unfreeze
                 ? "ON (T_e update wherever deposited weight > 0; FD conduction "
                   "open set n > 0; capacity/chi at n floored to qdsmc_n_floor)"
                 : "OFF (T_e held and faces closed at/below qdsmc_n_floor)")
@@ -2479,8 +2537,18 @@ void HybridPICModel::HybridPICSolveE (
             m_inertia_elliptic->m_warm_start = m_electron_inertia_warm_start;
             m_inertia_elliptic->Define(Efield, lev);
         }
-        m_inertia_elliptic->PrepareCoefficients(
-            rhofield, PhysConst::q_e * m_n_floor, lev);
+        if (amrex::MultiFab const * const ped_mf = DensityPedestal(lev)) {
+            // Density pedestal: d_e^2 = m_e/(mu0 e max(rho + rho_ped, floor)).
+            amrex::MultiFab rho_eff(rhofield.boxArray(), rhofield.DistributionMap(),
+                                    1, rhofield.nGrowVect());
+            amrex::MultiFab::Copy(rho_eff, rhofield, 0, 0, 1, rhofield.nGrowVect());
+            amrex::MultiFab::Add(rho_eff, *ped_mf, 0, 0, 1, rhofield.nGrowVect());
+            m_inertia_elliptic->PrepareCoefficients(
+                rho_eff, PhysConst::q_e * m_n_floor, lev);
+        } else {
+            m_inertia_elliptic->PrepareCoefficients(
+                rhofield, PhysConst::q_e * m_n_floor, lev);
+        }
         // The E rows the stair-case EB freezes (eb_update_E == 0, skipped by
         // the Ohm's-law solve above) are not unknowns of the elliptic
         // system; hand the flags over so the solve projects them out.
@@ -4103,6 +4171,8 @@ void HybridPICModel::QDSMCInitializeUe (int const lev,
     bool const avg_ji  = (J_i_avg_with != nullptr);
 
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
     amrex::GpuArray<int, 3> const & Jx_stag = Jx_IndexType;
     amrex::GpuArray<int, 3> const & Jy_stag = Jy_IndexType;
@@ -4120,6 +4190,8 @@ void HybridPICModel::QDSMCInitializeUe (int const lev,
     for (MFIter mfi(Vex, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
         amrex::Array4<amrex::Real const> const & rho_arr = rho_temp.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
         amrex::Array4<amrex::Real const> const rho1_arr = avg_rho
             ? rho_avg_with->const_array(mfi)
             : amrex::Array4<amrex::Real const>{};
@@ -4151,10 +4223,15 @@ void HybridPICModel::QDSMCInitializeUe (int const lev,
 
         amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            amrex::Real const rho_val = avg_rho
+            amrex::Real const rho_dep = avg_rho
                 ? 0.5_rt * (rho_arr(i,j,k) + rho1_arr(i,j,k))
                 : rho_arr(i,j,k);
-            if (rho_val <= rho_floor) { return; }
+            // Density pedestal (change of variables): V_e = -(J - J_i)/(e n_eff)
+            // in EVERY cell -- continuous in the deposit where the legacy
+            // guard switched markers between static (V_e = 0) and live.
+            if (!use_ped && rho_dep <= rho_floor) { return; }
+            amrex::Real const rho_val = use_ped
+                ? std::max(rho_dep + ped_arr(i,j,k), rho_floor) : rho_dep;
 
             // Plasma current interpolated in time between the saved (old) and
             // current (new) states; identical fields make this a no-op.
@@ -4220,6 +4297,8 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
     // Conversion factor used by helion to keep K_e numerically O(1): T_e in K
     // is multiplied by (k_B / q_e) so K_e ends up scaled in eV-equivalent.
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -4229,6 +4308,8 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
         amrex::Array4<amrex::Real>       const & Ke_arr  = Ke.array(mfi);
         amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::Box const tbox = amrex::convert(mfi.tilebox(), Ke.ixType().toIntVect());
         amrex::Box       box  = tbox;
@@ -4241,8 +4322,11 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
             // boundary that drains the plasma's electron thermal energy via
             // the remap diffusion (global exponential T_e collapse). With the
             // floor, the halo keeps whatever T_e it holds and is insulating.
-            amrex::Real const ne =
-                amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
+            // Density pedestal (change of variables): n_eff = n + n_ped, the
+            // same n_eff the recovery divides by (round trip stays exact).
+            amrex::Real const ne = use_ped
+                ? amrex::max(rho_arr(i,j,k) + ped_arr(i,j,k), rho_floor) / PhysConst::q_e
+                : amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
             Ke_arr(i,j,k) = Te_arr(i,j,k) * std::pow(ne, 1.0_rt - gamma) * kb_over_qe;
         });
     }
@@ -4352,7 +4436,11 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
     // Deposited-weight guard: cells no QDSMC marker reached keep their T_e.
     // Halo unfreeze: any positive deposited weight updates (the recovery is
     // the weight-mean of the deposited K); exactly-zero deposits keep T_e.
-    auto const w_floor    = m_qdsmc_halo_unfreeze ? 0.0_rt : m_qdsmc_n_floor;
+    // Density pedestal: every cell is live (the pedestal-weighted blend below
+    // bounds the update at tiny weights), so the deposited-weight gate is off.
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped    = (ped_mf != nullptr);
+    auto const w_floor    = (m_qdsmc_halo_unfreeze || use_ped) ? 0.0_rt : m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
     // Optional source taper of the transport update (member doc): the
     // withheld energy density is tallied on the valid nodes only.
@@ -4373,6 +4461,8 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
         amrex::Array4<amrex::Real const> const & Ke_arr      = Ke.const_array(mfi);
         amrex::Array4<amrex::Real const> const & weights_arr = weights.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr     = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
         amrex::Array4<amrex::Real> tp_arr;
         if (taper_on) { tp_arr = taper_mf.array(mfi); }
 
@@ -4389,12 +4479,24 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
             // conversion uses the same n_e^(gamma-1) factor on both sides of
             // the step, so a cell whose marker did not move keeps its T_e
             // exactly.
-            amrex::Real const ne =
-                amrex::max(rho_arr(i,j,k) / PhysConst::q_e, n_floor);
-            amrex::Real const Te_rec = Ke_arr(i,j,k)
+            amrex::Real const n_ped = use_ped ? ped_arr(i,j,k) / PhysConst::q_e : 0.0_rt;
+            amrex::Real const ne = use_ped
+                ? amrex::max(rho_arr(i,j,k) / PhysConst::q_e + n_ped, n_floor)
+                : amrex::max(rho_arr(i,j,k) / PhysConst::q_e, n_floor);
+            amrex::Real Te_rec = Ke_arr(i,j,k)
                           / std::pow(ne, 1.0_rt - gamma)
                           / w
                           / kb_over_qe;
+            if (use_ped) {
+                // Pedestal as a state (the MHD offset-density rule "the
+                // background is not transported"): the markers carry the
+                // deposited part's energy 1.5 kB w Te_rec, the pedestal part
+                // 1.5 kB n_ped V Te_old stays put and does no compression
+                // work; the cell's T_e is the exact energy-weighted mean of
+                // the two, so a tiny deposit nudges T_e by w/(w + n_ped V).
+                amrex::Real const w_ped = n_ped * cell_volume;
+                Te_rec = (w_ped * Te_arr(i,j,k) + w * Te_rec) / (w_ped + w);
+            }
             if (!taper_on) { Te_arr(i,j,k) = Te_rec; return; }
             // Source taper: blend the transport update toward no-change in
             // thin cells; book the withheld energy (valid nodes only).
@@ -5389,6 +5491,8 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
     // the audit tallies [J/m^3]; nodal like Te, deduplicated by sum_unique.
     amrex::MultiFab tally_mf(Te.boxArray(), Te.DistributionMap(), 2, 0);
     tally_mf.setVal(0.0_rt);
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -5399,6 +5503,8 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
         amrex::Array4<amrex::Real>       const & red_arr = redirect_E->array(mfi);
         amrex::Array4<amrex::Real>       const & tly_arr = tally_mf.array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
@@ -5406,7 +5512,11 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
             if (rho_val <= rho_floor) { return; }         // quarantined
             amrex::Real const Te_K = Te_arr(i,j,k);
             if (Te_K <= cap_K) { return; }
-            amrex::Real const ne  = rho_val / PhysConst::q_e;
+            // Density pedestal: the vented energy is booked at the capacity
+            // 1.5 n_eff kB of the state U_e = 1.5 n_eff kB T_e.
+            amrex::Real const ne  = use_ped
+                ? (rho_val + ped_arr(i,j,k)) / PhysConst::q_e
+                : rho_val / PhysConst::q_e;
             amrex::Real const dT  = Te_K - cap_K;
             amrex::Real const du  = 1.5_rt * ne * PhysConst::kb * dT;
             if (redir_gate_armed && rho_val <= rho_redir_gate) {
@@ -5452,6 +5562,8 @@ void HybridPICModel::QDSMCRelaxPedestalTe (int const lev, amrex::Real const dt_s
     amrex::Real const K_per_eV = qe / kb;
     amrex::Real const n_ped = m_qdsmc_te_pedestal_n;
     amrex::Real const n_cap = m_qdsmc_te_n_floor;
+    amrex::MultiFab const * const dped_mf = DensityPedestal(lev);
+    bool const use_dped = (dped_mf != nullptr);
     amrex::Real const decay = (m_qdsmc_te_pedestal_rate > 0.0_rt)
         ? (1.0_rt - std::exp(-m_qdsmc_te_pedestal_rate * dt_src)) : 1.0_rt;
 
@@ -5499,6 +5611,8 @@ void HybridPICModel::QDSMCRelaxPedestalTe (int const lev, amrex::Real const dt_s
         amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
         amrex::Array4<amrex::Real>       const & tly_arr = tally_mf.array(mfi);
+        amrex::Array4<amrex::Real const> dped_arr;
+        if (use_dped) { dped_arr = dped_mf->const_array(mfi); }
 
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
@@ -5509,7 +5623,10 @@ void HybridPICModel::QDSMCRelaxPedestalTe (int const lev, amrex::Real const dt_s
             amrex::Real const w  = 1.0_rt - halo_valve_weight(ne, n_ped);
             amrex::Real const dT = w * decay * (Te_K - T_cap_K);
             Te_arr(i,j,k) = Te_K - dT;
-            tly_arr(i,j,k) += 1.5_rt * amrex::max(ne, n_cap) * kb * dT;
+            // Density pedestal: capacity of the state U_e = 1.5 n_eff kB T_e.
+            amrex::Real const n_cap_eff = use_dped
+                ? amrex::max(ne + dped_arr(i,j,k) / qe, n_cap) : amrex::max(ne, n_cap);
+            tly_arr(i,j,k) += 1.5_rt * n_cap_eff * kb * dT;
         });
     }
 
@@ -6196,6 +6313,9 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev,
     amrex::MultiFab const & rho = rho_in;
 
     auto const rho_floor = PhysConst::q_e * m_n_floor;
+    // Density pedestal (change of variables): P_e = max(rho + rho_ped, floor) kB Te / q_e.
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -6205,11 +6325,15 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev,
         amrex::Array4<amrex::Real>       const & Pe_arr  = Pe.array(mfi);
         amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::Box const & tbox = mfi.tilebox();
         amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            amrex::Real const rho_val = std::max(rho_arr(i,j,k), rho_floor);
+            amrex::Real const rho_val = use_ped
+                ? std::max(rho_arr(i,j,k) + ped_arr(i,j,k), rho_floor)
+                : std::max(rho_arr(i,j,k), rho_floor);
             amrex::Real const ne      = rho_val / PhysConst::q_e;
             Pe_arr(i,j,k) = ne * PhysConst::kb * Te_arr(i,j,k);
         });
@@ -7409,7 +7533,12 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     amrex::Real const n_floor = m_qdsmc_n_floor;
     // Halo unfreeze: the open set becomes every node with n > 0; b_ne (heat
     // capacity, chi, harmonic face density) stays floored at n_floor.
-    amrex::Real const n_open  = m_qdsmc_halo_unfreeze ? 0.0_rt : n_floor;
+    // Density pedestal (change of variables): capacity, chi and the harmonic
+    // face density at n_eff = max(n + n_ped, n_floor); every non-covered node
+    // with n_eff > 0 is open.
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped        = (ped_mf != nullptr);
+    amrex::Real const n_open  = (m_qdsmc_halo_unfreeze || use_ped) ? 0.0_rt : n_floor;
     amrex::Real const f_lim   = m_cond_flux_limit_factor;
     bool const iso_full       = m_cond_isotropic;
     amrex::Real const iso_B   = m_cond_iso_B;
@@ -7494,11 +7623,15 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         amrex::Array4<amrex::Real const> const & Bz_arr  = Bz.const_array(mfi);
         amrex::Array4<amrex::Real const> const & phi_arr = has_eb
             ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             bool const covered = has_eb && (phi_arr(i,j,k) <= 0.0_rt);
-            amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+            amrex::Real const ne_raw = use_ped
+                ? rho_arr(i,j,k) / qe + ped_arr(i,j,k) / qe
+                : rho_arr(i,j,k) / qe;
             amrex::Real const bxv = ablastr::coarsen::sample::Interp(
                 Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0);
             amrex::Real const byv = ablastr::coarsen::sample::Interp(
@@ -10959,6 +11092,8 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
     auto const rho_floor = PhysConst::q_e * m_qdsmc_te_n_floor;
     // m_elec_temp is k_B T_e0 [J]; the T_e field is in K.
     auto const Te0_K     = m_elec_temp / PhysConst::kb;
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -10967,6 +11102,8 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
     {
         amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::Box const tbox = amrex::convert(mfi.tilebox(), Te.ixType().toIntVect());
         amrex::Box       box  = tbox;
@@ -10974,8 +11111,9 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            amrex::Real const ne =
-                amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
+            amrex::Real const ne = use_ped
+                ? amrex::max(rho_arr(i,j,k) + ped_arr(i,j,k), rho_floor) / PhysConst::q_e
+                : amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
             Te_arr(i,j,k) = Te0_K * std::pow(ne / n0_ref, gamma - 1.0_rt);
         });
     }
@@ -11170,6 +11308,99 @@ void HybridPICModel::WarnEnergyBudgetPathLimits (char const * path_name,
         ablastr::warn_manager::WarnPriority::high);
 }
 
+amrex::MultiFab const * HybridPICModel::DensityPedestal (int const lev) const
+{
+    if (!m_density_pedestal) { return nullptr; }
+    EnsureDensityPedestal();
+    return WarpX::GetInstance().m_fields.get("hybrid_rho_pedestal_fp", lev);
+}
+
+void HybridPICModel::EnsureDensityPedestal () const
+{
+    if (!m_density_pedestal || !m_density_pedestal_stale) { return; }
+    auto & warpx = WarpX::GetInstance();
+    m_density_pedestal_inventory = 0.0_rt;
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        FillDensityPedestal(lev);
+        amrex::MultiFab const & ped =
+            *warpx.m_fields.get("hybrid_rho_pedestal_fp", lev);
+        m_density_pedestal_inventory +=
+            EnergyVolumeIntegral(ped, 0, lev) / PhysConst::q_e;
+    }
+    m_density_pedestal_stale = false;
+}
+
+void HybridPICModel::FillDensityPedestal (int const lev) const
+{
+    ABLASTR_PROFILE("HybridPICModel::FillDensityPedestal()");
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::MultiFab & ped = *warpx.m_fields.get("hybrid_rho_pedestal_fp", lev);
+
+    bool const use_parser = !m_density_pedestal_expression.empty();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !use_parser || m_density_pedestal_parser,
+        "density_pedestal_profile(x,y,z) used before HybridPICModel::InitData "
+        "compiled it");
+    auto const profile = m_density_pedestal_profile;
+    amrex::Real const n_uniform = m_n_floor;
+    amrex::Real const qe = PhysConst::q_e;
+    auto const plo_arr = geom.ProbLoArray();
+    auto const dx_arr  = geom.CellSizeArray();
+    amrex::Real dx_max = 0.0_rt;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+        dx_max = amrex::max(dx_max, dx_arr[dd]);
+    }
+    // EB shaping: zero inside the body (level set <= 0, the same test as the
+    // conduction operator's "covered"), optionally tapered outside it with
+    // the MHD floor_outflow_limiter smoothstep (halo_valve_weight(phi + L, L)
+    // = smoothstep(phi/L): 0 at the wall, 1 one taper length out).
+    bool const has_eb = EB::enabled();
+    amrex::MultiFab const * eb_dist = has_eb
+        ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
+    amrex::Real const taper_len = m_density_pedestal_eb_taper_cells * dx_max;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(ped, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real> const & p_arr = ped.array(mfi);
+        amrex::Array4<amrex::Real const> const phi_arr = has_eb
+            ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::Box box = mfi.tilebox();
+        box.grow(ped.nGrowVect());
+        amrex::Box const phi_box = has_eb ? eb_dist->fabbox(mfi.index()) : box;
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real n_ped = n_uniform;
+            if (use_parser) {
+                int const node[3] = {i, j, k};
+                amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    cx[dd] = plo_arr[dd] + amrex::Real(node[dd]) * dx_arr[dd];
+                }
+#if defined(WARPX_DIM_3D)
+                n_ped = profile(cx[0], cx[1], cx[2]);
+#else
+                n_ped = profile(cx[0], 0.0_rt, cx[1]);
+#endif
+            }
+            if (has_eb && phi_box.contains(amrex::IntVect(AMREX_D_DECL(i, j, k)))) {
+                amrex::Real const phi = phi_arr(i, j, k);
+                if (phi <= 0.0_rt) {
+                    n_ped = 0.0_rt;
+                } else if (taper_len > 0.0_rt) {
+                    n_ped *= halo_valve_weight(phi + taper_len, taper_len);
+                }
+            }
+            p_arr(i, j, k) = amrex::max(n_ped, 0.0_rt) * qe;
+        });
+    }
+    ped.FillBoundary(geom.periodicity());
+}
+
 amrex::Real HybridPICModel::EnergyVolumeIntegral (
     amrex::MultiFab const & mf, int const comp, int const lev) const
 {
@@ -11223,6 +11454,8 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) cons
 
     amrex::Real const n_flr = m_n_floor;
     amrex::Real const n_bnd = amrex::max(m_contam_n_boundary, m_n_floor);
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
     amrex::MultiFab u_cls(Te.boxArray(), Te.DistributionMap(), 2, 0);
     u_cls.setVal(0.0_rt);
@@ -11235,12 +11468,17 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) cons
         amrex::Array4<amrex::Real>       const & u_arr   = u_cls.array(mfi);
         amrex::Array4<amrex::Real const> const & te_arr  = Te.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (use_ped) { ped_arr = ped_mf->const_array(mfi); }
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             amrex::Real const ne = rho_arr(i,j,k) / PhysConst::q_e;
             if (ne <= n_flr) { return; }
+            // Density pedestal: the state is U_e = 1.5 n_eff kB T_e.
+            amrex::Real const n_u = use_ped
+                ? ne + ped_arr(i,j,k) / PhysConst::q_e : ne;
             amrex::Real const u =
-                1.5_rt * ne * PhysConst::kb * te_arr(i,j,k);
+                1.5_rt * n_u * PhysConst::kb * te_arr(i,j,k);
             u_arr(i,j,k, (ne > n_bnd) ? 0 : 1) = u;
         });
     }
@@ -11508,6 +11746,8 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
         "allocated by the theta-implicit hybrid scheme");
 
     auto const rho_floor = PhysConst::q_e * m_n_floor;
+    // Density pedestal (change of variables): P_e at max(rho + rho_ped, floor).
+    amrex::MultiFab const * const ped_mf = DensityPedestal(lev);
     auto const th = theta;
 
 #ifdef AMREX_USE_OMP
@@ -11520,6 +11760,8 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
         amrex::Array4<amrex::Real const> const & Te_old_arr  = Te_old.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr     = rho.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_old_arr = rho_old.const_array(mfi);
+        amrex::Array4<amrex::Real const> ped_arr;
+        if (ped_mf) { ped_arr = ped_mf->const_array(mfi); }
 
         amrex::Box const & tbox = mfi.tilebox();
         int const c_half = rho.nComp()/2;  // second time level (mode 0)
@@ -11540,8 +11782,9 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
             // the QDSMC recovery already follow; the O((theta-1/2) dt)
             // label error this leaves in Pe is subdominant to the
             // theta > 1/2 path's own first-order time biasing.
-            amrex::Real const rho_val =
-                std::max(rho_arr(i,j,k,c_half), rho_floor);
+            amrex::Real const rho_val = ped_mf
+                ? std::max(rho_arr(i,j,k,c_half) + ped_arr(i,j,k), rho_floor)
+                : std::max(rho_arr(i,j,k,c_half), rho_floor);
             amrex::ignore_unused(rho_old_arr);
             amrex::Real const ne      = rho_val / PhysConst::q_e;
             amrex::Real const Te_th   = (1.0_rt - th) * Te_old_arr(i,j,k)

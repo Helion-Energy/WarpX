@@ -2456,6 +2456,97 @@ public:
      *  freeze. */
     bool m_qdsmc_halo_unfreeze = false;
 
+    // ---- Density pedestal as a change of variables (circuit/eee-pedcov). ----
+    /** Density pedestal as a CHANGE OF VARIABLES (Eric 2026-09-09: "the
+     *  deposited densities are added to the shaped pedestal to be additive
+     *  on top of it. It would kill the dust cell flickering"). Input:
+     *  density_pedestal (default false = bit-identical).
+     *
+     *  A static, shaped pedestal density n_ped(x,y,z) [m^-3] is built once
+     *  (parser density_pedestal_profile(x,y,z); default the uniform value
+     *  n_floor) and every electron-fluid density the hybrid derives from the
+     *  deposit becomes
+     *      n_eff = max(n_dep + n_ped, floor_legacy)
+     *  in place of max(n_dep, floor_legacy). The max is the positivity
+     *  backstop only: wherever n_ped >= the legacy floor (everywhere for the
+     *  default uniform pedestal) it is inert and n_eff = n_dep + n_ped is
+     *  smooth in the deposit, so a single marker entering or leaving a
+     *  near-empty cell moves the Ohm's-law divisor, V_e, P_e and the QDSMC
+     *  heat capacity by its own weight instead of switching them between
+     *  the floored and the live branch (the "dust cell flicker").
+     *
+     *  Mirror of the theta-implicit MHD lane (~/src/warpx-mhd-wt-stack-merge):
+     *  (i) implicit_mhd.halo_pedestal_fraction / RefreshHaloPedestal
+     *  (ThetaImplicitMHD.cpp:16755): rho_ped = f max(rho_peak, rho_ref),
+     *  realized by RAISING sub-pedestal fluid cells onto the pedestal state
+     *  and anchoring the drain gates at rho_ped -- the MHD's own equivalence
+     *  argument (ThetaImplicitMHD.H:1050-1075) says this is the additive
+     *  variable change in the original variable. The hybrid has no evolved
+     *  fluid density to raise, so the additive form is used directly and
+     *  needs no gate. (ii) implicit_mhd.advection_density_offset_fraction
+     *  (c5037a567, the reference code's subtract/advect/re-add): the
+     *  ADVECTIVE flux transports only the deviation above the offset and
+     *  "the background is not transported". The QDSMC analogue is the
+     *  K -> T_e recovery below: the markers transport only the deposited
+     *  part's energy and the pedestal part keeps its temperature. (iii) The
+     *  MHD raise skips the masked wall band (ImplicitMHDWallMask.H:124); here
+     *  n_ped = 0 inside the EB body (level set <= 0), optionally C^1-tapered
+     *  over density_pedestal_eb_taper_cells with the same smoothstep as the
+     *  MHD floor_outflow_limiter (= halo_valve_weight).
+     *
+     *  Sites (n_eff replaces the floored density): the Ohm's-law divisor of
+     *  the Hall + grad P_e terms (HybridPICSolveE, RZ and 3D), the elliptic
+     *  electron-inertia d_e^2 density, P_e = n_eff kB T_e (both emitters),
+     *  the QDSMC K <-> T_e conversion (InitializeKe, UpdateTe, SeedTeAdiabat),
+     *  the marker advection velocity V_e = -(J - J_i)/(e n_eff) (live in
+     *  every cell), the FD conduction capacity / chi / harmonic face density
+     *  and open set, the T_e shunt and pedestal-cap capacities, and the
+     *  class energy ledger u = 1.5 n_eff kB T_e. GATES KEEP THE DEPOSITED
+     *  DENSITY: the Holmstrom vacuum switch, the external-E subtraction, the
+     *  Joule / redirect / shunt / abort gates and eta(rho, J, t) -- the
+     *  pedestal carries no Hall, Ohmic or shunt physics of its own.
+     *
+     *  ENERGY EQUATION (the pedestal as a state): U_e = 1.5 n_eff kB T_e.
+     *  The freeze gate is off (w_floor = 0: any positive deposited weight
+     *  updates T_e; an exactly-zero deposit holds it) and the recovery is
+     *  the pedestal-weighted mean
+     *      T_e = (n_ped V T_old + w T_rec) / (n_ped V + w),
+     *  w = deposited marker weight [electrons], T_rec = the legacy
+     *  weight-mean recovery at n_eff: the marker-carried energy
+     *  1.5 kB w T_rec plus the pedestal's 1.5 kB n_ped V T_old, no energy
+     *  invented or dropped (an exact energy-weighted mean), and a tiny
+     *  deposit can nudge T_e only by its weight fraction -- the K -> T_e
+     *  blow-up at tiny weights is bounded by construction. The pedestal
+     *  electrons do no compression work (the MHD's "pedestal mass has no
+     *  reactive response of its own", halo source taper). Marker-less cells
+     *  keep their conducted value; the existing rectified pedestal cap
+     *  (qdsmc_te_pedestal_cap_ev, the rung-J port) relaxes them when armed.
+     *  Every cell conducts (FD open set = n_eff > 0 and not EB-covered).
+     *  Inventory sum(n_ped dV) and U_ped(T_e0) are printed at boot. */
+    bool m_density_pedestal = false;
+    /** density_pedestal_profile(x,y,z) [m^-3]; empty = uniform n_floor. */
+    std::string m_density_pedestal_expression;
+    std::unique_ptr<amrex::Parser> m_density_pedestal_parser;
+    amrex::ParserExecutor<3> m_density_pedestal_profile;
+    /** density_pedestal_eb_taper_cells: 0 = hard exclusion inside the EB
+     *  body only (the MHD masked-band rule); > 0 = C^1 smoothstep of the
+     *  level-set distance over that many (largest) cells outside the wall. */
+    amrex::Real m_density_pedestal_eb_taper_cells = 0.0;
+    /** Set by AllocateLevelMFs (init, restart, regrid): the pedestal field
+     *  must be (re)filled before its next use. */
+    mutable bool m_density_pedestal_stale = true;
+    /** Pedestal electron inventory sum(n_ped dV) over all levels [electrons]. */
+    mutable amrex::Real m_density_pedestal_inventory = 0.0;
+
+    /** The pedestal charge-density field q_e n_ped on level lev, filled on
+     *  demand (nullptr when density_pedestal is off). Nodal like rho_fp. */
+    [[nodiscard]] amrex::MultiFab const * DensityPedestal (int lev) const;
+    /** (Re)fill the pedestal field on every level if stale. */
+    void EnsureDensityPedestal () const;
+    /** Evaluate the pedestal profile at the nodes of level lev, zero inside
+     *  the EB body, tapered per m_density_pedestal_eb_taper_cells. */
+    void FillDensityPedestal (int lev) const;
+
     /** qdsmc_source_taper_n [m^-3] (< 0 = off): C^1 taper of the QDSMC
      *  transport update (the advective + polytropic-compression work the
      *  marker recovery carries) and of the Joule source in thin cells:

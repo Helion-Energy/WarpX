@@ -611,6 +611,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
+    // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
+    // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
+    // and eta(rho, J, t) keep the deposited rho.
+    amrex::MultiFab const * const rho_ped_mf = hybrid_model->DensityPedestal(lev);
+    const bool use_pedestal = (rho_ped_mf != nullptr);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -881,6 +887,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
+        Array4<Real const> rho_ped;
+        if (rho_ped_mf) { rho_ped = rho_ped_mf->const_array(mfi); }
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
         Array4<Real> const& Btheta = Bfield[1]->array(mfi);
@@ -972,7 +980,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Er_stag, coarsen, i, j, 0, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -1084,7 +1094,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Etheta_stag, coarsen, i, j, 0, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -1197,7 +1209,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Ez_stag, coarsen, i, j, 0, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -1388,6 +1402,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
+    // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
+    // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
+    // and eta(rho, J, t) keep the deposited rho.
+    amrex::MultiFab const * const rho_ped_mf = hybrid_model->DensityPedestal(lev);
+    const bool use_pedestal = (rho_ped_mf != nullptr);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -1544,6 +1564,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
+        Array4<Real const> rho_ped;
+        if (rho_ped_mf) { rho_ped = rho_ped_mf->const_array(mfi); }
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real> const& Bx = Bfield[0]->array(mfi);
         Array4<Real> const& By = Bfield[1]->array(mfi);
@@ -1611,7 +1633,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Ex_stag, coarsen, i, j, k, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1693,7 +1717,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Ey_stag, coarsen, i, j, k, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1775,7 +1801,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = use_pedestal
+                    ? std::max(rho_val + Interp(rho_ped, nodal, Ez_stag, coarsen, i, j, k, 0), rho_floor)
+                    : std::max(rho_val, rho_floor);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {

@@ -4220,6 +4220,60 @@ Maxwell solver: kinetic-fluid hybrid
     Relaxation rate [1/s] of the pedestal cap; negative = pinned (full relaxation per source application, a
     hard cap).
 
+.. pp:param:: hybrid_pic_model.density_pedestal
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Density pedestal as a **change of variables**. A static, shaped pedestal density
+    :math:`n_\mathrm{ped}(x,y,z)` (:pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)`, default the
+    uniform :pp:param:`hybrid_pic_model.n_floor`) is ADDED to the deposited density wherever the hybrid
+    derives an electron-fluid density: :math:`n_\mathrm{eff} = \max(n + n_\mathrm{ped}, n_\mathrm{floor})`
+    replaces :math:`\max(n, n_\mathrm{floor})` in the Ohm's-law divisor of the Hall and :math:`\nabla P_e`
+    terms, the elliptic electron-inertia :math:`d_e^2`, :math:`P_e = n_\mathrm{eff} k_B T_e`, the QDSMC
+    :math:`K_e \leftrightarrow T_e` conversion, the marker advection velocity :math:`V_e = -(J - J_i)/(e
+    n_\mathrm{eff})` (live in every cell), the FD conduction capacity / :math:`\chi` / harmonic face density and
+    open set, the :math:`T_e` shunt and pedestal-cap capacities, and the class energy ledger. The ``max`` is a
+    positivity backstop only (inert wherever :math:`n_\mathrm{ped}` is at or above the legacy floor, i.e.
+    everywhere for the default pedestal outside the embedded-boundary body). GATES KEEP THE DEPOSITED DENSITY:
+    the Holmstrom vacuum switch, the external-E subtraction, the Joule, redirect, shunt and abort gates and
+    ``plasma_resistivity(rho,J,t)`` -- the pedestal carries no Hall, Ohmic or shunt physics.
+
+    Energy equation: the pedestal is a STATE, :math:`U_e = 1.5\, n_\mathrm{eff} k_B T_e`. The deposited-weight
+    freeze gate is off (:pp:param:`hybrid_pic_model.qdsmc_halo_unfreeze` is implied) and the :math:`K_e
+    \rightarrow T_e` recovery is the pedestal-weighted mean :math:`T_e = (n_\mathrm{ped} V\, T_\mathrm{old} + w\,
+    T_\mathrm{rec})/(n_\mathrm{ped} V + w)` with :math:`w` the deposited marker weight: the markers transport only
+    the deposited part's energy, the pedestal part keeps its temperature (the MHD lane's offset-density rule,
+    "the background is not transported"), no energy is invented or dropped, and a tiny deposit can move
+    :math:`T_e` only by its weight fraction. Marker-less cells keep their conducted value;
+    :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_cap_ev` relaxes them when armed. Inside the embedded-boundary
+    body :math:`n_\mathrm{ped} = 0` (the MHD masked-band rule), optionally tapered with
+    :pp:param:`hybrid_pic_model.density_pedestal_eb_taper_cells`. The ``rho`` diagnostic stays the deposited
+    density; ``rho_pedestal`` dumps :math:`q_e n_\mathrm{ped}`. Prints ``[hybrid] density pedestal: ON`` with the
+    inventory :math:`\sum n_\mathrm{ped}\, dV` at startup. Off (the default) is bit-identical.
+
+    Mirrors the theta-implicit MHD lane's ``implicit_mhd.halo_pedestal_fraction`` (pedestal state raised onto
+    once per step, drain gates anchored at it) and ``implicit_mhd.advection_density_offset_fraction`` (the
+    subtract/advect/re-add change of variables); the hybrid has no evolved fluid density to raise, so the
+    additive form is used directly and needs no gate.
+
+.. pp:param:: hybrid_pic_model.density_pedestal_profile(x,y,z)
+    :type: ``string``
+    :default: uniform :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Pedestal density profile [:math:`m^{-3}`], evaluated once at the nodes (RZ: ``x`` = r, ``y`` = 0, ``z``);
+    rebuilt on restart and regrid.
+
+.. pp:param:: hybrid_pic_model.density_pedestal_eb_taper_cells
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    ``0``: the pedestal is zero inside the embedded-boundary body only (level set :math:`\le 0`). ``> 0``:
+    additionally a :math:`C^1` smoothstep of the level-set distance over that many (largest) cells outside the
+    wall, the MHD ``floor_outflow_limiter`` form.
+
 .. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
     :type: ``float``
     :default: :pp:param:`hybrid_pic_model.n_floor`
