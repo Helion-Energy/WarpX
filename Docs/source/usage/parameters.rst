@@ -7915,22 +7915,40 @@ Jacobian probes.
     ``global_col``, ``global_row``, ``diagonal``, ``local_block``), and
     the integers ``ir_n_steps``, ``nd_nlevels``, ``nd_ubfactor``,
     ``use_superpanels``, ``deterministic_mode``, ``host_nthreads``.
+    Every ``name=value`` token must be double-quoted in the input file
+    (``implicit_mhd.resistive_direct_cudss_options = "pivot_type=none"
+    "nd_nlevels=16"``; an unquoted ``a=b`` token is misread by ParmParse),
+    and every token is split on whitespace, so one quoted string with
+    several pairs is equivalent. Names and values are validated at
+    startup on every build; the cuDSS calls happen where cuDSS factorizes.
     Empty (the default) keeps the library defaults, i.e. today's
-    factorization and solve. Unknown names or values abort. A setting
-    that changes the factorization changes the block inverse only by
-    roundoff (the direct solve stays exact), but it is not bit-identical
-    to the default.
+    factorization and solve. A setting that changes the factorization
+    changes the block inverse only by roundoff (the direct solve stays
+    exact), but it is not bit-identical to the default.
+    ``pivot_type=none`` disables the pivot search (-6 % per solve on the
+    production RZ mesh): its safety is EMPIRICAL for a given operator --
+    on the production formation matrices at boot and at 18 us the
+    unpivoted LU has every pivot in ``[1, 417]`` with growth factor 1, in
+    FP64 and FP32 -- and must be re-validated whenever the block's operator
+    changes (Hall rows, another wall model, a different resistivity
+    model); :pp:param:`implicit_mhd.resistive_direct_check_factorization`
+    does that at run time and aborts on a failed factorization.
 
-.. pp:param:: implicit_mhd.resistive_direct_solve_host_sync
-    :type: ``bool``
-    :default: ``1``
+.. pp:param:: implicit_mhd.resistive_direct_check_factorization
+    :type: ``string``
+    :default: ``auto``
 
-    Whether every application of the direct resistive block ends with a
-    host-side stream synchronization (the legacy behaviour). The packed
-    right-hand side, the solve and the scatter of the solution are
-    stream ordered before every consumer, so ``0`` only lets the host
-    enqueue the following kernels while the solve runs (no numerical
-    effect).
+    Run-time check of the factorized solve of the direct resistive block:
+    after a factorization, solve for a deterministic pseudo-random vector
+    through the factorized path (reduced or full, FP32 or FP64) and compare
+    the solution with that vector and the residual of the FULL assembled
+    matrix with the right-hand side; both are printed and the run aborts
+    above the tolerance (1e-8 relative in FP64, 1e-3 in FP32). ``auto``
+    (the default) checks the first factorization whenever a cuDSS option,
+    ``precision = single`` or a row threshold is requested and never
+    otherwise (the default path stays untouched); ``first`` checks the
+    first factorization always, ``always`` every factorization (one extra
+    solve per refreeze), ``off`` never.
 
 .. pp:param:: implicit_mhd.resistive_direct_dump_prefix
     :type: ``string``
@@ -7960,27 +7978,33 @@ Jacobian probes.
     the reference of the assembly checks and of the dump). The block
     inverse is then accurate to ~3e-5 relative -- ample for a
     preconditioner -- and the solve is ~8 % cheaper on the production RZ
-    mesh. Requires the single-rank device assembly path. Not bit-identical
-    to the default.
+    mesh (measured in situ: 1.856 vs 2.010 ms per call, Newton and GMRES
+    counts unchanged; with ``pivot_type=none`` 1.739 ms). Available on
+    both assembly paths (single- and multi-rank). Not bit-identical to
+    the default; :pp:param:`implicit_mhd.resistive_direct_check_factorization`
+    gates the first factorization.
 
 .. pp:param:: implicit_mhd.resistive_direct_row_threshold
     :type: ``float``
     :default: ``-1`` (off)
 
-    Reduced solve of the direct resistive block. The factorized
-    triangular solves cost time in proportion to the rows they visit
-    (~5 ns per row on the production RZ mesh, trivial rows included), and
-    a large part of the block's face unknowns are identity rows (frozen
-    exterior faces, axis and boundary faces) or nearly so (hot plasma,
-    where the resistive diffusion number is 1e-4). With a value ``>= 0``,
-    a row whose off-diagonal couplings -- in its row and in its column --
+    Reduced solve of the direct resistive block. With a value ``>= 0``,
+    a row whose off-diagonal couplings -- in its row AND in its column --
     are all at most ``threshold`` times the diagonal is solved as
     :math:`x_i = b_i / a_{ii}` and the remaining rows form the factorized
-    sub-system. ``0`` drops exactly the rows without any coupling (the
-    exact inverse, with a roundoff-different factorization); a positive
-    value is an approximate inverse whose relative truncation is bounded
-    by the threshold. The row set is built from the frozen values with
-    ``threshold / row_threshold_margin`` and rebuilt (a new pattern
+    sub-system (the column criterion keeps rows that have no couplings of
+    their own but are read by neighbours, e.g. frozen wall faces; dropping
+    those would truncate O(1) couplings). ``0`` drops exactly the rows
+    without any coupling: the exact inverse with a roundoff-different
+    factorization, free of charge where such rows exist (a frozen
+    exterior, ``implicit_mhd.wall_field_freeze``); on the production
+    formation deck only 0.55 % of the rows qualify and nothing is gained.
+    A positive value is an APPROXIMATE inverse whose relative truncation
+    is bounded by the threshold; on the production deck, whose background
+    resistivity keeps every row's coupling near 2 % of the diagonal, a
+    threshold that removes rows (>= 0.3) doubles the GMRES count -- it is
+    not a speed lever there. The row set is built from the frozen values
+    with ``threshold / row_threshold_margin`` and rebuilt (a new pattern
     analysis) only when a dropped row's coupling exceeds the threshold at
     a later refreeze (checked on the device every refreeze), so the bound
     holds at every application. Requires the single-rank device assembly
