@@ -36,9 +36,9 @@ Two modes:
              control's physics to 1e-4 relative L2 (measured 5e-6 on the
              electron energy, identical mass density).
 
-newton.txt (plain layout + the six globalization counters):
+newton.txt (plain layout + the seven globalization counters):
   [2] iters [6] gmres [12] entrants [13] released [14] held [15] resolves
-  [16] damped_steps [17] rejected_trials
+  [16] damped_steps [17] rejected_trials [18] moved
 
 Usage: analysis_mhd_line_search_polynomial.py <control|cubic> <final plotfile>
 """
@@ -51,7 +51,7 @@ import yt
 control_directory = "../test_rz_theta_implicit_mhd_braginskii_oblique_edge_line_search_control"
 
 MAX_STEP = 10
-NUM_COLUMNS = 18
+NUM_COLUMNS = 19
 COL_ITERS, COL_GMRES = 2, 6
 COL_DAMPED, COL_REJECTED = 16, 17
 WORK_RATIO = 1.3
@@ -59,15 +59,23 @@ PHYSICS_TOLERANCE = 1.0e-4
 FIELDS = ["implicit_mhd_mass_density", "implicit_mhd_electron_energy", "Bz"]
 
 
-def last_session(rows, step_col=0):
-    resets = np.nonzero(np.diff(rows[:, step_col]) < 0)[0]
-    return rows[(resets[-1] + 1) if len(resets) else 0 :]
-
-
 def load_newton(directory):
-    rows = last_session(np.loadtxt(f"{directory}/diags/newton.txt", comments="#", ndmin=2))
+    # newton.txt APPENDS across reruns of a test directory, and earlier
+    # sessions may have a different column count: parse line by line and
+    # keep the most recent session (the rows after the last step reset).
+    sessions, current = [], []
+    for line in open(f"{directory}/diags/newton.txt"):
+        if line.startswith("#") or not line.strip():
+            continue
+        values = [float(v) for v in line.split()]
+        if current and values[0] <= current[-1][0]:
+            sessions.append(current)
+            current = []
+        current.append(values)
+    sessions.append(current)
+    rows = np.array(sessions[-1])
     assert rows.shape[1] == NUM_COLUMNS, (
-        f"{directory}/diags/newton.txt has {rows.shape[1]} columns, expected {NUM_COLUMNS}"
+        f"{directory}/diags/newton.txt (last session) has {rows.shape[1]} columns, expected {NUM_COLUMNS}"
     )
     assert int(rows[-1, 0]) == MAX_STEP, f"{directory}: run stopped at step {int(rows[-1, 0])}"
     return rows
