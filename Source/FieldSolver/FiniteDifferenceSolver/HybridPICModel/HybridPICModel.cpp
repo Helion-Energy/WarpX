@@ -7512,14 +7512,18 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
     int const pi = pr[0], pj = pr[1], pk = pr[2];
 
     // tally; the engaged face's Te_1 and Te_f ranges; probe node values
-    // (engaged flag, Te_1, Te_f, G_int, G_leg) -- all for the stats line
+    // (engaged flag, Te_1, Te_f, G_int, G_leg); engaged first-transverse-
+    // index range -- all but the tally are for the stats line
+    int const tdim = (d == 0) ? 1 : 0;   // first transverse grid dim
     amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpMin, amrex::ReduceOpMax,
                      amrex::ReduceOpMin, amrex::ReduceOpMax,
                      amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
-                     amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+                     amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpMin, amrex::ReduceOpMax> reduce_op;
     amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real,
                       amrex::Real, amrex::Real,
                       amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real,
                       amrex::Real, amrex::Real> reduce_data(reduce_op);
     using ReduceTuple = typename decltype(reduce_data)::Type;
 
@@ -7554,7 +7558,8 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
         {
             ReduceTuple const skip = {0.0_rt, r_big, -r_big, r_big, -r_big,
-                                      0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+                                      0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt,
+                                      r_big, -r_big};
             amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
             if (ne_raw <= 0.0_rt) { return skip; }
             int const ii = i + di, jj = j + dj, kk = k + dk;
@@ -7616,7 +7621,13 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             amrex::Real const relax =
                 std::exp(-dt_c * (G_int + G_leg) / C_row);
             amrex::Real T1 = Tf + (T0 - Tf) * relax;
-            if (cap_dt_dx > 0.0_rt && T0 > T1) {
+            // drain only, at the row too: a row below the series value
+            // (e.g. rewritten by the transport half) is left to the
+            // operator's interior flux rather than lifted by the reset,
+            // so the tally is monotone (<= 0) and the row reaches Te_f
+            // from below by conduction alone
+            if (T1 >= T0) { return skip; }
+            if (cap_dt_dx > 0.0_rt) {
                 amrex::Real const vte = sonic
                     ? std::sqrt(gam * kb * T0 / mi)
                     : std::sqrt(kb * T0 / me);
@@ -7625,7 +7636,10 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             amrex::Real const du = 1.5_rt * kb * ne_raw * (T1 - T0);
             Te_arr(i,j,k) = T1;
             amrex::Real const p = (i == pi && j == pj && k == pk) ? 1.0_rt : 0.0_rt;
-            return {w_v*du, Te1, Te1, T1, T1, p, p*Te1, p*T1, p*G_int, p*G_leg};
+            int const node[3] = {i, j, k};
+            amrex::Real const ti = amrex::Real(node[tdim]);
+            return {w_v*du, Te1, Te1, T1, T1, p, p*Te1, p*T1, p*G_int, p*G_leg,
+                    ti, ti};
         });
     }
     auto tup = reduce_data.value(reduce_op);
@@ -7639,6 +7653,10 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
     amrex::Real p_tef  = amrex::get<7>(tup);
     amrex::Real p_gint = amrex::get<8>(tup);
     amrex::Real p_gleg = amrex::get<9>(tup);
+    amrex::Real ti_lo  = amrex::get<10>(tup);
+    amrex::Real ti_hi  = amrex::get<11>(tup);
+    amrex::ParallelDescriptor::ReduceRealMin(ti_lo);
+    amrex::ParallelDescriptor::ReduceRealMax(ti_hi);
     amrex::ParallelDescriptor::ReduceRealSum(tally);
     amrex::ParallelDescriptor::ReduceRealMin(te1_lo);
     amrex::ParallelDescriptor::ReduceRealMax(te1_hi);
@@ -7670,6 +7688,7 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             << "] eV T_wall=" << m_cond_leg_Te_wall
             << " eV dE=" << tally*to_J
             << " J (cumulative " << m_cond_leg_tally[d][s]*to_J << " J)"
+            << " engaged_i=[" << ti_lo << ", " << ti_hi << "]"
             << " probe(" << pi << "," << pj << "," << pk << ")";
         if (p_on > 0.5_rt) {
             amrex::Print() << " Te_1=" << p_te1*K_to_eV
@@ -7677,7 +7696,7 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
                 << " eV G_int=" << p_gint << " G_leg=" << p_gleg
                 << " W/(m^2 K)\n";
         } else {
-            amrex::Print() << " not engaged (Te_1 <= max(T_wall, floor))\n";
+            amrex::Print() << " not engaged\n";
         }
     }
 }

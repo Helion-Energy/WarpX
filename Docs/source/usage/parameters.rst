@@ -4366,8 +4366,10 @@ Maxwell solver: kinetic-fluid hybrid
     hotter interior raises :math:`T_f` and the flux, a longer or colder leg lowers both. The condition is
     one-sided, as the MHD lane's ``outflow_limited`` wall and halo relaxation outlet are: it engages only
     where the drain's source (:math:`T_1` on an open face, the row's own :math:`T_0` on a closed one) exceeds
-    :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`, and a colder source keeps the legacy adiabatic face
-    (no reset, no tally), so the face flux
+    :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})` and only where the update lowers the row (a row below the
+    series value, e.g. rewritten by the transport half, is left to the operator's interior flux instead of being
+    lifted); a colder source keeps the legacy adiabatic face (no reset, no tally). The tally is therefore
+    monotone (a pure drain) and the face flux
     :math:`G_\mathrm{int} G_\mathrm{leg}/(G_\mathrm{int} + G_\mathrm{leg})\,(T_1 - T_\mathrm{wall})` passes
     continuously through zero. Applied where the isothermal pin is
     applied (after every accepted conduction substep, or per RKL2 stage / super-step following

@@ -2248,8 +2248,10 @@ public:
      *  leg engages only where the drain's source (Te_1 on an open face,
      *  the row's own T0 on a closed one) exceeds max(T_wall, Te floor)
      *  -- an exhaust face is an energy OUTFLOW (Eric 2026-09-09) -- and
-     *  a colder source keeps the legacy adiabatic face (no reset, no
-     *  tally), so the face flux G_int G_leg/(G_int + G_leg) (Te_1 -
+     *  only where the update lowers the row (a row below the series
+     *  value is left to the operator's interior flux); a colder source
+     *  keeps the legacy adiabatic face (no reset, no tally), so the
+     *  tally is monotone and the face flux G_int G_leg/(G_int + G_leg) (Te_1 -
      *  T_wall) is continuous through zero. The hybrid hook runs outside
      *  any Newton solve, so the hard rectifier replaces the MHD C^1
      *  gate. The leg throttles itself, so the
