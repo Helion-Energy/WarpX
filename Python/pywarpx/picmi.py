@@ -3306,6 +3306,50 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    halo_pedestal_temperature_e: float, default=0 (off, bit-identical)
+        COLD pedestal image for the electrons, in eV (requires
+        halo_pedestal_fraction > 0). By default the pedestal's energy
+        image is f times the instantaneous PEAK, so a raised cell
+        carries the peak's temperature (f cancels in the image
+        temperature). A positive value replaces the electron image by
+        the cold image at the pedestal density, U_e,ped = rho_ped (q/m)
+        T_e / (gamma_e - 1) (n_ped kB T_e), recomputed with the pedestal
+        every step and consumed wherever the image is: the per-step
+        raise and the electron-energy donor-gate anchor. Must exceed the
+        electron pressure floor's image at the pedestal base
+        (halo_pedestal_fraction x reference_mass_density) and the
+        electron temperature floor.
+
+    halo_pedestal_temperature_i: float, default=0 (off, bit-identical)
+        COLD pedestal image for the ions, in eV (requires
+        halo_pedestal_fraction > 0 and an ion energy closure): the ion
+        internal image becomes e_i,ped = rho_ped (q/m) T_i / (gamma_i - 1)
+        under total_energy/dual_energy (raise: E_i = |m|^2/(2 rho_ped) +
+        e_ped and U_i = e_ped, exactly consistent), U_par = rho_ped (q/m)
+        T_i / 2 and U_perp = rho_ped (q/m) T_i under cgl; consumed by
+        the raise, the ion donor-gate anchors and the pedestal-band
+        ion-energy relaxation target (halo_pedestal_energy_rate then
+        drains the pinned band toward the COLD image). Same floor
+        conditions as the electron image.
+
+    halo_pedestal_cold_raise: {"reset", "floor"}, default="reset"
+        How the raise applies a COLD image to a raised (sub-pedestal-
+        density) cell: "reset" SETS the species' energy to the image
+        (the raised cell IS pedestal-temperature plasma; a re-raised
+        band cell gives back heat gained since its last raise -- a
+        signed booking), "floor" takes max(own, image) (the peak-image
+        form: a pure source, a hotter cell keeps its energy and is only
+        diluted). Species with a zero temperature keep the max() raise.
+
+    halo_pedestal_ledger_file: str, optional
+        Pedestal refresh ledger (requires halo_pedestal_fraction > 0):
+        one row per step, "step raised_cells mass energy_e energy_i",
+        cumulative injected mass [kg] and SIGNED electron / ion energy
+        change [J] of the raise ([kg/m^2], [J/m^2] in 1D), booked exactly
+        from the raise kernel (the deltas of the conserved blocks: rho,
+        U_e, E_i or U_par + U_perp; the auxiliary U_i is not booked).
+        First write of a run truncates a stale file.
+
     advection_density_offset_fraction: float, default=0 (off, bit-identical)
         Offset-density advection (requires fluid_flux="central" or
         "hlld"): fraction f_off of the shared vacuum reference density
@@ -3863,6 +3907,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
+        halo_pedestal_temperature_e=None,
+        halo_pedestal_temperature_i=None,
+        halo_pedestal_cold_raise=None,
+        halo_pedestal_ledger_file=None,
         advection_density_offset_fraction=None,
         halo_relaxation_rate=None,
         halo_relaxation_target=None,
@@ -4006,6 +4054,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
+        self.halo_pedestal_temperature_e = halo_pedestal_temperature_e
+        self.halo_pedestal_temperature_i = halo_pedestal_temperature_i
+        self.halo_pedestal_cold_raise = halo_pedestal_cold_raise
+        self.halo_pedestal_ledger_file = halo_pedestal_ledger_file
         self.advection_density_offset_fraction = advection_density_offset_fraction
         self.halo_relaxation_rate = halo_relaxation_rate
         self.halo_relaxation_target = halo_relaxation_target
@@ -4159,6 +4211,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
+        implicit_mhd.halo_pedestal_temperature_e = self.halo_pedestal_temperature_e
+        implicit_mhd.halo_pedestal_temperature_i = self.halo_pedestal_temperature_i
+        implicit_mhd.halo_pedestal_cold_raise = self.halo_pedestal_cold_raise
+        implicit_mhd.halo_pedestal_ledger_file = self.halo_pedestal_ledger_file
         implicit_mhd.advection_density_offset_fraction = (
             self.advection_density_offset_fraction
         )

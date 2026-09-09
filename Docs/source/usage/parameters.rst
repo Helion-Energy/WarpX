@@ -5334,6 +5334,98 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.halo_pedestal_temperature_e
+    :type: ``float``
+    :unit: eV
+    :default: ``0`` (off, bit-identical)
+
+    COLD pedestal image for the electrons. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`. By default the
+    pedestal's energy images are :math:`f` times the instantaneous
+    peaks, so a raised cell carries the *peak's* temperature
+    (:math:`U_\mathrm{ped}/\rho_\mathrm{ped} = \max U / \max\rho`:
+    the fraction cancels in the image temperature, whatever :math:`f`
+    is). A positive value replaces the electron image by the cold image
+    at the pedestal density,
+
+    .. math::
+
+       U_{e,\mathrm{ped}} = \rho_\mathrm{ped}\,(q/m)\,T_e / (\gamma_e - 1)
+       \quad (= n_\mathrm{ped} k_B T_e / (\gamma_e - 1)),
+
+    recomputed with the pedestal density every step and frozen for the
+    solve, and consumed exactly where the peak image is: the per-step
+    raise of sub-pedestal cells and the electron-energy donor-gate
+    anchor. Motivation (measured on the production formation run against
+    the reference code): the pedestal band -- :math:`10^{-3}` of the
+    peak density over most of the open-field volume -- carried the peak's
+    temperature image (170-290 eV electrons, 600-1500 eV ions) where the
+    reference keeps a cold static floor (2 eV / 12-45 eV), a 1.5-2.5x
+    halo pressure excess that no windowed outlet can remove because the
+    raise re-imposes the image every step the pedestal rises. Asserted:
+    the cold image must exceed
+    :pp:param:`implicit_mhd.electron_pressure_floor`'s energy image at
+    the pedestal base :math:`f\,\rho_\mathrm{ref}` (the lowest the
+    dynamic pedestal can sit) and the electron temperature floor, so the
+    raised band stays an interior point of the admissible set.
+
+.. pp:param:: implicit_mhd.halo_pedestal_temperature_i
+    :type: ``float``
+    :unit: eV
+    :default: ``0`` (off, bit-identical)
+
+    COLD pedestal image for the ions. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction` and
+    ``implicit_mhd.ion_closure = total_energy``, ``dual_energy`` or
+    ``cgl``. The ion internal image becomes
+    :math:`e_{i,\mathrm{ped}} = \rho_\mathrm{ped}\,(q/m)\,T_i /
+    (\gamma_i - 1)` under ``total_energy``/``dual_energy`` (the raise
+    sets :math:`E_i = |\mathbf{m}|^2/(2\rho_\mathrm{ped}) +
+    e_{i,\mathrm{ped}}` and :math:`U_i = e_{i,\mathrm{ped}}`, exactly
+    consistent) and :math:`U_\parallel = \rho_\mathrm{ped}\,(q/m)\,T_i
+    / 2`, :math:`U_\perp = \rho_\mathrm{ped}\,(q/m)\,T_i` under
+    ``cgl``; it is consumed by the raise, the ion donor-gate anchors
+    (:math:`E_i`, :math:`U_i`, the CGL pair) and the pedestal-band
+    ion-energy relaxation target
+    (:pp:param:`implicit_mhd.halo_pedestal_energy_rate` then drains the
+    pinned band toward the *cold* image). Same floor conditions as the
+    electron image, against :pp:param:`implicit_mhd.ion_pressure_floor`
+    and the ion temperature floor.
+
+.. pp:param:: implicit_mhd.halo_pedestal_cold_raise
+    :type: ``string``
+    :default: ``reset``
+
+    How the raise applies a COLD image to a raised (sub-pedestal-density)
+    cell. ``reset``: the species' energy is *set* to the cold image, so
+    the raised cell is pedestal-temperature plasma; a band cell re-raised
+    by a rising pedestal gives back the heat it gained since its last
+    raise (a signed booking in the refresh ledger). ``floor``:
+    :math:`\max(\text{own}, \text{image})`, the form of the peak-image
+    raise -- a pure source: a cell hotter than the image keeps its energy
+    and is only diluted by the injected mass. Species whose cold
+    temperature is zero keep the :math:`\max` raise onto their peak
+    image regardless.
+
+.. pp:param:: implicit_mhd.halo_pedestal_ledger_file
+    :type: ``string``
+    :default: none
+
+    Pedestal refresh ledger (requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`): one row per step,
+    ``step raised_cells mass energy_e energy_i`` -- the cumulative
+    injected mass [kg] and the *signed* cumulative electron and ion
+    energy change [J] of the raise ([kg/m^2], [J/m^2] in 1D: the
+    geometry's own measure, the RZ annulus weight :math:`2\pi r`
+    included), booked from the raise kernel itself as the deltas of the
+    conserved blocks (:math:`\rho`; :math:`U_e`; :math:`E_i` under
+    ``total_energy``/``dual_energy`` -- the auxiliary :math:`U_i` is its
+    mirror and is not booked; :math:`U_\parallel + U_\perp` under
+    ``cgl``) summed over the raised cells, so it is exact by
+    construction. Rows are written every step (zero raised cells when
+    nothing was sub-pedestal); the first write of a run truncates a stale
+    file. Without the file the totals are never read.
+
 .. pp:param:: implicit_mhd.advection_density_offset_fraction
     :type: ``float``
     :default: ``0`` (off, bit-identical)

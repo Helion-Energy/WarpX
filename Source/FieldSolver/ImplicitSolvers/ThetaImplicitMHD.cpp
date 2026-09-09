@@ -243,6 +243,21 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_drag_rate);
     utils::parser::queryWithParser(pp, "halo_pedestal_energy_rate",
                                    m_halo_pedestal_energy_rate);
+    // Cold pedestal image (see m_halo_pedestal_temperature_e), its raise
+    // form and the refresh ledger.
+    utils::parser::queryWithParser(pp, "halo_pedestal_temperature_e",
+                                   m_halo_pedestal_temperature_e);
+    utils::parser::queryWithParser(pp, "halo_pedestal_temperature_i",
+                                   m_halo_pedestal_temperature_i);
+    {
+        std::string cold_raise = "reset";
+        pp.query("halo_pedestal_cold_raise", cold_raise);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            cold_raise == "reset" || cold_raise == "floor",
+            "implicit_mhd.halo_pedestal_cold_raise must be reset or floor");
+        m_halo_pedestal_cold_reset = (cold_raise == "reset");
+    }
+    pp.query("halo_pedestal_ledger_file", m_halo_pedestal_ledger_file);
     // Offset-density advection (the reference code's step_en subtract/advect/
     // re-add; see m_advection_density_offset_fraction).
     utils::parser::queryWithParser(pp, "advection_density_offset_fraction",
@@ -1448,6 +1463,75 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.halo_pedestal_energy_rate requires "
         "implicit_mhd.ion_closure = total_energy, dual_energy, or cgl "
         "(the barotropic closure evolves no ion energy block to relax)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_temperature_e >= 0.0_rt &&
+            m_halo_pedestal_temperature_i >= 0.0_rt,
+        "implicit_mhd.halo_pedestal_temperature_e / _i cannot be negative");
+    const bool cold_pedestal_image = m_halo_pedestal_temperature_e > 0.0_rt ||
+                                     m_halo_pedestal_temperature_i > 0.0_rt;
+    // The cold image is the pedestal band's state image: nothing to
+    // image without a pedestal, no ion block to image under the
+    // barotropic closure.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !cold_pedestal_image || m_halo_pedestal_fraction > 0.0_rt,
+        "implicit_mhd.halo_pedestal_temperature_e / _i require a positive "
+        "implicit_mhd.halo_pedestal_fraction (the cold image is the "
+        "pedestal band's state image, which does not exist without a "
+        "pedestal)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_temperature_i == 0.0_rt ||
+            m_ion_closure == "total_energy" ||
+            m_ion_closure == "dual_energy" || m_ion_closure == "cgl",
+        "implicit_mhd.halo_pedestal_temperature_i requires "
+        "implicit_mhd.ion_closure = total_energy, dual_energy, or cgl "
+        "(the barotropic closure evolves no ion energy block to image)");
+    if (cold_pedestal_image) {
+        // The raised band must stay an INTERIOR point of the admissible
+        // set (the reason the pedestal exists): the cold image must
+        // exceed the pressure floors' energy images at the pedestal BASE
+        // f rho_ref -- the lowest the dynamic pedestal can sit -- and the
+        // temperature floors.
+        const amrex::Real base_pressure_per_ev =
+            m_halo_pedestal_fraction * m_reference_mass_density *
+            m_ion_charge_to_mass;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_temperature_e == 0.0_rt ||
+                base_pressure_per_ev * m_halo_pedestal_temperature_e >
+                    m_electron_pressure_floor,
+            "implicit_mhd.halo_pedestal_temperature_e: the cold electron "
+            "image n_ped kB T_e at the pedestal base "
+            "(halo_pedestal_fraction x reference_mass_density) must exceed "
+            "implicit_mhd.electron_pressure_floor, else the raised band is "
+            "bound-resident");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_temperature_i == 0.0_rt ||
+                base_pressure_per_ev * m_halo_pedestal_temperature_i >
+                    m_ion_pressure_floor,
+            "implicit_mhd.halo_pedestal_temperature_i: the cold ion image "
+            "n_ped kB T_i at the pedestal base "
+            "(halo_pedestal_fraction x reference_mass_density) must exceed "
+            "implicit_mhd.ion_pressure_floor, else the raised band is "
+            "bound-resident");
+        const amrex::Real ev_to_kelvin = PhysConst::q_e / PhysConst::kb;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_temperature_e == 0.0_rt ||
+                m_halo_pedestal_temperature_e * ev_to_kelvin >=
+                    m_electron_temperature_floor,
+            "implicit_mhd.halo_pedestal_temperature_e cannot lie below "
+            "implicit_mhd.electron_temperature_floor");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_temperature_i == 0.0_rt ||
+                m_halo_pedestal_temperature_i * ev_to_kelvin >=
+                    m_ion_temperature_floor,
+            "implicit_mhd.halo_pedestal_temperature_i cannot lie below "
+            "implicit_mhd.ion_temperature_floor");
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_ledger_file.empty() ||
+            m_halo_pedestal_fraction > 0.0_rt,
+        "implicit_mhd.halo_pedestal_ledger_file requires a positive "
+        "implicit_mhd.halo_pedestal_fraction (the ledger books the pedestal "
+        "refresh, which does not exist without a pedestal)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_halo_relaxation_rate >= 0.0_rt,
         "implicit_mhd.halo_relaxation_rate cannot be negative");
@@ -3963,6 +4047,32 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Halo pedestal energy rate [1/s]: "
                    << m_halo_pedestal_energy_rate << "\n";
+    if (m_halo_pedestal_temperature_e > 0.0_rt ||
+        m_halo_pedestal_temperature_i > 0.0_rt ||
+        !m_halo_pedestal_ledger_file.empty()) {
+        amrex::Print() << "Halo pedestal image:           electrons ";
+        if (m_halo_pedestal_temperature_e > 0.0_rt) {
+            amrex::Print() << "cold " << m_halo_pedestal_temperature_e
+                           << " eV";
+        } else {
+            amrex::Print() << "peak (f x max U_e)";
+        }
+        amrex::Print() << ", ions ";
+        if (m_halo_pedestal_temperature_i > 0.0_rt) {
+            amrex::Print() << "cold " << m_halo_pedestal_temperature_i
+                           << " eV";
+        } else {
+            amrex::Print() << "peak (f x max e_i)";
+        }
+        amrex::Print() << ", cold raise: "
+                       << (m_halo_pedestal_cold_reset ? "reset" : "floor")
+                       << "\n"
+                       << "Halo pedestal ledger file:     "
+                       << (m_halo_pedestal_ledger_file.empty()
+                               ? "(none)"
+                               : m_halo_pedestal_ledger_file)
+                       << "\n";
+    }
     if (m_advection_density_offset_fraction > 0.0_rt) {
         amrex::Print() << "Advection density offset:      "
                        << m_advection_density_offset_fraction
@@ -5256,7 +5366,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         ClampWallExteriorState();
         m_loaded_state_sanitized = true;
     }
-    RefreshHaloPedestal();
+    RefreshHaloPedestal(step);
     RefreshVacuumReferenceDensity(step);
     m_state_old.Copy(m_state);
 
@@ -16752,7 +16862,7 @@ void ThetaImplicitMHD::ClampWallExteriorState ()
 #endif
 }
 
-void ThetaImplicitMHD::RefreshHaloPedestal ()
+void ThetaImplicitMHD::RefreshHaloPedestal (const int step)
 {
     if (m_halo_pedestal_fraction <= 0.0_rt) {
         return;
@@ -16761,6 +16871,16 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
     const bool cgl_closure = m_ion_closure == "cgl";
+    // Cold pedestal image (see m_halo_pedestal_temperature_e): per
+    // species, the energy image is the cold image at the pedestal
+    // density instead of f times the instantaneous peak; the raise then
+    // resets onto it (default) or floors at it.
+    const bool cold_electron_image = m_halo_pedestal_temperature_e > 0.0_rt;
+    const bool cold_ion_image = m_halo_pedestal_temperature_i > 0.0_rt;
+    const bool electron_reset =
+        cold_electron_image && m_halo_pedestal_cold_reset;
+    const bool ion_reset = cold_ion_image && m_halo_pedestal_cold_reset;
+    const bool book_ledger = !m_halo_pedestal_ledger_file.empty();
     amrex::MultiFab& density_block = m_state.getMultiFabBlock(MassDensityName, 0);
     amrex::MultiFab& electron_energy_block =
         m_state.getMultiFabBlock(ElectronEnergyName, 0);
@@ -16776,59 +16896,81 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     m_halo_pedestal_density =
         m_halo_pedestal_fraction *
         std::max(density_peak, m_reference_mass_density);
+    const amrex::Real pedestal = m_halo_pedestal_density;
+    // Cold image pressures n_ped kB T_ped = rho_ped (q/m) T[eV] (the
+    // z-wall ghost-fill identity, as the halo relaxation outlet uses it).
+    const amrex::Real cold_pressure_e =
+        pedestal * m_ion_charge_to_mass * m_halo_pedestal_temperature_e;
+    const amrex::Real cold_pressure_i =
+        pedestal * m_ion_charge_to_mass * m_halo_pedestal_temperature_i;
     m_halo_pedestal_electron_energy =
-        m_halo_pedestal_fraction * electron_energy_block.max(0);
+        cold_electron_image
+            ? cold_pressure_e / (m_gamma_e - 1.0_rt)
+            : m_halo_pedestal_fraction * electron_energy_block.max(0);
     m_halo_pedestal_ion_internal = 0.0_rt;
     m_halo_pedestal_ion_parallel = 0.0_rt;
     m_halo_pedestal_ion_perp = 0.0_rt;
-    const amrex::Real pedestal = m_halo_pedestal_density;
     if (total_energy_closure) {
-        // Internal-energy peak: E_i is conservative, so subtract the
-        // kinetic part cell by cell before reducing.
-        const amrex::MultiFab& momentum_block =
-            m_state.getMultiFabBlock(MomentumDensityName, 0);
-        const amrex::MultiFab& ion_energy_block =
-            m_state.getMultiFabBlock(IonEnergyName, 0);
-        const amrex::Real density_floor = m_mass_density_floor;
-        amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
-        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
-        using ReduceTuple = typename decltype(reduce_data)::Type;
-        for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
-            const amrex::Box box = mfi.validbox();
-            const auto rho = density_block.const_array(mfi);
-            const auto mom = momentum_block.const_array(mfi);
-            const auto ion_e = ion_energy_block.const_array(mfi);
-            reduce_op.eval(
-                box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                    amrex::Real kinetic_energy = 0.0_rt;
-                    for (int component = 0; component < 3; ++component) {
-                        kinetic_energy += mom(i, j, k, component) *
-                                          mom(i, j, k, component);
-                    }
-                    kinetic_energy *=
-                        0.5_rt / std::max(rho(i, j, k), density_floor);
-                    return {ion_e(i, j, k) - kinetic_energy};
-                });
+        if (cold_ion_image) {
+            m_halo_pedestal_ion_internal =
+                cold_pressure_i / (m_gamma_i - 1.0_rt);
+        } else {
+            // Internal-energy peak: E_i is conservative, so subtract the
+            // kinetic part cell by cell before reducing.
+            const amrex::MultiFab& momentum_block =
+                m_state.getMultiFabBlock(MomentumDensityName, 0);
+            const amrex::MultiFab& ion_energy_block =
+                m_state.getMultiFabBlock(IonEnergyName, 0);
+            const amrex::Real density_floor = m_mass_density_floor;
+            amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox();
+                const auto rho = density_block.const_array(mfi);
+                const auto mom = momentum_block.const_array(mfi);
+                const auto ion_e = ion_energy_block.const_array(mfi);
+                reduce_op.eval(
+                    box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                        amrex::Real kinetic_energy = 0.0_rt;
+                        for (int component = 0; component < 3; ++component) {
+                            kinetic_energy += mom(i, j, k, component) *
+                                              mom(i, j, k, component);
+                        }
+                        kinetic_energy *=
+                            0.5_rt / std::max(rho(i, j, k), density_floor);
+                        return {ion_e(i, j, k) - kinetic_energy};
+                    });
+            }
+            amrex::Real internal_peak =
+                amrex::get<0>(reduce_data.value(reduce_op));
+            amrex::ParallelAllReduce::Max(
+                internal_peak, amrex::ParallelContext::CommunicatorSub());
+            m_halo_pedestal_ion_internal =
+                m_halo_pedestal_fraction * std::max(internal_peak, 0.0_rt);
         }
-        amrex::Real internal_peak =
-            amrex::get<0>(reduce_data.value(reduce_op));
-        amrex::ParallelAllReduce::Max(
-            internal_peak, amrex::ParallelContext::CommunicatorSub());
-        m_halo_pedestal_ion_internal =
-            m_halo_pedestal_fraction * std::max(internal_peak, 0.0_rt);
     } else if (cgl_closure) {
-        m_halo_pedestal_ion_parallel =
-            m_halo_pedestal_fraction *
-            m_state.getMultiFabBlock(IonParallelEnergyName, 0).max(0);
-        m_halo_pedestal_ion_perp =
-            m_halo_pedestal_fraction *
-            m_state.getMultiFabBlock(IonPerpEnergyName, 0).max(0);
+        if (cold_ion_image) {
+            // Isotropic cold image: U_par = n kB T / 2, U_perp = n kB T.
+            m_halo_pedestal_ion_parallel = 0.5_rt * cold_pressure_i;
+            m_halo_pedestal_ion_perp = cold_pressure_i;
+        } else {
+            m_halo_pedestal_ion_parallel =
+                m_halo_pedestal_fraction *
+                m_state.getMultiFabBlock(IonParallelEnergyName, 0).max(0);
+            m_halo_pedestal_ion_perp =
+                m_halo_pedestal_fraction *
+                m_state.getMultiFabBlock(IonPerpEnergyName, 0).max(0);
+        }
     }
     if (density_block.min(0) >= pedestal) {
         // Nothing sub-pedestal: the per-block drain gates held the band
         // (they anchor at the CURRENT pedestal values each solve, so a
         // slowly moving pedestal needs no re-raise).
+        if (book_ledger) {
+            WriteHaloPedestalLedgerRow(step, 0);
+        }
         return;
     }
     // Raise every sub-pedestal cell ONTO the pedestal STATE: density to
@@ -16843,9 +16985,14 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     // raise re-triggers only where the dynamic pedestal itself rose
     // (peak growth under compression) -- the injected mass/energy is
     // the same class of tracked non-conservation as the positivity
-    // floors, confined to sub-pedestal halo cells. Landing exactly ON
-    // the pedestal is safe (unlike the admissibility bounds, which get
-    // a slack margin): the pedestal is an RHS-level gate anchor, not a
+    // floors, confined to sub-pedestal halo cells, and booked by the
+    // refresh ledger when requested. Under a COLD image with the reset
+    // raise the species' energy is SET to the image (the raised cell IS
+    // pedestal-temperature plasma; a re-raised band cell gives back the
+    // heat it gained since its last raise -- a signed booking); the
+    // floor raise keeps the max() form. Landing exactly ON the pedestal
+    // is safe (unlike the admissibility bounds, which get a slack
+    // margin): the pedestal is an RHS-level gate anchor, not a
     // constraint of the bounded Newton solve -- the admissibility
     // bounds stay at the far-lower positivity floors, so raised cells
     // are interior points with full two-sided probe headroom.
@@ -16886,6 +17033,29 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     const int wall_mz_lo = -m_wall_mask.GhostCells();
     const int wall_mz_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    // Ledger measure: product of the cell sizes, with the RZ annulus
+    // weight 2 pi r_center applied per cell in-kernel (units kg and J;
+    // kg/m^2 and J/m^2 in 1D -- the geometry's own measure).
+    amrex::Real cell_volume = 1.0_rt;
+    for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
+        cell_volume *= m_WarpX->Geom(0).CellSize(dim);
+    }
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+#endif
+    // One reduce kernel per box applies the raise and sums the ledger
+    // deltas (raised cells; injected mass; signed electron and ion
+    // energy change; each x measure) in the same pass. The per-cell
+    // state arithmetic is exactly that of the plain raise, so the state
+    // is bit-identical whether or not the totals are read (they are
+    // read only when the ledger file is set).
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum>
+        reduce_op;
+    amrex::ReduceData<amrex::Long, amrex::Real, amrex::Real, amrex::Real>
+        reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
     for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto rho = density_block.array(mfi);
@@ -16903,43 +17073,89 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
         const auto ion_int = ion_internal_block
                                  ? ion_internal_block->array(mfi)
                                  : amrex::Array4<amrex::Real>{};
-        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-            if (wall_freeze) {
-                const int jz = std::max(wall_mz_lo,
-                                        std::min(wall_mz_hi, j));
-                if (i >= wall_fm[jz]) {
-                    return;
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                if (wall_freeze) {
+                    const int jz = std::max(wall_mz_lo,
+                                            std::min(wall_mz_hi, j));
+                    if (i >= wall_fm[jz]) {
+                        return {amrex::Long(0), 0.0_rt, 0.0_rt, 0.0_rt};
+                    }
                 }
-            }
-            if (rho(i, j, k) >= pedestal) {
-                return;
-            }
-            rho(i, j, k) = pedestal;
-            energy(i, j, k) =
-                std::max(energy(i, j, k), electron_energy_pedestal);
-            if (total_energy_closure) {
-                // Pedestal E_i = kinetic part (at the RAISED density;
-                // momentum is untouched) + the internal pedestal.
-                amrex::Real kinetic_energy = 0.0_rt;
-                for (int component = 0; component < 3; ++component) {
-                    kinetic_energy += mom(i, j, k, component) *
-                                      mom(i, j, k, component);
+                const amrex::Real density_before = rho(i, j, k);
+                if (density_before >= pedestal) {
+                    return {amrex::Long(0), 0.0_rt, 0.0_rt, 0.0_rt};
                 }
-                kinetic_energy *= 0.5_rt / pedestal;
-                ion_e(i, j, k) =
-                    std::max(ion_e(i, j, k),
-                             kinetic_energy + ion_internal_pedestal);
-                if (ion_int) {
-                    ion_int(i, j, k) = std::max(ion_int(i, j, k),
-                                                ion_internal_pedestal);
+                amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                measure = 2.0_rt * MathConst::pi *
+                          (radial_lower + (i + 0.5_rt) * radial_cell_size);
+#endif
+                rho(i, j, k) = pedestal;
+                const amrex::Real electron_before = energy(i, j, k);
+                energy(i, j, k) =
+                    electron_reset
+                        ? electron_energy_pedestal
+                        : std::max(electron_before, electron_energy_pedestal);
+                amrex::Real ion_change = 0.0_rt;
+                if (total_energy_closure) {
+                    // Pedestal E_i = kinetic part (at the RAISED density;
+                    // momentum is untouched) + the internal pedestal.
+                    amrex::Real kinetic_energy = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        kinetic_energy += mom(i, j, k, component) *
+                                          mom(i, j, k, component);
+                    }
+                    kinetic_energy *= 0.5_rt / pedestal;
+                    const amrex::Real ion_before = ion_e(i, j, k);
+                    const amrex::Real ion_target =
+                        kinetic_energy + ion_internal_pedestal;
+                    ion_e(i, j, k) =
+                        ion_reset ? ion_target : std::max(ion_before, ion_target);
+                    ion_change = ion_e(i, j, k) - ion_before;
+                    if (ion_int) {
+                        ion_int(i, j, k) =
+                            ion_reset ? ion_internal_pedestal
+                                      : std::max(ion_int(i, j, k),
+                                                 ion_internal_pedestal);
+                    }
+                } else if (cgl_closure) {
+                    const amrex::Real parallel_before = ion_par(i, j, k);
+                    const amrex::Real perp_before = ion_perp(i, j, k);
+                    ion_par(i, j, k) =
+                        ion_reset ? ion_parallel_pedestal
+                                  : std::max(parallel_before,
+                                             ion_parallel_pedestal);
+                    ion_perp(i, j, k) =
+                        ion_reset ? ion_perp_pedestal
+                                  : std::max(perp_before, ion_perp_pedestal);
+                    ion_change = (ion_par(i, j, k) - parallel_before) +
+                                 (ion_perp(i, j, k) - perp_before);
                 }
-            } else if (cgl_closure) {
-                ion_par(i, j, k) =
-                    std::max(ion_par(i, j, k), ion_parallel_pedestal);
-                ion_perp(i, j, k) =
-                    std::max(ion_perp(i, j, k), ion_perp_pedestal);
-            }
-        });
+                return {amrex::Long(1), measure * (pedestal - density_before),
+                        measure * (energy(i, j, k) - electron_before),
+                        measure * ion_change};
+            });
+    }
+    if (book_ledger) {
+        const ReduceTuple totals = reduce_data.value(reduce_op);
+        amrex::Long raised_cells = amrex::get<0>(totals);
+        amrex::Real injected_mass = cell_volume * amrex::get<1>(totals);
+        amrex::Real electron_change = cell_volume * amrex::get<2>(totals);
+        amrex::Real ion_change = cell_volume * amrex::get<3>(totals);
+        amrex::ParallelAllReduce::Sum(
+            raised_cells, amrex::ParallelContext::CommunicatorSub());
+        amrex::ParallelAllReduce::Sum(
+            injected_mass, amrex::ParallelContext::CommunicatorSub());
+        amrex::ParallelAllReduce::Sum(
+            electron_change, amrex::ParallelContext::CommunicatorSub());
+        amrex::ParallelAllReduce::Sum(
+            ion_change, amrex::ParallelContext::CommunicatorSub());
+        m_halo_pedestal_injected_mass += injected_mass;
+        m_halo_pedestal_energy_e += electron_change;
+        m_halo_pedestal_energy_i += ion_change;
+        WriteHaloPedestalLedgerRow(step, raised_cells);
     }
     const auto& periodicity = m_WarpX->Geom(0).periodicity();
     density_block.FillBoundaryAndSync(periodicity);
@@ -16957,6 +17173,37 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     // beginning-of-step copies (and the first residual's sources) are
     // built from those.
     m_state.CopyMultiFabBlocksToFields();
+}
+
+void ThetaImplicitMHD::WriteHaloPedestalLedgerRow (const int step,
+                                                   const amrex::Long raised_cells)
+{
+    if (m_halo_pedestal_ledger_file.empty() ||
+        !amrex::ParallelDescriptor::IOProcessor()) {
+        return;
+    }
+    if (!m_halo_pedestal_ledger_started) {
+        // The refresh runs at the start of the first step, ahead of every
+        // other ledger's first row: create the file's directory if the
+        // path names one.
+        const auto parent =
+            std::filesystem::path(m_halo_pedestal_ledger_file).parent_path();
+        if (!parent.empty()) {
+            std::error_code ignored;
+            std::filesystem::create_directories(parent, ignored);
+        }
+    }
+    // Truncate at the first write of the run (a stale file from a
+    // previous run in the same directory would otherwise keep
+    // accumulating appended rows), append afterwards.
+    std::ofstream ledger(m_halo_pedestal_ledger_file,
+                         m_halo_pedestal_ledger_started ? std::ios::app
+                                                        : std::ios::trunc);
+    m_halo_pedestal_ledger_started = true;
+    ledger.precision(17);
+    ledger << step + 1 << " " << raised_cells << " "
+           << m_halo_pedestal_injected_mass << " " << m_halo_pedestal_energy_e
+           << " " << m_halo_pedestal_energy_i << "\n";
 }
 
 void ThetaImplicitMHD::UpdateStagedViscosity (const amrex::Real time)

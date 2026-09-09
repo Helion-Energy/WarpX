@@ -1,0 +1,14 @@
+# The cold pedestal image column under the CGL closure: the isotropic
+# cold image U_par = n_ped kB T_i / 2, U_perp = n_ped kB T_i lands the
+# raised cells exactly on the bulk's isotropic pressure (HLLD, as the
+# other CGL decks).
+FILE = inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold
+implicit_mhd.ion_closure = cgl
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true
+# The CGL closure carries its own stress: no explicit viscosity.
+implicit_mhd.viscosity = 0.0
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_ion_parallel_energy implicit_mhd_ion_perp_energy

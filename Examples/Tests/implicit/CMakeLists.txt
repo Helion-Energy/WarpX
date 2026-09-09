@@ -422,6 +422,122 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# COLD pedestal image (implicit_mhd.halo_pedestal_temperature_e / _i):
+# on a three-band static column (sub-pedestal halo loaded COLD on one
+# side and HOT on the other, cold image in pressure balance with the
+# bulk) the default "reset" raise lands every sub-pedestal cell exactly
+# on the cold state image for both species (dual-energy sync exact),
+# removing the hot band's excess heat, and the refresh ledger books the
+# signed change exactly; the column is a uniform-pressure static contact
+# afterwards, so the raised state rides unchanged. Discriminates the peak
+# image (hot band left hot, cold band lifted to 0.3x only) and the floor
+# form (hot band left hot).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold  # inputs
+    "analysis_mhd_halo_pedestal_cold.py reset diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The "floor" form of the cold raise: max(own, image) lifts the cold band
+# onto the image and leaves the hot band hot (checked after the first
+# step, before the hot band's pressure jump reaches the band interiors);
+# the ledger books a pure source.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_floor  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold implicit_mhd.halo_pedestal_cold_raise=floor"  # inputs
+    "analysis_mhd_halo_pedestal_cold.py floor diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The other ion energy closures: E_i alone (total_energy) and the CGL
+# pair (U_par = n_ped kB T_i / 2, U_perp = n_ped kB T_i).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_total_energy  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_total_energy  # inputs
+    "analysis_mhd_halo_pedestal_cold.py total_energy diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_cgl  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_cgl  # inputs
+    "analysis_mhd_halo_pedestal_cold.py cgl diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The cold image under the production SOLVER stack (packed_gmres x
+# fused_vector_ops = 2 x active_set = 1 x fused_residual = 1): the raise
+# and its ledger sit outside the solve, and on the static column every
+# solve exits at iteration 0 -- the gate is that the four knobs boot,
+# parse and book identically with the cold image on.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_production_stack  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold.py reset diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ dynamic deck of the cold image with the production FLUID stack
+# (dual_energy, central + viscosity, theta 1, Braginskii, pedestal drag
+# and ion-energy relaxation, axial field): periodic z and a reflecting
+# outer wall make the refresh the only mass source, so the ledger's
+# injected mass must close against the domain mass change; the hot sparse
+# halo makes the electron booking negative and the ion booking positive;
+# the band riding the pedestal must stay near the cold image (the peak
+# image would put it at the core temperature). Two ranks, two boxes.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... under the production solver stack minus the fused residual
+# (packed_gmres x fused_vector_ops = 2 x active_set = 1): the same physics
+# gates (round-off-different Krylov process, same converged state).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... the full production solver stack (adds implicit_evolve.fused_residual
+# = 1): bit-identical to the stack without it -- Newton diagnostic file
+# byte-equal, plotfile fields identical to the last bit -- the combination
+# gate every production knob set must carry.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref  # dependency
+)
+
 # Offset-density advection (implicit_mhd.advection_density_offset_fraction,
 # The reference code's subtract/advect/re-add density advance), NULL TWIN: a
 # two-cell-edged top-hat entropy wave advecting across a featureless
