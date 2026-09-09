@@ -2482,9 +2482,10 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     m_fused_residual = fr::Enabled() && m_use_recast;
 #endif
     if (fr::Enabled() && !m_fused_residual) {
-        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1 has no "
-                          "effect on this path (RZ with implicit_mhd.fluid_flux = hlld "
-                          "or central only)\n";
+        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1: the "
+                          "residual-side fusion is wired into the RZ conservative-form "
+                          "path only and is off here; the preconditioner, direct-solver "
+                          "and solver-vector parts of the knob stay on (exact)\n";
     }
     if (m_resistive_theta < 0.0_rt) {
         // Default: the dissipative Ohm terms keep the global centering.
@@ -6753,7 +6754,10 @@ void ThetaImplicitMHD::ResidualHotspotReport (const WarpXSolverVec& residual) co
 
     auto harvest = [&] (const amrex::MultiFab& block_mf, const char* label) {
         const amrex::Real block_max = block_mf.norm0(0, 0, true);
-        const amrex::Real block_l2 = block_mf.norm2(0);
+        // The masked norm (owner weights on shared nodes/faces) is valid for
+        // the face-staggered field blocks too; the plain norm2 asserts
+        // cell-centered data and double-counts box seams.
+        const amrex::Real block_l2 = block_mf.norm2(0, m_WarpX->Geom(0).periodicity());
         report << "  " << label << ": |F|_2 = " << block_l2
                << ", |F|_max = " << block_max;
         if (block_max <= 0.0_rt) {

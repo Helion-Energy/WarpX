@@ -1,0 +1,8 @@
+# The external-wall Green's-function deck with BOTH z caps open (and eight
+# boxes on one rank): the reference run of the fused-residual identity test
+# that exercises the open-cap `keep_rows` clamp of the axial ghost fills and
+# the kept exchanges across box seams.
+FILE = inputs_test_rz_theta_implicit_mhd_external_wall_ghost
+boundary.field_lo = none open
+boundary.field_hi = open open
+amr.max_grid_size = 8
