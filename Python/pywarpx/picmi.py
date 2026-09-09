@@ -3819,6 +3819,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Margin of the reduced row set (rows kept from threshold/margin on;
         default 10).
 
+    resistive_direct_precision: {"double", "single"}, optional
+        Factorize and solve the direct resistive block in FP32 ("single";
+        conversions on the device around the cuDSS calls). Default double.
+
     viscous_theta: float, optional
         Time centering of the VISCOUS stage, in [0.5, 1]; everything else
         keeps the global theta. Default: the global theta
@@ -3930,6 +3934,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_direct_dump_assembly=None,
         resistive_direct_row_threshold=None,
         resistive_direct_row_threshold_margin=None,
+        resistive_direct_precision=None,
         conduction_theta=None,
         viscous_theta=None,
         fluid_flux=None,
@@ -4083,6 +4088,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_direct_row_threshold_margin = (
             resistive_direct_row_threshold_margin
         )
+        self.resistive_direct_precision = resistive_direct_precision
         self.conduction_theta = conduction_theta
         self.viscous_theta = viscous_theta
         self.fluid_flux = fluid_flux
@@ -4264,6 +4270,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_direct_row_threshold_margin = (
             self.resistive_direct_row_threshold_margin
         )
+        implicit_mhd.resistive_direct_precision = self.resistive_direct_precision
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.viscous_theta = self.viscous_theta
         implicit_mhd.fluid_flux = self.fluid_flux

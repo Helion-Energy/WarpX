@@ -7950,6 +7950,19 @@ Jacobian probes.
     the matrix dump also works on builds without a factorization backend
     (``pc_mhd_block.resistive_validate_assembly`` assembles the matrix).
 
+.. pp:param:: implicit_mhd.resistive_direct_precision
+    :type: ``string``
+    :default: ``double``
+
+    ``single`` factorizes and solves the direct resistive block in FP32:
+    the assembled FP64 values, the right-hand side and the solution are
+    converted on the device around the cuDSS calls (the FP64 values stay
+    the reference of the assembly checks and of the dump). The block
+    inverse is then accurate to ~3e-5 relative -- ample for a
+    preconditioner -- and the solve is ~8 % cheaper on the production RZ
+    mesh. Requires the single-rank device assembly path. Not bit-identical
+    to the default.
+
 .. pp:param:: implicit_mhd.resistive_direct_row_threshold
     :type: ``float``
     :default: ``-1`` (off)

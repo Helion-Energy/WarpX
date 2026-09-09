@@ -281,6 +281,30 @@ DroppedCouplingMax (const amrex::Real* const a_values, const int* const a_slot_r
     return amrex::get<0>(reduce_data.value(reduce_op));
 }
 
+/** \brief FP64 -> FP32 device conversion (single-precision solve). */
+inline void
+ConvertToSingle (const amrex::Real* const a_source, float* const a_target,
+                 const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long index)
+                       {
+                           a_target[index] = static_cast<float>(a_source[index]);
+                       });
+}
+
+/** \brief FP32 -> FP64 device conversion (single-precision solve). */
+inline void
+ConvertToDouble (const float* const a_source, amrex::Real* const a_target,
+                 const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long index)
+                       {
+                           a_target[index] = static_cast<amrex::Real>(a_source[index]);
+                       });
+}
+
 /** \brief Zero a device vector of matrix values. */
 inline void
 ZeroRealVector (amrex::Real* const a_data, const std::size_t a_size)
@@ -378,6 +402,13 @@ ZeroIntScalar (int* const a_data)
  *    coupling exceeds the threshold at a later refreeze (checked on the
  *    device at every refreeze), so the bound holds at every application.
  *    Single-rank device assembly only.
+ *  - precision (double|single, default double): factorize and solve in
+ *    FP32 (values, right-hand side and solution converted on the device
+ *    around the cuDSS calls; the assembled FP64 values stay the reference
+ *    for the assembly checks). The block inverse is then accurate to
+ *    ~3e-5 relative -- ample for a preconditioner -- and the solve is
+ *    measured ~8 % cheaper on the production matrix. Single-rank device
+ *    assembly only.
  */
 class ResistiveDirectSolver
 {
@@ -648,6 +679,14 @@ class ResistiveDirectSolver
         // the class comment). Host products of BuildReducedSystem and
         // their device copies; the global-slot helpers (row of every
         // slot, diagonal slot of every row) are built once at the freeze.
+        // Single-precision factorization/solve (implicit_mhd.resistive_direct_precision):
+        // FP32 twins of the values, right-hand side and solution buffers that
+        // the cuDSS objects wrap; conversions run on the device around the calls.
+        bool m_single_precision = false;
+        amrex::Gpu::DeviceVector<float> m_values_single;
+        amrex::Gpu::DeviceVector<float> m_rhs_single;
+        amrex::Gpu::DeviceVector<float> m_solution_single;
+
         amrex::Real m_row_threshold = -1.0;
         amrex::Real m_row_threshold_margin = 10.0;
         bool m_reduced_active = false;
@@ -877,6 +916,16 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_row_threshold_margin >= 1.0,
             "implicit_mhd.resistive_direct_row_threshold_margin must be >= 1");
+        std::string precision = "double";
+        pp_implicit_mhd.query("resistive_direct_precision", precision);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            precision == "double" || precision == "single",
+            "implicit_mhd.resistive_direct_precision must be double or single");
+        m_single_precision = precision == "single";
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_single_precision || m_use_device_assembly,
+            "implicit_mhd.resistive_direct_precision = single requires the single-rank "
+            "device assembly path (implicit_mhd.resistive_direct_device_assembly)");
     }
 
     // Device-copyable twin of WrapPoint/GlobalIndex for the kernels.
@@ -1980,6 +2029,7 @@ ResistiveDirectSolver::FactorizeReduced ()
     }
     const auto rows = static_cast<std::int64_t>(m_reduced_rows);
     const auto nonzeros = static_cast<std::int64_t>(m_reduced_columns.size());
+    const bool pattern_new = m_reduced_pattern_new;
     if (m_reduced_pattern_new)
     {
         if (m_cudss_reduced_ready)
@@ -1991,17 +2041,31 @@ ResistiveDirectSolver::FactorizeReduced ()
             m_cudss_reduced_ready = false;
         }
         WARPX_CUDSS_CHECK(cudssDataCreate(m_cudss_handle, &m_cudss_reduced_data));
+        const void* wrapped_values = m_reduced_values_device.data();
+        void* wrapped_rhs = m_reduced_rhs_device.data();
+        void* wrapped_solution = m_reduced_solution_device.data();
+        cudssDataType_t value_type = CUDSS_R_64F;
+        if (m_single_precision)
+        {
+            m_values_single.resize(m_reduced_columns.size());
+            m_rhs_single.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+            m_solution_single.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+            wrapped_values = m_values_single.data();
+            wrapped_rhs = m_rhs_single.data();
+            wrapped_solution = m_solution_single.data();
+            value_type = CUDSS_R_32F;
+        }
         WARPX_CUDSS_CHECK(cudssMatrixCreateCsr(
             &m_cudss_reduced_matrix, rows, rows, nonzeros,
             m_reduced_row_offsets_device.data(), nullptr, m_reduced_columns_device.data(),
-            m_reduced_values_device.data(), CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F,
+            wrapped_values, CUDSS_R_32I, CUDSS_R_32I, value_type,
             CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_reduced_rhs, rows, 1, rows,
-                                              m_reduced_rhs_device.data(), CUDSS_R_64F,
+                                              wrapped_rhs, value_type,
                                               CUDSS_LAYOUT_COL_MAJOR));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_reduced_solution, rows, 1, rows,
-                                              m_reduced_solution_device.data(),
-                                              CUDSS_R_64F, CUDSS_LAYOUT_COL_MAJOR));
+                                              wrapped_solution, value_type,
+                                              CUDSS_LAYOUT_COL_MAJOR));
         amrex::Gpu::streamSynchronize();
         const amrex::Real analysis_start = amrex::ParallelDescriptor::second();
         WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_ANALYSIS,
@@ -2015,7 +2079,14 @@ ResistiveDirectSolver::FactorizeReduced ()
         m_cudss_reduced_ready = true;
         m_reduced_pattern_new = false;
     }
-    else
+    if (m_single_precision)
+    {
+        direct_detail::ConvertToSingle(m_reduced_values_device.data(),
+                                       m_values_single.data(), nonzeros);
+        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_reduced_matrix,
+                                               m_values_single.data()));
+    }
+    else if (!pattern_new)
     {
         WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_reduced_matrix,
                                                m_reduced_values_device.data()));
@@ -2087,16 +2158,33 @@ ResistiveDirectSolver::Factorize ()
         }
         amrex::Gpu::streamSynchronize();
 
+        const void* wrapped_values = matrix_values;
+        void* wrapped_rhs = m_device_rhs.data();
+        void* wrapped_solution = m_device_solution.data();
+        cudssDataType_t value_type = CUDSS_R_64F;
+        if (m_single_precision)
+        {
+            m_values_single.resize(m_matrix_values.size());
+            m_rhs_single.resize(m_num_rows);
+            m_solution_single.resize(m_num_rows);
+            direct_detail::ConvertToSingle(matrix_values, m_values_single.data(),
+                                           num_values);
+            wrapped_values = m_values_single.data();
+            wrapped_rhs = m_rhs_single.data();
+            wrapped_solution = m_solution_single.data();
+            value_type = CUDSS_R_32F;
+            amrex::Gpu::streamSynchronize();
+        }
         WARPX_CUDSS_CHECK(cudssMatrixCreateCsr(
             &m_cudss_matrix, num_rows, num_rows, num_values,
             m_device_row_offsets.data(), nullptr, m_device_column_indices.data(),
-            matrix_values, CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F,
+            wrapped_values, CUDSS_R_32I, CUDSS_R_32I, value_type,
             CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_rhs, num_rows, 1, num_rows,
-                                              m_device_rhs.data(), CUDSS_R_64F,
+                                              wrapped_rhs, value_type,
                                               CUDSS_LAYOUT_COL_MAJOR));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_solution, num_rows, 1, num_rows,
-                                              m_device_solution.data(), CUDSS_R_64F,
+                                              wrapped_solution, value_type,
                                               CUDSS_LAYOUT_COL_MAJOR));
         WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_ANALYSIS,
                                        m_cudss_config, m_cudss_data, m_cudss_matrix,
@@ -2105,8 +2193,18 @@ ResistiveDirectSolver::Factorize ()
     else if (m_use_device_assembly)
     {
         // The refresh already updated the wrapped device buffer in place
-        // (same stream: ordered before the factorization).
-        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_device.data()));
+        // (same stream: ordered before the factorization); the FP32 twin
+        // is refreshed from it.
+        if (m_single_precision)
+        {
+            direct_detail::ConvertToSingle(m_values_device.data(), m_values_single.data(),
+                                           num_values);
+            WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_single.data()));
+        }
+        else
+        {
+            WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_device.data()));
+        }
     }
     else
     {
@@ -2266,11 +2364,22 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
                                            reduced_rhs[local] = rhs[row_list[local]];
                                        });
                 }
+                if (m_single_precision)
+                {
+                    direct_detail::ConvertToSingle(m_reduced_rhs_device.data(),
+                                                   m_rhs_single.data(), m_reduced_rows);
+                }
                 WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
                                                m_cudss_config, m_cudss_reduced_data,
                                                m_cudss_reduced_matrix,
                                                m_cudss_reduced_solution,
                                                m_cudss_reduced_rhs));
+                if (m_single_precision)
+                {
+                    direct_detail::ConvertToDouble(m_solution_single.data(),
+                                                   m_reduced_solution_device.data(),
+                                                   m_reduced_rows);
+                }
                 {
                     const amrex::Real* const reduced_solution =
                         m_reduced_solution_device.data();
@@ -2287,9 +2396,19 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
         }
         else
         {
+            if (m_single_precision)
+            {
+                direct_detail::ConvertToSingle(m_device_rhs.data(), m_rhs_single.data(),
+                                               m_num_rows);
+            }
             WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
                                            m_cudss_config, m_cudss_data, m_cudss_matrix,
                                            m_cudss_solution, m_cudss_rhs));
+            if (m_single_precision)
+            {
+                direct_detail::ConvertToDouble(m_solution_single.data(),
+                                               m_device_solution.data(), m_num_rows);
+            }
         }
         if (!m_use_device_assembly)
         {
