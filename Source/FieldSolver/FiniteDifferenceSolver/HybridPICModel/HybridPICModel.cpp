@@ -870,6 +870,29 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_eb_flux_limit >= 0.0_rt,
             "hybrid_pic_model.qdsmc_conduction_eb_flux_limit must be "
             ">= 0 (0 = plain isothermal reset of the EB ring)");
+        // MHD staircase-corner temperature pin (member doc of
+        // m_qdsmc_eb_corner_pin); default off = bit-identical.
+        pp_hybrid.query("qdsmc_eb_corner_pin", m_qdsmc_eb_corner_pin);
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_eb_corner_pin_Te", m_qdsmc_eb_corner_pin_Te);
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_eb_corner_pin_rate", m_qdsmc_eb_corner_pin_rate);
+        if (m_qdsmc_eb_corner_pin) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(EB::enabled(),
+                "hybrid_pic_model.qdsmc_eb_corner_pin = 1 needs an embedded "
+                "boundary (the corner set is empty without one)");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_qdsmc_eb_corner_pin_Te >= 0.0_rt || m_cond_eb_bc == 1,
+                "hybrid_pic_model.qdsmc_eb_corner_pin = 1 needs a wall "
+                "temperature: qdsmc_eb_corner_pin_Te [eV], or the isothermal "
+                "EB BC whose qdsmc_conduction_eb_Te(x,y,z) it then reuses");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_include_thermal_conduction && m_cond_operator == 1,
+                "hybrid_pic_model.qdsmc_eb_corner_pin = 1 acts in the FD "
+                "conduction post-step (thermal conduction on, "
+                "qdsmc_conduction_operator = fd) and would be silently inert "
+                "otherwise");
+        }
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -1591,6 +1614,22 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             << "; FD EB ring pin f = " << m_cond_eb_flux_limit
             << (m_cond_eb_flux_limit > 0.0_rt ? "" : " (plain reset)")
             << "; EB conduction BC " << (m_cond_eb_bc == 1 ? "isothermal" : "adiabatic")
+            << "\n";
+        amrex::Print() << "[qdsmc] EB corner pin (MHD wall_corner_temperature_pin_rate port): "
+            << (m_qdsmc_eb_corner_pin
+                ? "ON (T_wall "
+                  + (m_qdsmc_eb_corner_pin_Te >= 0.0_rt
+                     ? fmt(m_qdsmc_eb_corner_pin_Te) + " eV"
+                     : std::string("= qdsmc_conduction_eb_Te(x,y,z)"))
+                  + ", "
+                  + (m_qdsmc_eb_corner_pin_rate > 0.0_rt
+                     ? "rate " + fmt(m_qdsmc_eb_corner_pin_rate) + " /s"
+                     : std::string("hard pin"))
+                  + "; corner = live node with a wall on two axes (EB-covered "
+                    "axis neighbour or non-adiabatic domain face); after the "
+                    "capped pins, before the floor; ledger corner_pin; counts "
+                    "printed at the first conduction call)"
+                : "OFF")
             << "\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
@@ -4380,6 +4419,22 @@ void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
 
 namespace
 {
+    // EB coverage test of the corner mask: node (i,j,k) is covered when it
+    // lies inside the nodal domain and the level-set FAB and its level set
+    // is <= 0 (the FD conduction operator's "covered"). Nodes outside the
+    // domain are open: a domain face is a wall only through its conduction
+    // BC (EbCornerMask).
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    bool eb_node_covered (amrex::Array4<amrex::Real const> const & phi,
+                          amrex::Box const & dom_nodes,
+                          amrex::Box const & phi_box,
+                          int const i, int const j, int const k)
+    {
+        amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+        if (!dom_nodes.contains(iv) || !phi_box.contains(iv)) { return false; }
+        return phi(i, j, k) <= 0.0_rt;
+    }
+
     // C^1 smoothstep gate of the halo valves: 0 at/below n_ped, 1 at/above
     // 2 n_ped (the MHD lane's floor_outflow_limiter form, TIM K.H).
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
@@ -7040,6 +7095,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         (m_qdsmc_te_pedestal_cap_eV >= 0._rt) || m_qdsmc_te_pedestal_image ||
         (m_te_shunt_eV > 0._rt) ||
         (m_cond_eb_bc == 1) ||
+        m_qdsmc_eb_corner_pin ||
         any_wall_bc ||
         m_has_energy_sink ||
         m_has_electron_stopping ||
@@ -7065,6 +7121,13 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
             << " wall_pin=" << wall_pin
+            << " corner_pin=" << m_cond_corner_tally
+            << " corner_Te_max_eV="
+            << (m_qdsmc_eb_corner_pin
+                ? m_corner_pin_last_max_K * PhysConst::kb / PhysConst::q_e : -1._rt)
+            << " corner_nbr_Te_max_eV="
+            << (m_qdsmc_eb_corner_pin
+                ? m_corner_pin_last_nbr_max_K * PhysConst::kb / PhysConst::q_e : -1._rt)
             << " source_taper=" << m_source_taper_J
             << " te_pedestal=" << m_te_pedestal_J
             << " te_pedestal_cap_eV="
@@ -8533,6 +8596,110 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         m_cond_eb_tally += tly;
         };
 
+    // MHD staircase-corner temperature pin (member doc of
+    // m_qdsmc_eb_corner_pin): every live corner node relaxes toward T_wall
+    // after the capped pins (the MHD order) and before the floor. The
+    // exchange is booked with the operator's floored capacity 1.5 b_ne kB
+    // in the pin_eb_ring tally convention; the pre-pin corner maximum and
+    // the maximum over each corner's live non-corner axis neighbours (read
+    // inside the FAB's valid box only, so no ghost state is consulted and
+    // no node written by this kernel is read) are kept for the ledger line.
+    bool const corner_pin = m_qdsmc_eb_corner_pin;
+    amrex::iMultiFab const * const corner_mask =
+        corner_pin ? &EbCornerMask(lev, Te) : nullptr;
+    auto pin_eb_corner = [&] (amrex::MultiFab & Tf, amrex::Real const dts)
+    {
+        auto const ebTe = m_cond_eb_Te;
+        bool const use_const = (m_qdsmc_eb_corner_pin_Te >= 0.0_rt);
+        amrex::Real const Tconst_K = m_qdsmc_eb_corner_pin_Te * qe / kb;
+        // fraction of (T - T_wall) that survives one application
+        amrex::Real const keep = (m_qdsmc_eb_corner_pin_rate > 0.0_rt)
+            ? std::exp(-m_qdsmc_eb_corner_pin_rate * dts) : 0.0_rt;
+        auto const plo_arr = geom.ProbLoArray();
+        auto const dx_arr  = geom.CellSizeArray();
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpMax,
+                         amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real>
+            reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box tile_box = mfi.tilebox();
+            amrex::Box const box_nodes =
+                amrex::surroundingNodes(mfi.validbox());
+            {   // unique node ownership (fixup-loop seam trim)
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    if (tile_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                        (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                         geom.isPeriodic(dd))) {
+                        tile_box.growHi(dd, -1);
+                    }
+                }
+            }
+            amrex::Array4<amrex::Real>       const & Te_arr = Tf.array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr  = bne.const_array(mfi);
+            amrex::Array4<int const>         const & m_arr  =
+                corner_mask->const_array(mfi);
+            reduce_op.eval(tile_box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                if (m_arr(i,j,k) == 0) { return {0.0_rt, 0.0_rt, 0.0_rt}; }
+                int const node[3] = {i, j, k};
+                amrex::Real const T0 = Te_arr(i,j,k);
+                amrex::Real TwK = Tconst_K;
+                if (!use_const) {
+                    amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                        cx[dd] = plo_arr[dd] + amrex::Real(node[dd])*dx_arr[dd];
+                    }
+#if defined(WARPX_DIM_3D)
+                    TwK = ebTe(cx[0], cx[1], cx[2]) * qe / kb;
+#else
+                    TwK = ebTe(cx[0], 0.0_rt, cx[1]) * qe / kb;
+#endif
+                }
+                amrex::Real const T1 = TwK + keep * (T0 - TwK);
+                Te_arr(i,j,k) = T1;
+                // live non-corner axis neighbours inside this FAB's valid box
+                amrex::Real nbr_max = 0.0_rt;
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    for (int side = -1; side <= 1; side += 2) {
+                        int nb[3] = {node[0], node[1], node[2]};
+                        nb[dd] += side;
+                        amrex::IntVect const iv(AMREX_D_DECL(nb[0], nb[1], nb[2]));
+                        if (!box_nodes.contains(iv)) { continue; }
+                        if (m_arr(nb[0],nb[1],nb[2]) != 0 ||
+                            b_arr(nb[0],nb[1],nb[2],BNE::b_ebm) == 0.0_rt) {
+                            continue;
+                        }
+                        nbr_max = amrex::max(nbr_max, Te_arr(nb[0],nb[1],nb[2]));
+                    }
+                }
+                amrex::Real const du =
+                    1.5_rt * kb * b_arr(i,j,k,BNE::b_ne) * (T1 - T0);
+#ifdef WARPX_DIM_RZ
+                amrex::Real const r_i =
+                    r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                amrex::Real const w_v = 2.0_rt*MathConst::pi*
+                    ((r_i > 0.0_rt) ? r_i : dr_rz/8.0_rt);
+                return {w_v*du, T0, nbr_max};
+#else
+                return {du, T0, nbr_max};
+#endif
+            });
+        }
+        auto tup = reduce_data.value(reduce_op);
+        amrex::Real tly   = amrex::get<0>(tup);
+        amrex::Real t_max = amrex::get<1>(tup);
+        amrex::Real n_max = amrex::get<2>(tup);
+        amrex::ParallelDescriptor::ReduceRealSum(tly);
+        amrex::ParallelDescriptor::ReduceRealMax(t_max);
+        amrex::ParallelDescriptor::ReduceRealMax(n_max);
+        m_cond_corner_tally += tly;
+        m_corner_pin_last_max_K = t_max;
+        m_corner_pin_last_nbr_max_K = n_max;
+    };
+
     // Positivity floor (see m_cond_te_floor): the anisotropic tensor
     // update is not monotone -- its off-diagonal cross-term fluxes can
     // drive T_e below zero at grid-sharp field-direction rotations, and
@@ -8618,6 +8785,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     {
         ApplyQdsmcConductionWallBCs(lev, dts, yy, rho);
         if (eb_iso) { pin_eb_ring(yy, dts); }
+        if (corner_pin) { pin_eb_corner(yy, dts); }
         if (te_floor_K > 0.0_rt) { apply_te_floor(yy); }
     };
 
@@ -11399,6 +11567,120 @@ void HybridPICModel::FillDensityPedestal (int const lev) const
         });
     }
     ped.FillBoundary(geom.periodicity());
+}
+
+amrex::iMultiFab const & HybridPICModel::EbCornerMask (
+    int const lev, amrex::MultiFab const & like) const
+{
+    if (m_eb_corner_mask.size() <= lev) { m_eb_corner_mask.resize(lev + 1); }
+    auto & mask = m_eb_corner_mask[lev];
+    if (mask && mask->boxArray() == like.boxArray() &&
+        mask->DistributionMap() == like.DistributionMap()) {
+        return *mask;
+    }
+    ABLASTR_PROFILE("HybridPICModel::EbCornerMask()");
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    amrex::MultiFab const & phi =
+        *warpx.m_fields.get(FieldType::distance_to_eb, lev);
+    mask = std::make_unique<amrex::iMultiFab>(
+        like.boxArray(), like.DistributionMap(), 1, 1);
+    mask->setVal(0);
+
+    // A domain face of axis d is a wall when its conduction BC pins (not
+    // adiabatic); the geometric count reported below ignores the BC. The
+    // RZ axis is a symmetry plane, never a face.
+    amrex::GpuArray<int, AMREX_SPACEDIM> pin_lo, pin_hi, face_lo, face_hi;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        bool const per = geom.isPeriodic(d);
+        face_lo[d] = per ? 0 : 1;
+        face_hi[d] = per ? 0 : 1;
+        pin_lo[d] = (!per && m_cond_bc[d][0] != 0) ? 1 : 0;
+        pin_hi[d] = (!per && m_cond_bc[d][1] != 0) ? 1 : 0;
+    }
+#ifdef WARPX_DIM_RZ
+    if (geom.ProbLo(0) <= 0.0_rt) { face_lo[0] = 0; pin_lo[0] = 0; }
+#endif
+
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real>
+        reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (MFIter mfi(*mask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const tile_box = mfi.tilebox();
+        amrex::Box count_box = tile_box;
+        {   // unique node ownership for the counts (fixup-loop seam trim)
+            amrex::Box const box_nodes =
+                amrex::surroundingNodes(mfi.validbox());
+            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                if (count_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                    (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                     geom.isPeriodic(dd))) {
+                    count_box.growHi(dd, -1);
+                }
+            }
+        }
+        amrex::Array4<int>               const & m_arr   = mask->array(mfi);
+        amrex::Array4<amrex::Real const> const & phi_arr = phi.const_array(mfi);
+        amrex::Box const phi_box = phi.fabbox(mfi.index());
+        reduce_op.eval(tile_box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+        {
+            m_arr(i,j,k) = 0;
+            if (eb_node_covered(phi_arr, dom_nodes, phi_box, i, j, k)) {
+                return {0.0_rt, 0.0_rt, 0.0_rt};
+            }
+            int const node[3] = {i, j, k};
+            int n_eb = 0, n_pin = 0, n_face = 0;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                int nb[3] = {i, j, k};
+                nb[d] = node[d] + 1;
+                bool wall_eb = eb_node_covered(phi_arr, dom_nodes, phi_box,
+                                               nb[0], nb[1], nb[2]);
+                nb[d] = node[d] - 1;
+                wall_eb = wall_eb || eb_node_covered(phi_arr, dom_nodes, phi_box,
+                                                     nb[0], nb[1], nb[2]);
+                bool const at_lo = (node[d] == dom_nodes.smallEnd(d));
+                bool const at_hi = (node[d] == dom_nodes.bigEnd(d));
+                bool const pin  = (at_lo && pin_lo[d])  || (at_hi && pin_hi[d]);
+                bool const face = (at_lo && face_lo[d]) || (at_hi && face_hi[d]);
+                if (wall_eb)   { ++n_eb; }
+                else if (pin)  { ++n_pin; }
+                else if (face) { ++n_face; }
+            }
+            int cls = 0;
+            if (n_eb >= 2) { cls = 1; }
+            else if (n_eb >= 1 && n_pin >= 1) { cls = 2; }
+            m_arr(i,j,k) = cls;
+            bool const own =
+                count_box.contains(amrex::IntVect(AMREX_D_DECL(i, j, k)));
+            bool const geom_face = (n_eb >= 1 && (n_pin + n_face) >= 1);
+            return {(own && cls == 1) ? 1.0_rt : 0.0_rt,
+                    (own && cls == 2) ? 1.0_rt : 0.0_rt,
+                    (own && geom_face) ? 1.0_rt : 0.0_rt};
+        });
+    }
+    mask->FillBoundary(geom.periodicity());
+    auto tup = reduce_data.value(reduce_op);
+    amrex::Real n_stair     = amrex::get<0>(tup);
+    amrex::Real n_face_pin  = amrex::get<1>(tup);
+    amrex::Real n_face_geom = amrex::get<2>(tup);
+    amrex::ParallelDescriptor::ReduceRealSum(n_stair);
+    amrex::ParallelDescriptor::ReduceRealSum(n_face_pin);
+    amrex::ParallelDescriptor::ReduceRealSum(n_face_geom);
+    amrex::Print() << "[qdsmc] EB corner pin: level " << lev
+        << " corner nodes = " << static_cast<long>(n_stair)
+        << " stair inside corners (EB-covered neighbours on two axes) + "
+        << static_cast<long>(n_face_pin)
+        << " EB-meets-domain-face corners with a pinning face BC (of "
+        << static_cast<long>(n_face_geom)
+        << " live nodes on a domain face next to the EB; an adiabatic face "
+           "is not a wall)\n";
+    return *mask;
 }
 
 amrex::Real HybridPICModel::EnergyVolumeIntegral (
