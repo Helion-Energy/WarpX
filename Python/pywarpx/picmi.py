@@ -3796,10 +3796,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         ir_n_steps, nd_nlevels, nd_ubfactor, use_superpanels,
         deterministic_mode, host_nthreads). Default: library defaults.
 
-    resistive_direct_solve_phases: bool, optional
-        Measurement mode: run every application of the direct resistive
-        block as its cuDSS sub-phases in separate profiler regions.
-
     resistive_direct_solve_host_sync: bool, optional
         Host synchronization closing every application of the direct
         resistive block (default True = legacy; False lets the host run
@@ -3919,7 +3915,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         resistive_direct_cudss_options=None,
-        resistive_direct_solve_phases=None,
         resistive_direct_solve_host_sync=None,
         resistive_direct_dump_prefix=None,
         resistive_direct_dump_assembly=None,
@@ -4069,7 +4064,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.resistive_direct_cudss_options = resistive_direct_cudss_options
-        self.resistive_direct_solve_phases = resistive_direct_solve_phases
         self.resistive_direct_solve_host_sync = resistive_direct_solve_host_sync
         self.resistive_direct_dump_prefix = resistive_direct_dump_prefix
         self.resistive_direct_dump_assembly = resistive_direct_dump_assembly
@@ -4241,7 +4235,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_direct_cudss_options = (
             self.resistive_direct_cudss_options
         )
-        implicit_mhd.resistive_direct_solve_phases = self.resistive_direct_solve_phases
         implicit_mhd.resistive_direct_solve_host_sync = (
             self.resistive_direct_solve_host_sync
         )

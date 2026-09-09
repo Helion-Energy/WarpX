@@ -7921,18 +7921,6 @@ Jacobian probes.
     roundoff (the direct solve stays exact), but it is not bit-identical
     to the default.
 
-.. pp:param:: implicit_mhd.resistive_direct_solve_phases
-    :type: ``bool``
-    :default: ``0``
-
-    Measurement mode of the direct resistive block: run each application
-    as the cuDSS solve sub-phases (forward permutation, forward
-    substitution, diagonal, backward substitution, backward permutation,
-    refinement), each inside its own profiler region closed by a stream
-    synchronization, so the profiler table splits the per-application
-    device time by sub-phase. Same arithmetic as the single-phase solve;
-    slower (the synchronizations).
-
 .. pp:param:: implicit_mhd.resistive_direct_solve_host_sync
     :type: ``bool``
     :default: ``1``

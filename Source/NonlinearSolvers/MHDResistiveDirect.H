@@ -302,10 +302,6 @@ ZeroIntScalar (int* const a_data)
  *    before the analysis (reordering_alg, factorization_alg, solve_alg,
  *    matching_alg, pivot_type, ir_n_steps, nd_nlevels, nd_ubfactor,
  *    use_superpanels, deterministic_mode, host_nthreads);
- *  - solve_phases: run the solve as its cuDSS sub-phases (forward
- *    permutation, forward, diagonal, backward, backward permutation,
- *    refinement), each in its own profiler region with a stream
- *    synchronization, so the profiler splits the solve cost;
  *  - solve_host_sync: the host synchronization that closes every
  *    application (0 lets the host run ahead; the results are stream
  *    ordered either way);
@@ -548,7 +544,6 @@ class ResistiveDirectSolver
         // Measurement / tuning knobs (implicit_mhd.resistive_direct_*, see
         // the class comment).
         std::vector<std::string> m_cudss_options;
-        bool m_split_solve_phases = false;
         bool m_host_sync_after_solve = true;
         std::string m_dump_prefix;
         int m_dump_assembly = 1;
@@ -723,7 +718,6 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
 
         // Measurement / tuning knobs (defaults: today's behaviour).
         pp_implicit_mhd.queryarr("resistive_direct_cudss_options", m_cudss_options);
-        pp_implicit_mhd.query("resistive_direct_solve_phases", m_split_solve_phases);
         pp_implicit_mhd.query("resistive_direct_solve_host_sync",
                               m_host_sync_after_solve);
         pp_implicit_mhd.query("resistive_direct_dump_prefix", m_dump_prefix);
@@ -1753,50 +1747,9 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
             amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_rhs.begin(),
                                   m_rhs.end(), m_device_rhs.begin());
         }
-        if (m_split_solve_phases)
-        {
-            // The same sub-phases cuDSS runs inside CUDSS_PHASE_SOLVE, each
-            // closed by a stream synchronization so the profiler regions
-            // carry the device time of one sub-phase (measurement mode).
-            const auto run_phase = [&] (const int a_phase)
-            {
-                WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, a_phase, m_cudss_config,
-                                               m_cudss_data, m_cudss_matrix,
-                                               m_cudss_solution, m_cudss_rhs));
-                amrex::Gpu::streamSynchronize();
-            };
-            {
-                BL_PROFILE("ResistiveDirect::Solve(fwd_perm)");
-                run_phase(CUDSS_PHASE_SOLVE_FWD_PERM);
-            }
-            {
-                BL_PROFILE("ResistiveDirect::Solve(fwd)");
-                run_phase(CUDSS_PHASE_SOLVE_FWD);
-            }
-            {
-                BL_PROFILE("ResistiveDirect::Solve(diag)");
-                run_phase(CUDSS_PHASE_SOLVE_DIAG);
-            }
-            {
-                BL_PROFILE("ResistiveDirect::Solve(bwd)");
-                run_phase(CUDSS_PHASE_SOLVE_BWD);
-            }
-            {
-                BL_PROFILE("ResistiveDirect::Solve(bwd_perm)");
-                run_phase(CUDSS_PHASE_SOLVE_BWD_PERM);
-            }
-            {
-                BL_PROFILE("ResistiveDirect::Solve(refinement)");
-                run_phase(CUDSS_PHASE_SOLVE_REFINEMENT);
-            }
-        }
-        else
-        {
-            WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
-                                           m_cudss_config, m_cudss_data,
-                                           m_cudss_matrix, m_cudss_solution,
-                                           m_cudss_rhs));
-        }
+        WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
+                                       m_cudss_config, m_cudss_data, m_cudss_matrix,
+                                       m_cudss_solution, m_cudss_rhs));
         if (!m_use_device_assembly)
         {
             amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, m_device_solution.begin(),
