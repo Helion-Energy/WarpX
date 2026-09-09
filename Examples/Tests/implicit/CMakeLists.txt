@@ -2601,6 +2601,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# split twin (single rank): the kept rows partitioned into the connected
+# components of the coupling pattern -- the poloidal (B_r, B_z) block of 992
+# rows and the azimuthal block of 512 rows -- each dumped as its own
+# sub-system; disjointness, coverage, exact restriction and the absence of
+# inter-system couplings are checked from the dumps
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly_split  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_split  # inputs
+    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.03 2"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # reduced-solve partition on a two-resistivity deck (single rank): the
 # wall-band override deck with the plasma resistivity 1000x lower
 # (my_constants.D = 0.02), so the band rows (constant override eta,
