@@ -212,6 +212,20 @@ void HybridPICModel::ReadParameters ()
             ablastr::warn_manager::WarnPriority::medium);
     }
 
+    // EM-transparent EB for the field solve (see m_eb_fields_transparent):
+    // default off, bit-identical. The wall is then kept only by the
+    // insulating standoff-band collection, so require that wall type.
+    pp_hybrid.query("eb_fields_transparent", m_eb_fields_transparent);
+    if (m_eb_fields_transparent) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            EB::enabled()
+            && WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating,
+            "hybrid_pic_model.eb_fields_transparent = 1 requires an embedded "
+            "boundary with boundary.eb_type = insulating: the field solve no "
+            "longer sees the wall, so the standoff-band particle collection "
+            "is what keeps it.");
+    }
+
     // Master gate for the electron-energy equation. When enabled, K_e is
     // advected each step by fictitious Lagrangian particles moving with V_e
     // (see Phys. Plasmas 31, 012902 (2024)); T_e is recovered from K_e and n_e
@@ -1369,6 +1383,11 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
+
+    if (m_eb_fields_transparent) {
+        amrex::Print() << "[hybrid] EB fields: TRANSPARENT (field solve ignores "
+                          "the EB; particles/QDSMC EB fill unchanged)\n";
+    }
 
     // Electron-ion energy-equilibration rate nu_ei(rho,Te,Ti,t) for the Q_ei term.
     m_nu_ei_parser = std::make_unique<amrex::Parser>(

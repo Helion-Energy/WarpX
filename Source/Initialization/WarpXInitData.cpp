@@ -1643,6 +1643,20 @@ void WarpX::InitializeEBGridData (int lev)
                     m_eb_update_B[lev],
                     m_fields.get_alldirs(FieldType::Bfield_fp, lev),
                     eb_fact, Geom(lev).periodicity() );
+
+                // EM-transparent EB for the hybrid field solve
+                // (hybrid_pic_model.eb_fields_transparent): every E, J and B
+                // location is updated, so the EB body is live vacuum at the
+                // parser resistivity. Particle collection, the ion-current
+                // mask and the QDSMC fill key on the level set and keep the
+                // wall. Applied here so that restarts and regrids, which
+                // rebuild the flags through this function, stay transparent.
+                if (m_hybrid_pic_model && m_hybrid_pic_model->m_eb_fields_transparent) {
+                    for (int idim = 0; idim < 3; ++idim) {
+                        m_eb_update_E[lev][idim]->setVal(1);
+                        m_eb_update_B[lev][idim]->setVal(1);
+                    }
+                }
             }
 
         }

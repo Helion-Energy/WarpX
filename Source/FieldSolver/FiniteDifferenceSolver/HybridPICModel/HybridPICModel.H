@@ -2518,6 +2518,26 @@ public:
      *  inside a const call chain. */
     mutable bool m_eb_ji_mask_checked = false;
 
+    /** EM-transparent embedded boundary for the FIELD solve. Input:
+     *  eb_fields_transparent (default false = bit-identical).
+     *
+     *  The stair-case EB freezes every E and J location whose update flag
+     *  is 0, and B follows through Faraday's law: the wall is a perfect
+     *  conductor for the PLASMA-FRAME field while the painted external field
+     *  passes through it. The annulus between the plasma edge and the wall
+     *  then conserves the plasma flux, amplifying the diamagnetic surface
+     *  current, and a reciprocity flux probe reads that current without the
+     *  wall's image current. When set, both update-flag sets are reset to 1
+     *  everywhere right after the stair-case marking
+     *  (WarpX::InitializeEBGridData), so Ampere's law, Ohm's law, Faraday's
+     *  law, the open-boundary source curl, the electron-inertia mask and the
+     *  external-field add treat the EB body as live vacuum at the parser
+     *  resistivity. Everything keyed on the level set is unchanged: particle
+     *  collection at the insulating standoff band, the ion-current mask
+     *  (eb_zero_ion_current_cells), the QDSMC insulating EB fill and the
+     *  conduction EB pin. Requires boundary.eb_type = insulating. */
+    bool m_eb_fields_transparent = false;
+
     /** Plasma resistivity */
     std::string m_eta_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_resistivity_parser;

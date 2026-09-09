@@ -4838,6 +4838,27 @@ Maxwell solver: kinetic-fluid hybrid
     AMReX level-set roof (every location would be masked). Negative values (the default) leave the
     deposited current untouched.
 
+.. pp:param:: hybrid_pic_model.eb_fields_transparent
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    EM-transparent embedded boundary for the hybrid FIELD solve. By default the stair-case
+    embedded boundary freezes every E and J location whose update flag is 0 (B follows through
+    Faraday's law), which makes the wall a perfect conductor for the plasma-frame field while the
+    painted external field passes through it: the annulus between the plasma edge and the wall
+    conserves the plasma flux, amplifies the diamagnetic surface current, and a reciprocity flux
+    probe reads that current without the wall's image current. When set, both update-flag sets
+    are reset to 1 everywhere right after the stair-case marking, so Ampere's law, Ohm's law,
+    Faraday's law, the open-boundary source curl, the electron-inertia mask and the
+    external-field add treat the embedded-boundary body as live vacuum at the parser
+    resistivity. Everything keyed on the level set is unchanged: particle collection at the
+    insulating standoff band, :pp:param:`hybrid_pic_model.eb_zero_ion_current_cells`, the QDSMC
+    insulating EB fill and the conduction EB pin. Requires :pp:param:`boundary.eb_type`
+    ``= insulating`` (the standoff-band collection is then what keeps the wall). Prints
+    ``[hybrid] EB fields: TRANSPARENT`` at startup. Off (the default) is bit-identical to the
+    unmodified solver.
+
 .. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
     :type: ``bool``
     :default: ``false``
