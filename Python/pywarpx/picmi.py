@@ -2169,6 +2169,29 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         mode, against its value at iteration 0 of each solve. Defaults to
         relative_tolerance.
 
+    active_set_hysteresis: integer, default=0
+        Release hysteresis of the active set (requires active_set): after
+        iteration 0 of a solve a pinned component resting on its bound
+        whose residual has turned inward is held for up to this many
+        consecutive identifications before it is released (anti-cycling;
+        0 = released on the sign of its residual, the plain rule).
+
+    line_search_resolve: bool, default=False
+        Entrant re-solve (requires active_set): when the projection clamps
+        new components into the set and the full step then fails the
+        Armijo test, re-solve the reduced system once with the enlarged
+        set and retry the full step before backtracking; a failed ladder
+        whose free residual is within the active-set tolerance exits as
+        converged (status 4) rather than as a stagnation-accept.
+
+    line_search: string, default='backtrack'
+        Step-length rule of the Newton line search: 'backtrack' (halving,
+        bit-identical), 'quadratic' or 'cubic' (safeguarded polynomial
+        models of the merit function through the rejected trials).
+
+    line_search_min_step: float, default=2**-12
+        Smallest step the polynomial line-search rules may try.
+
     jfnk_epsilon: float, default=1.e-6
         Relative size of the matrix-free Jacobian probe (the state is
         perturbed by eps*dU with eps = jfnk_epsilon ||U||/||dU|| in the
@@ -2223,6 +2246,10 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         forcing_max=None,
         active_set=None,
         active_set_tolerance=None,
+        active_set_hysteresis=None,
+        line_search_resolve=None,
+        line_search=None,
+        line_search_min_step=None,
         jfnk_epsilon=None,
         jfnk_epsilon_mode=None,
         jfnk_component_floor=None,
@@ -2253,12 +2280,20 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.forcing_max = forcing_max
         self.active_set = active_set
         self.active_set_tolerance = active_set_tolerance
+        self.active_set_hysteresis = active_set_hysteresis
+        self.line_search_resolve = line_search_resolve
+        self.line_search = line_search
+        self.line_search_min_step = line_search_min_step
         self.jfnk_epsilon = jfnk_epsilon
         self.jfnk_epsilon_mode = jfnk_epsilon_mode
         self.jfnk_component_floor = jfnk_component_floor
         self.jfnk_component_floors = jfnk_component_floors
         self.jfnk_probe_report_file = jfnk_probe_report_file
 
+        if line_search is not None:
+            assert line_search in ("backtrack", "quadratic", "cubic"), (
+                "line_search must be 'backtrack', 'quadratic' or 'cubic'"
+            )
         if jfnk_epsilon_mode is not None:
             assert jfnk_epsilon_mode in ("global", "component"), (
                 "jfnk_epsilon_mode must be 'global' or 'component'"
@@ -2299,6 +2334,10 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.forcing_max = self.forcing_max
         newton.active_set = self.active_set
         newton.active_set_tolerance = self.active_set_tolerance
+        newton.active_set_hysteresis = self.active_set_hysteresis
+        newton.line_search_resolve = self.line_search_resolve
+        newton.line_search = self.line_search
+        newton.line_search_min_step = self.line_search_min_step
         newton.jfnk_epsilon = self.jfnk_epsilon
         newton.jfnk_epsilon_mode = self.jfnk_epsilon_mode
         newton.jfnk_component_floor = self.jfnk_component_floor

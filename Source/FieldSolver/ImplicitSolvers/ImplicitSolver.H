@@ -257,11 +257,38 @@ public:
                                            const WarpXSolverVec& a_F,
                                            bool a_keep_clamped,
                                            amrex::Long& a_entered,
-                                           amrex::Long& a_released) const
+                                           amrex::Long& a_released,
+                                           amrex::Long& a_held) const
     {
         amrex::ignore_unused(a_U, a_F, a_keep_clamped);
         a_entered = 0;
         a_released = 0;
+        a_held = 0;
+        return 0;
+    }
+
+    /**
+     * \brief Reduced-space Newton release hysteresis
+     * (newton.active_set_hysteresis): after iteration 0 of a solve, a
+     * member whose residual no longer demands the sub-bound update
+     * (F_i <= 0) but still rests on its bound is HELD in the set for up
+     * to a_count consecutive such identifications before it is released
+     * (a_count = 0: released at once, the plain rule). Iteration 0
+     * rebuilds the set from the state and resets the counters. No-op
+     * default.
+     */
+    virtual void SetActiveSetHysteresis (int a_count)
+    {
+        amrex::ignore_unused(a_count);
+    }
+
+    /**
+     * \brief Number of components currently in the active set (global),
+     * as recorded by the last IdentifyActiveSet / projection call. Zero
+     * for operators without a projection.
+     */
+    [[nodiscard]] virtual amrex::Long ActiveSetSize () const
+    {
         return 0;
     }
 

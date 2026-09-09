@@ -29,6 +29,15 @@
 #include <filesystem>
 
 /**
+ * \brief Step-length rule of the Newton line search (newton.line_search):
+ * backtrack halves the step (the historical ladder, default); quadratic
+ * and cubic pick the safeguarded minimiser of a polynomial model of the
+ * merit function 0.5 ||F||^2 through the trials (Dennis & Schnabel 1983
+ * sec. 6.3.2, Kelley 1995 sec. 8.3.1).
+ */
+AMREX_ENUM(NewtonLineSearchType, backtrack, quadratic, cubic);
+
+/**
  * \brief Newton method to solve nonlinear equation of form:
  * F(U) = U - b - R(U) = 0. U is the solution vector, b is a constant,
  * and R(U) is some nonlinear function of U, which is computed in the
@@ -109,7 +118,16 @@ public:
         if (m_active_set) {
             amrex::Print() << "Newton active set:          true (reduced-space solve on the free subspace)\n";
             amrex::Print() << "Active-set tolerance:       " << m_active_set_tolerance << "\n";
+            amrex::Print() << "Active-set hysteresis:      " << m_active_set_hysteresis
+                           << (m_active_set_hysteresis > 0
+                                   ? " (members whose residual turned inward are held this many identifications)\n"
+                                   : " (released on the sign of their residual)\n");
+            amrex::Print() << "Line-search entrant re-solve: "
+                           << (m_line_search_resolve ? "true" : "false") << "\n";
         }
+        amrex::Print()     << "Newton line search:         "
+                           << amrex::getEnumNameString(m_line_search)
+                           << ", min step " << m_line_search_min_step << "\n";
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -283,6 +301,54 @@ private:
     amrex::Real m_active_set_tolerance = -1.0;
 
     /**
+     * \brief Release hysteresis of the active set
+     * (newton.active_set_hysteresis, default 0 = the plain rule). After
+     * iteration 0 of a solve a member resting on its bound whose residual
+     * has turned inward (F_i <= 0) is held in the set for up to this
+     * many consecutive identifications before it is released; iteration
+     * 0 rebuilds the set from the state. Anti-cycling: measured on the
+     * production formation deck the plain rule re-forms the set every
+     * iteration (a member released on the sign of its own residual is
+     * driven back through its bound by the same iteration's free
+     * direction and re-clamped by the projection), which truncates the
+     * direction and damps or stalls the line search (25% damped
+     * iterations, 17% stagnation exits, 2 wasted iterations per step in
+     * the 14-17 us windows). Requires newton.active_set = 1.
+     */
+    int m_active_set_hysteresis = 0;
+
+    /**
+     * \brief Entrant re-solve (newton.line_search_resolve, default
+     * false; requires newton.active_set = 1). When the projection clamps
+     * NEW components into the active set at a Newton iteration and the
+     * full step then fails the Armijo test, the reduced linear system is
+     * solved ONCE more with the enlarged set (same base state, same
+     * frozen preconditioner) and the full step is retried before the
+     * ladder backtracks: the truncated direction is replaced by one
+     * consistent with the entrants held at their bounds. A ladder that
+     * still fails with the free residual (with respect to the enlarged
+     * set) already within the active-set tolerance exits as converged
+     * (status 4) instead of as a stagnation-accept (status 1).
+     */
+    bool m_line_search_resolve = false;
+
+    /**
+     * \brief Step-length rule of the line search (newton.line_search,
+     * default backtrack = halving, bit-identical) and the smallest step
+     * the polynomial rules may try (newton.line_search_min_step, default
+     * 2^-12 = the floor of the 12-rung halving ladder).
+     */
+    NewtonLineSearchType m_line_search = NewtonLineSearchType::backtrack;
+    amrex::Real m_line_search_min_step = 1.0 / 4096.0;
+
+    /**
+     * \brief Any of the globalization knobs above is non-default: the
+     * diagnostic file then carries six more columns per solve (entrants,
+     * released, held, re-solves, damped steps, rejected trials).
+     */
+    bool m_globalization_knobs = false;
+
+    /**
      * \brief Consecutive zero-progress (frozen) solve counter.
      */
     mutable int m_frozen_steps = 0;
@@ -395,6 +461,59 @@ private:
     void ParseParameters ();
 
     /**
+     * \brief Safeguarded polynomial step of the line search. The merit
+     * function is f(l) = 0.5 ||F(U - l dU)||^2 with f(0) = 0.5 r0^2 and
+     * slope f'(0) = -r0^2 (the Newton direction; the inexactness and the
+     * projection make the true slope a little less negative, which the
+     * safeguards absorb). With one failed trial (a_lambda_c, a_norm_c) the
+     * quadratic model through f(0), f'(0), f(a_lambda_c) is minimised;
+     * with two (the cubic rule, from the second backtrack on) the cubic
+     * through f(0), f'(0), f(a_lambda_c), f(a_lambda_p) (Dennis &
+     * Schnabel A6.3.1). The result is clipped to [0.1, 0.5] a_lambda_c so
+     * the step neither collapses nor stalls.
+     */
+    static amrex::Real InterpolatedStep (amrex::Real a_lambda_c,
+                                         amrex::Real a_norm_c,
+                                         amrex::Real a_lambda_p,
+                                         amrex::Real a_norm_p,
+                                         amrex::Real a_norm_0,
+                                         bool a_use_cubic)
+    {
+        using namespace amrex::literals;
+        const amrex::Real f0 = 0.5_rt * a_norm_0 * a_norm_0;
+        const amrex::Real fprime0 = -a_norm_0 * a_norm_0;
+        const amrex::Real fc = 0.5_rt * a_norm_c * a_norm_c;
+        // g(l) = f(l) - f(0) - f'(0) l >= 0 on a failed trial.
+        const amrex::Real gc = fc - f0 - fprime0 * a_lambda_c;
+        amrex::Real lambda = 0.5_rt * a_lambda_c;
+        if (!a_use_cubic || a_lambda_p <= 0.0_rt || a_lambda_p == a_lambda_c) {
+            if (gc > 0.0_rt) {
+                lambda = -fprime0 * a_lambda_c * a_lambda_c / (2.0_rt * gc);
+            }
+        } else {
+            const amrex::Real fp = 0.5_rt * a_norm_p * a_norm_p;
+            const amrex::Real gp = fp - f0 - fprime0 * a_lambda_p;
+            const amrex::Real lc2 = a_lambda_c * a_lambda_c;
+            const amrex::Real lp2 = a_lambda_p * a_lambda_p;
+            const amrex::Real inv = 1.0_rt / (a_lambda_c - a_lambda_p);
+            const amrex::Real a = inv * (gc / lc2 - gp / lp2);
+            const amrex::Real b =
+                inv * (-a_lambda_p * gc / lc2 + a_lambda_c * gp / lp2);
+            const amrex::Real disc = b * b - 3.0_rt * a * fprime0;
+            if (std::abs(a) < 1.0e-30_rt * std::max(std::abs(b), 1.0_rt)) {
+                if (b > 0.0_rt) { lambda = -fprime0 / (2.0_rt * b); }
+            } else if (disc >= 0.0_rt) {
+                lambda = (-b + std::sqrt(disc)) / (3.0_rt * a);
+            }
+        }
+        if (!(lambda > 0.0_rt) || !std::isfinite(lambda)) {
+            lambda = 0.5_rt * a_lambda_c;
+        }
+        return std::min(0.5_rt * a_lambda_c,
+                        std::max(0.1_rt * a_lambda_c, lambda));
+    }
+
+    /**
      * \brief Compute the nonlinear residual: F(U) = U - b - R(U).
      * a_is_iterate distinguishes the evaluation at an accepted Newton
      * iterate (the F(U_k) driving the convergence test) from a
@@ -460,6 +579,7 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             "newton.active_set = 1 requires an operator with an admissibility "
             "projection and a Newton line search (the theta-implicit MHD solver)");
         m_ops->SetActiveSetMode(true);
+        m_ops->SetActiveSetHysteresis(m_active_set_hysteresis);
         m_linear_function->setActiveSetMasking(true);
         m_F_free.Define(a_U);
         m_F_split.Define(a_U);
@@ -532,6 +652,20 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
             diagnostic_file << " ";
             diagnostic_file << "[" << c++ << "]max_bound_excess";
         }
+        if (m_globalization_knobs) {
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]entrants";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]released";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]held";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]resolves";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]damped_steps";
+            diagnostic_file << " ";
+            diagnostic_file << "[" << c++ << "]rejected_trials";
+        }
         diagnostic_file << "\n";
         diagnostic_file.close();
     }
@@ -573,6 +707,27 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_active_set || m_active_set_tolerance < 1.0,
         "newton.active_set_tolerance must be below 1");
+    pp_newton.query("active_set_hysteresis", m_active_set_hysteresis);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_active_set_hysteresis >= 0,
+        "newton.active_set_hysteresis must be non-negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_active_set || m_active_set_hysteresis == 0,
+        "newton.active_set_hysteresis requires newton.active_set = 1");
+    pp_newton.query("line_search_resolve", m_line_search_resolve);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_active_set || !m_line_search_resolve,
+        "newton.line_search_resolve requires newton.active_set = 1");
+    pp_newton.query("line_search", m_line_search);
+    utils::parser::queryWithParser(pp_newton, "line_search_min_step",
+                                   m_line_search_min_step);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_line_search_min_step > 0.0 && m_line_search_min_step < 1.0,
+        "newton.line_search_min_step must be in (0, 1)");
+    m_globalization_knobs =
+        (m_active_set_hysteresis > 0) || m_line_search_resolve ||
+        (m_line_search != NewtonLineSearchType::backtrack) ||
+        (m_line_search_min_step != 1.0 / 4096.0);
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
     pp_newton.query("adaptive_forcing",    m_adaptive_forcing);
@@ -675,6 +830,16 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     // move, in margins (<= 0.5 by construction).
     amrex::Real active_max_leak = 0.;
     amrex::Real active_max_excess = 0.;
+    // Globalization bookkeeping per solve (newton.txt extra columns when
+    // any globalization knob is set): components the projection clamped
+    // into the set, released and held at the identifications, entrant
+    // re-solves, damped accepted steps, rejected trials.
+    amrex::Long solve_entrants = 0;
+    amrex::Long solve_released = 0;
+    amrex::Long solve_held = 0;
+    int solve_resolves = 0;
+    int solve_damped = 0;
+    int solve_rejected = 0;
 
     int iter;
     int linear_solver_iters = 0;
@@ -693,8 +858,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             // the pinned components held at the bound.
             amrex::Long entered = 0;
             amrex::Long released = 0;
+            amrex::Long held = 0;
             active_num_pinned = m_ops->IdentifyActiveSet(
-                a_U, m_F, iter > 0, entered, released);
+                a_U, m_F, iter > 0, entered, released, held);
+            solve_released += released;
+            solve_held += held;
             active_set_identified = true;
             amrex::Long moved = 0;
             if (active_num_pinned > 0) {
@@ -716,7 +884,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                                << ": " << active_num_pinned << " pinned ("
                                << entered << " entered, " << released
                                << " released, " << moved
-                               << " moved onto bounds)\n";
+                               << " moved onto bounds; " << held << " held)\n";
             }
         }
 
@@ -925,8 +1093,13 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // The projecting variant may also zero descent components at
         // cells resting on their bound (active-set treatment), so a
         // single floor-resident cell cannot deadlock the line search.
-        const amrex::Real solver_step =
+        const amrex::Long set_before_projection =
+            m_active_set ? m_ops->ActiveSetSize() : 0;
+        amrex::Real solver_step =
             m_ops->ProjectAndLimitSolverStep(a_U, m_dU, -1.0_rt);
+        const amrex::Long entrants =
+            m_active_set ? m_ops->ActiveSetSize() - set_before_projection : 0;
+        solve_entrants += entrants;
         if (m_ops->UseNewtonLineSearch()) {
             constexpr int max_backtracks = 12;
             constexpr amrex::Real reduction = 0.5_rt;
@@ -946,6 +1119,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 free_norm = reference_norm;
             }
             bool accepted = false;
+            bool resolved = false;
+            // Polynomial step rule state: the last two rejected trials.
+            amrex::Real lambda_c = 0.0_rt;
+            amrex::Real norm_c = 0.0_rt;
+            amrex::Real lambda_p = 0.0_rt;
+            amrex::Real norm_p = 0.0_rt;
             for (int backtrack = 0; backtrack <= max_backtracks; ++backtrack) {
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                     step_length > 0.0_rt,
@@ -966,6 +1145,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 if (trial_norm <= (1.0_rt - armijo * step_length) * reference_norm) {
                     a_U.Copy(m_trial_U);
                     accepted = true;
+                    if (step_length < 1.0_rt) { solve_damped++; }
                     if (this->m_verbose &&
                         (step_length != 1.0_rt || backtrack != 0)) {
                         amrex::Print()
@@ -974,7 +1154,103 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                     }
                     break;
                 }
-                step_length *= reduction;
+                solve_rejected++;
+                // Entrant re-solve (newton.line_search_resolve): the full
+                // step of a direction the projection has just truncated
+                // (new components clamped into the set) failed. Solve the
+                // reduced system once more with the enlarged set -- same
+                // base state, same frozen preconditioner -- and retry the
+                // full step before backtracking: the truncated direction
+                // is replaced by one consistent with the entrants held at
+                // their bounds. At most once per Newton iteration.
+                if (m_line_search_resolve && m_active_set && !resolved &&
+                    backtrack == 0 && entrants > 0 && active_num_pinned > 0) {
+                    resolved = true;
+                    solve_resolves++;
+                    m_F_free.Copy(m_F);
+                    m_ops->ZeroActiveSetComponents(m_F_free);
+                    m_dU.zero();
+                    m_linear_solver->solve(m_dU, m_F_free, linsol_rtol,
+                                           m_linsol_atol);
+                    const int resolve_iters = m_linear_solver->getNumIters();
+                    linear_solver_iters += resolve_iters;
+                    m_F_split.zero();
+                    m_ops->CopyActiveSetComponents(m_F_split, m_dU);
+                    active_max_leak =
+                        std::max(active_max_leak, m_F_split.norm2());
+                    const amrex::Long set_before_resolve = m_ops->ActiveSetSize();
+                    solver_step =
+                        m_ops->ProjectAndLimitSolverStep(a_U, m_dU, -1.0_rt);
+                    const amrex::Long more_entrants =
+                        m_ops->ActiveSetSize() - set_before_resolve;
+                    solve_entrants += more_entrants;
+                    // The Armijo reference is the free norm with respect
+                    // to the enlarged set (the entrants are graded as
+                    // pinned), as for the first ladder.
+                    reference_norm = ActiveSetResidualSplit(
+                        m_F, active_pinned_defect, active_num_pinned);
+                    free_norm = reference_norm;
+                    step_length = -solver_step;
+                    lambda_c = 0.0_rt;
+                    norm_c = 0.0_rt;
+                    lambda_p = 0.0_rt;
+                    norm_p = 0.0_rt;
+                    if (this->m_verbose) {
+                        amrex::Print()
+                            << "Newton: entrant re-solve at iteration " << iter
+                            << " (" << entrants << " entrants clamped, "
+                            << more_entrants << " more after the re-solve, "
+                            << resolve_iters
+                            << " linear iterations); retrying the full step\n";
+                    }
+                    // The loop increment makes the retry trial 0.
+                    backtrack = -1;
+                    continue;
+                }
+                if (m_line_search == NewtonLineSearchType::backtrack) {
+                    step_length *= reduction;
+                } else {
+                    // Safeguarded polynomial step from the rejected trials
+                    // (quadratic on the first backtrack; cubic thereafter
+                    // when selected). The ladder gives up below
+                    // newton.line_search_min_step.
+                    lambda_p = lambda_c;
+                    norm_p = norm_c;
+                    lambda_c = step_length;
+                    norm_c = trial_norm;
+                    step_length = InterpolatedStep(
+                        lambda_c, norm_c, lambda_p, norm_p, reference_norm,
+                        m_line_search == NewtonLineSearchType::cubic &&
+                            lambda_p > 0.0_rt);
+                    if (step_length < m_line_search_min_step) {
+                        break;
+                    }
+                }
+            }
+            // A ladder that failed although the free residual with respect
+            // to the set enlarged by this iteration's projection is within
+            // the active-set tolerance is a converged reduced solve, not a
+            // stagnation (newton.line_search_resolve): exit as status 4.
+            if (!accepted && m_active_set && m_line_search_resolve &&
+                active_num_pinned > 0) {
+                const amrex::Real free_target = std::max(
+                    {m_atol, m_active_set_tolerance * active_free_norm0,
+                     1.0e-12_rt * norm_abs});
+                if (reference_norm <= free_target) {
+                    this->m_exit_status = 4;
+                    free_norm = reference_norm;
+                    amrex::Print()
+                        << "Newton: exiting at iteration = " << std::setw(3) << iter
+                        << ". Satisfied active-set tolerance " << m_active_set_tolerance
+                        << " on the free subspace after a failed line search (free norm "
+                        << reference_norm << " abs., "
+                        << reference_norm / active_free_norm0
+                        << " rel.; pinned defect " << active_pinned_defect
+                        << " over " << active_num_pinned
+                        << " components; full rel. norm " << norm_rel << ")\n";
+                    m_frozen_steps = 0;
+                    break;
+                }
             }
             // Full-norm backtracking exhausted. With require_convergence
             // the solve aborts here -- BEFORE any rescue is attempted, so
@@ -1258,6 +1534,14 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             diagnostic_file << active_max_leak;
             diagnostic_file << " ";
             diagnostic_file << active_max_excess;
+        }
+        if (m_globalization_knobs) {
+            diagnostic_file << " " << solve_entrants;
+            diagnostic_file << " " << solve_released;
+            diagnostic_file << " " << solve_held;
+            diagnostic_file << " " << solve_resolves;
+            diagnostic_file << " " << solve_damped;
+            diagnostic_file << " " << solve_rejected;
         }
         diagnostic_file << "\n";
         diagnostic_file.close();
