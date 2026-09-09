@@ -7950,21 +7950,6 @@ Jacobian probes.
     the matrix dump also works on builds without a factorization backend
     (``pc_mhd_block.resistive_validate_assembly`` assembles the matrix).
 
-.. pp:param:: implicit_mhd.resistive_direct_split_components
-    :type: ``bool``
-    :default: ``0``
-
-    Split the direct resistive block into the connected components of
-    its coupling pattern and factorize/solve each as its own system,
-    back to back on the stream. Without the Hall term the RZ resistive
-    operator decouples into the poloidal (``B_r``, ``B_z``) and the
-    azimuthal (``B_theta``) blocks; on the production RZ mesh the two
-    solves cost 11 % less than the coupled one (offline benchmark, 1.75
-    vs 1.97 ms; on separate streams they do not overlap). Exact up to
-    the roundoff of a different factorization; rides on the reduced-solve
-    machinery (:pp:param:`implicit_mhd.resistive_direct_row_threshold`,
-    set to 0 when off). Single-rank device assembly only.
-
 .. pp:param:: implicit_mhd.resistive_direct_precision
     :type: ``string``
     :default: ``double``

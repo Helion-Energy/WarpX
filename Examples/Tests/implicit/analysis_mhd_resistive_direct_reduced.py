@@ -8,14 +8,7 @@
 
 """Partition gate of the reduced solve of the direct resistive block.
 
-Usage: analysis_mhd_resistive_direct_reduced.py <threshold> <margin> <min dropped fraction> [<systems>]
-
-With the optional fourth argument the dump comes from the split
-(``implicit_mhd.resistive_direct_split_components``): the kept rows are
-partitioned into that many sub-systems ``<prefix>_reduced<k>_*``, which
-must be disjoint, cover the kept rows, each be the exact restriction of
-the full matrix, and carry NO coupling to another system in the full
-matrix (the connected components of the coupling pattern).
+Usage: analysis_mhd_resistive_direct_reduced.py <threshold> <margin> <min dropped fraction>
 
 ``implicit_mhd.resistive_direct_row_threshold`` splits the assembled rows
 into a factorized sub-system and rows solved as b_i / a_ii. The dump of
@@ -40,7 +33,6 @@ import scipy.sparse as sp
 threshold = float(sys.argv[1])
 margin = float(sys.argv[2])
 min_dropped_fraction = float(sys.argv[3])
-expected_systems = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 prefix = "diags/resistive_direct"
 
 
@@ -66,25 +58,9 @@ def read_vec(path):
 
 
 a = read_csr(prefix + "_matrix.bin")
+sub = read_csr(prefix + "_reduced_matrix.bin")
+rows = read_vec(prefix + "_reduced_rows.bin").astype(np.int64)
 n = a.shape[0]
-if expected_systems:
-    meta = open(prefix + "_reduced_meta.txt").read()
-    assert f"systems {expected_systems}\n" in meta and "split 1" in meta, meta
-    systems = [
-        (read_csr(f"{prefix}_reduced{k}_matrix.bin"),
-         read_vec(f"{prefix}_reduced{k}_rows.bin").astype(np.int64))
-        for k in range(expected_systems)
-    ]
-    rows = np.sort(np.concatenate([r for _, r in systems]))
-    assert len(np.unique(rows)) == len(rows), "sub-systems overlap"
-    for i, (_, rows_i) in enumerate(systems):
-        for j, (_, rows_j) in enumerate(systems):
-            if i != j:
-                assert a[rows_i][:, rows_j].nnz == 0, (i, j, "coupled systems")
-    sub = None
-else:
-    sub = read_csr(prefix + "_reduced_matrix.bin")
-    rows = read_vec(prefix + "_reduced_rows.bin").astype(np.int64)
 
 # the rule, recomputed from the full matrix
 build_threshold = threshold / margin
@@ -101,25 +77,14 @@ assert rows.shape == expected_rows.shape and np.array_equal(rows, expected_rows)
     len(rows), len(expected_rows))
 assert np.all(np.diff(rows) > 0), "kept rows are listed in canonical order"
 
-# each sub-system is the exact restriction (pattern and values bit-equal)
-def check_restriction(sub, rows):
-    restricted = a[rows][:, rows].tocsr()
-    restricted.sort_indices()
-    sub.sort_indices()
-    assert sub.shape == restricted.shape
-    assert np.array_equal(sub.indptr, restricted.indptr)
-    assert np.array_equal(sub.indices, restricted.indices)
-    assert np.array_equal(sub.data, restricted.data), "sub-system values are the full matrix's"
-    return sub.nnz
-
-
-if expected_systems:
-    sub_nnz = sum(check_restriction(sub_k, rows_k) for sub_k, rows_k in systems)
-    sizes = [len(rows_k) for _, rows_k in systems]
-    assert sizes == sorted(sizes, reverse=True), sizes
-else:
-    sub_nnz = check_restriction(sub, rows)
-    sizes = [len(rows)]
+# the sub-system is the exact restriction (pattern and values bit-equal)
+restricted = a[rows][:, rows].tocsr()
+restricted.sort_indices()
+sub.sort_indices()
+assert sub.shape == restricted.shape
+assert np.array_equal(sub.indptr, restricted.indptr)
+assert np.array_equal(sub.indices, restricted.indices)
+assert np.array_equal(sub.data, restricted.data), "sub-system values are the full matrix's"
 
 # every dropped coupling is within the build bound (both sides)
 dropped = ~keep
@@ -136,6 +101,6 @@ dropped_fraction = 1.0 - len(rows) / n
 print(
     f"reduced solve partition: threshold {threshold:g} (build {build_threshold:g}), "
     f"{len(rows)} of {n} rows kept, dropped fraction {dropped_fraction:.3f}, "
-    f"sub-system sizes {sizes}, nonzeros {sub_nnz} of {a.nnz}, worst dropped coupling {worst:.3e}"
+    f"sub-system nonzeros {sub.nnz} of {a.nnz}, worst dropped coupling {worst:.3e}"
 )
 assert dropped_fraction >= min_dropped_fraction, (dropped_fraction, min_dropped_fraction)

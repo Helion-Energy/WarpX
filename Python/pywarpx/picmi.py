@@ -3823,11 +3823,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Factorize and solve the direct resistive block in FP32 ("single";
         conversions on the device around the cuDSS calls). Default double.
 
-    resistive_direct_split_components: bool, optional
-        Factorize and solve the connected components of the direct
-        resistive block (poloidal / azimuthal without the Hall term) as
-        separate systems back to back (exact; default off).
-
     viscous_theta: float, optional
         Time centering of the VISCOUS stage, in [0.5, 1]; everything else
         keeps the global theta. Default: the global theta
@@ -3940,7 +3935,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_direct_row_threshold=None,
         resistive_direct_row_threshold_margin=None,
         resistive_direct_precision=None,
-        resistive_direct_split_components=None,
         conduction_theta=None,
         viscous_theta=None,
         fluid_flux=None,
@@ -4095,7 +4089,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             resistive_direct_row_threshold_margin
         )
         self.resistive_direct_precision = resistive_direct_precision
-        self.resistive_direct_split_components = resistive_direct_split_components
         self.conduction_theta = conduction_theta
         self.viscous_theta = viscous_theta
         self.fluid_flux = fluid_flux
@@ -4278,9 +4271,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.resistive_direct_row_threshold_margin
         )
         implicit_mhd.resistive_direct_precision = self.resistive_direct_precision
-        implicit_mhd.resistive_direct_split_components = (
-            self.resistive_direct_split_components
-        )
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.viscous_theta = self.viscous_theta
         implicit_mhd.fluid_flux = self.fluid_flux
