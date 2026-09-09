@@ -3809,6 +3809,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     resistive_direct_dump_assembly: int, optional
         1-based count of the assembly whose matrix is written (default 1).
 
+    resistive_direct_row_threshold: float, optional
+        Reduced solve of the direct resistive block: rows whose couplings
+        are all below this fraction of the diagonal are solved as
+        b_i / a_ii and only the rest is factorized (0 = the exact
+        coupling-free rows; default off = -1).
+
+    resistive_direct_row_threshold_margin: float, optional
+        Margin of the reduced row set (rows kept from threshold/margin on;
+        default 10).
+
     viscous_theta: float, optional
         Time centering of the VISCOUS stage, in [0.5, 1]; everything else
         keeps the global theta. Default: the global theta
@@ -3918,6 +3928,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_direct_solve_host_sync=None,
         resistive_direct_dump_prefix=None,
         resistive_direct_dump_assembly=None,
+        resistive_direct_row_threshold=None,
+        resistive_direct_row_threshold_margin=None,
         conduction_theta=None,
         viscous_theta=None,
         fluid_flux=None,
@@ -4067,6 +4079,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_direct_solve_host_sync = resistive_direct_solve_host_sync
         self.resistive_direct_dump_prefix = resistive_direct_dump_prefix
         self.resistive_direct_dump_assembly = resistive_direct_dump_assembly
+        self.resistive_direct_row_threshold = resistive_direct_row_threshold
+        self.resistive_direct_row_threshold_margin = (
+            resistive_direct_row_threshold_margin
+        )
         self.conduction_theta = conduction_theta
         self.viscous_theta = viscous_theta
         self.fluid_flux = fluid_flux
@@ -4241,6 +4257,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_direct_dump_prefix = self.resistive_direct_dump_prefix
         implicit_mhd.resistive_direct_dump_assembly = (
             self.resistive_direct_dump_assembly
+        )
+        implicit_mhd.resistive_direct_row_threshold = (
+            self.resistive_direct_row_threshold
+        )
+        implicit_mhd.resistive_direct_row_threshold_margin = (
+            self.resistive_direct_row_threshold_margin
         )
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.viscous_theta = self.viscous_theta

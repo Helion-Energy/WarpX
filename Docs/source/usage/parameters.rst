@@ -7950,6 +7950,38 @@ Jacobian probes.
     the matrix dump also works on builds without a factorization backend
     (``pc_mhd_block.resistive_validate_assembly`` assembles the matrix).
 
+.. pp:param:: implicit_mhd.resistive_direct_row_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+
+    Reduced solve of the direct resistive block. The factorized
+    triangular solves cost time in proportion to the rows they visit
+    (~5 ns per row on the production RZ mesh, trivial rows included), and
+    a large part of the block's face unknowns are identity rows (frozen
+    exterior faces, axis and boundary faces) or nearly so (hot plasma,
+    where the resistive diffusion number is 1e-4). With a value ``>= 0``,
+    a row whose off-diagonal couplings -- in its row and in its column --
+    are all at most ``threshold`` times the diagonal is solved as
+    :math:`x_i = b_i / a_{ii}` and the remaining rows form the factorized
+    sub-system. ``0`` drops exactly the rows without any coupling (the
+    exact inverse, with a roundoff-different factorization); a positive
+    value is an approximate inverse whose relative truncation is bounded
+    by the threshold. The row set is built from the frozen values with
+    ``threshold / row_threshold_margin`` and rebuilt (a new pattern
+    analysis) only when a dropped row's coupling exceeds the threshold at
+    a later refreeze (checked on the device every refreeze), so the bound
+    holds at every application. Requires the single-rank device assembly
+    path. Not bit-identical to the default (a different factorization).
+
+.. pp:param:: implicit_mhd.resistive_direct_row_threshold_margin
+    :type: ``float``
+    :default: ``10``
+
+    Margin of the reduced solve's row set (see
+    :pp:param:`implicit_mhd.resistive_direct_row_threshold`): rows are
+    kept from ``threshold / margin`` on, so a dropped row can grow its
+    coupling by the margin before the row set has to be rebuilt.
+
 .. pp:param:: implicit_mhd.resistive_direct_dump_assembly
     :type: ``int``
     :default: ``1``
