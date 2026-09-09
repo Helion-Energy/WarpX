@@ -7561,10 +7561,6 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             amrex::Real const ne1_raw = rho_arr(ii,jj,kk) / qe;
             amrex::Real const T0  = Te_arr(i,j,k);
             amrex::Real const Te1 = Te_arr(ii,jj,kk);
-            // one-sided (outflow) gate anchored at max(T_wall, Te floor),
-            // the MHD outflow_limited anchor: a colder interior keeps the
-            // legacy adiabatic face untouched
-            if (Te1 <= T_min_K) { return skip; }
 #ifdef WARPX_DIM_RZ
             amrex::Real const r_i =
                 r_edge0 + amrex::Real(i - dom_rlo)*dr_rz;
@@ -7580,6 +7576,12 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
             amrex::Real const ne_1 = amrex::max(ne1_raw, n_floor);
             bool const face_open = (ne_raw > n_open) && (ne1_raw > n_open);
             amrex::Real const ne_f = 2.0_rt*ne_w*ne_1/(ne_w + ne_1);
+            // one-sided (outflow) gate anchored at max(T_wall, Te floor),
+            // the MHD outflow_limited anchor: the source of the drain is
+            // the interior node on an open face and the row itself on a
+            // closed one; a colder source keeps the legacy adiabatic face
+            // untouched (no reset, no tally)
+            if ((face_open ? Te1 : T0) <= T_min_K) { return skip; }
             amrex::Real const Te1_eV = amrex::max(Te1, 0.0_rt) * kb / qe;
             amrex::Real const kappa_1 =
                 amrex::max(kappa_par_ex(ne_1, Te1_eV, t_now), 0.0_rt);
@@ -7600,12 +7602,25 @@ void HybridPICModel::ApplyQdsmcConductionLegBC (
                     ? (G_int*Te1 + G_leg*T_wall_K) / G_sum : T_wall_K;
                 Tf = amrex::max(Tf, T_min_K);
             }
-            amrex::Real T1 = Tf;
-            if (cap_dt_dx > 0.0_rt && T0 > Tf) {
+            // Lumped row update over the stage: the row (capacity C_row =
+            // 1.5 kB ne_w dx per unit face area, the operator's floored
+            // capacity) sits between the interior (G_int, Te_1 frozen over
+            // the stage) and the wall (G_leg), so T(dt) = Tf + (T0 - Tf)
+            // exp(-dt (G_int + G_leg)/C_row). An open face relaxes in
+            // dx^2/chi << dt and lands on the Robin pin Tf; a CLOSED face
+            // (G_int = 0: the row or its neighbour is a floored/frozen
+            // node) relaxes toward T_min at the leg's own rate G_leg/C_row
+            // = chi_leg/(L dx) -- the MHD halo-outlet rate form -- instead
+            // of being pinned there.
+            amrex::Real const C_row = 1.5_rt * kb * ne_w * dx_d;
+            amrex::Real const relax =
+                std::exp(-dt_c * (G_int + G_leg) / C_row);
+            amrex::Real T1 = Tf + (T0 - Tf) * relax;
+            if (cap_dt_dx > 0.0_rt && T0 > T1) {
                 amrex::Real const vte = sonic
                     ? std::sqrt(gam * kb * T0 / mi)
                     : std::sqrt(kb * T0 / me);
-                T1 = amrex::max(Tf, T0 - cap_dt_dx * vte * T0 / 1.5_rt);
+                T1 = amrex::max(T1, T0 - cap_dt_dx * vte * T0 / 1.5_rt);
             }
             amrex::Real const du = 1.5_rt * kb * ne_raw * (T1 - T0);
             Te_arr(i,j,k) = T1;

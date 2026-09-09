@@ -2237,11 +2237,18 @@ public:
      *  qdsmc_kappa_par parser; zero when the face is closed) and
      *  G_leg = kappa_par(n_face, Te_f) / L, re-evaluated at the new Te_f
      *  for m_cond_leg_iterations passes. Te_f is clamped at T_wall and
-     *  at the conduction Te floor. ONE-SIDED like the MHD lane's
+     *  at the conduction Te floor. The row is advanced as a lumped
+     *  capacitor C_row = 1.5 kB n_face dx between the two conductances,
+     *  T(dt) = Te_f + (T0 - Te_f) exp(-dt (G_int + G_leg)/C_row): an open
+     *  face (dx^2/chi << dt) lands on the Robin pin Te_f, a CLOSED face
+     *  (G_int = 0 at a floored/frozen row) relaxes toward T_min at the
+     *  leg's own rate chi_leg/(L dx), the MHD halo-outlet rate form,
+     *  instead of being pinned. ONE-SIDED like the MHD lane's
      *  outflow_limited wall and halo relaxation outlet (7972d2564): the
-     *  leg engages only where Te_1 exceeds max(T_wall, Te floor) -- an
-     *  exhaust face is an energy OUTFLOW (Eric 2026-09-09) -- and a
-     *  colder interior keeps the legacy adiabatic face (no reset, no
+     *  leg engages only where the drain's source (Te_1 on an open face,
+     *  the row's own T0 on a closed one) exceeds max(T_wall, Te floor)
+     *  -- an exhaust face is an energy OUTFLOW (Eric 2026-09-09) -- and
+     *  a colder source keeps the legacy adiabatic face (no reset, no
      *  tally), so the face flux G_int G_leg/(G_int + G_leg) (Te_1 -
      *  T_wall) is continuous through zero. The hybrid hook runs outside
      *  any Newton solve, so the hard rectifier replaces the MHD C^1

@@ -4356,12 +4356,18 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`G_\mathrm{leg} = \kappa_\parallel(n_f, T_f)/L` from the same parser at the face node's floored
     density. :math:`T_f` is re-evaluated :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_iterations` times
     (the conductances depend on it through :math:`\kappa_\parallel \propto T_e^{5/2}`) and clamped at
-    :math:`T_\mathrm{wall}` and at ``qdsmc_conduction_Te_floor``. The operator's last face then carries
-    :math:`q = G_\mathrm{int}(T_1 - T_f)` into the row, so the drain regulates itself: a hotter interior
-    raises :math:`T_f` and the flux, a longer or colder leg lowers both. The condition is one-sided, as the
-    MHD lane's ``outflow_limited`` wall and halo relaxation outlet are: it engages only where :math:`T_1`
-    exceeds :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`, and a colder interior keeps the legacy
-    adiabatic face (no reset, no tally), so the face flux
+    :math:`T_\mathrm{wall}` and at ``qdsmc_conduction_Te_floor``. The boundary row is advanced as a lumped
+    capacitor :math:`C = 1.5 n_f k_B \Delta x` between the two conductances,
+    :math:`T(\Delta t) = T_f + (T_0 - T_f)\,e^{-\Delta t (G_\mathrm{int} + G_\mathrm{leg})/C}`: an open
+    face (:math:`\Delta x^2/\chi \ll \Delta t`) lands on :math:`T_f`, while a face closed by the density
+    floor (:math:`G_\mathrm{int} = 0`, a frozen row) relaxes toward :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`
+    at the leg's own rate :math:`\chi_\mathrm{leg}/(L \Delta x)` instead of being pinned. The operator's last
+    face then carries :math:`q = G_\mathrm{int}(T_1 - T_f)` into the row, so the drain regulates itself: a
+    hotter interior raises :math:`T_f` and the flux, a longer or colder leg lowers both. The condition is
+    one-sided, as the MHD lane's ``outflow_limited`` wall and halo relaxation outlet are: it engages only
+    where the drain's source (:math:`T_1` on an open face, the row's own :math:`T_0` on a closed one) exceeds
+    :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`, and a colder source keeps the legacy adiabatic face
+    (no reset, no tally), so the face flux
     :math:`G_\mathrm{int} G_\mathrm{leg}/(G_\mathrm{int} + G_\mathrm{leg})\,(T_1 - T_\mathrm{wall})` passes
     continuously through zero. Applied where the isothermal pin is
     applied (after every accepted conduction substep, or per RKL2 stage / super-step following
