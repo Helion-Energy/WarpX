@@ -178,6 +178,13 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
 {
     using ablastr::fields::Direction;
 
+    // The implicit residual's Faraday update (EvolveMagneticFieldAndApplyBCs
+    // with the skip) on a deck without an open z cap or an insulator
+    // boundary: the whole application is dead for its caller (see there).
+    if (m_residual_bfield_boundary_skip == 2 && patch_type == PatchType::fine) {
+        return;
+    }
+
 #if defined(WARPX_DIM_RZ)
     // Green's-function open (free-space) boundary with an open z (cap)
     // face: the fill must run BEFORE the reflecting/axis fills, because
@@ -188,7 +195,7 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     const bool open_bc_greens_z =
         (field_boundary_lo[1] == FieldBoundaryType::Open) ||
         (field_boundary_hi[1] == FieldBoundaryType::Open);
-    // (An open z cap is NEVER subject to m_skip_open_bc_bfield_ghost_fill: the
+    // (An open z cap is NEVER subject to m_residual_bfield_boundary_skip: the
     // cap fill is one step of a lagged recursion -- the next application's
     // source deposit reads the cap ghost row it wrote (see the deposit in
     // GreensFunctionOpenBC::ApplyToBfield), so the ghosts are live across
@@ -285,7 +292,7 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     // the free-space field of the interior sources (default off; active
     // only with boundary.field_hi[0] == open and the hybrid solver). When
     // a z cap is open too, the fill already ran at the top of this method.
-    // m_skip_open_bc_bfield_ghost_fill: the implicit residual's Faraday
+    // m_residual_bfield_boundary_skip >= 1: the implicit residual's Faraday
     // update skips this fill (see EvolveMagneticFieldAndApplyBCs). Exact
     // here because the r_hi-only application is a function of the valid B
     // and of ghosts refreshed earlier in this same application (the z_lo
@@ -293,7 +300,7 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     // untouched by this fill), and it writes the r_hi ghost band only,
     // which the next application overwrites before anything reads it.
     if (GreensFunctionOpenBC::IsActive() && !open_bc_greens_z &&
-        patch_type == PatchType::fine && !m_skip_open_bc_bfield_ghost_fill) {
+        patch_type == PatchType::fine && m_residual_bfield_boundary_skip == 0) {
         if (!m_open_bc_greens) {
             m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
         }

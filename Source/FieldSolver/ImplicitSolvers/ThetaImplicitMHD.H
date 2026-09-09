@@ -566,6 +566,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_z_lo_pmc;
     }
 
+    [[nodiscard]] bool GetFusedResidualStreamSyncElisionForPC () const override
+    {
+        return m_fused_residual_nosync;
+    }
+
     [[nodiscard]] const amrex::MultiFab*
     GetMHDWallConductionDiagonalForPC () const override
     {
@@ -1798,13 +1803,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // sequence it replaces (same per-element expressions). Set in Define.
     bool m_fused_residual = false;
     // The knob's level while m_fused_residual (0 otherwise): 2 adds the
-    // exact residual-only skips (the dead open-boundary ghost refill of
-    // the Faraday update; the MFIter stream-sync elision on a single local
-    // box), 3 the split face-flux launches. See FusedResidualOps.H.
+    // exact residual-only skips (the dead boundary application of the
+    // residual's Faraday update; the MFIter stream-sync elision). See
+    // FusedResidualOps.H.
     int m_fused_residual_level = 0;
-    // Level >= 2 AND this rank owns one box (AMReX rotates the GPU streams
-    // over the local boxes of an MFIter, so single-stream issue order --
-    // the premise of the elision -- holds only then).
+    // Level >= 2 AND the state holds ONE box in a non-periodic domain (AMReX
+    // rotates the GPU streams over an MFIter's local boxes and a ghost
+    // exchange can move data otherwise, so single-stream issue order -- the
+    // premise of the elision -- holds only then). Printed in the banner.
     bool m_fused_residual_nosync = false;
     // ---- TVD reconstruction of the recast face states
     // (implicit_mhd.fluid_reconstruction; default "none" = the

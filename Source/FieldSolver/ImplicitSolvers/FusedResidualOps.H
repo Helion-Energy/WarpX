@@ -69,25 +69,33 @@
  */
 namespace warpx::fused_residual
 {
-    /** \brief ``implicit_evolve.fused_residual`` (0 to 3), read once.
+    /** \brief ``implicit_evolve.fused_residual`` (0, 1 or 2), read once.
      *
      * 0: every existing path untouched. 1: the fused bookkeeping described
-     * above. 2: level 1 plus the two residual-only savings that are exact by
-     * construction -- the open-boundary (Green's-function) ghost refill
-     * inside the residual's Faraday update is skipped where only the r_hi
-     * face is open (that fill writes the r_hi ghost band only, from valid
-     * data, and the fused residual reads B - B^n on the valid faces; the
-     * next evaluation re-sets B and re-applies the boundary before any
-     * read; an open z cap keeps its refill: the next application's deposit
-     * reads the cap ghost row), and, on a rank that owns a single box
-     * (every kernel of a stage then
-     * runs on one stream in issue order), AMReX's per-MFIter stream
+     * above. 2: level 1 plus two residual-only savings that are exact by
+     * construction. (a) The boundary application inside the residual's
+     * Faraday update is dead for the fused residual, which reads B - B^n on
+     * the valid faces and re-sets B (valid) and re-applies the full boundary
+     * before anything reads a ghost cell again -- every fill of that
+     * application writes ghost cells, or writes a valid face value the
+     * Faraday update already holds (the PEC normal face, where the
+     * tangential E is zero); it is therefore skipped whole on decks without
+     * an open z cap or an insulator boundary, and reduced to the skip of the
+     * r_hi-only Green's-function refill otherwise. An open z cap always
+     * keeps its own fill: the next application's source deposit reads the
+     * cap ghost row it wrote (a lagged recursion; measured 1e-5 non-exact
+     * when skipped). (b) Where the state's MultiFabs hold ONE box in a
+     * non-periodic domain (every kernel of a stage then runs on one stream
+     * in issue order and no ghost exchange can move data) and the solver
+     * runs the RZ conservative-form path, AMReX's per-MFIter stream
      * synchronizations are elided inside the residual evaluation, the
      * active-set mask operations and the block preconditioner's apply
-     * (NoSyncScope below; the preconditioner's MLMG applications keep
-     * theirs, SyncScope). 3: level 2 plus the face-flux kernels split into
-     * an advective and a diffusive launch per direction (same per-face
-     * expressions, the intermediate face registers stored and reloaded). */
+     * (NoSyncScope below; the preconditioner's MLMG applications and the
+     * circuit hook keep theirs, SyncScope). The solver prints the arming
+     * decision in its banner. A third level -- the face-flux evaluation
+     * split into an advective and a diffusive launch -- was measured slower
+     * (the diffusive closure alone holds the register budget) and removed;
+     * the value 3 is refused. */
     inline int Level ()
     {
         static const int level = [] () {
@@ -95,8 +103,9 @@ namespace warpx::fused_residual
             const amrex::ParmParse pp("implicit_evolve");
             pp.query("fused_residual", value);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                value >= 0 && value <= 3,
-                "implicit_evolve.fused_residual must be 0, 1, 2 or 3");
+                value >= 0 && value <= 2,
+                "implicit_evolve.fused_residual must be 0, 1 or 2 (level 3, the split "
+                "face-flux evaluation, was measured slower than level 2 and removed)");
             return value;
         }();
         return level;
@@ -107,7 +116,7 @@ namespace warpx::fused_residual
     /** \brief Scoped elision of the MFIter stream synchronizations
      * (amrex::Gpu::setNoSyncRegion(true)) while a_enable; a no-op otherwise
      * and on CPU builds. The caller guarantees single-stream issue order
-     * (one local box) and that nothing inside frees device memory a queued
+     * (one box, non-periodic) and that nothing inside frees device memory a queued
      * kernel still uses. */
     struct NoSyncScope
     {

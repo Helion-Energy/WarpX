@@ -108,17 +108,43 @@ WarpX::ApplyMagneticFieldBoundaryAfterSet ( amrex::Real a_time, bool a_exchange_
 void
 WarpX::EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
                                         bool a_exchange_ghosts,
-                                        bool a_skip_open_bc_ghost_fill )
+                                        bool a_skip_dead_boundary_application )
 {
-    // The r_hi-only Green's-function open-boundary fill writes the r_hi
-    // ghost band only, from the valid B (and ghosts refreshed earlier in the
-    // same application): a caller whose residual reads the updated B on the
-    // valid faces and re-sets B before the next use may skip it exactly. An
-    // open z cap is exempt inside ApplyBfieldBoundary (its fill feeds the next
-    // application's deposit). The reflecting/axis/insulator applications stay.
-    m_skip_open_bc_bfield_ghost_fill = a_skip_open_bc_ghost_fill;
-    EvolveB(a_thetadt, SubcyclingHalf::None, start_time);
-    m_skip_open_bc_bfield_ghost_fill = false;
+    // For a caller that reads the updated B on the valid faces only and
+    // re-sets B and re-applies the full boundary before the next read, the
+    // boundary application inside this EvolveB is dead: the PEC fill writes
+    // ghosts and the normal face value, which the Faraday update already
+    // holds (the tangential E on a PEC face is zero, so the normal curl is
+    // zero there); the PMC, axis and Green's r_hi fills write ghosts only.
+    // Two exceptions keep their fills: an open z cap (its Green's fill is one
+    // step of a lagged recursion -- the next application's source deposit
+    // reads the cap ghost row it wrote -- so only the r_hi-only Green's fill
+    // is skipped there) and an insulator boundary (not audited: nothing
+    // skipped). The mode lives on the object for the duration of the call.
+    struct SkipGuard {
+        int& slot; explicit SkipGuard (int& s, int mode) : slot(s) { slot = mode; }
+        ~SkipGuard () { slot = 0; }
+        SkipGuard (const SkipGuard&) = delete; SkipGuard& operator= (const SkipGuard&) = delete;
+    };
+    int skip_mode = 0;
+    if (a_skip_dead_boundary_application) {
+        bool open_z_cap = false;
+#if defined(WARPX_DIM_RZ)
+        open_z_cap = (field_boundary_lo[1] == FieldBoundaryType::Open) ||
+                     (field_boundary_hi[1] == FieldBoundaryType::Open);
+#endif
+        bool insulator = false;
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+            insulator = insulator ||
+                        field_boundary_lo[idim] == FieldBoundaryType::PEC_Insulator ||
+                        field_boundary_hi[idim] == FieldBoundaryType::PEC_Insulator;
+        }
+        skip_mode = (open_z_cap || insulator) ? 1 : 2;
+    }
+    {
+        const SkipGuard guard(m_residual_bfield_boundary_skip, skip_mode);
+        EvolveB(a_thetadt, SubcyclingHalf::None, start_time);
+    }
     if (a_exchange_ghosts) {
         FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
     }

@@ -156,15 +156,17 @@ public:
     /** The Faraday part of UpdateMagneticFieldAndApplyBCs for a caller that
      * wrote B^n into Bfield_fp itself: EvolveB (with its boundary
      * application) and the ghost exchange only if a_exchange_ghosts. With
-     * a_skip_open_bc_ghost_fill the Green's-function open-boundary ghost
-     * fill of that boundary application is skipped when only the r_hi face
-     * is open (it then writes the r_hi ghost band only, from valid data):
-     * for a caller that reads the updated B on the valid faces and re-sets
-     * B before the next use, exact. An open z cap keeps its fill (the next
-     * application's source deposit reads the cap ghost row). */
+     * a_skip_dead_boundary_application the boundary application of that
+     * EvolveB is skipped as far as it is dead for a caller that reads the
+     * updated B on the valid faces only and re-applies the full boundary
+     * before the next read: whole on a deck without an open z cap or an
+     * insulator boundary (every fill writes ghosts, or a PEC normal face
+     * value the update already holds), the r_hi-only Green's-function fill
+     * otherwise (an open z cap keeps its fill: the next application's source
+     * deposit reads the cap ghost row it wrote). */
     void EvolveMagneticFieldAndApplyBCs ( amrex::Real a_thetadt, amrex::Real start_time,
                                           bool a_exchange_ghosts,
-                                          bool a_skip_open_bc_ghost_fill = false );
+                                          bool a_skip_dead_boundary_application = false );
     void SpectralSourceFreeFieldAdvance ( amrex::Real start_time);
     void FinishMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_theta, amrex::Real a_time );
@@ -1302,10 +1304,13 @@ private:
      * hybrid-PIC B-field advance; lazily constructed in
      * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
     std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
-    /** While true, ApplyBfieldBoundary skips the Green's-function open
-     * boundary ghost fill (set by EvolveMagneticFieldAndApplyBCs for the
-     * implicit residual whose consumer reads the valid faces only). */
-    bool m_skip_open_bc_bfield_ghost_fill = false;
+    /** How much of ApplyBfieldBoundary the implicit residual's Faraday
+     * update skips (set for the duration of that EvolveB by
+     * EvolveMagneticFieldAndApplyBCs, whose caller reads the updated valid
+     * faces only and re-applies the full boundary before the next read):
+     * 0 = nothing; 1 = the r_hi-only Green's-function ghost fill; 2 = the
+     * whole application (no open z cap, no insulator boundary). */
+    int m_residual_bfield_boundary_skip = 0;
 
     /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields
      * and discrete inductances driving the hybrid solver's split external

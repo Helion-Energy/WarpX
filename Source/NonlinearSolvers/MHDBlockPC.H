@@ -293,9 +293,9 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         //! implicit_evolve.fused_residual: the block copies, frozen-row restores
         //! and no-op ghost exchanges of Apply() as one launch per stage
         bool m_fused = false;
-        //! the knob's level; >= 2 on a rank owning one box: Apply() elides the
-        //! MFIter stream synchronizations (its MLMG applications keep theirs)
-        int m_fused_level = 0;
+        //! the solver's stream-sync elision decision (fused_residual >= 2 on a
+        //! single-box, non-periodic recast layout): Apply() elides the MFIter
+        //! stream synchronizations too (its MLMG applications keep theirs)
         bool m_fused_nosync = false;
         bool m_verbose = false;
         bool m_bottom_verbose = false;
@@ -999,10 +999,9 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
         "pc_mhd_block requires Efield_fp or Bfield_fp as its vector block");
     m_hlld_state = (array_type == warpx::fields::FieldType::Bfield_fp);
     m_fused = warpx::fused_residual::Enabled();
-    m_fused_level = warpx::fused_residual::Level();
-    // Level >= 2 stream-sync elision: single-stream issue order needs one
-    // local box (AMReX rotates the streams over an MFIter's local boxes).
-    m_fused_nosync = m_fused_level >= 2 && state.getArrayVec()[0][0]->local_size() == 1;
+    // The stream-sync elision follows the SOLVER's arming decision (level >= 2,
+    // one box, non-periodic, RZ conservative-form path), never the knob alone.
+    m_fused_nosync = ops->GetFusedResidualStreamSyncElisionForPC();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(state.numAMRLevels() == 1 && ops->numAMRLevels() == 1,
                                      "pc_mhd_block currently supports one AMR level");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -4095,7 +4094,8 @@ MHDBlockPC<T, Ops>::Apply (T& solution, const T& rhs)
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(IsDefined(),
                                      "MHDBlockPC::Apply() called on an undefined object");
-    // fused_residual >= 2 on a single local box: no per-MFIter stream
+    // fused_residual >= 2 on the single-box non-periodic recast layout (the
+    // solver's decision): no per-MFIter stream
     // synchronization inside the apply (FusedResidualOps.H, NoSyncScope):
     // the block copies, wall-row scalings, signal-block kernels, the direct
     // solvers' gathers/scatters and cuDSS phases (stream-ordered) and the
