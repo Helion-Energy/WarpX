@@ -2572,6 +2572,29 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
 
+def _quote_cudss_options(options):
+    """ParmParse form of implicit_mhd.resistive_direct_cudss_options.
+
+    A list/tuple of "name=value" strings becomes one double-quoted token per
+    option (the Bucket emits an already-quoted string verbatim); a plain
+    string is quoted as a whole (the solver splits every token on whitespace,
+    so a space-separated string is equivalent to the list). An unquoted
+    a=b token would be misread by ParmParse ("no values for definition").
+    None stays None (knob not emitted).
+    """
+    if options is None:
+        return None
+    if isinstance(options, str):
+        options = options.split()
+    tokens = []
+    for option in options:
+        option = str(option).strip().strip('"')
+        assert "=" in option, f"cuDSS option {option!r} is not a name=value pair"
+        assert " " not in option, f"cuDSS option {option!r} must not contain spaces"
+        tokens.append(f'"{option}"')
+    return " ".join(tokens) if tokens else None
+
+
 class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     """
     Sets up the theta-implicit single-ion-fluid MHD evolve scheme.
@@ -3823,6 +3846,46 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         "auto", the default, engages it exactly there). "off" keeps the
         host gather path everywhere.
 
+    resistive_direct_cudss_options: string or list of strings, optional
+        "name=value" pairs forwarded to the cuDSS configuration of the
+        direct resistive block before its analysis (reordering_alg,
+        factorization_alg, solve_alg, matching_alg, pivot_type,
+        ir_n_steps, nd_nlevels, nd_ubfactor, use_superpanels,
+        deterministic_mode, host_nthreads). A list is emitted as one
+        double-quoted token per option, a string as one quoted token
+        (an unquoted a=b token is misread by ParmParse); either way the
+        solver splits every token on whitespace, so "pivot_type=none
+        nd_nlevels=16" and ["pivot_type=none", "nd_nlevels=16"] are the
+        same. Default: library defaults.
+
+    resistive_direct_dump_prefix: string, optional
+        Write the assembled matrix of the direct resistive block (and the
+        right-hand side / solution of one application) as binary files
+        with this prefix, for offline solver benchmarks.
+
+    resistive_direct_dump_assembly: int, optional
+        1-based count of the assembly whose matrix is written (default 1).
+
+    resistive_direct_row_threshold: float, optional
+        Reduced solve of the direct resistive block: rows whose couplings
+        are all below this fraction of the diagonal are solved as
+        b_i / a_ii and only the rest is factorized (0 = the exact
+        coupling-free rows; default off = -1).
+
+    resistive_direct_row_threshold_margin: float, optional
+        Margin of the reduced row set (rows kept from threshold/margin on;
+        default 10).
+
+    resistive_direct_precision: {"double", "single"}, optional
+        Factorize and solve the direct resistive block in FP32 ("single";
+        conversions on the device around the cuDSS calls). Default double.
+
+    resistive_direct_check_factorization: {"auto", "off", "first", "always"}, optional
+        Run-time check of the factorized solve (deterministic vector,
+        full-matrix residual; aborts above tolerance). Default auto = the
+        first factorization when a cuDSS option, single precision or a
+        row threshold is requested.
+
     viscous_theta: float, optional
         Time centering of the VISCOUS stage, in [0.5, 1]; everything else
         keeps the global theta. Default: the global theta
@@ -3936,6 +3999,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_chi_perp_max=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
+        resistive_direct_cudss_options=None,
+        resistive_direct_dump_prefix=None,
+        resistive_direct_dump_assembly=None,
+        resistive_direct_row_threshold=None,
+        resistive_direct_row_threshold_margin=None,
+        resistive_direct_precision=None,
+        resistive_direct_check_factorization=None,
         conduction_theta=None,
         viscous_theta=None,
         fluid_flux=None,
@@ -4084,6 +4154,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_chi_perp_max = conduction_chi_perp_max
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
+        self.resistive_direct_cudss_options = resistive_direct_cudss_options
+        self.resistive_direct_dump_prefix = resistive_direct_dump_prefix
+        self.resistive_direct_dump_assembly = resistive_direct_dump_assembly
+        self.resistive_direct_row_threshold = resistive_direct_row_threshold
+        self.resistive_direct_row_threshold_margin = (
+            resistive_direct_row_threshold_margin
+        )
+        self.resistive_direct_precision = resistive_direct_precision
+        self.resistive_direct_check_factorization = resistive_direct_check_factorization
         self.conduction_theta = conduction_theta
         self.viscous_theta = viscous_theta
         self.fluid_flux = fluid_flux
@@ -4251,6 +4330,23 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
             self.resistive_direct_device_assembly
+        )
+        implicit_mhd.resistive_direct_cudss_options = (
+            _quote_cudss_options(self.resistive_direct_cudss_options)
+        )
+        implicit_mhd.resistive_direct_dump_prefix = self.resistive_direct_dump_prefix
+        implicit_mhd.resistive_direct_dump_assembly = (
+            self.resistive_direct_dump_assembly
+        )
+        implicit_mhd.resistive_direct_row_threshold = (
+            self.resistive_direct_row_threshold
+        )
+        implicit_mhd.resistive_direct_row_threshold_margin = (
+            self.resistive_direct_row_threshold_margin
+        )
+        implicit_mhd.resistive_direct_precision = self.resistive_direct_precision
+        implicit_mhd.resistive_direct_check_factorization = (
+            self.resistive_direct_check_factorization
         )
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.viscous_theta = self.viscous_theta

@@ -9,6 +9,7 @@
 
 #include "FieldSolver/ImplicitSolvers/FusedResidualOps.H"
 #include "MHDResistiveStencil.H"
+#include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 
 #include <AMReX_Array.H>
@@ -24,6 +25,7 @@
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_Reduce.H>
 #include <AMReX_Vector.H>
 
 #if defined(WARPX_USE_CUDSS)
@@ -38,11 +40,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace warpx::mhd_pc
 {
@@ -228,6 +232,79 @@ ScatterComponentSolution (const DirectIndexView& a_view, const int a_component,
     }
 }
 
+/** \brief Gather the reduced sub-system's values from the global CSR
+ * values through the frozen slot map (reduced solve). */
+inline void
+GatherReducedValues (const amrex::Real* const a_values, const int* const a_slots,
+                     amrex::Real* const a_reduced, const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long entry)
+                       {
+                           a_reduced[entry] = a_values[a_slots[entry]];
+                       });
+}
+
+/** \brief Maximum over the dropped rows' couplings of |a_ij| / |a_ii|
+ * (slots whose row or column is a dropped row; reduced solve). */
+inline amrex::Real
+DroppedCouplingMax (const amrex::Real* const a_values, const int* const a_slot_row,
+                    const int* const a_slot_column, const int* const a_diag_slot,
+                    const int* const a_keep, const amrex::Long a_num_slots)
+{
+    amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    reduce_op.eval(a_num_slots, reduce_data,
+                   [=] AMREX_GPU_DEVICE (amrex::Long slot) -> ReduceTuple
+                   {
+                       const int row = a_slot_row[slot];
+                       const int column = a_slot_column[slot];
+                       amrex::Real ratio = 0.0;
+                       if (row != column)
+                       {
+                           const amrex::Real magnitude = std::abs(a_values[slot]);
+                           if (a_keep[row] == 0)
+                           {
+                               ratio = amrex::max(
+                                   ratio, magnitude / std::abs(a_values[a_diag_slot[row]]));
+                           }
+                           if (a_keep[column] == 0)
+                           {
+                               ratio = amrex::max(
+                                   ratio,
+                                   magnitude / std::abs(a_values[a_diag_slot[column]]));
+                           }
+                       }
+                       return {ratio};
+                   });
+    return amrex::get<0>(reduce_data.value(reduce_op));
+}
+
+/** \brief FP64 -> FP32 device conversion (single-precision solve). */
+inline void
+ConvertToSingle (const amrex::Real* const a_source, float* const a_target,
+                 const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long index)
+                       {
+                           a_target[index] = static_cast<float>(a_source[index]);
+                       });
+}
+
+/** \brief FP32 -> FP64 device conversion (single-precision solve). */
+inline void
+ConvertToDouble (const float* const a_source, amrex::Real* const a_target,
+                 const amrex::Long a_count)
+{
+    amrex::ParallelFor(a_count,
+                       [=] AMREX_GPU_DEVICE (amrex::Long index)
+                       {
+                           a_target[index] = static_cast<amrex::Real>(a_source[index]);
+                       });
+}
+
 /** \brief Zero a device vector of matrix values. */
 inline void
 ZeroRealVector (amrex::Real* const a_data, const std::size_t a_size)
@@ -293,6 +370,57 @@ ZeroIntScalar (int* const a_data)
  * The numeric backend is NVIDIA cuDSS (CUDA builds configured with
  * WarpX_CUDSS=ON). Assembly and the roundoff matvec validation against
  * the matrix-free operator are portable and available on every build.
+ *
+ * Measurement and tuning knobs (implicit_mhd.resistive_direct_*, every
+ * default = the behaviour above):
+ *  - cudss_options: "name=value" pairs forwarded to cudssConfigSet
+ *    before the analysis (reordering_alg, factorization_alg, solve_alg,
+ *    matching_alg, pivot_type, ir_n_steps, nd_nlevels, nd_ubfactor,
+ *    use_superpanels, deterministic_mode, host_nthreads); every ParmParse
+ *    token is split on whitespace, names and values are validated at
+ *    Define on every build. pivot_type=none disables the pivot search:
+ *    its safety is EMPIRICAL for a given operator (on the production RZ
+ *    formation matrices the unpivoted LU has every pivot in [1, 417] with
+ *    growth factor 1, in FP64 and FP32) and must be re-validated when the
+ *    block's operator changes (Hall rows, another wall model), which is
+ *    what check_factorization does at run time;
+ *  - check_factorization (auto|off|first|always): after a factorization,
+ *    solve for a deterministic pseudo-random vector x* through the
+ *    factorized path (reduced or not, FP32 or not), and compare the
+ *    solution with x* and the residual of the FULL assembled matrix with
+ *    the right-hand side; print both and abort above a tolerance (1e-8
+ *    relative in FP64, 1e-3 in FP32). auto = first factorization when a
+ *    cuDSS option, single precision or the reduced solve is requested,
+ *    off otherwise (the default path stays untouched);
+ *  - dump_prefix / dump_assembly: write the assembled CSR matrix of the
+ *    given assembly (1-based count) and the right-hand side and
+ *    solution of the first application after it, as binary files for an
+ *    offline solver benchmark (I/O rank; see DumpMatrix for the format).
+ *  - row_threshold (>= 0 engages; default -1 = off): the REDUCED solve.
+ *    The cuDSS triangular solves cost time in proportion to the number
+ *    of rows they visit (measured ~5 ns per row on the production
+ *    matrix, independent of how trivial the row is), and a large part of
+ *    the level's face unknowns are identity rows (frozen exterior
+ *    faces, axis and boundary faces) or nearly so (hot plasma, where the
+ *    resistive diffusion number is 1e-4). A row whose off-diagonal
+ *    couplings, in its row AND in its column, are all <= threshold *
+ *    diagonal is solved as x_i = b_i / a_ii; the remaining rows form the
+ *    factorized sub-system. threshold = 0 drops exactly the rows without
+ *    any coupling (exact inverse, roundoff-different factorization);
+ *    threshold > 0 is an approximate inverse with a relative truncation
+ *    error bounded by the threshold. The row set is built from the
+ *    frozen values with threshold / row_threshold_margin (default 10) and
+ *    rebuilt -- a new pattern analysis -- only when a dropped row's
+ *    coupling exceeds the threshold at a later refreeze (checked on the
+ *    device at every refreeze), so the bound holds at every application.
+ *    Single-rank device assembly only.
+ *  - precision (double|single, default double): factorize and solve in
+ *    FP32 (values, right-hand side and solution converted on the device
+ *    around the cuDSS calls; the assembled FP64 values stay the reference
+ *    for the assembly checks). The block inverse is then accurate to
+ *    ~3e-5 relative -- ample for a preconditioner -- and the solve is
+ *    measured ~8 % cheaper on the production matrix. Single-rank device
+ *    assembly only.
  */
 class ResistiveDirectSolver
 {
@@ -382,6 +510,20 @@ class ResistiveDirectSolver
          */
         void FillValidationVector (const amrex::Array<amrex::MultiFab*, 3>& a_faces);
 
+        // Internal steps of Solve()/Factorize(), public only because their
+        // device lambdas may not live in private members (nvcc extended
+        // lambda rule); not part of the interface.
+
+        /** \brief Solve the factorized system for the canonical device
+         * right-hand side m_device_rhs into m_device_solution (reduced or
+         * full path, FP32 conversions included). I/O rank, cuDSS builds. */
+        void SolveDeviceVectors ();
+
+        /** \brief The factorization check (see the class comment): solve
+         * for a deterministic vector and gate the solution error and the
+         * full-matrix residual; prints and aborts above the tolerance. */
+        void CheckFactorization ();
+
         /**
          * \brief Compare the matrix-free action A x on the validation
          * vector against the assembled-matrix product: returns the
@@ -404,7 +546,7 @@ class ResistiveDirectSolver
         /** \brief Deterministic pseudo-random unit value keyed by the
          * canonical unknown index (reproducible on every rank without
          * communication). */
-        [[nodiscard]] static amrex::Real
+        [[nodiscard]] AMREX_GPU_HOST_DEVICE static amrex::Real
         ValidationValue (const amrex::Long a_index)
         {
             auto z = static_cast<std::uint64_t>(a_index) + 0x9E3779B97F4A7C15ULL;
@@ -502,8 +644,108 @@ class ResistiveDirectSolver
                                        : (bits | 0x8000000000000000ULL);
         }
 
+        /** \brief Write the assembled CSR matrix (I/O rank) for the
+         * offline benchmark; binary little-endian: magic "WXCSR001",
+         * int64 rows, int64 nonzeros, int32 space dimension, int32 3
+         * (components), per component {int32 active, int64 offset,
+         * int32 low[3], int32 high[3]}, int32 row_offsets[rows + 1],
+         * int32 columns[nonzeros], float64 values[nonzeros]; a text
+         * twin "<prefix>_meta.txt" repeats the header. */
+        void DumpMatrix () const;
+
+        /** \brief Write one canonical-length vector (magic "WXVEC001",
+         * int64 length, float64 values). */
+        static void DumpVector (const std::string& a_path,
+                                const amrex::Real* a_values, amrex::Long a_size);
+
+        /** \brief Split and validate implicit_mhd.resistive_direct_cudss_options
+         * (portable: names, enumerated values and integers are checked on
+         * every build; the cuDSS calls happen in ApplyCudssOptions). */
+        void ParseCudssOptions ();
+
+#if defined(WARPX_USE_CUDSS)
+        /** \brief Forward the parsed cuDSS options to cudssConfigSet. */
+        void ApplyCudssOptions () const;
+
+        /** \brief Factorization of the reduced sub-system (see the class
+         * comment): (re)creates the cuDSS objects and runs the analysis
+         * after a row-set (re)build, then gathers the sub-system values
+         * and refactorizes. */
+        void FactorizeReduced ();
+#endif
+
+        /** \brief Current CSR values on the host (the device copy on the
+         * device-assembly path, the folded host values otherwise). */
+        [[nodiscard]] amrex::Vector<amrex::Real> HostValues () const;
+
+        /** \brief Build the reduced row set and its sub-system pattern from
+         * the given values (portable, host): rows kept iff some
+         * off-diagonal coupling in the row or the column exceeds
+         * (threshold / margin) times the diagonal. Uploads the device
+         * copies. */
+        void BuildReducedSystem (const amrex::Vector<amrex::Real>& a_values);
+
+        /** \brief Device reduction over the dropped rows' couplings: the
+         * maximum of |a_ij| / |a_ii| over slots whose row or column is a
+         * dropped row (the truncation the reduced solve makes). */
+        [[nodiscard]] amrex::Real DroppedCouplingMax () const;
+
+        /** \brief Write the reduced sub-system next to the full dump. */
+        void DumpReducedMatrix (const amrex::Vector<amrex::Real>& a_values) const;
+
         bool m_is_defined = false;
         bool m_pattern_built = false;
+
+        // Measurement / tuning knobs (implicit_mhd.resistive_direct_*, see
+        // the class comment).
+        std::vector<std::string> m_cudss_options; //!< validated name=value tokens
+        std::string m_check_factorization = "auto";
+        int m_factorization_count = 0;
+        // Device CSR copies for the factorization check's matrix-vector
+        // products (built at the first check; the values are the device
+        // values of the active assembly path).
+        amrex::Gpu::DeviceVector<int> m_check_row_offsets;
+        amrex::Gpu::DeviceVector<int> m_check_columns;
+        amrex::Gpu::DeviceVector<amrex::Real> m_check_reference;
+        amrex::Gpu::DeviceVector<amrex::Real> m_check_rhs;
+        std::string m_dump_prefix;
+        int m_dump_assembly = 1;
+        int m_assembly_count = 0;
+        bool m_dump_solve_pending = false;
+
+        // Reduced solve (implicit_mhd.resistive_direct_row_threshold, see
+        // the class comment). Host products of BuildReducedSystem and
+        // their device copies; the global-slot helpers (row of every
+        // slot, diagonal slot of every row) are built once at the freeze.
+        // Single-precision factorization/solve (implicit_mhd.resistive_direct_precision):
+        // FP32 twins of the values, right-hand side and solution buffers that
+        // the cuDSS objects wrap; conversions run on the device around the calls.
+        bool m_single_precision = false;
+        amrex::Gpu::DeviceVector<float> m_values_single;
+        amrex::Gpu::DeviceVector<float> m_rhs_single;
+        amrex::Gpu::DeviceVector<float> m_solution_single;
+
+        amrex::Real m_row_threshold = -1.0;
+        amrex::Real m_row_threshold_margin = 10.0;
+        bool m_reduced_active = false;
+        bool m_reduced_pattern_new = false;
+        int m_reduced_rebuilds = 0;
+        amrex::Long m_reduced_rows = 0;
+        amrex::Vector<int> m_reduced_row_list;
+        amrex::Vector<int> m_reduced_row_offsets;
+        amrex::Vector<int> m_reduced_columns;
+        amrex::Vector<int> m_reduced_slots;
+        amrex::Gpu::DeviceVector<int> m_slot_row_device;
+        amrex::Gpu::DeviceVector<int> m_slot_column_device;
+        amrex::Gpu::DeviceVector<int> m_diag_slot_device;
+        amrex::Gpu::DeviceVector<int> m_keep_device;
+        amrex::Gpu::DeviceVector<int> m_reduced_row_list_device;
+        amrex::Gpu::DeviceVector<int> m_reduced_row_offsets_device;
+        amrex::Gpu::DeviceVector<int> m_reduced_columns_device;
+        amrex::Gpu::DeviceVector<int> m_reduced_slots_device;
+        amrex::Gpu::DeviceVector<amrex::Real> m_reduced_values_device;
+        amrex::Gpu::DeviceVector<amrex::Real> m_reduced_rhs_device;
+        amrex::Gpu::DeviceVector<amrex::Real> m_reduced_solution_device;
 
         amrex::Geometry m_geometry;
         amrex::Array<ComponentMap, 3> m_component_map;
@@ -571,6 +813,13 @@ class ResistiveDirectSolver
         cudssMatrix_t m_cudss_matrix = nullptr;
         cudssMatrix_t m_cudss_rhs = nullptr;
         cudssMatrix_t m_cudss_solution = nullptr;
+        // Reduced sub-system objects (same handle and config; the data
+        // object and the matrix wrappers are recreated at every rebuild).
+        bool m_cudss_reduced_ready = false;
+        cudssData_t m_cudss_reduced_data = nullptr;
+        cudssMatrix_t m_cudss_reduced_matrix = nullptr;
+        cudssMatrix_t m_cudss_reduced_rhs = nullptr;
+        cudssMatrix_t m_cudss_reduced_solution = nullptr;
         amrex::Gpu::DeviceVector<int> m_device_row_offsets;
         amrex::Gpu::DeviceVector<int> m_device_column_indices;
         amrex::Gpu::DeviceVector<amrex::Real> m_device_values;
@@ -591,12 +840,23 @@ inline
 ResistiveDirectSolver::~ResistiveDirectSolver ()
 {
 #if defined(WARPX_USE_CUDSS)
+    if (m_cudss_reduced_ready)
+    {
+        cudssMatrixDestroy(m_cudss_reduced_solution);
+        cudssMatrixDestroy(m_cudss_reduced_rhs);
+        cudssMatrixDestroy(m_cudss_reduced_matrix);
+        cudssDataDestroy(m_cudss_handle, m_cudss_reduced_data);
+        m_cudss_reduced_ready = false;
+    }
     if (m_cudss_ready)
     {
-        cudssMatrixDestroy(m_cudss_solution);
-        cudssMatrixDestroy(m_cudss_rhs);
-        cudssMatrixDestroy(m_cudss_matrix);
-        cudssDataDestroy(m_cudss_handle, m_cudss_data);
+        if (m_cudss_matrix != nullptr)
+        {
+            cudssMatrixDestroy(m_cudss_solution);
+            cudssMatrixDestroy(m_cudss_rhs);
+            cudssMatrixDestroy(m_cudss_matrix);
+            cudssDataDestroy(m_cudss_handle, m_cudss_data);
+        }
         cudssConfigDestroy(m_cudss_config);
         cudssDestroy(m_cudss_handle);
         m_cudss_ready = false;
@@ -670,6 +930,41 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
             "single-rank run (multi-rank assembles through the host gather)");
         m_use_device_assembly =
             device_assembly == "on" || (device_assembly == "auto" && single_rank);
+
+        // Measurement / tuning knobs (defaults: today's behaviour).
+        pp_implicit_mhd.queryarr("resistive_direct_cudss_options", m_cudss_options);
+        ParseCudssOptions();
+        pp_implicit_mhd.query("resistive_direct_check_factorization", m_check_factorization);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_check_factorization == "auto" || m_check_factorization == "off" ||
+                m_check_factorization == "first" || m_check_factorization == "always",
+            "implicit_mhd.resistive_direct_check_factorization must be auto, off, first "
+            "or always");
+        pp_implicit_mhd.query("resistive_direct_dump_prefix", m_dump_prefix);
+        pp_implicit_mhd.query("resistive_direct_dump_assembly", m_dump_assembly);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_dump_assembly >= 1,
+            "implicit_mhd.resistive_direct_dump_assembly must be >= 1 (the "
+            "1-based count of the assembly whose matrix is written)");
+        utils::parser::queryWithParser(pp_implicit_mhd, "resistive_direct_row_threshold",
+                                       m_row_threshold);
+        utils::parser::queryWithParser(pp_implicit_mhd,
+                                       "resistive_direct_row_threshold_margin",
+                                       m_row_threshold_margin);
+        m_reduced_active = m_row_threshold >= 0.0;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_reduced_active || m_use_device_assembly,
+            "implicit_mhd.resistive_direct_row_threshold requires the single-rank "
+            "device assembly path (implicit_mhd.resistive_direct_device_assembly)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_row_threshold_margin >= 1.0,
+            "implicit_mhd.resistive_direct_row_threshold_margin must be >= 1");
+        std::string precision = "double";
+        pp_implicit_mhd.query("resistive_direct_precision", precision);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            precision == "double" || precision == "single",
+            "implicit_mhd.resistive_direct_precision must be double or single");
+        m_single_precision = precision == "single";
     }
 
     // Device-copyable twin of WrapPoint/GlobalIndex for the kernels.
@@ -1136,6 +1431,384 @@ ResistiveDirectSolver::AssembleValues (
             CheckAssemblyParity();
         }
     }
+
+    ++m_assembly_count;
+    if (m_reduced_active)
+    {
+        // First assembly: build the row set. Later ones: rebuild only when a
+        // dropped row's coupling has grown past the threshold (the bound of
+        // the reduced solve would otherwise be violated).
+        bool rebuild = first_assembly;
+        if (!rebuild)
+        {
+            const amrex::Real drift = DroppedCouplingMax();
+            rebuild = drift > m_row_threshold;
+            if (rebuild)
+            {
+                amrex::Print() << "pc_mhd_block resistive direct reduced solve: a dropped "
+                                  "row's coupling reached "
+                               << drift << " > " << m_row_threshold
+                               << ", rebuilding the row set\n";
+            }
+        }
+        if (rebuild)
+        {
+            BuildReducedSystem(HostValues());
+        }
+    }
+    if (!m_dump_prefix.empty() && m_assembly_count == m_dump_assembly)
+    {
+        DumpMatrix();
+        if (m_reduced_active)
+        {
+            DumpReducedMatrix(HostValues());
+        }
+        m_dump_solve_pending = true;
+    }
+}
+
+inline amrex::Vector<amrex::Real>
+ResistiveDirectSolver::HostValues () const
+{
+    amrex::Vector<amrex::Real> values;
+    if (m_use_device_assembly)
+    {
+        values.resize(m_values_device.size());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_values_device.begin(),
+                         m_values_device.end(), values.begin());
+    }
+    else
+    {
+        values = m_matrix_values;
+    }
+    return values;
+}
+
+inline void
+ResistiveDirectSolver::BuildReducedSystem (const amrex::Vector<amrex::Real>& a_values)
+{
+    BL_PROFILE("ResistiveDirect::BuildReducedSystem()");
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pattern_built && static_cast<amrex::Long>(a_values.size()) ==
+                               static_cast<amrex::Long>(m_column_indices.size()),
+        "ResistiveDirectSolver::BuildReducedSystem() needs the frozen pattern and its "
+        "values");
+    const amrex::Long num_rows = m_num_rows;
+    const amrex::Long num_slots = m_column_indices.size();
+
+    // Global-slot helpers (once): the row of every slot and the diagonal
+    // slot of every row.
+    if (m_slot_row_device.empty())
+    {
+        amrex::Vector<int> slot_row(num_slots);
+        amrex::Vector<int> diag_slot(num_rows, -1);
+        for (amrex::Long row = 0; row < num_rows; ++row)
+        {
+            for (int slot = m_row_offsets[row]; slot < m_row_offsets[row + 1]; ++slot)
+            {
+                slot_row[slot] = static_cast<int>(row);
+                if (m_column_indices[slot] == row)
+                {
+                    diag_slot[row] = slot;
+                }
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                diag_slot[row] >= 0,
+                "ResistiveDirectSolver reduced solve: a canonical row has no diagonal");
+        }
+        m_slot_row_device.resize(num_slots);
+        m_slot_column_device.resize(num_slots);
+        m_diag_slot_device.resize(num_rows);
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, slot_row.begin(), slot_row.end(),
+                              m_slot_row_device.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_column_indices.begin(),
+                              m_column_indices.end(), m_slot_column_device.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, diag_slot.begin(), diag_slot.end(),
+                              m_diag_slot_device.begin());
+        m_keep_device.resize(num_rows);
+    }
+
+    // Keep a row when any off-diagonal coupling in its row or its column
+    // exceeds (threshold / margin) x the diagonal of that row/column.
+    const amrex::Real keep_threshold = m_row_threshold / m_row_threshold_margin;
+    amrex::Vector<amrex::Real> diagonal(num_rows, 0.0);
+    for (amrex::Long row = 0; row < num_rows; ++row)
+    {
+        for (int slot = m_row_offsets[row]; slot < m_row_offsets[row + 1]; ++slot)
+        {
+            if (m_column_indices[slot] == row)
+            {
+                diagonal[row] = std::abs(a_values[slot]);
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            diagonal[row] > 0.0,
+            "ResistiveDirectSolver reduced solve: a canonical row has a zero diagonal");
+    }
+    amrex::Vector<int> keep(num_rows, 0);
+    for (amrex::Long row = 0; row < num_rows; ++row)
+    {
+        for (int slot = m_row_offsets[row]; slot < m_row_offsets[row + 1]; ++slot)
+        {
+            const int column = m_column_indices[slot];
+            if (column == row)
+            {
+                continue;
+            }
+            const amrex::Real magnitude = std::abs(a_values[slot]);
+            if (magnitude > keep_threshold * diagonal[row])
+            {
+                keep[row] = 1;
+            }
+            if (magnitude > keep_threshold * diagonal[column])
+            {
+                keep[column] = 1;
+            }
+        }
+    }
+
+    // The sub-system: kept rows in canonical order, columns restricted to
+    // kept rows (the dropped couplings are the bounded truncation).
+    m_reduced_row_list.clear();
+    amrex::Vector<int> local_index(num_rows, -1);
+    for (amrex::Long row = 0; row < num_rows; ++row)
+    {
+        if (keep[row] != 0)
+        {
+            local_index[row] = static_cast<int>(m_reduced_row_list.size());
+            m_reduced_row_list.push_back(static_cast<int>(row));
+        }
+    }
+    m_reduced_rows = m_reduced_row_list.size();
+    m_reduced_row_offsets.assign(m_reduced_rows + 1, 0);
+    m_reduced_columns.clear();
+    m_reduced_slots.clear();
+    for (amrex::Long local = 0; local < m_reduced_rows; ++local)
+    {
+        const int row = m_reduced_row_list[local];
+        for (int slot = m_row_offsets[row]; slot < m_row_offsets[row + 1]; ++slot)
+        {
+            const int column_local = local_index[m_column_indices[slot]];
+            if (column_local >= 0)
+            {
+                m_reduced_columns.push_back(column_local);
+                m_reduced_slots.push_back(slot);
+            }
+        }
+        m_reduced_row_offsets[local + 1] = static_cast<int>(m_reduced_columns.size());
+    }
+
+    // Device copies.
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, keep.begin(), keep.end(),
+                          m_keep_device.begin());
+    m_reduced_row_list_device.resize(m_reduced_row_list.size());
+    m_reduced_row_offsets_device.resize(m_reduced_row_offsets.size());
+    m_reduced_columns_device.resize(m_reduced_columns.size());
+    m_reduced_slots_device.resize(m_reduced_slots.size());
+    m_reduced_values_device.resize(m_reduced_slots.size());
+    m_reduced_rhs_device.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+    m_reduced_solution_device.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_reduced_row_list.begin(),
+                          m_reduced_row_list.end(), m_reduced_row_list_device.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_reduced_row_offsets.begin(),
+                          m_reduced_row_offsets.end(), m_reduced_row_offsets_device.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_reduced_columns.begin(),
+                          m_reduced_columns.end(), m_reduced_columns_device.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_reduced_slots.begin(),
+                          m_reduced_slots.end(), m_reduced_slots_device.begin());
+    amrex::Gpu::streamSynchronize();
+    m_reduced_pattern_new = true;
+    ++m_reduced_rebuilds;
+    amrex::Print() << "pc_mhd_block resistive direct reduced solve: " << m_reduced_rows
+                   << " of " << num_rows << " rows kept (" << m_reduced_columns.size()
+                   << " of " << num_slots << " nonzeros; threshold " << m_row_threshold
+                   << ", build threshold " << keep_threshold << "; build #"
+                   << m_reduced_rebuilds << " at assembly " << m_assembly_count << ")\n";
+}
+
+inline amrex::Real
+ResistiveDirectSolver::DroppedCouplingMax () const
+{
+    if (m_keep_device.empty())
+    {
+        return 0.0;
+    }
+    return direct_detail::DroppedCouplingMax(
+        m_values_device.data(), m_slot_row_device.data(), m_slot_column_device.data(),
+        m_diag_slot_device.data(), m_keep_device.data(),
+        static_cast<amrex::Long>(m_values_device.size()));
+}
+
+inline void
+ResistiveDirectSolver::DumpReducedMatrix (const amrex::Vector<amrex::Real>& a_values) const
+{
+    if (!amrex::ParallelDescriptor::IOProcessor() || !m_reduced_active)
+    {
+        return;
+    }
+    // Same layout as the full dump (component records left inactive: the
+    // rows are the listed subset of the canonical unknowns), plus the row
+    // list as a vector file.
+    const auto num_rows = static_cast<std::int64_t>(m_reduced_rows);
+    const auto num_values = static_cast<std::int64_t>(m_reduced_columns.size());
+    const std::string path = m_dump_prefix + "_reduced_matrix.bin";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver could not open the dump file " + path);
+    const char magic[9] = "WXCSR001";
+    out.write(magic, 8);
+    out.write(reinterpret_cast<const char*>(&num_rows), sizeof(num_rows));
+    out.write(reinterpret_cast<const char*>(&num_values), sizeof(num_values));
+    const std::int32_t spacedim = AMREX_SPACEDIM;
+    const std::int32_t num_components = 3;
+    out.write(reinterpret_cast<const char*>(&spacedim), sizeof(spacedim));
+    out.write(reinterpret_cast<const char*>(&num_components), sizeof(num_components));
+    for (int component = 0; component < 3; ++component)
+    {
+        const std::int32_t active = 0;
+        const std::int64_t offset = 0;
+        const std::int32_t zeros[3] = {0, 0, 0};
+        out.write(reinterpret_cast<const char*>(&active), sizeof(active));
+        out.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
+        out.write(reinterpret_cast<const char*>(zeros), sizeof(zeros));
+        out.write(reinterpret_cast<const char*>(zeros), sizeof(zeros));
+    }
+    out.write(reinterpret_cast<const char*>(m_reduced_row_offsets.data()),
+              static_cast<std::streamsize>(sizeof(int) * m_reduced_row_offsets.size()));
+    out.write(reinterpret_cast<const char*>(m_reduced_columns.data()),
+              static_cast<std::streamsize>(sizeof(int) * m_reduced_columns.size()));
+    amrex::Vector<amrex::Real> values(m_reduced_slots.size());
+    for (std::size_t entry = 0; entry < values.size(); ++entry)
+    {
+        values[entry] = a_values[m_reduced_slots[entry]];
+    }
+    out.write(reinterpret_cast<const char*>(values.data()),
+              static_cast<std::streamsize>(sizeof(amrex::Real) * values.size()));
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver failed writing the dump file " + path);
+    amrex::Vector<amrex::Real> rows(m_reduced_row_list.size());
+    for (std::size_t entry = 0; entry < rows.size(); ++entry)
+    {
+        rows[entry] = static_cast<amrex::Real>(m_reduced_row_list[entry]);
+    }
+    DumpVector(m_dump_prefix + "_reduced_rows.bin", rows.data(),
+               static_cast<amrex::Long>(rows.size()));
+    amrex::Print() << "pc_mhd_block resistive direct: wrote the reduced sub-system ("
+                   << num_rows << " rows, " << num_values << " nonzeros) to " << path
+                   << "\n";
+}
+
+inline void
+ResistiveDirectSolver::DumpVector (const std::string& a_path,
+                                   const amrex::Real* const a_values,
+                                   const amrex::Long a_size)
+{
+    static_assert(sizeof(amrex::Real) == 8, "the dump format stores float64 values");
+    std::ofstream out(a_path, std::ios::binary | std::ios::trunc);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver could not open the dump file " + a_path);
+    const char magic[9] = "WXVEC001";
+    out.write(magic, 8);
+    const auto size = static_cast<std::int64_t>(a_size);
+    out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    out.write(reinterpret_cast<const char*>(a_values),
+              static_cast<std::streamsize>(sizeof(amrex::Real) * a_size));
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        out.good(), "ResistiveDirectSolver failed writing the dump file " + a_path);
+}
+
+inline void
+ResistiveDirectSolver::DumpMatrix () const
+{
+    if (!amrex::ParallelDescriptor::IOProcessor())
+    {
+        return;
+    }
+    // The current values: the device refresh updates m_values_device in
+    // place (single-rank device path); the host fold fills
+    // m_matrix_values otherwise.
+    amrex::Vector<amrex::Real> values;
+    const amrex::Real* value_data = m_matrix_values.data();
+    if (m_use_device_assembly)
+    {
+        values.resize(m_values_device.size());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_values_device.begin(),
+                         m_values_device.end(), values.begin());
+        value_data = values.data();
+    }
+    const auto num_rows = static_cast<std::int64_t>(m_num_rows);
+    const auto num_values = static_cast<std::int64_t>(m_column_indices.size());
+    const std::string path = m_dump_prefix + "_matrix.bin";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            out.good(), "ResistiveDirectSolver could not open the dump file " + path);
+        const char magic[9] = "WXCSR001";
+        out.write(magic, 8);
+        out.write(reinterpret_cast<const char*>(&num_rows), sizeof(num_rows));
+        out.write(reinterpret_cast<const char*>(&num_values), sizeof(num_values));
+        const std::int32_t spacedim = AMREX_SPACEDIM;
+        const std::int32_t num_components = 3;
+        out.write(reinterpret_cast<const char*>(&spacedim), sizeof(spacedim));
+        out.write(reinterpret_cast<const char*>(&num_components),
+                  sizeof(num_components));
+        for (int component = 0; component < 3; ++component)
+        {
+            const ComponentMap& map = m_component_map[component];
+            const std::int32_t active = map.active ? 1 : 0;
+            const auto offset = static_cast<std::int64_t>(map.offset);
+            std::int32_t low[3] = {0, 0, 0};
+            std::int32_t high[3] = {0, 0, 0};
+            for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+            {
+                low[direction] = map.active ? map.low[direction] : 0;
+                high[direction] = map.active ? map.high[direction] : 0;
+            }
+            out.write(reinterpret_cast<const char*>(&active), sizeof(active));
+            out.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
+            out.write(reinterpret_cast<const char*>(low), sizeof(low));
+            out.write(reinterpret_cast<const char*>(high), sizeof(high));
+        }
+        static_assert(sizeof(int) == 4, "the dump format stores int32 indices");
+        out.write(reinterpret_cast<const char*>(m_row_offsets.data()),
+                  static_cast<std::streamsize>(sizeof(int) * m_row_offsets.size()));
+        out.write(reinterpret_cast<const char*>(m_column_indices.data()),
+                  static_cast<std::streamsize>(sizeof(int) * m_column_indices.size()));
+        out.write(reinterpret_cast<const char*>(value_data),
+                  static_cast<std::streamsize>(sizeof(amrex::Real) * num_values));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            out.good(), "ResistiveDirectSolver failed writing the dump file " + path);
+    }
+    {
+        std::ofstream meta(m_dump_prefix + "_meta.txt", std::ios::trunc);
+        meta << "rows " << num_rows << "\nnonzeros " << num_values << "\nspacedim "
+             << AMREX_SPACEDIM << "\nassembly " << m_assembly_count << "\nvalues "
+             << (m_use_device_assembly ? "device" : "host") << "\n";
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            meta << "periodic" << direction << " "
+                 << (m_geometry.isPeriodic(direction) ? 1 : 0) << "\n";
+        }
+        for (int component = 0; component < 3; ++component)
+        {
+            const ComponentMap& map = m_component_map[component];
+            meta << "component" << component << " active " << (map.active ? 1 : 0)
+                 << " offset " << map.offset;
+            if (map.active)
+            {
+                for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+                {
+                    meta << " low" << direction << " " << map.low[direction] << " high"
+                         << direction << " " << map.high[direction];
+                }
+            }
+            meta << "\n";
+        }
+    }
+    amrex::Print() << "pc_mhd_block resistive direct: wrote the assembled matrix ("
+                   << num_rows << " rows, " << num_values << " nonzeros, assembly "
+                   << m_assembly_count << ") to " << path << "\n";
 }
 
 inline void
@@ -1229,6 +1902,325 @@ ResistiveDirectSolver::CheckAssemblyParity () const
 }
 
 inline void
+ResistiveDirectSolver::ParseCudssOptions ()
+{
+    // Every ParmParse token may carry several whitespace-separated
+    // name=value pairs (the PICMI string form); the result is one token per
+    // pair, validated against the option table on every build.
+    static const std::map<std::string, std::vector<std::string>> table = {
+        {"reordering_alg", {"default", "btf_colamd", "colamd", "amd", "nested_dissection", "none"}},
+        {"factorization_alg", {"default", "multiblock", "general"}},
+        {"solve_alg", {"default", "general"}},
+        {"matching_alg", {"none", "max_diag_count", "max_min_diag", "max_min_diag_alt",
+                          "max_diag_sum", "max_diag_product", "auto"}},
+        {"pivot_type", {"auto", "none", "global_col", "global_row", "diagonal", "local_block"}},
+        {"ir_n_steps", {}}, {"nd_nlevels", {}}, {"nd_ubfactor", {}},
+        {"use_superpanels", {}}, {"deterministic_mode", {}}, {"host_nthreads", {}}};
+    std::vector<std::string> tokens;
+    for (const std::string& raw : m_cudss_options)
+    {
+        std::size_t begin = 0;
+        while (begin < raw.size())
+        {
+            const std::size_t end = raw.find_first_of(" \t", begin);
+            const std::string token =
+                raw.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            begin = end == std::string::npos ? raw.size() : end + 1;
+            if (token.empty())
+            {
+                continue;
+            }
+            const std::size_t separator = token.find('=');
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                separator != std::string::npos && separator > 0 &&
+                    separator + 1 < token.size(),
+                "implicit_mhd.resistive_direct_cudss_options entries are name=value "
+                "pairs, got '" + token + "'");
+            const std::string name = token.substr(0, separator);
+            const std::string text = token.substr(separator + 1);
+            const auto entry = table.find(name);
+            std::string known;
+            for (const auto& item : table)
+            {
+                known += (known.empty() ? "" : ", ") + item.first;
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                entry != table.end(),
+                "implicit_mhd.resistive_direct_cudss_options: unknown option '" + name +
+                    "' (known: " + known + ")");
+            if (entry->second.empty())
+            {
+                std::size_t consumed = 0;
+                try
+                {
+                    (void)std::stoi(text, &consumed);
+                }
+                catch (const std::exception&)
+                {
+                    consumed = 0;
+                }
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    consumed == text.size(),
+                    "implicit_mhd.resistive_direct_cudss_options: '" + name +
+                        "' expects an integer, got '" + text + "'");
+            }
+            else
+            {
+                std::string allowed;
+                for (const auto& value : entry->second)
+                {
+                    allowed += (allowed.empty() ? "" : ", ") + value;
+                }
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    std::find(entry->second.begin(), entry->second.end(), text) !=
+                        entry->second.end(),
+                    "implicit_mhd.resistive_direct_cudss_options: '" + name +
+                        "' does not accept '" + text + "' (allowed: " + allowed + ")");
+            }
+            tokens.push_back(token);
+        }
+    }
+    m_cudss_options = tokens;
+}
+
+#if defined(WARPX_USE_CUDSS)
+inline void
+ResistiveDirectSolver::ApplyCudssOptions () const
+{
+    // "name=value" pairs from implicit_mhd.resistive_direct_cudss_options,
+    // applied once before the analysis (the phase that consumes the
+    // reordering/pivoting/algorithm choices).
+    const auto set_enum = [&] (const cudssConfigParam_t a_param, const int a_value)
+    {
+        WARPX_CUDSS_CHECK(cudssConfigSet(m_cudss_config, a_param, &a_value,
+                                         sizeof(a_value)));
+    };
+    const auto parse_int = [] (const std::string& a_name, const std::string& a_text)
+    {
+        std::size_t consumed = 0;
+        int value = 0;
+        try
+        {
+            value = std::stoi(a_text, &consumed);
+        }
+        catch (const std::exception&)
+        {
+            consumed = 0;
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            consumed == a_text.size() && !a_text.empty(),
+            "implicit_mhd.resistive_direct_cudss_options: '" + a_name +
+                "' expects an integer, got '" + a_text + "'");
+        return value;
+    };
+    const auto match = [] (const std::string& a_name, const std::string& a_text,
+                           const std::vector<std::pair<std::string, int>>& a_table)
+    {
+        for (const auto& entry : a_table)
+        {
+            if (entry.first == a_text)
+            {
+                return entry.second;
+            }
+        }
+        std::string allowed;
+        for (const auto& entry : a_table)
+        {
+            allowed += (allowed.empty() ? "" : ", ") + entry.first;
+        }
+        WARPX_ABORT_WITH_MESSAGE("implicit_mhd.resistive_direct_cudss_options: '" +
+                                 a_name + "' does not accept '" + a_text +
+                                 "' (allowed: " + allowed + ")");
+        return 0;
+    };
+    for (const std::string& option : m_cudss_options)
+    {
+        const std::size_t separator = option.find('=');
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            separator != std::string::npos && separator > 0 &&
+                separator + 1 < option.size(),
+            "implicit_mhd.resistive_direct_cudss_options entries are name=value "
+            "pairs, got '" + option + "'");
+        const std::string name = option.substr(0, separator);
+        const std::string text = option.substr(separator + 1);
+        if (name == "reordering_alg")
+        {
+            set_enum(CUDSS_CONFIG_REORDERING_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_REORDERING_ALG_DEFAULT},
+                            {"btf_colamd", CUDSS_REORDERING_ALG_BTF_COLAMD},
+                            {"colamd", CUDSS_REORDERING_ALG_COLAMD},
+                            {"amd", CUDSS_REORDERING_ALG_AMD},
+                            {"nested_dissection", CUDSS_REORDERING_ALG_NESTED_DISSECTION},
+                            {"none", CUDSS_REORDERING_ALG_NONE}}));
+        }
+        else if (name == "factorization_alg")
+        {
+            set_enum(CUDSS_CONFIG_FACTORIZATION_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_FACTORIZATION_ALG_DEFAULT},
+                            {"multiblock", CUDSS_FACTORIZATION_ALG_MULTIBLOCK},
+                            {"general", CUDSS_FACTORIZATION_ALG_GENERAL}}));
+        }
+        else if (name == "solve_alg")
+        {
+            set_enum(CUDSS_CONFIG_SOLVE_ALG,
+                     match(name, text,
+                           {{"default", CUDSS_SOLVE_ALG_DEFAULT},
+                            {"general", CUDSS_SOLVE_ALG_GENERAL}}));
+        }
+        else if (name == "matching_alg")
+        {
+            set_enum(CUDSS_CONFIG_MATCHING_ALG,
+                     match(name, text,
+                           {{"none", CUDSS_MATCHING_ALG_NONE},
+                            {"max_diag_count", CUDSS_MATCHING_ALG_MAX_DIAG_COUNT},
+                            {"max_min_diag", CUDSS_MATCHING_ALG_MAX_MIN_DIAG},
+                            {"max_min_diag_alt", CUDSS_MATCHING_ALG_MAX_MIN_DIAG_ALT},
+                            {"max_diag_sum", CUDSS_MATCHING_ALG_MAX_DIAG_SUM},
+                            {"max_diag_product", CUDSS_MATCHING_ALG_MAX_DIAG_PRODUCT},
+                            {"auto", CUDSS_MATCHING_ALG_AUTO}}));
+        }
+        else if (name == "pivot_type")
+        {
+            set_enum(CUDSS_CONFIG_PIVOT_TYPE,
+                     match(name, text,
+                           {{"auto", CUDSS_PIVOT_AUTO},
+                            {"none", CUDSS_PIVOT_NONE},
+                            {"global_col", CUDSS_PIVOT_GLOBAL_COL},
+                            {"global_row", CUDSS_PIVOT_GLOBAL_ROW},
+                            {"diagonal", CUDSS_PIVOT_DIAGONAL},
+                            {"local_block", CUDSS_PIVOT_LOCAL_BLOCK}}));
+        }
+        else if (name == "ir_n_steps")
+        {
+            set_enum(CUDSS_CONFIG_IR_N_STEPS, parse_int(name, text));
+        }
+        else if (name == "nd_nlevels")
+        {
+            set_enum(CUDSS_CONFIG_ND_NLEVELS, parse_int(name, text));
+        }
+        else if (name == "nd_ubfactor")
+        {
+            set_enum(CUDSS_CONFIG_ND_UBFACTOR, parse_int(name, text));
+        }
+        else if (name == "use_superpanels")
+        {
+            set_enum(CUDSS_CONFIG_USE_SUPERPANELS, parse_int(name, text));
+        }
+        else if (name == "deterministic_mode")
+        {
+            set_enum(CUDSS_CONFIG_DETERMINISTIC_MODE, parse_int(name, text));
+        }
+        else if (name == "host_nthreads")
+        {
+            set_enum(CUDSS_CONFIG_HOST_NTHREADS, parse_int(name, text));
+        }
+        else
+        {
+            WARPX_ABORT_WITH_MESSAGE(
+                "implicit_mhd.resistive_direct_cudss_options: unknown option '" + name +
+                "' (known: reordering_alg, factorization_alg, solve_alg, "
+                "matching_alg, pivot_type, ir_n_steps, nd_nlevels, nd_ubfactor, "
+                "use_superpanels, deterministic_mode, host_nthreads)");
+        }
+        amrex::Print() << "pc_mhd_block resistive direct: cuDSS option " << name << " = "
+                       << text << "\n";
+    }
+}
+#endif
+
+#if defined(WARPX_USE_CUDSS)
+inline void
+ResistiveDirectSolver::FactorizeReduced ()
+{
+    BL_PROFILE("ResistiveDirect::FactorizeReduced()");
+
+    // Sub-system values gathered from the refreshed global values (stream
+    // ordered after the refresh).
+    direct_detail::GatherReducedValues(
+        m_values_device.data(), m_reduced_slots_device.data(),
+        m_reduced_values_device.data(),
+        static_cast<amrex::Long>(m_reduced_slots_device.size()));
+    if (m_reduced_rows == 0)
+    {
+        // Every row is trivial: nothing to factorize.
+        m_reduced_pattern_new = false;
+        return;
+    }
+    const auto rows = static_cast<std::int64_t>(m_reduced_rows);
+    const auto nonzeros = static_cast<std::int64_t>(m_reduced_columns.size());
+    const bool pattern_new = m_reduced_pattern_new;
+    if (m_reduced_pattern_new)
+    {
+        if (m_cudss_reduced_ready)
+        {
+            WARPX_CUDSS_CHECK(cudssMatrixDestroy(m_cudss_reduced_solution));
+            WARPX_CUDSS_CHECK(cudssMatrixDestroy(m_cudss_reduced_rhs));
+            WARPX_CUDSS_CHECK(cudssMatrixDestroy(m_cudss_reduced_matrix));
+            WARPX_CUDSS_CHECK(cudssDataDestroy(m_cudss_handle, m_cudss_reduced_data));
+            m_cudss_reduced_ready = false;
+        }
+        WARPX_CUDSS_CHECK(cudssDataCreate(m_cudss_handle, &m_cudss_reduced_data));
+        const void* wrapped_values = m_reduced_values_device.data();
+        void* wrapped_rhs = m_reduced_rhs_device.data();
+        void* wrapped_solution = m_reduced_solution_device.data();
+        cudssDataType_t value_type = CUDSS_R_64F;
+        if (m_single_precision)
+        {
+            m_values_single.resize(m_reduced_columns.size());
+            m_rhs_single.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+            m_solution_single.resize(std::max<amrex::Long>(m_reduced_rows, 1));
+            wrapped_values = m_values_single.data();
+            wrapped_rhs = m_rhs_single.data();
+            wrapped_solution = m_solution_single.data();
+            value_type = CUDSS_R_32F;
+        }
+        WARPX_CUDSS_CHECK(cudssMatrixCreateCsr(
+            &m_cudss_reduced_matrix, rows, rows, nonzeros,
+            m_reduced_row_offsets_device.data(), nullptr, m_reduced_columns_device.data(),
+            wrapped_values, CUDSS_R_32I, CUDSS_R_32I, value_type,
+            CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_reduced_rhs, rows, 1, rows,
+                                              wrapped_rhs, value_type,
+                                              CUDSS_LAYOUT_COL_MAJOR));
+        WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_reduced_solution, rows, 1, rows,
+                                              wrapped_solution, value_type,
+                                              CUDSS_LAYOUT_COL_MAJOR));
+        amrex::Gpu::streamSynchronize();
+        const amrex::Real analysis_start = amrex::ParallelDescriptor::second();
+        WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_ANALYSIS,
+                                       m_cudss_config, m_cudss_reduced_data,
+                                       m_cudss_reduced_matrix, m_cudss_reduced_solution,
+                                       m_cudss_reduced_rhs));
+        amrex::Gpu::streamSynchronize();
+        amrex::Print() << "pc_mhd_block resistive direct reduced solve: analysis of the "
+                       << rows << "-row sub-system "
+                       << amrex::ParallelDescriptor::second() - analysis_start << " s\n";
+        m_cudss_reduced_ready = true;
+        m_reduced_pattern_new = false;
+    }
+    if (m_single_precision)
+    {
+        direct_detail::ConvertToSingle(m_reduced_values_device.data(),
+                                       m_values_single.data(), nonzeros);
+        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_reduced_matrix,
+                                               m_values_single.data()));
+    }
+    else if (!pattern_new)
+    {
+        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_reduced_matrix,
+                                               m_reduced_values_device.data()));
+    }
+    WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_FACTORIZATION,
+                                   m_cudss_config, m_cudss_reduced_data,
+                                   m_cudss_reduced_matrix, m_cudss_reduced_solution,
+                                   m_cudss_reduced_rhs));
+    amrex::Gpu::streamSynchronize();
+}
+#endif
+
+inline void
 ResistiveDirectSolver::Factorize ()
 {
     BL_PROFILE("ResistiveDirect::Factorize()");
@@ -1251,6 +2243,20 @@ ResistiveDirectSolver::Factorize ()
         WARPX_CUDSS_CHECK(cudssCreate(&m_cudss_handle));
         WARPX_CUDSS_CHECK(cudssSetStream(m_cudss_handle, amrex::Gpu::gpuStream()));
         WARPX_CUDSS_CHECK(cudssConfigCreate(&m_cudss_config));
+        ApplyCudssOptions();
+        m_cudss_ready = true;
+    }
+    if (m_reduced_active)
+    {
+        // The reduced sub-system is the only factorized object (the full
+        // matrix is never analysed).
+        FactorizeReduced();
+        ++m_factorization_count;
+        CheckFactorization();
+        return;
+    }
+    if (m_cudss_matrix == nullptr)
+    {
         WARPX_CUDSS_CHECK(cudssDataCreate(m_cudss_handle, &m_cudss_data));
 
         // Device assembly refreshes m_values_device in place, so the CSR
@@ -1275,45 +2281,262 @@ ResistiveDirectSolver::Factorize ()
         }
         amrex::Gpu::streamSynchronize();
 
+        const void* wrapped_values = matrix_values;
+        void* wrapped_rhs = m_device_rhs.data();
+        void* wrapped_solution = m_device_solution.data();
+        cudssDataType_t value_type = CUDSS_R_64F;
+        if (m_single_precision)
+        {
+            m_values_single.resize(m_matrix_values.size());
+            m_rhs_single.resize(m_num_rows);
+            m_solution_single.resize(m_num_rows);
+            direct_detail::ConvertToSingle(matrix_values, m_values_single.data(),
+                                           num_values);
+            wrapped_values = m_values_single.data();
+            wrapped_rhs = m_rhs_single.data();
+            wrapped_solution = m_solution_single.data();
+            value_type = CUDSS_R_32F;
+            amrex::Gpu::streamSynchronize();
+        }
         WARPX_CUDSS_CHECK(cudssMatrixCreateCsr(
             &m_cudss_matrix, num_rows, num_rows, num_values,
             m_device_row_offsets.data(), nullptr, m_device_column_indices.data(),
-            matrix_values, CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F,
+            wrapped_values, CUDSS_R_32I, CUDSS_R_32I, value_type,
             CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_rhs, num_rows, 1, num_rows,
-                                              m_device_rhs.data(), CUDSS_R_64F,
+                                              wrapped_rhs, value_type,
                                               CUDSS_LAYOUT_COL_MAJOR));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_solution, num_rows, 1, num_rows,
-                                              m_device_solution.data(), CUDSS_R_64F,
+                                              wrapped_solution, value_type,
                                               CUDSS_LAYOUT_COL_MAJOR));
         WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_ANALYSIS,
                                        m_cudss_config, m_cudss_data, m_cudss_matrix,
                                        m_cudss_solution, m_cudss_rhs));
-        m_cudss_ready = true;
     }
     else if (m_use_device_assembly)
     {
         // The refresh already updated the wrapped device buffer in place
-        // (same stream: ordered before the factorization).
-        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_device.data()));
+        // (same stream: ordered before the factorization); the FP32 twin
+        // is refreshed from it.
+        if (m_single_precision)
+        {
+            direct_detail::ConvertToSingle(m_values_device.data(), m_values_single.data(),
+                                           num_values);
+            WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_single.data()));
+        }
+        else
+        {
+            WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_device.data()));
+        }
     }
     else
     {
         amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_matrix_values.begin(),
                               m_matrix_values.end(), m_device_values.begin());
+        if (m_single_precision)
+        {
+            direct_detail::ConvertToSingle(m_device_values.data(), m_values_single.data(),
+                                           num_values);
+        }
         amrex::Gpu::streamSynchronize();
-        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_device_values.data()));
+        WARPX_CUDSS_CHECK(cudssMatrixSetValues(
+            m_cudss_matrix, m_single_precision
+                                ? static_cast<const void*>(m_values_single.data())
+                                : static_cast<const void*>(m_device_values.data())));
     }
     WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_FACTORIZATION,
                                    m_cudss_config, m_cudss_data, m_cudss_matrix,
                                    m_cudss_solution, m_cudss_rhs));
     amrex::Gpu::streamSynchronize();
+    ++m_factorization_count;
+    CheckFactorization();
 #else
     WARPX_ABORT_WITH_MESSAGE(
         "pc_mhd_block.resistive_solver = direct requires a CUDA build configured "
         "with WarpX_CUDSS=ON (NVIDIA cuDSS); chebyshev is the portable default");
 #endif
 }
+
+#if defined(WARPX_USE_CUDSS)
+inline void
+ResistiveDirectSolver::SolveDeviceVectors ()
+{
+    // m_device_rhs -> m_device_solution through the factorized path.
+    if (m_reduced_active)
+    {
+        // Trivial rows: x_i = b_i / a_ii everywhere (the kept rows are
+        // overwritten by the sub-system solve below).
+        {
+            const amrex::Real* const rhs = m_device_rhs.data();
+            const amrex::Real* const values = m_values_device.data();
+            const int* const diag_slot = m_diag_slot_device.data();
+            amrex::Real* const solution = m_device_solution.data();
+            amrex::ParallelFor(m_num_rows,
+                               [=] AMREX_GPU_DEVICE (amrex::Long row)
+                               {
+                                   solution[row] = rhs[row] / values[diag_slot[row]];
+                               });
+        }
+        if (m_reduced_rows > 0)
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_cudss_reduced_ready,
+                "ResistiveDirectSolver::Solve() reduced solve called before its "
+                "factorization");
+            {
+                const amrex::Real* const rhs = m_device_rhs.data();
+                const int* const row_list = m_reduced_row_list_device.data();
+                amrex::Real* const reduced_rhs = m_reduced_rhs_device.data();
+                amrex::ParallelFor(m_reduced_rows,
+                                   [=] AMREX_GPU_DEVICE (amrex::Long local)
+                                   {
+                                       reduced_rhs[local] = rhs[row_list[local]];
+                                   });
+            }
+            if (m_single_precision)
+            {
+                direct_detail::ConvertToSingle(m_reduced_rhs_device.data(),
+                                               m_rhs_single.data(), m_reduced_rows);
+            }
+            WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
+                                           m_cudss_config, m_cudss_reduced_data,
+                                           m_cudss_reduced_matrix,
+                                           m_cudss_reduced_solution,
+                                           m_cudss_reduced_rhs));
+            if (m_single_precision)
+            {
+                direct_detail::ConvertToDouble(m_solution_single.data(),
+                                               m_reduced_solution_device.data(),
+                                               m_reduced_rows);
+            }
+            {
+                const amrex::Real* const reduced_solution =
+                    m_reduced_solution_device.data();
+                const int* const row_list = m_reduced_row_list_device.data();
+                amrex::Real* const solution = m_device_solution.data();
+                amrex::ParallelFor(m_reduced_rows,
+                                   [=] AMREX_GPU_DEVICE (amrex::Long local)
+                                   {
+                                       solution[row_list[local]] =
+                                           reduced_solution[local];
+                                   });
+            }
+        }
+    }
+    else
+    {
+        if (m_single_precision)
+        {
+            direct_detail::ConvertToSingle(m_device_rhs.data(), m_rhs_single.data(),
+                                           m_num_rows);
+        }
+        WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
+                                       m_cudss_config, m_cudss_data, m_cudss_matrix,
+                                       m_cudss_solution, m_cudss_rhs));
+        if (m_single_precision)
+        {
+            direct_detail::ConvertToDouble(m_solution_single.data(),
+                                           m_device_solution.data(), m_num_rows);
+        }
+    }
+}
+
+inline void
+ResistiveDirectSolver::CheckFactorization ()
+{
+    const bool nondefault =
+        !m_cudss_options.empty() || m_single_precision || m_reduced_active;
+    const bool due = m_check_factorization == "always" ||
+                     ((m_check_factorization == "first" ||
+                       (m_check_factorization == "auto" && nondefault)) &&
+                      m_factorization_count == 1);
+    if (!due || !amrex::ParallelDescriptor::IOProcessor())
+    {
+        return;
+    }
+    BL_PROFILE("ResistiveDirect::CheckFactorization()");
+
+    // Device CSR of the FULL assembled matrix (the check measures the
+    // factorized path -- reduced, FP32 -- against the exact operator).
+    const auto num_rows = static_cast<amrex::Long>(m_num_rows);
+    const auto num_slots = static_cast<amrex::Long>(m_column_indices.size());
+    if (m_check_row_offsets.empty())
+    {
+        m_check_row_offsets.resize(m_row_offsets.size());
+        m_check_columns.resize(m_column_indices.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_row_offsets.begin(),
+                              m_row_offsets.end(), m_check_row_offsets.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_column_indices.begin(),
+                              m_column_indices.end(), m_check_columns.begin());
+        m_check_reference.resize(num_rows);
+        m_check_rhs.resize(num_rows);
+    }
+    const amrex::Real* const values =
+        m_use_device_assembly ? m_values_device.data() : m_device_values.data();
+    const int* const row_offsets = m_check_row_offsets.data();
+    const int* const columns = m_check_columns.data();
+    amrex::Real* const reference = m_check_reference.data();
+    amrex::Real* const rhs = m_device_rhs.data();
+    amrex::Real* const check_rhs = m_check_rhs.data();
+    // x* deterministic, b = M x*
+    amrex::ParallelFor(num_rows,
+                       [=] AMREX_GPU_DEVICE (amrex::Long row)
+                       {
+                           reference[row] = ValidationValue(row);
+                       });
+    amrex::ParallelFor(num_rows,
+                       [=] AMREX_GPU_DEVICE (amrex::Long row)
+                       {
+                           amrex::Real sum = 0.0;
+                           for (int slot = row_offsets[row]; slot < row_offsets[row + 1];
+                                ++slot)
+                           {
+                               sum += values[slot] * reference[columns[slot]];
+                           }
+                           rhs[row] = sum;
+                           check_rhs[row] = sum;
+                       });
+    SolveDeviceVectors();
+    // residual of the full matrix and error against x*
+    const amrex::Real* const solution = m_device_solution.data();
+    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax,
+                     amrex::ReduceOpMax>
+        reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real> reduce_data(
+        reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    reduce_op.eval(num_rows, reduce_data,
+                   [=] AMREX_GPU_DEVICE (amrex::Long row) -> ReduceTuple
+                   {
+                       amrex::Real sum = 0.0;
+                       for (int slot = row_offsets[row]; slot < row_offsets[row + 1];
+                            ++slot)
+                       {
+                           sum += values[slot] * solution[columns[slot]];
+                       }
+                       return {std::abs(sum - check_rhs[row]), std::abs(check_rhs[row]),
+                               std::abs(solution[row] - reference[row]),
+                               std::abs(reference[row])};
+                   });
+    const auto result = reduce_data.value(reduce_op);
+    const amrex::Real residual = amrex::get<0>(result) / amrex::get<1>(result);
+    const amrex::Real error = amrex::get<2>(result) / amrex::get<3>(result);
+    const amrex::Real tolerance = m_single_precision ? 1.0e-3 : 1.0e-8;
+    amrex::Print() << "pc_mhd_block resistive direct factorization check (#"
+                   << m_factorization_count << ", " << num_rows << " rows, "
+                   << (m_single_precision ? "FP32" : "FP64")
+                   << (m_reduced_active ? ", reduced" : "")
+                   << (m_cudss_options.empty() ? "" : ", cuDSS options")
+                   << "): residual " << residual << ", solution error " << error
+                   << " (tolerance " << tolerance << ")\n";
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        residual <= tolerance && error <= tolerance,
+        "pc_mhd_block resistive direct: the factorized solve fails its check -- the "
+        "requested cuDSS options / precision / reduction are not safe for this operator "
+        "(see the printed residual and solution error)");
+    amrex::ignore_unused(num_slots);
+}
+#endif
 
 inline void
 ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
@@ -1424,14 +2647,29 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
             amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_rhs.begin(),
                                   m_rhs.end(), m_device_rhs.begin());
         }
-        WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
-                                       m_cudss_config, m_cudss_data, m_cudss_matrix,
-                                       m_cudss_solution, m_cudss_rhs));
+        SolveDeviceVectors();
         if (!m_use_device_assembly)
         {
             amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, m_device_solution.begin(),
                                   m_device_solution.end(), m_solution.begin());
             amrex::Gpu::streamSynchronize();
+        }
+        if (m_dump_solve_pending)
+        {
+            // The right-hand side and solution of the first application
+            // after the dumped assembly (the benchmark's check vectors).
+            amrex::Vector<amrex::Real> rhs(m_num_rows);
+            amrex::Vector<amrex::Real> solution(m_num_rows);
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_device_rhs.begin(),
+                             m_device_rhs.end(), rhs.begin());
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_device_solution.begin(),
+                             m_device_solution.end(), solution.begin());
+            DumpVector(m_dump_prefix + "_rhs.bin", rhs.data(), m_num_rows);
+            DumpVector(m_dump_prefix + "_solution.bin", solution.data(), m_num_rows);
+            amrex::Print() << "pc_mhd_block resistive direct: wrote the right-hand "
+                              "side and solution of one application to "
+                           << m_dump_prefix << "_{rhs,solution}.bin\n";
+            m_dump_solve_pending = false;
         }
     }
 #else

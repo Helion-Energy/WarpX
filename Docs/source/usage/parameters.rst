@@ -7992,6 +7992,135 @@ Jacobian probes.
     (:math:`\le 4` ULP; exact equality expected, the allowance absorbs
     device FMA contraction only) at every update.
 
+.. pp:param:: implicit_mhd.resistive_direct_cudss_options
+    :type: ``list of strings``
+    :default: (empty)
+
+    ``name=value`` pairs forwarded to the cuDSS configuration of the
+    direct resistive preconditioner block before its one-time analysis
+    (``pc_mhd_block.resistive_solver = direct``): ``reordering_alg``
+    (``default``, ``btf_colamd``, ``colamd``, ``amd``,
+    ``nested_dissection``, ``none``), ``factorization_alg`` (``default``,
+    ``multiblock``, ``general``), ``solve_alg`` (``default``,
+    ``general``), ``matching_alg`` (``none``, ``max_diag_count``,
+    ``max_min_diag``, ``max_min_diag_alt``, ``max_diag_sum``,
+    ``max_diag_product``, ``auto``), ``pivot_type`` (``auto``, ``none``,
+    ``global_col``, ``global_row``, ``diagonal``, ``local_block``), and
+    the integers ``ir_n_steps``, ``nd_nlevels``, ``nd_ubfactor``,
+    ``use_superpanels``, ``deterministic_mode``, ``host_nthreads``.
+    Every ``name=value`` token must be double-quoted in the input file
+    (``implicit_mhd.resistive_direct_cudss_options = "pivot_type=none"
+    "nd_nlevels=16"``; an unquoted ``a=b`` token is misread by ParmParse),
+    and every token is split on whitespace, so one quoted string with
+    several pairs is equivalent. Names and values are validated at
+    startup on every build; the cuDSS calls happen where cuDSS factorizes.
+    Empty (the default) keeps the library defaults, i.e. today's
+    factorization and solve. A setting that changes the factorization
+    changes the block inverse only by roundoff (the direct solve stays
+    exact), but it is not bit-identical to the default.
+    ``pivot_type=none`` disables the pivot search (-6 % per solve on the
+    production RZ mesh): its safety is EMPIRICAL for a given operator --
+    on the production formation matrices at boot and at 18 us the
+    unpivoted LU has every pivot in ``[1, 417]`` with growth factor 1, in
+    FP64 and FP32 -- and must be re-validated whenever the block's operator
+    changes (Hall rows, another wall model, a different resistivity
+    model); :pp:param:`implicit_mhd.resistive_direct_check_factorization`
+    does that at run time and aborts on a failed factorization.
+
+.. pp:param:: implicit_mhd.resistive_direct_check_factorization
+    :type: ``string``
+    :default: ``auto``
+
+    Run-time check of the factorized solve of the direct resistive block:
+    after a factorization, solve for a deterministic pseudo-random vector
+    through the factorized path (reduced or full, FP32 or FP64) and compare
+    the solution with that vector and the residual of the FULL assembled
+    matrix with the right-hand side; both are printed and the run aborts
+    above the tolerance (1e-8 relative in FP64, 1e-3 in FP32). ``auto``
+    (the default) checks the first factorization whenever a cuDSS option,
+    ``precision = single`` or a row threshold is requested and never
+    otherwise (the default path stays untouched); ``first`` checks the
+    first factorization always, ``always`` every factorization (one extra
+    solve per refreeze), ``off`` never.
+
+.. pp:param:: implicit_mhd.resistive_direct_dump_prefix
+    :type: ``string``
+    :default: (empty)
+
+    When set, the I/O rank writes the assembled sparse matrix of the
+    direct resistive block at the assembly counted by
+    :pp:param:`implicit_mhd.resistive_direct_dump_assembly` to
+    ``<prefix>_matrix.bin`` (binary CSR: magic ``WXCSR001``, int64 rows
+    and nonzeros, int32 space dimension and component count, per
+    component the active flag, canonical offset and index ranges, then
+    int32 row offsets and column indices and float64 values; a text twin
+    ``<prefix>_meta.txt`` repeats the header), and the right-hand side
+    and solution of the first application after it to
+    ``<prefix>_rhs.bin`` / ``<prefix>_solution.bin`` (magic ``WXVEC001``,
+    int64 length, float64 values). Input for offline solver benchmarks;
+    the matrix dump also works on builds without a factorization backend
+    (``pc_mhd_block.resistive_validate_assembly`` assembles the matrix).
+
+.. pp:param:: implicit_mhd.resistive_direct_precision
+    :type: ``string``
+    :default: ``double``
+
+    ``single`` factorizes and solves the direct resistive block in FP32:
+    the assembled FP64 values, the right-hand side and the solution are
+    converted on the device around the cuDSS calls (the FP64 values stay
+    the reference of the assembly checks and of the dump). The block
+    inverse is then accurate to ~3e-5 relative -- ample for a
+    preconditioner -- and the solve is ~8 % cheaper on the production RZ
+    mesh (measured in situ: 1.856 vs 2.010 ms per call, Newton and GMRES
+    counts unchanged; with ``pivot_type=none`` 1.739 ms). Available on
+    both assembly paths (single- and multi-rank). Not bit-identical to
+    the default; :pp:param:`implicit_mhd.resistive_direct_check_factorization`
+    gates the first factorization.
+
+.. pp:param:: implicit_mhd.resistive_direct_row_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+
+    Reduced solve of the direct resistive block. With a value ``>= 0``,
+    a row whose off-diagonal couplings -- in its row AND in its column --
+    are all at most ``threshold`` times the diagonal is solved as
+    :math:`x_i = b_i / a_{ii}` and the remaining rows form the factorized
+    sub-system (the column criterion keeps rows that have no couplings of
+    their own but are read by neighbours, e.g. frozen wall faces; dropping
+    those would truncate O(1) couplings). ``0`` drops exactly the rows
+    without any coupling: the exact inverse with a roundoff-different
+    factorization, free of charge where such rows exist (a frozen
+    exterior, ``implicit_mhd.wall_field_freeze``); on the production
+    formation deck only 0.55 % of the rows qualify and nothing is gained.
+    A positive value is an APPROXIMATE inverse whose relative truncation
+    is bounded by the threshold; on the production deck, whose background
+    resistivity keeps every row's coupling near 2 % of the diagonal, a
+    threshold that removes rows (>= 0.3) doubles the GMRES count -- it is
+    not a speed lever there. The row set is built from the frozen values
+    with ``threshold / row_threshold_margin`` and rebuilt (a new pattern
+    analysis) only when a dropped row's coupling exceeds the threshold at
+    a later refreeze (checked on the device every refreeze), so the bound
+    holds at every application. Requires the single-rank device assembly
+    path. Not bit-identical to the default (a different factorization).
+
+.. pp:param:: implicit_mhd.resistive_direct_row_threshold_margin
+    :type: ``float``
+    :default: ``10``
+
+    Margin of the reduced solve's row set (see
+    :pp:param:`implicit_mhd.resistive_direct_row_threshold`): rows are
+    kept from ``threshold / margin`` on, so a dropped row can grow its
+    coupling by the margin before the row set has to be rebuilt.
+
+.. pp:param:: implicit_mhd.resistive_direct_dump_assembly
+    :type: ``int``
+    :default: ``1``
+
+    1-based count of the assembly whose matrix
+    :pp:param:`implicit_mhd.resistive_direct_dump_prefix` writes (with
+    ``pc_mhd_block.resistive_refreeze = step`` one assembly per time
+    step, so ``N`` selects the matrix frozen at step ``N``).
+
 .. pp:param:: implicit_mhd.conduction_theta
     :type: ``float``
     :default: :pp:param:`implicit_evolve.theta`

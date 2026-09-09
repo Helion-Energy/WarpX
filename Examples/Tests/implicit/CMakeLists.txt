@@ -2660,6 +2660,87 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# PICMI emission of implicit_mhd.resistive_direct_cudss_options (pure
+# Python, no compiled bindings): the list, string and space-separated
+# string forms must reach the input deck as double-quoted name=value
+# tokens (an unquoted a=b token is misread by ParmParse); the unset kwarg
+# emits nothing
+add_test(
+    NAME test_picmi_resistive_direct_cudss_options
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_picmi_resistive_direct_cudss_options.py
+)
+set_tests_properties(test_picmi_resistive_direct_cudss_options PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${WarpX_SOURCE_DIR}/Python"
+    LABELS "picmi"
+)
+
+# matrix-dump twin (single rank): the assembled rows of the direct
+# resistive block are written as the binary CSR file of the offline solver
+# benchmark and checked against the operator's structure -- one unknown per
+# face, the axis identity rows, the poloidal/azimuthal decoupling, and the
+# exact symmetry under the cylindrical face-volume row scaling (the raw
+# matrix is asymmetric); physics assertions are the baseline's
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly_dump  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_dump  # inputs
+    "analysis_mhd_resistive_direct_dump.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# reduced-solve partition twin at threshold 0 (single rank): the rows
+# without any coupling (axis and outer-wall B_r faces) leave the factorized
+# sub-system, which must be the full matrix restricted to the kept rows
+# (bit-equal values); the rule (row and column couplings vs threshold /
+# margin) is recomputed from the full dump; physics assertions are the
+# baseline's
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly_reduced  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_reduced  # inputs
+    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.03 0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# reduced-solve partition with FROZEN WALL FACES (single rank): the live
+# fluid wall deck with implicit_mhd.wall_field_freeze = 1 -- frozen faces
+# are identity rows that live faces still read (307 one-sided entries on
+# this deck), so 69 of its 408 rows are kept by the column criterion ALONE
+# and must stay in the factorized sub-system for the trivial rows to be
+# exact; the analysis requires the column-only count and rejects any kept
+# row referencing a dropped one (a row-only rule fails three checks)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze_reduced  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1 implicit_mhd.resistive_direct_dump_prefix=diags/resistive_direct implicit_mhd.resistive_direct_dump_assembly=2 implicit_mhd.resistive_direct_row_threshold=0"  # inputs
+    "analysis_mhd_resistive_direct_reduced.py 0.0 10 0.3 60"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# reduced-solve partition on a two-resistivity deck (single rank): the
+# wall-band override deck with the plasma resistivity 1000x lower
+# (my_constants.D = 0.02), so the band rows (constant override eta,
+# couplings 0.5-2 x the diagonal) stay in the factorized sub-system while
+# the plasma rows (couplings ~5e-4) are solved as b_i / a_ii at threshold
+# 1e-2 (build bound 1e-3; 57 % of the rows dropped, worst dropped coupling
+# 8e-4): the rule, the exact restriction and the bound are checked from
+# the dumps
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_band_eta_reduced  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_band_eta my_constants.D=0.02 implicit_mhd.resistive_direct_dump_prefix=diags/resistive_direct implicit_mhd.resistive_direct_dump_assembly=2 implicit_mhd.resistive_direct_row_threshold=1e-2"  # inputs
+    "analysis_mhd_resistive_direct_reduced.py 1e-2 10 0.5 0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # banded twin: the same preconditioned physics with the resistive block
 # inverted by the block-banded LU along z (dense radial blocks treat the
 # axis/wall/halo coupling exactly; periodic-z wraps PC-grade dropped); one

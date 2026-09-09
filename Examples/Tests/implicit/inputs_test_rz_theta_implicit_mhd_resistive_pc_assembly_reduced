@@ -1,0 +1,11 @@
+# base input parameters
+FILE = inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly
+
+# Reduced-solve partition twin at threshold 0 (one rank): exactly the rows
+# without any coupling -- the axis and outer-wall B_r faces -- leave the
+# factorized sub-system (solved as b_i / a_ii), the rest is the full
+# matrix restricted to the kept rows; the dumps of both are checked
+# against the rule and against each other.
+implicit_mhd.resistive_direct_dump_prefix = diags/resistive_direct
+implicit_mhd.resistive_direct_dump_assembly = 2
+implicit_mhd.resistive_direct_row_threshold = 0.0
