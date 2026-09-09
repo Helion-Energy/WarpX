@@ -3805,6 +3805,34 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
 )
+# The PRODUCTION combination of the bounded hold: the churn deck with the
+# candidate globalization (newton.active_set_hysteresis = 30 +
+# newton.active_set_hold_defect_bound = 0.03) alone and with the rest of the
+# production stack (packed GMRES, fused vector ops, fused residual). The
+# bounded hold must not cost work against the plain-rule control and must
+# leave the converged physics within 1e-5 of it (the whole-solve hold's
+# class); the full stack must reproduce the amrex-GMRES bounded-hold arm
+# to the packed solver's round-off class (physics 1e-6, Newton within 5%,
+# linear work within 10%). analysis_mhd_newton_knob_vs_control.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.03"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_churn --newton-max 1.0 --gmres-max 1.02 --physics 1e-5 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob newton.active_set_hold_defect_bound=0.03"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod_packed  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 newton.active_set_hold_defect_bound=0.03 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_newton_knob_vs_control.py diags/diag000016 --control ../test_rz_theta_implicit_mhd_wall_active_set_debt_prod --newton-max 1.05 --newton-min 0.95 --gmres-max 1.10 --physics 1e-6 --fields implicit_mhd_mass_density,implicit_mhd_electron_energy,implicit_mhd_ion_energy,implicit_mhd_ion_internal_energy,implicit_mhd_momentum_z --require-knob newton.linear_solver=packed_gmres"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_debt_prod  # dependency
+)
+
 # The smooth-floor widths (implicit_mhd.pressure_floor_width_factor,
 # implicit_mhd.dual_energy_fk_width) on the churn deck, where the wall row
 # rides its floor every solve: the wider corners must leave the converged
