@@ -1974,7 +1974,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
     coupling_block: {"none", "alfven_schur"}, optional
         Ideal momentum-field coupling block of the recast path (default
         none; alfven_schur = the Alfven Schur term inside the exact B
-        block, design stage)
+        block: a documented NEGATIVE RESULT on the production formation
+        state -- GMRES per Newton nearly doubles -- opt-in for tests only)
 
     coupling_threshold: float, optional
         Local coupling number at which the coupling block engages (default 1)
@@ -2231,13 +2232,15 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         that leaves the right-preconditioned GMRES iteration unchanged).
         'block_split': one finite difference per block family (the field
         and momentum blocks; the mass, energy and scalar blocks), each
-        sized by jfnk_epsilon of its own family norm -- every block probed
-        at its own scale for a second residual evaluation per Jacobian
-        application (correctness option; see the parameters documentation)
+        sized by jfnk_epsilon of its own component-scaled family norm (the
+        component floors apply) -- every block probed at its own scale for
+        a second residual evaluation per Jacobian application, measured
+        +50-75 % wall per step on the production formation step
+        (correctness option; see the parameters documentation)
 
     jfnk_component_floor: float, default=1.e-3
         Additive floor of the component probe scale, as a fraction of each
-        state block's reference scale (component mode only).
+        state block's reference scale (component and block_split modes).
 
     jfnk_component_floors: dict, optional
         Per-block overrides of jfnk_component_floor, {block_name: fraction},
