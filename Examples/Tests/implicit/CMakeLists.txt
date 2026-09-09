@@ -2227,7 +2227,8 @@ add_warpx_test(
 
 # Packed-basis GMRES (newton.linear_solver = packed_gmres) twins of the
 # conduction-block tests: the same decks and solver settings (restart
-# length 100, Newton rtol 1e-10, the block preconditioner) with the Krylov
+# length 100 in RZ, 200 in 1D; Newton rtol 1e-10 / 1e-8; the block
+# preconditioner) with the Krylov
 # basis packed on the serialized DOF layout and its in-run self test
 # (packed inner products, norms, axpy/lincomb, pack/unpack round trip and
 # GEMV kernels against the solver-vector operations). The RZ run on two
