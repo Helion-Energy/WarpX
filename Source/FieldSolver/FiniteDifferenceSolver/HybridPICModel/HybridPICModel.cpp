@@ -818,6 +818,20 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_wall_flux_limit >= 0.0_rt,
             "hybrid_pic_model.qdsmc_conduction_wall_flux_limit must be "
             ">= 0 (0 = plain isothermal reset)");
+        std::string capform = "free_streaming";
+        pp_hybrid.query("qdsmc_conduction_wall_flux_cap_form", capform);
+        if (capform == "free_streaming") { m_cond_wall_flux_cap_form = 0; }
+        else if (capform == "sonic") { m_cond_wall_flux_cap_form = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form must be "
+                "'free_streaming' or 'sonic'");
+        }
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_eb_flux_limit", m_cond_eb_flux_limit);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_eb_flux_limit >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_eb_flux_limit must be "
+            ">= 0 (0 = plain isothermal reset of the EB ring)");
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -1475,6 +1489,16 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
                      ? "rate " + fmt(m_qdsmc_te_pedestal_rate) + " /s" : std::string("pinned = hard cap"))
                   + "; drain-only, ledger te_pedestal)"
                 : "OFF")
+            << "\n";
+        amrex::Print() << "[qdsmc] wall flux caps ("
+            << (m_cond_wall_flux_cap_form == 1
+                ? "sonic: q_max = f n kB Te c_s, c_s = sqrt(gamma kB Te/m_i)"
+                : "free_streaming: q_max = f n kB Te v_te")
+            << ", pre-pin node): domain-face pins f = " << m_cond_wall_flux_limit
+            << (m_cond_wall_flux_limit > 0.0_rt ? "" : " (plain reset)")
+            << "; FD EB ring pin f = " << m_cond_eb_flux_limit
+            << (m_cond_eb_flux_limit > 0.0_rt ? "" : " (plain reset)")
+            << "; EB conduction BC " << (m_cond_eb_bc == 1 ? "isothermal" : "adiabatic")
             << "\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
@@ -7163,6 +7187,18 @@ namespace
 }
 
 
+amrex::Real HybridPICModel::WallCapIonMass () const
+{
+    auto & mypc = WarpX::GetInstance().GetPartContainer();
+    for (auto const & nm : mypc.GetSpeciesNames()) {
+        auto & pc = mypc.GetParticleContainerFromName(nm);
+        if (pc.getCharge() != 0._prt) {
+            return static_cast<amrex::Real>(pc.getMass());
+        }
+    }
+    return 1.67262192369e-27_rt;   // proton mass fallback (no charged species)
+}
+
 void HybridPICModel::ApplyQdsmcConductionWallBCs (
     int const lev, amrex::Real const dt_c,
     amrex::MultiFab & Te, amrex::MultiFab const & rho) const
@@ -7180,6 +7216,10 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
     amrex::Real const me = PhysConst::m_e;
+    // cap speed by form (member doc of m_cond_wall_flux_cap_form)
+    bool const sonic = (m_cond_wall_flux_cap_form == 1);
+    amrex::Real const gam = m_gamma;
+    amrex::Real const mi = sonic ? WallCapIonMass() : PhysConst::m_e;
 #ifdef WARPX_DIM_RZ
     amrex::Real const r_edge0 = geom.ProbLo(0);
     amrex::Real const dr_rz = geom.CellSize(0);
@@ -7266,7 +7306,9 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
                         // drop (n_e cancels against 1.5 n_e kB) that is
                         // dT_max = f v_te T0 dt / (1.5 dx). Never below
                         // Te_wall; the tally books the applied change.
-                        amrex::Real const vte = std::sqrt(kb * T0 / me);
+                        amrex::Real const vte = sonic
+                            ? std::sqrt(gam * kb * T0 / mi)
+                            : std::sqrt(kb * T0 / me);
                         amrex::Real const T1 = amrex::max(Te_wall_K,
                             T0 - cap_dt_dx * vte * T0 / 1.5_rt);
                         du = 1.5_rt * kb * ne * (T1 - T0);
@@ -8220,12 +8262,27 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     // ring-2 default covers the deposition density ramp; the FD operator
     // has no deposit ramp, but the shared default keeps the arms
     // comparable; positive tally = energy into the plasma).
-    auto pin_eb_ring = [&] (amrex::MultiFab & Tf)
+    auto pin_eb_ring = [&] (amrex::MultiFab & Tf, amrex::Real const dts)
     {
         auto const ebTe = m_cond_eb_Te;
         auto const plo_arr = geom.ProbLoArray();
         auto const dx_arr  = geom.CellSizeArray();
         int const eb_ring = m_cond_eb_ring;
+        // Flux cap on the ring pin (qdsmc_conduction_eb_flux_limit, its own
+        // factor -- Eric: sheath value 0.1 at the EB, 1 at z_hi -- with the
+        // same form as the domain-face pins): the ring node may lose at most
+        // q_max A dts per accepted substep, q_max = f n kB Te v_cap at the
+        // pre-pin node state (v_cap = v_te or the sonic c_s); A/V = 1/dx_max
+        // -- the ring has no normal, the largest cell size is the
+        // conservative (strongest-cap) choice. 0 = plain reset (unchanged).
+        amrex::Real dx_max = 0.0_rt;
+        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+            dx_max = amrex::max(dx_max, dx_arr[dd]);
+        }
+        amrex::Real const cap_dt_dx = m_cond_eb_flux_limit * dts / dx_max;
+        bool const sonic = (m_cond_wall_flux_cap_form == 1);
+        amrex::Real const gam = m_gamma;
+        amrex::Real const mi = sonic ? WallCapIonMass() : PhysConst::m_e;
         amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
         amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -8279,9 +8336,19 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
 #endif
                 amrex::Real const TwK = Te_eV * qe / kb;
+                amrex::Real T1 = TwK;
+                if (cap_dt_dx > 0.0_rt && Te_arr(i,j,k) > TwK) {
+                    // cooling toward the wall: cap the drain (member doc
+                    // of m_cond_wall_flux_limit), never below the wall
+                    amrex::Real const T0 = Te_arr(i,j,k);
+                    amrex::Real const vcap = sonic
+                        ? std::sqrt(gam * kb * T0 / mi)
+                        : std::sqrt(kb * T0 / me);
+                    T1 = amrex::max(TwK, T0 - cap_dt_dx * vcap * T0 / 1.5_rt);
+                }
                 amrex::Real const du =
-                    1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
-                Te_arr(i,j,k) = TwK;
+                    1.5_rt * kb * ne * (T1 - Te_arr(i,j,k));
+                Te_arr(i,j,k) = T1;
 #ifdef WARPX_DIM_RZ
                 // RZ: tally weighted by 2 pi Vr/dr [J/m^2], as in the
                 // domain wall-BC tally (cx[0] is the node radius)
@@ -8383,7 +8450,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     auto post_step = [&] (amrex::MultiFab & yy, amrex::Real const dts)
     {
         ApplyQdsmcConductionWallBCs(lev, dts, yy, rho);
-        if (eb_iso) { pin_eb_ring(yy); }
+        if (eb_iso) { pin_eb_ring(yy, dts); }
         if (te_floor_K > 0.0_rt) { apply_te_floor(yy); }
     };
 

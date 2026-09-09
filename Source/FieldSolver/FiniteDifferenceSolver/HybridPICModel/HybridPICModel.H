@@ -2186,6 +2186,33 @@ public:
      *  qdsmc_conduction_wall_flux_limit. */
     amrex::Real m_cond_wall_flux_limit = 0.0;
 
+    /** Form of the wall flux cap (Eric 2026-09-09: the EB and the exhaust
+     *  face must be energy OUTFLOW with a flux limiter). Applies to BOTH
+     *  wall families, the domain-face isothermal pins AND the FD EB
+     *  isothermal ring pin (the MHD lane's shared-lambda rule; before this
+     *  the ring pin was uncapped). 0 = free_streaming: q_max = f n kB Te
+     *  v_te (the legacy form). 1 = sonic (MHD WP2, survey row 7): q_max =
+     *  f n kB Te c_s with c_s = sqrt(gamma kB Te / m_i) at the pre-pin
+     *  interior node, m_i = the first charged species' mass; the T_i term
+     *  of MHD's c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i is omitted
+     *  (T_i is not available inside the conduction operator), so at
+     *  T_i = T_e the hybrid sonic cap is 1/sqrt2 of MHD's; MHD flies
+     *  f_e = 5. Input: qdsmc_conduction_wall_flux_cap_form. */
+    int m_cond_wall_flux_cap_form = 0;
+
+    /** Flux cap factor of the FD EB isothermal ring pin (Eric 2026-09-09:
+     *  "use the sheath value at the eb walls, but use 1 at zhi"): its OWN
+     *  knob, default 0.1 = the sheath value, f in units of v_te (or c_s
+     *  under the sonic form) at the pre-pin interior node, same semantics
+     *  as m_cond_wall_flux_limit, which stays the domain-face cap. 0 =
+     *  plain reset (the pre-2026-09-09 behaviour). Inert unless
+     *  qdsmc_conduction_eb_bc = isothermal. Input:
+     *  qdsmc_conduction_eb_flux_limit. */
+    amrex::Real m_cond_eb_flux_limit = 0.1;
+
+    /** Ion mass used by the sonic wall cap: the first charged species. */
+    [[nodiscard]] amrex::Real WallCapIonMass () const;
+
     /** Cumulative wall-BC energy tallies per (grid dim, side 0=lo/
      *  1=hi), in node-u units [J/m^3] summed over boundary nodes
      *  (multiply by the node dual-cell volume for Joules; positive =

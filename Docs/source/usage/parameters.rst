@@ -4261,14 +4261,40 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` to be positive. Costs one extra pass and two
     ghost exchanges per right-hand-side evaluation. With the bound inactive the result is unchanged.
 
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form
+    :type: ``str``
+    :default: ``free_streaming``
+    :optional:
+
+    Speed in the wall flux cap :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit`: ``free_streaming`` =
+    :math:`q_\max = f n_e k_B T_e v_{te}` (the legacy form); ``sonic`` = the MHD lane's sheath form
+    :math:`q_\max = f n_e k_B T_e c_s`, :math:`c_s = \sqrt{\gamma k_B T_e / m_i}` at the pre-pin interior node with
+    :math:`m_i` the first charged species' mass (the ion-temperature term of the MHD sound speed is omitted, so at
+    :math:`T_i = T_e` this cap is :math:`1/\sqrt{2}` of the MHD one); the MHD production value is :math:`f_e = 5`.
+    Applies to the domain-face pins and the FD EB ring pin alike.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_eb_flux_limit
+    :type: ``float``
+    :default: ``0.1``
+    :optional:
+
+    Flux cap factor of the finite-difference embedded-boundary isothermal ring pin
+    (``qdsmc_conduction_eb_bc = isothermal``), with the semantics and form of
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit` (the domain-face factor, which stays separate: the
+    sheath value ~0.1 at the wall, free streaming 1 at the exhaust face). A ring node has no normal, so the dual-cell face
+    is taken as the largest cell size (the strongest-cap choice). ``0`` = plain reset of the ring (the earlier behaviour).
+    Inert unless the EB conduction BC is isothermal.
+
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_limit
     :type: ``float``
     :default: ``0`` (off)
     :optional:
 
-    Free-streaming cap on the ``isothermal`` domain-face conduction boundary condition
+    Flux cap on the ``isothermal`` conduction boundary conditions of BOTH wall families: the domain-face pins
     (``hybrid_pic_model.qdsmc_conduction_bc_lo`` / ``_hi`` = ``isothermal`` with the wall temperature from
-    ``qdsmc_conduction_bc_Te_lo`` / ``_hi`` in eV). At ``0`` the boundary node row is reset to the wall
+    ``qdsmc_conduction_bc_Te_lo`` / ``_hi`` in eV); the embedded-boundary isothermal ring pin has its own factor
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_eb_flux_limit` with the same form. The cap speed is set by
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form`. At ``0`` the boundary node row is reset to the wall
     temperature after every accepted conduction substep: a bath of infinite conductance whose drain along every
     field line ending on the wall is set by the interior conduction alone. With a positive factor :math:`f` the
     energy a boundary node may lose to the wall in a substep :math:`\Delta t_s` is bounded by the free-streaming
