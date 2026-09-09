@@ -12,9 +12,10 @@ implicit_evolve.fused_residual = 1 runs the bookkeeping of the MHD residual and 
 block preconditioner (block copies, domain-ghost fills, cell-centered
 interpolations, zero fills, frozen-row restores) as one kernel per stage
 instead of one per MultiFab, and skips the ghost exchanges that cannot move data (one box, non-periodic), with the per-element expressions unchanged. Level 2 adds the
-skip of the ghost-only open-boundary refill inside the residual's Faraday
-update (and, on GPUs, the per-MFIter stream-sync elision), level 3 the
-split face-flux launches -- all with the per-face expressions unchanged.
+skip of the dead boundary application inside the residual's Faraday update
+(whole on decks without an open z cap or an insulator boundary, the
+r_hi-only Green's refill otherwise) and, on GPUs, the per-MFIter
+stream-sync elision on a single-box layout -- the expressions unchanged.
 This run and its twin (same deck, a lower level of the knob) must
 therefore agree exactly: the Newton diagnostic file is byte-identical and
 the final plotfile fields are identical to the last bit.

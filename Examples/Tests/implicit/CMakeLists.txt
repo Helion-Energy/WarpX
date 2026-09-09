@@ -2505,42 +2505,29 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_fused_residual_stack_l1_ref  # dependency
 )
 
-# implicit_evolve.fused_residual = 3 (level 2 plus the face-flux evaluation split
-# into an advective and a diffusive launch per direction, the intermediate face
-# registers stored and reloaded) must be bit-identical as well: the same decks
-# -- r_hi-open Green's (2 ranks), both z caps open, the z_lo mirror with the
-# banded block, the shaped-wall fluid/field freeze rows (viscous band, no-slip,
-# wall drains and preconditioner rows all live), and the production stack.
+# The production stack WITH the production preconditioner (the block PC is one of
+# the regions whose MFIter stream synchronizations level 2 elides; its MLMG
+# applications keep theirs): packed GMRES x fused vector ops x active set x
+# pc_mhd_block (banded resistive block) x fused residual, level 2 vs level 1.
 add_warpx_test(
-    test_rz_theta_implicit_mhd_fused_residual_l3_identity_open_caps  # name
+    test_rz_theta_implicit_mhd_fused_residual_stack_pc_l1_ref  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost_open_caps implicit_evolve.fused_residual=3"  # inputs
-    "analysis_mhd_fused_residual_identity.py diags/diag000002 ../test_rz_theta_implicit_mhd_fused_residual_identity_open_caps_ref/diags/diag000002"  # analysis
+    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded implicit_evolve.fused_residual=1"  # inputs
+    OFF  # analysis
     OFF  # checksum
-    test_rz_theta_implicit_mhd_fused_residual_identity_open_caps_ref  # dependency
+    OFF  # dependency
 )
 
 add_warpx_test(
-    test_rz_theta_implicit_mhd_fused_residual_l3_identity_mirror  # name
+    test_rz_theta_implicit_mhd_fused_residual_stack_pc_l2  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_mirror_half jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=true pc_mhd_block.resistive_threshold=1.0e-6 implicit_evolve.fused_residual=3"  # inputs
-    "analysis_mhd_fused_residual_identity.py diags/diag000032 ../test_rz_theta_implicit_mhd_mirror_half_pc/diags/diag000032"  # analysis
+    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded implicit_evolve.fused_residual=2"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000002 ../test_rz_theta_implicit_mhd_fused_residual_stack_pc_l1_ref/diags/diag000002"  # analysis
     OFF  # checksum
-    test_rz_theta_implicit_mhd_mirror_half_pc  # dependency
+    test_rz_theta_implicit_mhd_fused_residual_stack_pc_l1_ref  # dependency
 )
-
-add_warpx_test(
-    test_rz_theta_implicit_mhd_fused_residual_stack_l3  # name
-    RZ  # dims
-    1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=3"  # inputs
-    "analysis_mhd_fused_residual_identity.py diags/diag000002 ../test_rz_theta_implicit_mhd_fused_residual_stack_l1_ref/diags/diag000002"  # analysis
-    OFF  # checksum
-    test_rz_theta_implicit_mhd_fused_residual_stack_l1_ref  # dependency
-)
-
 add_warpx_test(
     test_rz_theta_implicit_mhd_fused_vector_ops  # name
     RZ  # dims
@@ -2783,9 +2770,11 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# fused_residual levels 2 and 3 on the r_hi-open Green's deck (the production
-# boundary class, 2 ranks), registered after their dependency (add_warpx_test
-# skips a test whose dependency is not yet registered).
+# fused_residual level 2 on the r_hi-open Green's deck (2 ranks), registered
+# after its dependency (add_warpx_test skips a test whose dependency is not yet
+# registered); then the production boundary class proper -- z_lo PMC + r_hi open
+# Green's (the PMC fill and the r_hi refill both dead inside the residual's
+# Faraday update), level 2 vs level 1.
 add_warpx_test(
     test_rz_theta_implicit_mhd_fused_residual_l2_identity_rhi_open  # name
     RZ  # dims
@@ -2797,13 +2786,23 @@ add_warpx_test(
 )
 
 add_warpx_test(
-    test_rz_theta_implicit_mhd_fused_residual_l3_identity_rhi_open  # name
+    test_rz_theta_implicit_mhd_fused_residual_pmc_rhi_l1_ref  # name
     RZ  # dims
-    2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost implicit_evolve.fused_residual=3"  # inputs
-    "analysis_mhd_fused_residual_identity.py diags/diag000002 ../test_rz_theta_implicit_mhd_external_wall_ghost/diags/diag000002"  # analysis
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost max_step=8 boundary.field_lo=none pmc boundary.particle_lo=none reflecting implicit_mhd.z_lo_boundary_fluid=symmetry implicit_evolve.fused_residual=1"  # inputs
+    OFF  # analysis
     OFF  # checksum
-    test_rz_theta_implicit_mhd_external_wall_ghost  # dependency
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_fused_residual_l2_identity_pmc_rhi  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_wall_ghost max_step=8 boundary.field_lo=none pmc boundary.particle_lo=none reflecting implicit_mhd.z_lo_boundary_fluid=symmetry implicit_evolve.fused_residual=2"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_fused_residual_pmc_rhi_l1_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_fused_residual_pmc_rhi_l1_ref  # dependency
 )
 
 # stair-step PEC shaped wall (implicit_mhd.wall_model = pec) under a
@@ -3702,10 +3701,10 @@ add_warpx_test(
 )
 
 add_warpx_test(
-    test_rz_theta_implicit_mhd_fused_residual_l3_identity_wall  # name
+    test_rz_theta_implicit_mhd_fused_residual_l2_identity_wall  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1 implicit_evolve.fused_residual=3"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1 implicit_evolve.fused_residual=2"  # inputs
     "analysis_mhd_fused_residual_identity.py diags/diag000005 ../test_rz_theta_implicit_mhd_wall_field_freeze_live_pc/diags/diag000005"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_field_freeze_live_pc  # dependency
@@ -3871,6 +3870,29 @@ add_warpx_test(
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # dependency
+)
+
+# The same two production knobs with the fused residual at level 2 (the dead
+# boundary application skipped, the stream-sync elision armed on the one-box
+# layout): the hold's Newton diagnostic file byte-equal and the fields identical.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_fused_l2  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 implicit_evolve.fused_residual=2"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_sticky  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_fused_l2  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.active_set_hysteresis=30 implicit_evolve.fused_residual=2"  # inputs
     "analysis_mhd_fused_residual_identity.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref/diags/diag000016"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_sticky_1box_ref  # dependency
