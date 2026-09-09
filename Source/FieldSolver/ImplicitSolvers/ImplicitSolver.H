@@ -972,6 +972,18 @@ public:
     }
 
     /**
+     * \brief Whether the solver runs its residual evaluation with AMReX's
+     * per-MFIter stream synchronizations elided (implicit_evolve.fused_residual
+     * >= 2 on a single-box, non-periodic layout of the RZ conservative-form
+     * path). The block preconditioner arms the same elision inside its apply
+     * from this decision, never from the knob alone.
+     */
+    [[nodiscard]] virtual bool GetFusedResidualStreamSyncElisionForPC () const
+    {
+        return false;
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.

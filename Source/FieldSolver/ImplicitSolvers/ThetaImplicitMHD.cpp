@@ -2510,8 +2510,21 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
 #if defined(WARPX_DIM_RZ)
     m_fused_residual = fr::Enabled() && m_use_recast;
 #endif
+    m_fused_residual_level = m_fused_residual ? fr::Level() : 0;
+    // Level >= 2 stream-sync elision needs every kernel of a stage on ONE
+    // stream in issue order and no ghost exchange that could move data:
+    // AMReX's MFIter rotates the GPU streams over the LOCAL boxes and the
+    // FillBoundary path has its own synchronizations, so the elision is
+    // armed only for a single box in a non-periodic domain (the one-GPU
+    // production layout), on this RZ conservative-form path.
+    m_fused_residual_nosync =
+        m_fused_residual_level >= 2 &&
+        !fr::NeedsGhostExchange(
+            *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0),
+            m_WarpX->Geom(0).periodicity());
     if (fr::Enabled() && !m_fused_residual) {
-        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = 1: the "
+        amrex::Print() << "ThetaImplicitMHD: implicit_evolve.fused_residual = "
+                       << fr::Level() << ": the "
                           "residual-side fusion is wired into the RZ conservative-form "
                           "path only and is off here; the preconditioner, direct-solver "
                           "and solver-vector parts of the knob stay on (exact)\n";
@@ -3689,7 +3702,12 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "-------- THETA IMPLICIT SINGLE-FLUID MHD PARAMETERS -------\n"
                    << "-----------------------------------------------------------\n"
                    << "Theta:                         " << m_theta << "\n"
-                   << "Fused residual bookkeeping:    " << (m_fused_residual ? "on" : "off") << "\n"
+                   << "Fused residual bookkeeping:    " << (m_fused_residual ? "on" : "off")
+                   << " (level " << m_fused_residual_level << ", stream-sync elision "
+                   << (m_fused_residual_nosync ? "on: one box, non-periodic"
+                       : (m_fused_residual_level >= 2 ? "off: several boxes or a periodic domain"
+                                                      : "off"))
+                   << ")\n"
                    << "Ion charge-to-mass [C/kg]:     " << m_ion_charge_to_mass << "\n"
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
@@ -6156,6 +6174,18 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
 {
     BL_PROFILE("ThetaImplicitMHD::ComputeRHS()");
     amrex::ignore_unused(nonlinear_iteration);
+    // fused_residual >= 2 on a single box in a non-periodic domain: no per-MFIter stream
+    // synchronization inside this evaluation (FusedResidualOps.H,
+    // NoSyncScope). Every kernel of the evaluation is issued on the one
+    // stream in program order, the kernel arguments are copied at launch
+    // (fused op tables by value, Array4 views of persistent MultiFabs,
+    // device pointers of persistent tables), and nothing below allocates
+    // and frees device memory a queued kernel still reads -- the host
+    // reductions (MultiFab::max/min, Gpu::copy) synchronize on their own --
+    // so the results are unchanged; the GPU stops idling for the host
+    // between consecutive small launches. The circuit hook restores the
+    // synchronizations for its own duration (below).
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
 
     UpdateWarpXFields(state, start_time);
 
@@ -6187,6 +6217,10 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     if (m_external_field_iteration &&
         (!m_circuit_hook_newton_scope ||
          (!from_jacobian && m_residual_is_newton_iterate))) {
+        // The hook (python callback or native engine, then the external
+        // field refresh) runs with the stream synchronizations restored:
+        // foreign code, at accepted Newton iterates only.
+        const fr::SyncScope sync_for_hook(m_fused_residual_nosync);
         // Circuit-in-the-residual coupling: python measures the
         // reciprocity flux linkage of THIS iterate's plasma current
         // (hybrid_current_fp_plasma, just computed), re-advances the
@@ -8098,6 +8132,9 @@ void ThetaImplicitMHD::ZeroActiveSetComponents (WarpXSolverVec& a_v) const
     if (m_projected_components == 0) {
         return;
     }
+    // fused_residual >= 2: no MFIter stream sync (persistent masks and
+    // blocks only; see ComputeRHS).
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -8140,6 +8177,7 @@ void ThetaImplicitMHD::CopyActiveSetComponents (WarpXSolverVec& a_dst,
     if (m_projected_components == 0) {
         return;
     }
+    const fr::NoSyncScope no_sync(m_fused_residual_nosync);
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -16768,7 +16806,22 @@ void ThetaImplicitMHD::UpdateMagneticFieldFused (const amrex::Real a_thetadt,
         }
     }
     fr::Run(ops);
-    m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange);
+    // Level >= 2: the boundary application inside this Faraday update is
+    // dead for the fused residual and is skipped (WarpX decides how much:
+    // the whole application where every fill writes ghost cells only -- PMC,
+    // axis, r_hi Green's -- the r_hi-only Green's refill otherwise). The
+    // fused residual reads rhs = B - B^n on the VALID faces (ComputeRHS), and
+    // the next evaluation re-sets the valid Bfield_fp from the state and
+    // re-applies the full boundary before anything reads a ghost cell. An
+    // open z cap always keeps its fill (the next application's deposit reads
+    // the cap ghost row it wrote: a lagged recursion, 1e-5 relative
+    // difference when skipped) and so does a PEC face (its fill writes the
+    // valid normal face value; the update reproduces it only where the
+    // tangential E is exactly zero, measured false with a Hall term or a
+    // ramped drive: 9e-12 / 6e-16 when skipped). Every other identity deck
+    // and the whole suite are identical.
+    m_WarpX->EvolveMagneticFieldAndApplyBCs(a_thetadt, a_start_time, exchange,
+                                            m_fused_residual_level >= 2);
 }
 
 void ThetaImplicitMHD::SanitizeLoadedState ()

@@ -15,6 +15,7 @@
 #include <AMReX_Box.H>
 #include <AMReX_Dim3.H>
 #include <AMReX_FabArrayBase.H>
+#include <AMReX_GpuControl.H>
 #include <AMReX_GpuLaunch.H>
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_INT.H>
@@ -68,7 +69,33 @@
  */
 namespace warpx::fused_residual
 {
-    /** \brief ``implicit_evolve.fused_residual`` (0 or 1), read once. */
+    /** \brief ``implicit_evolve.fused_residual`` (0, 1 or 2), read once.
+     *
+     * 0: every existing path untouched. 1: the fused bookkeeping described
+     * above. 2: level 1 plus two residual-only savings that are exact by
+     * construction. (a) The boundary application inside the residual's
+     * Faraday update is dead for the fused residual, which reads B - B^n on
+     * the valid faces and re-sets B (valid) and re-applies the full boundary
+     * before anything reads a ghost cell again -- it is skipped whole on
+     * decks whose fills all write ghost cells only (PMC, axis, r_hi Green's:
+     * no open z cap, no PEC, no insulator boundary), and reduced to the skip
+     * of the r_hi-only Green's-function refill otherwise. An open z cap
+     * always keeps its own fill: the next application's source deposit reads
+     * the cap ghost row it wrote (a lagged recursion; measured 1e-5 non-exact
+     * when skipped); a PEC fill writes the valid normal face value, which the
+     * update reproduces only where the tangential E is exactly zero
+     * (measured false on two suite decks). (b) Where the state's MultiFabs hold ONE box in a
+     * non-periodic domain (every kernel of a stage then runs on one stream
+     * in issue order and no ghost exchange can move data) and the solver
+     * runs the RZ conservative-form path, AMReX's per-MFIter stream
+     * synchronizations are elided inside the residual evaluation, the
+     * active-set mask operations and the block preconditioner's apply
+     * (NoSyncScope below; the preconditioner's MLMG applications and the
+     * circuit hook keep theirs, SyncScope). The solver prints the arming
+     * decision in its banner. A third level -- the face-flux evaluation
+     * split into an advective and a diffusive launch -- was measured slower
+     * (the diffusive closure alone holds the register budget) and removed;
+     * the value 3 is refused. */
     inline int Level ()
     {
         static const int level = [] () {
@@ -76,14 +103,61 @@ namespace warpx::fused_residual
             const amrex::ParmParse pp("implicit_evolve");
             pp.query("fused_residual", value);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                value == 0 || value == 1,
-                "implicit_evolve.fused_residual must be 0 or 1");
+                value >= 0 && value <= 2,
+                "implicit_evolve.fused_residual must be 0, 1 or 2 (level 3, the split "
+                "face-flux evaluation, was measured slower than level 2 and removed)");
             return value;
         }();
         return level;
     }
 
     inline bool Enabled () { return Level() >= 1; }
+
+    /** \brief Scoped elision of the MFIter stream synchronizations
+     * (amrex::Gpu::setNoSyncRegion(true)) while a_enable; a no-op otherwise
+     * and on CPU builds. The caller guarantees single-stream issue order
+     * (one box, non-periodic) and that nothing inside frees device memory a queued
+     * kernel still uses. */
+    struct NoSyncScope
+    {
+        explicit NoSyncScope (const bool a_enable) : m_active(a_enable)
+        {
+            if (m_active) { m_prev = amrex::Gpu::setNoSyncRegion(true); }
+        }
+        ~NoSyncScope ()
+        {
+            if (m_active) { amrex::ignore_unused(amrex::Gpu::setNoSyncRegion(m_prev)); }
+        }
+        NoSyncScope (const NoSyncScope&) = delete;
+        NoSyncScope& operator= (const NoSyncScope&) = delete;
+        NoSyncScope (NoSyncScope&&) = delete;
+        NoSyncScope& operator= (NoSyncScope&&) = delete;
+    private:
+        bool m_active = false;
+        bool m_prev = false;
+    };
+
+    /** \brief Scoped restoration of the MFIter stream synchronizations
+     * inside a NoSyncScope (for a callee that allocates and frees device
+     * temporaries of its own, or hands device data to another stream). */
+    struct SyncScope
+    {
+        explicit SyncScope (const bool a_enable = true) : m_active(a_enable)
+        {
+            if (m_active) { m_prev = amrex::Gpu::setNoSyncRegion(false); }
+        }
+        ~SyncScope ()
+        {
+            if (m_active) { amrex::ignore_unused(amrex::Gpu::setNoSyncRegion(m_prev)); }
+        }
+        SyncScope (const SyncScope&) = delete;
+        SyncScope& operator= (const SyncScope&) = delete;
+        SyncScope (SyncScope&&) = delete;
+        SyncScope& operator= (SyncScope&&) = delete;
+    private:
+        bool m_active = false;
+        bool m_prev = false;
+    };
 
     /** \brief True when a FillBoundary of this FabArray can move data. */
     inline bool NeedsGhostExchange (const amrex::FabArrayBase& a_fa,

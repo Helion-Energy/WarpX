@@ -293,6 +293,10 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         //! implicit_evolve.fused_residual: the block copies, frozen-row restores
         //! and no-op ghost exchanges of Apply() as one launch per stage
         bool m_fused = false;
+        //! the solver's stream-sync elision decision (fused_residual >= 2 on a
+        //! single-box, non-periodic recast layout): Apply() elides the MFIter
+        //! stream synchronizations too (its MLMG applications keep theirs)
+        bool m_fused_nosync = false;
         bool m_verbose = false;
         bool m_bottom_verbose = false;
         bool m_agglomeration = true;
@@ -995,6 +999,9 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
         "pc_mhd_block requires Efield_fp or Bfield_fp as its vector block");
     m_hlld_state = (array_type == warpx::fields::FieldType::Bfield_fp);
     m_fused = warpx::fused_residual::Enabled();
+    // The stream-sync elision follows the SOLVER's arming decision (level >= 2,
+    // one box, non-periodic, RZ conservative-form path), never the knob alone.
+    m_fused_nosync = ops->GetFusedResidualStreamSyncElisionForPC();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(state.numAMRLevels() == 1 && ops->numAMRLevels() == 1,
                                      "pc_mhd_block currently supports one AMR level");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -2815,7 +2822,10 @@ MHDBlockPC<T, Ops>::ApplyConductionCrossCorrection ()
 
     // 3. the correction solve with the same operator, then x1 = x0 - R y
     m_cross_solution->setVal(0.0);
-    m_signal_solver->solve({m_cross_solution.get()}, {m_cross_rhs.get()}, 0.0, 0.0);
+    { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+        const warpx::fused_residual::SyncScope sync_for_mlmg;
+        m_signal_solver->solve({m_cross_solution.get()}, {m_cross_rhs.get()}, 0.0, 0.0);
+    }
     for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
     {
         const auto x = m_signal_solution->array(mfi);
@@ -3028,8 +3038,11 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         if (m_signal_diffusion_active || !conduction_exact)
         {
             m_signal_solution->setVal(0.0);
-            m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0,
+            { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+                const warpx::fused_residual::SyncScope sync_for_mlmg;
+                m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0,
                                    0.0);
+            }
         }
         if (conduction_exact)
         {
@@ -3115,7 +3128,10 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         const amrex::MultiFab wave_rhs(*m_signal_solution, amrex::make_alias,
                                        m_momentum_component, 3);
         m_momentum_solution->setVal(0.0);
-        m_wave_solver_rz->solve({m_momentum_solution.get()}, {&wave_rhs}, 0.0, 0.0);
+        { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+            const warpx::fused_residual::SyncScope sync_for_mlmg;
+            m_wave_solver_rz->solve({m_momentum_solution.get()}, {&wave_rhs}, 0.0, 0.0);
+        }
         amrex::MultiFab::Copy(*m_signal_solution, *m_momentum_solution, 0,
                               m_momentum_component, 3, 0);
     }
@@ -4078,6 +4094,15 @@ MHDBlockPC<T, Ops>::Apply (T& solution, const T& rhs)
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(IsDefined(),
                                      "MHDBlockPC::Apply() called on an undefined object");
+    // fused_residual >= 2 on the single-box non-periodic recast layout (the
+    // solver's decision): no per-MFIter stream
+    // synchronization inside the apply (FusedResidualOps.H, NoSyncScope):
+    // the block copies, wall-row scalings, signal-block kernels, the direct
+    // solvers' gathers/scatters and cuDSS phases (stream-ordered) and the
+    // Faraday corrector all work on persistent buffers on the one stream;
+    // the MLMG applications restore the synchronizations for their own
+    // duration (they allocate and release temporaries per solve).
+    const warpx::fused_residual::NoSyncScope no_sync(m_fused_nosync);
     solution.zero();
     if (m_hlld_state)
     {
@@ -4241,7 +4266,10 @@ MHDBlockPC<T, Ops>::SolveFieldBlock (T& solution)
 #endif
 
     m_curl_curl->prepareRHS({&field_rhs});
-    m_field_solver->solve({&field_solution}, {&field_rhs}, 0.0, 0.0);
+    { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+        const warpx::fused_residual::SyncScope sync_for_mlmg;
+        m_field_solver->solve({&field_solution}, {&field_rhs}, 0.0, 0.0);
+    }
 }
 
 template <class T, class Ops>
@@ -4414,7 +4442,10 @@ MHDBlockPC<T, Ops>::ApplyFluidBlock (T& solution, const T& rhs)
 
     if (m_acoustic_active)
     {
-        m_fluid_solver->solve({m_pressure.get()}, {m_pressure_rhs.get()}, 0.0, 0.0);
+        { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+            const warpx::fused_residual::SyncScope sync_for_mlmg;
+            m_fluid_solver->solve({m_pressure.get()}, {m_pressure_rhs.get()}, 0.0, 0.0);
+        }
         m_pressure->FillBoundary(m_geometry.periodicity());
     }
 
@@ -4581,7 +4612,10 @@ MHDBlockPC<T, Ops>::ApplyIdealWaveFluidBlock (T& solution, const T& rhs)
     m_momentum_rhs->FillBoundary(m_geometry.periodicity());
 
     m_momentum_solution->setVal(0.0);
-    m_wave_solver->solve({m_momentum_solution.get()}, {m_momentum_rhs.get()}, 0.0, 0.0);
+    { // MLMG keeps its stream synchronizations (fused_residual >= 2)
+        const warpx::fused_residual::SyncScope sync_for_mlmg;
+        m_wave_solver->solve({m_momentum_solution.get()}, {m_momentum_rhs.get()}, 0.0, 0.0);
+    }
     m_momentum_solution->FillBoundary(m_geometry.periodicity());
 
     const RT electron_enthalpy = m_electron_enthalpy;

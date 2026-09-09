@@ -3869,6 +3869,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         box, non-periodic) skipped; bit-identical. The residual-side
         fusions act on the RZ conservative-form path only; the
         preconditioner/solver-vector parts follow the knob everywhere.
+        2 = level 1 plus the exact residual-only skips: the dead boundary
+        application inside the residual's Faraday update (whole on decks
+        whose fills are ghost-only -- no open z cap, no PEC, no insulator
+        boundary -- the r_hi-only Green's refill otherwise) and the per-MFIter stream
+        synchronizations on a single-box, non-periodic layout of the RZ
+        conservative-form path (the banner prints the decision). 3 is
+        refused (the split face-flux evaluation was measured slower and
+        removed).
     """
 
     def __init__(
