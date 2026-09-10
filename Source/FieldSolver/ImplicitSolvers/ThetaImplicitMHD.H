@@ -445,6 +445,166 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
 
+    // ---- GLOBAL ENERGY AUDIT (implicit_mhd.energy_audit_file; off when
+    // empty, bit-identical: none of the audit code runs and the RHS
+    // kernel's register writes stay disarmed). One row per audited step
+    // (every energy_audit_interval steps) closing the domain's energy
+    // budget in J (full 2 pi volumes in RZ, per unit area in 1D):
+    //   totals at t^n and t^{n+1}: magnetic energy of the plasma
+    //   response, of the total field (external coil field included) and
+    //   of the external field alone, U_e, E_i, U_i, kinetic, mass, and the
+    //   change-of-variables background's share of the thermal totals;
+    //   over the step: the exact discrete Poynting outflow through every
+    //   domain face (E_ohm^theta x B_tot^theta, the face-averaged B the
+    //   summation by parts of the Yee curl pair produces, so the term is
+    //   the one the discrete Faraday update exchanges with the volume),
+    //   the fluid energy/mass export per face and per block, the
+    //   shaped-wall stair deposition per block, the field-to-fluid
+    //   transfer dt sum E_ohm . J, every volume source of the fluid RHS
+    //   as deposited (registers the RHS kernel writes only during the
+    //   audit's own evaluation at the accepted theta state), the
+    //   theta-quadrature term (theta - 1/2) sum |dB|^2/mu0, the Newton
+    //   defect per block (sum (U^theta - U^n - rhs) dV / theta), the
+    //   end-of-step restorations (eater, floors, dual-energy sync) as
+    //   total differences between the stages of FinishStateUpdate, the
+    //   between-step injections, and the code's own cumulative ledgers;
+    //   two closure residuals: 'booked' (the physical fluxes and the
+    //   code's existing bookings only) and 'full' (every named term;
+    //   round-off by construction when nothing is missing).
+    // The audit reads the state and recomputes scratch registers at the
+    // accepted theta state exactly like AccumulateAbsorbedWallLedger
+    // (plasma current, cell-centered fields, face fluxes, the Ohm E --
+    // saved before and restored after); it never writes the state.
+    // Requires the recast flux path and an ion energy closure
+    // (total_energy or dual_energy).
+    std::string m_energy_audit_file;
+    int m_energy_audit_interval = 1;
+    bool m_energy_audit_started = false;
+    // This step is audited (set at the top of OneStep).
+    bool m_energy_audit_step = false;
+    // Armed only around the audit's own ComputeFluidRHS evaluation: the
+    // RHS kernel then writes its volume sources into the register.
+    bool m_energy_audit_capture = false;
+    std::unique_ptr<amrex::MultiFab> m_energy_audit_register;
+    // Total magnetic field at t^n (external added), for the total-field
+    // energy change and the theta-quadrature term.
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_b_total_old;
+    // Efield_fp as the solve left it (restored after the audit's Ohm
+    // assembly so nothing downstream can see a different E).
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_e_saved;
+    WarpXSolverVec m_energy_audit_rhs;
+    // Register components (cell-centered, as deposited by the RHS kernel:
+    // wall_live x plasma_weight x term, per unit volume per unit time).
+    struct EnergyAuditRegister {
+        enum : int {
+            lorentz = 0,     // gated magnetic-force work into E_i
+            lorentz_raw,     // the same before the drain gate / halo taper
+            joule_e,         // electron Joule share into U_e
+            joule_i,         // ion Joule share into E_i and U_i
+            pw_e,            // electron pressure work into U_e
+            pw_i,            // its E_i counterpart (+p_e div u_e, gated)
+            pdv_ui,          // blended pdV work into U_i
+            visc_ui,         // viscous heating into U_i
+            equil,           // e-i equilibration: +U_e, -E_i, -U_i
+            drain_ei,        // pedestal-band drag/relaxation drains of E_i
+            drain_ui,        // pedestal-band relaxation drain of U_i
+            cov_shift_pw_e,  // change of variables: the dropped electron
+                             // pressure work shift_e div u_e (-> U_e; the
+                             // opposite enters E_i)
+            cov_shift_pdv_ui, // the dropped U_i pdV work shift_i div u
+            relax_e,         // halo relaxation outlet drain of U_e (>= 0 = removed)
+            relax_ei,        // ... of E_i
+            relax_ui,        // ... of U_i
+            fcs_mass,        // floor-consistency supply of rho
+            fcs_e,           // ... of U_e
+            fcs_ei,          // ... of E_i
+            fcs_ui,          // ... of U_i
+            count
+        };
+    };
+    struct EnergyAuditTotals {
+        amrex::Real mass = 0.0;
+        amrex::Real ue = 0.0;
+        amrex::Real ei = 0.0;
+        amrex::Real ui = 0.0;
+        amrex::Real ke = 0.0;
+    };
+    struct EnergyAuditStep {
+        // step-start totals (t^n)
+        EnergyAuditTotals old_fluid;
+        amrex::Real wb_total_old = 0.0;
+        amrex::Real wb_resp_old = 0.0;
+        amrex::Real wb_ext_old = 0.0;
+        // theta-stage quantities (rates already multiplied by dt)
+        amrex::Real poynt_out[3] = {0.0, 0.0, 0.0};      // r_hi, z_lo, z_hi
+        amrex::Real export_domain[4][3] = {};            // block (mass,ue,ei,ui) x face
+        amrex::Real export_wall[4] = {0.0, 0.0, 0.0, 0.0};
+        amrex::Real ej = 0.0;
+        amrex::Real src[EnergyAuditRegister::count] = {};
+        amrex::Real rhs_sum[4] = {0.0, 0.0, 0.0, 0.0};   // sum rhs dV / theta
+        amrex::Real newton[4] = {0.0, 0.0, 0.0, 0.0};
+        amrex::Real b_theta_dot_db = 0.0;                // sum B_tot^theta . dB_tot / mu0
+        amrex::Real theta_diss = 0.0;
+        // end-of-step stage totals
+        EnergyAuditTotals stage_raw, stage_eater, stage_efloor, stage_eirestore, stage_sync, final_fluid;
+        amrex::Real wb_total_new = 0.0;
+        amrex::Real wb_resp_new = 0.0;
+        amrex::Real wb_ext_new = 0.0;
+        // between steps
+        bool have_prev_final = false;
+        int prev_step = -1;
+        EnergyAuditTotals prev_final;
+        // cumulative accumulators
+        amrex::Real cum_resid_booked = 0.0;
+        amrex::Real cum_resid_full = 0.0;
+        amrex::Real cum_poynt_in = 0.0;
+        amrex::Real cum_fluid_in = 0.0;
+        amrex::Real cum_wall = 0.0;
+        amrex::Real cum_ej = 0.0;
+        amrex::Real cum_theta_diss = 0.0;
+        amrex::Real cum_exchange = 0.0;
+        amrex::Real cum_pwpair = 0.0;
+        amrex::Real cum_faraday = 0.0;
+        amrex::Real cum_newton = 0.0;
+        amrex::Real cum_floor = 0.0;
+        amrex::Real cum_sync = 0.0;
+        amrex::Real cum_eater = 0.0;
+        amrex::Real cum_inject = 0.0;
+        amrex::Real cum_fluxw = 0.0;
+        amrex::Real cum_dw_total = 0.0;
+        // ledger snapshots at the previous row (for per-step deltas)
+        amrex::Real prev_wall_energy = 0.0;
+        amrex::Real prev_absorb_energy = 0.0;
+        amrex::Real prev_floor_supply = 0.0;
+        amrex::Real prev_pinned = 0.0;
+        amrex::Real prev_halo_relax = 0.0;
+        amrex::Real prev_eater = 0.0;
+        amrex::Real prev_pedestal_e = 0.0;
+        amrex::Real prev_pedestal_i = 0.0;
+        amrex::Real domain_volume = 0.0;
+    };
+    EnergyAuditStep m_energy_audit;
+    /** Global energy audit (implicit_mhd.energy_audit_file; see the
+     * members): the top-of-step snapshot of the total magnetic field and
+     * its energy (before the split-field subtraction), the step-old fluid
+     * totals (after m_state_old is set), the accepted theta-state
+     * evaluation (face fluxes, Ohm E, RHS with the registers armed, the
+     * boundary/wall/volume reductions), the FinishStateUpdate stage
+     * totals (0 raw, 1 eater, 2 electron floor, 3 E_i restoration,
+     * 4 sync, 5 final) and the row writer. All no-ops unless this step is
+     * audited. Defined in ThetaImplicitMHDEnergyAudit.cpp. */
+    void EnergyAuditBeginStep (int step);
+    void EnergyAuditRecordOldState ();
+    void EnergyAuditThetaStage (amrex::Real start_time);
+    void EnergyAuditFinishStage (int stage);
+    void EnergyAuditWriteRow (amrex::Real end_time, int step);
+    [[nodiscard]] EnergyAuditTotals EnergyAuditFluidTotals (
+        const WarpXSolverVec& state) const;
+    /** sum_{components} a . b x (field dual volume) over the valid boxes. */
+    [[nodiscard]] amrex::Real EnergyAuditFieldDot (
+        const std::array<const amrex::MultiFab*, 3>& a,
+        const std::array<const amrex::MultiFab*, 3>& b,
+        const std::array<const amrex::MultiFab*, 3>* a_add = nullptr) const;
     /** Append this step's row to implicit_mhd.floor_ledger_file (rank 0;
      * the first write of a run truncates a stale file): the cumulative
      * floor-consistency supply "step mass energy", followed in the

@@ -1016,6 +1016,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "absorb_ledger_interval",
                                    m_absorb_ledger_interval);
     pp.query("wall_ledger_file", m_wall_ledger_file);
+    // Global energy audit (see the members): off when the file is empty.
+    pp.query("energy_audit_file", m_energy_audit_file);
+    utils::parser::queryWithParser(pp, "energy_audit_interval",
+                                   m_energy_audit_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_energy_audit_interval >= 1,
+        "implicit_mhd.energy_audit_interval must be >= 1");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_absorb_ledger_interval >= 0,
         "implicit_mhd.absorb_ledger_interval cannot be negative");
@@ -1118,6 +1125,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     m_use_hlld = (m_fluid_flux == "hlld");
     m_use_central = (m_fluid_flux == "central");
     m_use_recast = m_use_hlld || m_use_central;
+    if (!m_energy_audit_file.empty()) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_recast,
+            "implicit_mhd.energy_audit_file requires the conservative flux "
+            "path (fluid_flux = central or hlld)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ion_closure == "total_energy" || m_ion_closure == "dual_energy",
+            "implicit_mhd.energy_audit_file requires ion_closure = "
+            "total_energy or dual_energy");
+    }
     // The reference code's f_ohmi (vp.f90 dw0_io / te_step split): the ion species
     // receives a direct share of the Joule power. 0 = legacy
     // all-electron; (0, 1] = constant share; -1 = the reference code's Te-keyed
@@ -4460,6 +4477,15 @@ void ThetaImplicitMHD::PrintParameters () const
                        << " (newton.active_set: exit residual over the "
                           "pinned components / theta, booked per solve)\n";
     }
+    if (!m_energy_audit_file.empty()) {
+        amrex::Print() << "Energy audit file:             "
+                       << m_energy_audit_file << " (every "
+                       << m_energy_audit_interval
+                       << " step(s): domain totals, boundary Poynting and "
+                          "fluid fluxes, wall deposition, E.J, RHS sources, "
+                          "theta term, Newton defect, end-of-step "
+                          "restorations, closure residuals)\n";
+    }
     if (m_density_eater_rate > 0.0_rt) {
         amrex::Print() << "Density eater rate [1/step]:   "
                        << m_density_eater_rate << "\n"
@@ -5646,6 +5672,9 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     m_dt = dt;
     AuditTransportConsistency(start_time);
+    // Global energy audit: is this step audited? Snapshot the total field
+    // BEFORE the split-field subtraction below.
+    EnergyAuditBeginStep(step);
     m_circuit_hook_calls = 0;
     // Native circuit driver: (re)open the coupling step lazily at the
     // first qualifying residual evaluation. A step replayed after a
@@ -5732,6 +5761,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
     m_state_old.Copy(m_state);
     m_state_old_valid = true;
+    EnergyAuditRecordOldState();
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
     // limiters (theta-extrapolated end-of-step donor gating needs old
@@ -5857,8 +5887,13 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // to t^{n+1}.
         AccumulateHaloRelaxationLedger(m_dt, step);
     }
+    // Global energy audit: the accepted theta-state evaluation (face
+    // fluxes, Ohm E, RHS with the registers armed; Efield_fp restored),
+    // before FinishStateUpdate extrapolates the state to t^{n+1}.
+    EnergyAuditThetaStage(start_time);
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt, step);
+    EnergyAuditWriteRow(start_time + m_dt, step);
     if (m_external_field_iteration) {
         // Sync-tax instrument: how many circuit-hook firings the step
         // cost (python round-trips, or native engine advances; the
@@ -15641,8 +15676,39 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
 
+    // Global energy audit registers (EnergyAuditRegister): written only
+    // while the audit's own evaluation has them armed, as the volume
+    // sources are DEPOSITED (wall_live x plasma_weight x term); the kernel
+    // arithmetic below is unchanged, so the disarmed path is bit-identical.
+    const bool audit_capture =
+        m_energy_audit_capture && (m_energy_audit_register != nullptr);
+    amrex::MultiFab* const audit_register_mf =
+        audit_capture ? m_energy_audit_register.get() : nullptr;
+    constexpr int audit_lorentz = EnergyAuditRegister::lorentz;
+    constexpr int audit_lorentz_raw = EnergyAuditRegister::lorentz_raw;
+    constexpr int audit_joule_e = EnergyAuditRegister::joule_e;
+    constexpr int audit_joule_i = EnergyAuditRegister::joule_i;
+    constexpr int audit_pw_e = EnergyAuditRegister::pw_e;
+    constexpr int audit_pw_i = EnergyAuditRegister::pw_i;
+    constexpr int audit_pdv_ui = EnergyAuditRegister::pdv_ui;
+    constexpr int audit_visc_ui = EnergyAuditRegister::visc_ui;
+    constexpr int audit_equil = EnergyAuditRegister::equil;
+    constexpr int audit_drain_ei = EnergyAuditRegister::drain_ei;
+    constexpr int audit_drain_ui = EnergyAuditRegister::drain_ui;
+    constexpr int audit_cov_shift_pw_e = EnergyAuditRegister::cov_shift_pw_e;
+    constexpr int audit_cov_shift_pdv_ui = EnergyAuditRegister::cov_shift_pdv_ui;
+    constexpr int audit_relax_e = EnergyAuditRegister::relax_e;
+    constexpr int audit_relax_ei = EnergyAuditRegister::relax_ei;
+    constexpr int audit_relax_ui = EnergyAuditRegister::relax_ui;
+    constexpr int audit_fcs_mass = EnergyAuditRegister::fcs_mass;
+    constexpr int audit_fcs_e = EnergyAuditRegister::fcs_e;
+    constexpr int audit_fcs_ei = EnergyAuditRegister::fcs_ei;
+    constexpr int audit_fcs_ui = EnergyAuditRegister::fcs_ui;
+
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
+        const auto audit_reg = audit_capture ? audit_register_mf->array(mfi)
+                                             : amrex::Array4<amrex::Real>{};
         const auto rho = density.const_array(mfi);
         const auto rho_old = old_density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
@@ -16251,6 +16317,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             energy_increment(i, j, k) =
                 wall_live * theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
+            if (audit_capture) {
+                audit_reg(i, j, k, audit_pw_e) =
+                    wall_live * plasma_weight * pressure_work;
+                audit_reg(i, j, k, audit_joule_e) =
+                    wall_live * plasma_weight * joule_heating;
+                // the change of variables' contribution to the electron
+                // pressure work, ungated: -shift_e div u_e
+                audit_reg(i, j, k, audit_cov_shift_pw_e) =
+                    wall_live * plasma_weight *
+                    (-pedestal_shift_pressure_e * divergence_electron_velocity);
+            }
             // Electron-ion equilibration (see the host constants above
             // and m_electron_ion_equilibration; the reference code's eq_brate
             // exchange): the STEP-OLD frozen Spitzer rate times the LIVE
@@ -16311,6 +16388,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                              plasma_weight *
                                              equilibration_heating;
             }
+            if (audit_capture) {
+                audit_reg(i, j, k, audit_equil) =
+                    wall_live * plasma_weight * equilibration_heating;
+            }
 
             if (total_energy_closure) {
                 const amrex::Real safe_density =
@@ -16341,6 +16422,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         mom(i, j, k, component) * magnetic_force[component];
                 }
                 lorentz_work /= safe_density;
+                if (audit_capture) {
+                    audit_reg(i, j, k, audit_lorentz_raw) =
+                        wall_live * plasma_weight * lorentz_work;
+                }
                 amrex::Real ion_pressure_work =
                     (pressure_e + pedestal_shift_pressure_e) *
                     divergence_electron_velocity;
@@ -16424,6 +16509,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work + joule_ion_share) -
                      drag_kinetic_drain - energy_relax_drain);
+                if (audit_capture) {
+                    audit_reg(i, j, k, audit_lorentz) =
+                        wall_live * plasma_weight * lorentz_work;
+                    audit_reg(i, j, k, audit_pw_i) =
+                        wall_live * plasma_weight * ion_pressure_work;
+                    audit_reg(i, j, k, audit_joule_i) =
+                        wall_live * plasma_weight * joule_ion_share;
+                    audit_reg(i, j, k, audit_drain_ei) =
+                        wall_live * (drag_kinetic_drain + energy_relax_drain);
+                }
                 if (ei_equilibration) {
                     // Electron-ion equilibration counterpart (see the
                     // electron row above): the identical product with
@@ -16640,6 +16735,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_internal_flux + pdv_work +
                           viscous_heating + joule_ion_share) -
                      internal_relax_drain);
+                if (audit_capture) {
+                    audit_reg(i, j, k, audit_pdv_ui) =
+                        wall_live * plasma_weight * pdv_work;
+                    audit_reg(i, j, k, audit_visc_ui) =
+                        wall_live * plasma_weight * viscous_heating;
+                    audit_reg(i, j, k, audit_drain_ui) =
+                        wall_live * internal_relax_drain;
+                    // the change of variables' contribution to the blended
+                    // pdV work, ungated: -shift_i div u
+                    audit_reg(i, j, k, audit_cov_shift_pdv_ui) =
+                        wall_live * plasma_weight *
+                        (-pedestal_shift_pressure_i * divergence_velocity);
+                }
                 if (ei_equilibration) {
                     // Electron-ion equilibration: U_i receives the
                     // SAME internal-only exchange as E_i above (the
@@ -17029,10 +17137,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
                 electron_target = std::max(electron_target,
                                            halo_relaxation_electron_floor);
-                energy_increment(i, j, k) -=
+                const amrex::Real relax_electron =
                     relax_scale * (energy(i, j, k) - electron_target) *
                     theta_implicit_mhd::floor_outflow_limiter(
                         energy(i, j, k), electron_target);
+                energy_increment(i, j, k) -= relax_electron;
+                if (audit_capture) {
+                    audit_reg(i, j, k, audit_relax_e) = relax_electron / theta_dt;
+                }
                 if (total_energy_closure && !halo_relaxation_ion_target) {
                     const amrex::Real ion_target =
                         std::max(rho_old(i, j, k) * halo_relaxation_ion_spec,
@@ -17047,20 +17159,29 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     const amrex::Real internal_energy =
                         ion_e(i, j, k) -
                         0.5_rt * momentum_square / safe_density;
-                    ion_energy_increment(i, j, k) -=
+                    const amrex::Real relax_ion =
                         relax_scale * (internal_energy - ion_target) *
                         theta_implicit_mhd::floor_outflow_limiter(
                             internal_energy, ion_target);
+                    ion_energy_increment(i, j, k) -= relax_ion;
+                    if (audit_capture) {
+                        audit_reg(i, j, k, audit_relax_ei) = relax_ion / theta_dt;
+                    }
                     if (dual_energy_closure) {
                         // The auxiliary U_i mirrors the SAME internal
                         // drain toward the same target, keyed on its own
                         // (purely internal) value -- exactly the
                         // pedestal-relaxation pairing.
-                        ion_internal_increment(i, j, k) -=
+                        const amrex::Real relax_internal =
                             relax_scale *
                             (ion_int(i, j, k) - ion_target) *
                             theta_implicit_mhd::floor_outflow_limiter(
                                 ion_int(i, j, k), ion_target);
+                        ion_internal_increment(i, j, k) -= relax_internal;
+                        if (audit_capture) {
+                            audit_reg(i, j, k, audit_relax_ui) =
+                                relax_internal / theta_dt;
+                        }
                     }
                 } else if (cgl_closure && !halo_relaxation_ion_target) {
                     // U_par and U_perp are purely internal under this
@@ -17102,38 +17223,54 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 const amrex::Real supply_scale =
                     wall_live * theta_dt * floor_supply_rate;
                 if (evolve_ion_fluid) {
-                    rho_increment(i, j, k) +=
+                    const amrex::Real supply_mass =
                         supply_scale *
                         theta_implicit_mhd::floor_consistency_deficit(
                             rho(i, j, k), rho_old(i, j, k),
                             rho_old(i, j, k), fc_mass_floor,
                             fc_mass_coefficient, theta, fc_width);
+                    rho_increment(i, j, k) += supply_mass;
+                    if (audit_capture) {
+                        audit_reg(i, j, k, audit_fcs_mass) = supply_mass / theta_dt;
+                    }
                 }
-                energy_increment(i, j, k) +=
+                const amrex::Real supply_electron =
                     supply_scale *
                     theta_implicit_mhd::floor_consistency_deficit(
                         energy(i, j, k), energy_old(i, j, k),
                         rho_old(i, j, k), fc_electron_floor,
                         fc_electron_coefficient, theta, fc_width);
+                energy_increment(i, j, k) += supply_electron;
+                if (audit_capture) {
+                    audit_reg(i, j, k, audit_fcs_e) = supply_electron / theta_dt;
+                }
                 if (total_energy_closure) {
-                    ion_energy_increment(i, j, k) +=
+                    const amrex::Real supply_ion =
                         supply_scale *
                         theta_implicit_mhd::floor_consistency_deficit(
                             ion_e(i, j, k), ion_e_old(i, j, k),
                             rho_old(i, j, k), fc_ion_floor,
                             fc_ion_coefficient, theta, fc_width);
+                    ion_energy_increment(i, j, k) += supply_ion;
+                    if (audit_capture) {
+                        audit_reg(i, j, k, audit_fcs_ei) = supply_ion / theta_dt;
+                    }
                 }
                 if (dual_energy_closure) {
                     // The auxiliary U_i block is bounded like the others
                     // (block 3 of MakeAdmissibilityBounds under this
                     // closure), so it gets its own supply; it is NOT
                     // booked in the ledger (bookkeeping, not conserved).
-                    ion_internal_increment(i, j, k) +=
+                    const amrex::Real supply_internal =
                         supply_scale *
                         theta_implicit_mhd::floor_consistency_deficit(
                             ion_int(i, j, k), ion_int_old(i, j, k),
                             rho_old(i, j, k), fc_perp_floor,
                             fc_perp_coefficient, theta, fc_width);
+                    ion_internal_increment(i, j, k) += supply_internal;
+                    if (audit_capture) {
+                        audit_reg(i, j, k, audit_fcs_ui) = supply_internal / theta_dt;
+                    }
                 }
                 if (cgl_closure) {
                     ion_parallel_increment(i, j, k) +=
@@ -18669,7 +18806,9 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
     // update and the step_tm floors on the eaten density. The
     // restorations below therefore key their density-dependent bounds
     // to the eaten density, exactly the state the next solve freezes.
+    EnergyAuditFinishStage(0);
     ApplyDensityEater(end_time, step);
+    EnergyAuditFinishStage(1);
 
     // End-of-step floor restorations below evaluate the temperature
     // floors' density-dependent bounds with the END-OF-STEP density: it is
@@ -18763,6 +18902,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             m_WarpX->Geom(0).periodicity());
     }
 
+    EnergyAuditFinishStage(2);
     if (m_ion_closure == "total_energy" || m_ion_closure == "dual_energy") {
         // Dual-energy synchronization (the standard sync step, without the
         // auxiliary internal-energy equation): in kinetic-dominated cells
@@ -18839,6 +18979,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             });
         }
         ion_energy_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+        EnergyAuditFinishStage(3);
         if (m_ion_closure == "dual_energy" && m_dual_energy_sync) {
             // Dual-energy re-sync at the accepted step end, the port of
             // The reference code's mixmaster temperature update (ntb.f90:102-106,
@@ -19065,6 +19206,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             internal_block.FillBoundaryAndSync(
                 m_WarpX->Geom(0).periodicity());
         }
+        EnergyAuditFinishStage(4);
     } else if (m_ion_closure == "cgl") {
         // Floor restoration at the accepted step end (round-off
         // insurance; the Newton admissibility bounds already hold the
@@ -19409,4 +19551,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
         // against the coil vector potentials.
         AddExternalFieldsToTotals(1.0_rt);
     }
+    // Global energy audit: final totals of the step (fluid blocks and the
+    // total/response/external magnetic energies).
+    EnergyAuditFinishStage(5);
 }

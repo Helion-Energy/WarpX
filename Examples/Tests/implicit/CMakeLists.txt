@@ -5436,3 +5436,120 @@ add_warpx_test(
     OFF  # checksum
     test_1d_theta_implicit_mhd_vacuum_drag_drain_pointwise_off  # dependency
 )
+
+
+# Global energy audit (implicit_mhd.energy_audit_file). Closed periodic
+# system (the circularly polarized Alfven wave, central flux, total-energy
+# ions): the 'full' closure residual at round-off, the Faraday defect and
+# the fluid self-checks at round-off, the theta term identically zero at
+# theta = 1/2 and positive at theta = 1 with a linear dt scaling of its
+# total over a fixed interval (half-dt twin).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_periodic  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_energy_audit_periodic  # inputs
+    "analysis_mhd_energy_audit_periodic.py diags/energy_audit.txt 0.5"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_periodic_be_halfdt  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_evolve.theta=1.0 my_constants.nsteps=80"  # inputs
+    "analysis_mhd_energy_audit_periodic.py diags/energy_audit.txt 1.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_periodic_be  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_evolve.theta=1.0"  # inputs
+    "analysis_mhd_energy_audit_periodic.py diags/energy_audit.txt 1.0 ../test_1d_theta_implicit_mhd_energy_audit_periodic_be_halfdt/diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_energy_audit_periodic_be_halfdt  # dependency
+)
+
+# The change of variables on (pure-background velocity pulse, dual-energy
+# ions, the sync on): closure at round-off, the background shares and the
+# dropped background works recorded, the pedestal ledger zero.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_cov  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_cov.py diags/energy_audit.txt halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ production-stack shape (external field split, dielectric stair wall
+# with the outflow_limited thermal BC and its ledger, dual-energy ions,
+# PEC / mirror / open boundaries, two ranks): the audit's wall deposition
+# reproduces the wall ledger, the self-checks and the full closure are at
+# round-off, and the run is byte-identical to its twin without the audit.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_wall_ref  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_floor_gate  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_wall  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_floor_gate implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_rz.py diags/energy_audit.txt diags/wall_ledger.txt 0.5 diags/diag000016 ../test_rz_theta_implicit_mhd_energy_audit_wall_ref/diags/diag000016 ../test_rz_theta_implicit_mhd_energy_audit_wall_ref/diags/newton.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_energy_audit_wall_ref  # dependency
+)
+
+# The same column under backward Euler: the theta term positive, the wall
+# deposition against the ledger, closure at round-off.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_wall_be  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_floor_gate implicit_evolve.theta=1.0 implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_rz.py diags/energy_audit.txt diags/wall_ledger.txt 1.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Magnetized column with the external-field split, a dielectric stair
+# wall (zero_flux, ledger), the floor-consistency supply, backward Euler,
+# total-energy ions, two boxes per rank: every named term live at once;
+# closure and self-checks at round-off, the wall column against the ledger.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_field_wall  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_dielectric_clamp implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_rz.py diags/energy_audit.txt diags/wall_ledger.txt 1.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Magnetized column with the Green's open r_hi boundary, the external
+# coil drive and the absorbing fluid boundary (hlld recast, backward
+# Euler): the field-side terms live (Poynting through the open face with
+# the external inductive E, E.J, the theta term, the Faraday defect of the
+# Green's fill), the r_hi fluid export against the absorb ledger, closure
+# at round-off.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_open  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_r_open_absorb_wall implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_rz.py diags/energy_audit.txt absorb:diags/absorb_ledger.txt 1.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)

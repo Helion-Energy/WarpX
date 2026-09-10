@@ -3127,6 +3127,23 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         heat-load instrument. Rows of "step mass energy" on the
         absorb_ledger_interval cadence.
 
+    energy_audit_file: str, optional
+        File for the solver's global energy audit (off when unset; the
+        disarmed path is bit-identical): one row per audited step with the
+        domain totals (magnetic response/total/external, U_e, E_i, U_i,
+        kinetic, mass, background shares), the exact discrete Poynting and
+        fluid inflows per domain face, the shaped-wall deposition per
+        block, dt sum E.J, every fluid volume source as deposited, the
+        theta-quadrature term, the Faraday defect, the Newton defect, the
+        end-of-step restorations (eater, floors, dual-energy sync), the
+        between-step injections, the code's cumulative ledgers and the two
+        closure residuals ('booked' and 'full'), per step and cumulative.
+        Requires fluid_flux central or hlld and ion_closure total_energy or
+        dual_energy.
+
+    energy_audit_interval: integer, optional
+        Audit every this many steps (default 1 = exact cumulative closure).
+
     conduction_coefficient_state: {"theta", "step_old"}, optional
         Evaluation state of the conduction COEFFICIENT inputs (face
         rho_f, charge density, and temperatures feeding the parser
@@ -4244,6 +4261,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_heat_flux_cap_factor_electron=None,
         wall_heat_flux_cap_factor_ion=None,
         wall_ledger_file=None,
+        energy_audit_file=None,
+        energy_audit_interval=None,
         wall_band_eta_override=None,
         wall_field_freeze=None,
         conduction_coefficient_state=None,
@@ -4416,6 +4435,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_heat_flux_cap_factor_electron = wall_heat_flux_cap_factor_electron
         self.wall_heat_flux_cap_factor_ion = wall_heat_flux_cap_factor_ion
         self.wall_ledger_file = wall_ledger_file
+        self.energy_audit_file = energy_audit_file
+        self.energy_audit_interval = energy_audit_interval
         self.wall_band_eta_override = wall_band_eta_override
         self.wall_field_freeze = wall_field_freeze
         self.conduction_coefficient_state = conduction_coefficient_state
@@ -4657,6 +4678,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.wall_heat_flux_cap_factor_ion
         )
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
+        implicit_mhd.energy_audit_file = self.energy_audit_file
+        implicit_mhd.energy_audit_interval = self.energy_audit_interval
         implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
         implicit_mhd.wall_field_freeze = self.wall_field_freeze
         implicit_mhd.conduction_coefficient_state = self.conduction_coefficient_state
