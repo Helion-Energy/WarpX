@@ -5090,7 +5090,9 @@ Jacobian probes.
     matrix-free Jacobian probes; where :math:`U_{i,\mathrm{old}} \ge 2\,
     \mathrm{guard}` the closure is today's to the bit. At fixed :math:`B`
     an internal-energy threshold is a :math:`\beta` threshold
-    (:math:`50\,\mathrm{J/m^3}` at 0.5 T is :math:`\beta = 5\times10^{-4}`);
+    (:math:`50\,\mathrm{J/m^3}` at 0.5 T is :math:`U_i/(B^2/2\mu_0) =
+    5\times10^{-4}`, i.e. :math:`\beta_p = (2/3)\,U_i/(B^2/2\mu_0) =
+    3.4\times10^{-4}`);
     in temperature, :math:`T_i = G/(1.5\,n\,k_B)`: 50 J/m\ :sup:`3` is
     630 eV at :math:`n = 3.3\times10^{17}\,\mathrm{m^{-3}}` (the production
     pedestal density), 63 eV at ten times it and 0.6 eV at
@@ -5101,8 +5103,16 @@ Jacobian probes.
     5\times10^{5}\,\mathrm{J/m^3}` at its 12 us peak (the flown reference
     cards used mix = -1, no cutoff). With a ledger file named, the solver
     also prints ``MHD dual-energy guard ledger: step N guarded_cells M
-    discarded_cum X J`` every step, so the artefact size can be read from
-    the log.
+    discarded_cum X J`` every step, so an upper bound of the artefact can
+    be read from the log (see the ledger entry below). The window's input
+    is the TOTAL step-old :math:`U_i` of the cell, background included:
+    with the change-of-variables pedestal on, the pedestal's own internal
+    energy counts (0.16 J/m\ :sup:`3` at the production pedestal density
+    and 2 eV). The rewrite and the ledger exist only with
+    ``dual_energy_sync = 1`` (the default): with the sync off
+    (``allow_dual_energy_sync_off``) the guard only weights the blend and
+    nothing is discarded or booked.
+
     Motivation: the wall-adjacent cells of a tenuous scrape-off accrete
     :math:`E_i` under a wall-pressed cell velocity that advects no mass
     while :math:`K` is negligible, so the kinetic gate is open and the sync
@@ -5117,10 +5127,15 @@ Jacobian probes.
     window is below 1 and the cumulative ion energy the end-of-step rewrite
     removed from (positive) or added to (negative) the conservative
     register over those cells, :math:`\sum (E_{i,\mathrm{before}} -
-    E_{i,\mathrm{after}})\,dV` [J] ([J/m\ :sup:`2`] in 1D), i.e. the
-    measured :math:`E_i` excess the guarded closure discards. The first
-    write of a run truncates a stale file; the counter restarts at zero on
-    a simulation restart. With the file named, the cell-centred register
+    E_{i,\mathrm{after}})\,dV` [J] ([J/m\ :sup:`2`] in 1D). This is an
+    UPPER BOUND of the :math:`E_i` artefact, not its measurement: the
+    rewrite discards the whole difference between the conservative and
+    the internal-energy evolution in every guarded cell -- the artefact
+    plus the legitimate irreversible heating the internal form misses
+    (stagnation heating, the Lorentz-work mismatch, the truncation of the
+    :math:`p\,dV` forms). The first write of a run truncates a stale
+    file; the counter and the per-cell register restart at zero on a
+    simulation restart. With the file named, the cell-centred register
     ``implicit_mhd_dual_energy_guard_discard`` (cumulative J/m\ :sup:`3`
     discarded in that cell, the ledger's per-cell twin: its RZ-volume
     integral equals the ledger's cumulative column) is allocated and can be
@@ -5869,8 +5884,24 @@ Jacobian probes.
     operator as the plasma current, refreshed with every external-field
     refresh), so the fluid feels
     :math:`\mathbf{j}_\text{plasma}\times\mathbf{B}_\text{total}` to
-    truncation and the ion-energy work pairs with it. Requires the
-    conservative flux form and the split external fields.
+    truncation and the ion-energy work pairs with it. The residual of the
+    correction (face-form stress divergence against point-form force) is
+    :math:`O((\Delta r/r)^2)`: 0.3-0.5 % of the coil force for a
+    five-cell painted current sheet at production resolution, about 1 %
+    on the 16-cell test mesh; it is exact in the interior only -- the
+    cells at a domain boundary keep a fraction of the uncorrected force,
+    because the face stress there carries the boundary image of
+    :math:`\mathbf{B}`. The two settings differ in a ramping external
+    field too: an ideal conductor screening a ramping painted field
+    carries :math:`\mathbf{j}_\text{plasma} = -\mathbf{j}_\text{ext}`;
+    under ``total`` it feels no force at all (the paint's force cancels
+    the real force on the screening current), under ``plasma`` it feels
+    the screening current's force -- and the coils of a production drive
+    ramp every step. Scale of the paint: the production formation deck's
+    softened coil filaments put 14.1 % of each formation coil's current
+    inside the wall radius (exact softened-loop potential, r < 0.725 m).
+    Works in 1D and RZ alike (both carry discriminant tests). Requires
+    the conservative flux form and the split external fields.
 
 .. pp:param:: implicit_mhd.vacuum_drag_kinetic_drain
     :type: ``bool``
@@ -5882,6 +5913,14 @@ Jacobian probes.
     :math:`-\nu_\text{vac}\,|\mathbf{m}|^2/\rho` the drag causes. Off, a
     dust wind that a body force holds at its terminal velocity against the
     drag books the force's whole work as ion INTERNAL energy every step.
+    The pairing is discretely exact at :math:`\theta = 1/2` (the shipped
+    test) and for steady terminal-velocity flow; at :math:`\theta = 1` the
+    backward-Euler step's own dissipation
+    :math:`|\Delta\mathbf{m}|^2/(2\rho)` per step stays in :math:`E_i` as
+    internal energy (a dust cell stopped from :math:`u_0` in one step at
+    :math:`\nu\,\Delta t = 8` has the drain book only :math:`2/(2 +
+    \nu\,\Delta t) = 20\,\%` of the kinetic energy lost) -- the same
+    property as the pedestal-band drain.
 
 .. pp:param:: implicit_mhd.floor_consistency_width_fraction
     :type: ``float``

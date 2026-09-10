@@ -705,7 +705,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     /** Edge-centered curl of the split EXTERNAL field over mu0 -- the current
      * the external field carries inside the domain -- staggered like
      * hybrid_current_fp_plasma (the same Ampere operator fills both);
-     * allocated and refreshed only under lorentz_force_current = plasma. */
+     * allocated and refreshed only under lorentz_force_current = plasma. Not
+     * the hybrid model's hybrid_current_fp_external, which is the PRESCRIBED
+     * J_external source that CalculatePlasmaCurrent subtracts: a different
+     * object. */
     inline static constexpr char ExternalCurrentFPName[] = "implicit_mhd_external_current_fp";
     /** Its cell-centered gather (three components), the operand of the
      * j_ext x B correction of the recast fluid rows. */
@@ -1013,7 +1016,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // vertices) holds 10-45 eV. The reference code's mix = -2 structure with
     // an absolute threshold and a smooth window (the max-relative hard
     // cutoff above is unchanged). At fixed B an internal-energy threshold
-    // is a beta threshold: 50 J/m^3 at 0.5 T is beta 5e-4. In temperature,
+    // is a beta threshold: 50 J/m^3 at 0.5 T is U/(B^2/2mu0) = 5e-4, i.e.
+    // beta_p = (2/3) U/(B^2/2mu0) = 3.4e-4. In temperature,
     // T_i = G/(1.5 n kB): 50 J/m^3 is 630 eV at the production pedestal
     // density 3.3e17 m^-3, 63 eV at ten times it, 0.6 eV at 3.3e20 -- the
     // whole floor/pedestal class of the formation deck is guarded at the
@@ -1023,7 +1027,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // 1e-4 x (2.2e21 m^-3 x 1 keV total / (gamma - 1) ~ 5e5 J/m^3) at its
     // 12 us peak (f_pr_mn = f_en_mn f_t_mn = 1e-3 x 0.1; the flown
     // reference cards used mix = -1, i.e. no cutoff, and did not need one:
-    // its wall vertices are Dirichlet for both species with v = 0).
+    // its wall vertices are Dirichlet for both species with v = 0). The
+    // window's input is the TOTAL step-old U_i of the cell, background
+    // included (with the change-of-variables pedestal the pedestal's own
+    // internal energy counts: 0.16 J/m^3 at the production pedestal density
+    // and 2 eV). The rewrite and the ledger exist only with the dual-energy
+    // sync on (dual_energy_sync = 1, the default): with the sync off the
+    // guard only weights the blend and nothing is discarded or booked.
     amrex::Real m_dual_energy_internal_guard = 0.0;
     // Guard ledger (implicit_mhd.dual_energy_guard_ledger_file; requires a
     // positive guard): one row per step "step guarded_cells discarded_cum"
@@ -1031,14 +1041,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // ion energy the step-end rewrite removed from (positive) or added to
     // (negative) the conservative register over those cells,
     // sum (E_i,before - E_i,after) dV [J] ([J/m^2] in 1D; the cell measure
-    // is the geometry's, RZ annulus 2 pi r_center dr dz) -- the measured
-    // E_i excess the guarded closure discards. Evaluated on the same state
+    // is the geometry's, RZ annulus 2 pi r_center dr dz) -- an UPPER BOUND
+    // of the E_i artefact, not its measurement: the rewrite discards the
+    // whole difference between the conservative and the internal-energy
+    // evolution in every guarded cell, the artefact plus the legitimate
+    // irreversible heating the internal form misses (stagnation heating,
+    // the Lorentz-work mismatch, the pdV truncation). Evaluated on the same state
     // and arithmetic as the rewrite, BEFORE it, in a separate reduction so
     // the state-modifying kernel is untouched. First write of a run
-    // truncates a stale file; the counter restarts at zero on a
-    // simulation restart, like the other ledgers. With the file named the
-    // cell-centred register DualEnergyGuardDiscardName is allocated and
-    // accumulated alongside (the WHERE of the discard: J/m^3 per cell).
+    // truncates a stale file; the counter and the per-cell register restart
+    // at zero on a simulation restart, like the other ledgers. With the file
+    // named the cell-centred register DualEnergyGuardDiscardName is
+    // allocated and accumulated alongside (the WHERE of the discard: J/m^3
+    // per cell).
     std::string m_dual_energy_guard_ledger_file;
     bool m_dual_energy_guard_ledger_started = false;
     amrex::Real m_dual_energy_guard_discarded = 0.0;
@@ -1183,7 +1198,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // against the drag books the force's whole work (the recast rows
     // integrate u . (-div T) into E_i) as ion INTERNAL energy every step:
     // measured on the production formation deck as the multi-GW ion heat
-    // source of the wall band (2026-09-09).
+    // source of the wall band (2026-09-09). The pairing is discretely exact
+    // at theta = 1/2 (the shipped test) and for steady terminal-velocity
+    // flow; at theta = 1 the backward-Euler step's own dissipation
+    // |Delta m|^2/(2 rho) per step stays in E_i as internal energy (a dust
+    // cell stopped from u0 in one step at nu dt = 8 has the drain book only
+    // 2/(2 + nu dt) = 20 % of the kinetic energy lost) -- the same property
+    // as the pedestal-band drain.
     bool m_vacuum_drag_kinetic_drain = false;
     // implicit_mhd.lorentz_force_current: which current the fluid rows feel
     // through the magnetic force. "total" (default, bit-identical): the
@@ -1197,6 +1218,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // discrete Ampere operator as the plasma current, refreshed with every
     // external-field refresh), so the fluid feels j_plasma x B_total to
     // truncation and the ion energy books the matching u . (j_plasma x B).
+    // The residual of the correction (face-form stress divergence against
+    // point-form force) is O((dr/r)^2): 0.3-0.5 % of the coil force for a
+    // five-cell painted current sheet at production resolution, ~1 % on the
+    // 16-cell test mesh; exact in the interior only (the cells at a domain
+    // boundary keep a fraction of the uncorrected force: the face stress
+    // there carries the boundary image of B). In a RAMPING external field
+    // the settings differ too: an ideal conductor screening the ramp carries
+    // j_plasma = -j_ext and under "total" feels no force at all (the paint's
+    // force cancels the real force on the screening current), under "plasma"
+    // the screening current's force -- and the production coils ramp every
+    // step. Scale of the paint: the production formation deck's softened
+    // coil filaments put 14.1 % of each formation coil's current inside the
+    // wall radius (exact softened-loop potential, r < 0.725 m). Works in 1D
+    // and RZ alike (both carry discriminant tests).
     // Requires the recast (fluid_flux hlld/central; the pointwise-force path
     // already uses j_plasma x B) and hybrid_pic_model.add_external_fields.
     std::string m_lorentz_force_current_name = "total";

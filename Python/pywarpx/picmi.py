@@ -3265,13 +3265,18 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         total-minus-kinetic residual), the end-of-step mixmaster rewrite
         discards the E_i excess there and the Enzo overwrite U_i := E_i - KE
         is skipped. The reference code's mix=-2 structure with an absolute
-        threshold and a smooth window; step-old input, per-solve constant;
-        bit-identical where U_i_old >= 2 guard (and when off).
+        threshold and a smooth window; step-old input (the TOTAL U_i of
+        the cell, background included), per-solve constant; bit-identical
+        where U_i_old >= 2 guard (and when off). The rewrite and its
+        ledger exist only with dual_energy_sync on.
 
     dual_energy_guard_ledger_file: str, default=None
         With a positive dual_energy_internal_guard: one row per step
         "step guarded_cells discarded_cum" -- guarded cells and the
-        cumulative E_i the rewrite discarded over them [J] ([J/m^2] in 1D).
+        cumulative E_i the rewrite discarded over them [J] ([J/m^2] in 1D),
+        an upper bound of the E_i artefact (the whole difference between
+        the conservative and the internal-energy evolution in the guarded
+        cells, legitimate irreversible heating included).
         With the file named the cell-centred register
         implicit_mhd_dual_energy_guard_discard (cumulative J/m^3 per cell,
         the ledger's per-cell twin) is allocated and plot-able by name.
@@ -3577,7 +3582,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         j_ext x B_total cell by cell, from the same discrete Ampere
         operator as the plasma current, refreshed with every external-
         field refresh, so the fluid feels j_plasma x B_total to
-        truncation and the ion energy books the matching work. Requires
+        truncation and the ion energy books the matching work (residual
+        O((dr/r)^2), exact in the interior only: domain-boundary cells
+        keep a fraction of the uncorrected force; in a ramping external
+        field a screening conductor feels no force under "total" and the
+        screening current's force under "plasma"). Requires
         fluid_flux hlld/central and add_external_fields.
 
     vacuum_drag_kinetic_drain: bool, default=False
@@ -3585,7 +3594,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         total-energy channel the way the pedestal-band drag already is:
         E_i loses the kinetic decay -nu_vac |m|^2/rho the drag causes.
         Off, a dust wind held at terminal velocity by the drag books the
-        whole work of the force driving it as ion internal energy.
+        whole work of the force driving it as ion internal energy. The
+        pairing is discretely exact at theta = 1/2 and for steady flow;
+        at theta = 1 the backward-Euler dissipation |dm|^2/(2 rho) per
+        step stays in E_i as internal energy (as for the pedestal drain).
 
     floor_consistency_width_fraction: float, default=0.1
         Rectifier width of the floor-consistency source as a fraction of
