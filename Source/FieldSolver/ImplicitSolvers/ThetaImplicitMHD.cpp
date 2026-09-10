@@ -4164,9 +4164,20 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Halo pedestal energy rate [1/s]: "
                    << m_halo_pedestal_energy_rate << "\n";
-    if (m_halo_pedestal_temperature_e > 0.0_rt ||
-        m_halo_pedestal_temperature_i > 0.0_rt ||
-        !m_halo_pedestal_ledger_file.empty()) {
+    if (m_pedestal_fraction > 0.0_rt) {
+        // Under the change of variables the halo-pedestal raise machinery
+        // is inert (no fraction, no gates, no tapers): the ledger it shares
+        // books only the reference-rule lifts, if any.
+        amrex::Print() << "Halo pedestal raise machinery: inert under the "
+                          "change of variables (no image, no gates, no "
+                          "tapers); the pedestal ledger "
+                       << (m_halo_pedestal_ledger_file.empty()
+                               ? std::string("(none)")
+                               : m_halo_pedestal_ledger_file)
+                       << " books the reference-rule lifts only\n";
+    } else if (m_halo_pedestal_temperature_e > 0.0_rt ||
+               m_halo_pedestal_temperature_i > 0.0_rt ||
+               !m_halo_pedestal_ledger_file.empty()) {
         amrex::Print() << "Halo pedestal image:           electrons ";
         if (m_halo_pedestal_temperature_e > 0.0_rt) {
             amrex::Print() << "cold " << m_halo_pedestal_temperature_e
