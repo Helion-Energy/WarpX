@@ -4274,6 +4274,25 @@ Maxwell solver: kinetic-fluid hybrid
     additionally a :math:`C^1` smoothstep of the level-set distance over that many (largest) cells outside the
     wall, the MHD ``floor_outflow_limiter`` form.
 
+.. pp:param:: hybrid_pic_model.density_pedestal_track_floor
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Keep the pedestal **synchronised with the runtime density floor**. The pedestal is otherwise static: it is
+    built once from :pp:param:`hybrid_pic_model.n_floor` at startup and rebuilt only on restart and regrid, so a
+    run whose python layer moves the floor with ``set_hybrid_pic_density_floor`` (e.g. a floor held at a fixed
+    fraction of the measured peak density) drifts apart from its own pedestal. With this on, that setter marks the
+    pedestal image stale and it is refilled before its next use; because an empty
+    :pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)` fills the pedestal with the uniform
+    :pp:param:`hybrid_pic_model.n_floor`, the refilled pedestal *is* the new floor
+    (:math:`n_\mathrm{ped} = n_\mathrm{floor}`), with the embedded-boundary exclusion and taper unchanged and
+    the inventory :math:`\sum n_\mathrm{ped}\, dV` retallied. Requires
+    :pp:param:`hybrid_pic_model.density_pedestal` = ``1`` and an EMPTY
+    :pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)`: a parser image is a fixed spatial profile that
+    carries no floor to follow, and the combination is refused at startup rather than silently ignored. Prints
+    ``[hybrid] density pedestal track_floor:`` at startup. Off (the default) is bit-identical.
+
 .. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
     :type: ``float``
     :default: :pp:param:`hybrid_pic_model.n_floor`

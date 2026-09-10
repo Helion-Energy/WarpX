@@ -286,6 +286,8 @@ void HybridPICModel::ReadParameters ()
                     m_density_pedestal_expression);
     utils::parser::queryWithParser(pp_hybrid, "density_pedestal_eb_taper_cells",
                                    m_density_pedestal_eb_taper_cells);
+    pp_hybrid.query("density_pedestal_track_floor",
+                    m_density_pedestal_track_floor);
     if (m_density_pedestal) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_n_floor > 0.0_rt || !m_density_pedestal_expression.empty(),
@@ -295,6 +297,22 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_density_pedestal_eb_taper_cells >= 0.0_rt,
             "hybrid_pic_model.density_pedestal_eb_taper_cells must be >= 0");
+    }
+    if (m_density_pedestal_track_floor) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_density_pedestal,
+            "hybrid_pic_model.density_pedestal_track_floor = 1 needs "
+            "hybrid_pic_model.density_pedestal = 1 (there is no pedestal to "
+            "keep in step with the density floor otherwise)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_density_pedestal_expression.empty(),
+            "hybrid_pic_model.density_pedestal_track_floor = 1 requires an "
+            "EMPTY hybrid_pic_model.density_pedestal_profile(x,y,z): the "
+            "pedestal follows the runtime density floor only through the "
+            "uniform n_floor refill, and a parser image is a fixed spatial "
+            "profile that carries no floor to follow. Drop the profile (the "
+            "pedestal is then the floor everywhere outside the EB body) or "
+            "drop density_pedestal_track_floor");
     }
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_source_taper_n",
                                    m_qdsmc_source_taper_n);
@@ -1481,6 +1499,13 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             << " electrons, U_ped(Te0) = " << u_ped
             << " J; freeze gate off, V_e live everywhere; gates/eta keep n_dep; "
                "rho record = deposited, rho_pedestal = n_ped)\n";
+        amrex::Print() << "[hybrid] density pedestal track_floor: "
+            << (m_density_pedestal_track_floor
+                ? "ON (a runtime density-floor change refills the pedestal, "
+                  "so n_ped == n_floor for the rest of the run)"
+                : "OFF (the pedestal is static at its boot value; a runtime "
+                  "density-floor change does not move it)")
+            << "\n";
     }
 
     // Electron-ion energy-equilibration rate nu_ei(rho,Te,Ti,t) for the Q_ei term.
