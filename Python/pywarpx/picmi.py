@@ -3470,6 +3470,28 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the accepted theta state — the conservation instrument of the
         outlet, the relaxation-side sibling of wall_ledger_file.
 
+    lorentz_force_current: str, default="total"
+        Which current the fluid rows feel through the magnetic force.
+        "total": the conservative (hlld/central) momentum rows integrate
+        -div of the Maxwell stress of the TOTAL field, i.e. (j_plasma +
+        j_ext) x B with j_ext = curl(B_ext)/mu0 the current the split
+        external field carries inside the domain (zero only when every
+        external source sits outside it; a softened in-domain coil
+        filament puts part of its current inside the fluid cells, which
+        then feel the coil's own hoop force). "plasma": the rows subtract
+        j_ext x B_total cell by cell, from the same discrete Ampere
+        operator as the plasma current, refreshed with every external-
+        field refresh, so the fluid feels j_plasma x B_total to
+        truncation and the ion energy books the matching work. Requires
+        fluid_flux hlld/central and add_external_fields.
+
+    vacuum_drag_kinetic_drain: bool, default=False
+        Pair the vacuum dust drag (vacuum_drag_rate) with the ion
+        total-energy channel the way the pedestal-band drag already is:
+        E_i loses the kinetic decay -nu_vac |m|^2/rho the drag causes.
+        Off, a dust wind held at terminal velocity by the drag books the
+        whole work of the force driving it as ion internal energy.
+
     floor_consistency_width_fraction: float, default=0.1
         Rectifier width of the floor-consistency source as a fraction of
         the cell bound; the bound-riding supply capacity is
@@ -3978,6 +4000,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_relaxation_temperature=None,
         halo_relaxation_n_max=None,
         halo_relaxation_ledger_file=None,
+        lorentz_force_current=None,
+        vacuum_drag_kinetic_drain=None,
         floor_consistency_rate=None,
         floor_consistency_width_fraction=None,
         floor_ledger_file=None,
@@ -4132,6 +4156,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_relaxation_temperature = halo_relaxation_temperature
         self.halo_relaxation_n_max = halo_relaxation_n_max
         self.halo_relaxation_ledger_file = halo_relaxation_ledger_file
+        self.lorentz_force_current = lorentz_force_current
+        self.vacuum_drag_kinetic_drain = vacuum_drag_kinetic_drain
         self.floor_consistency_rate = floor_consistency_rate
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
@@ -4300,6 +4326,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_relaxation_temperature = self.halo_relaxation_temperature
         implicit_mhd.halo_relaxation_n_max = self.halo_relaxation_n_max
         implicit_mhd.halo_relaxation_ledger_file = self.halo_relaxation_ledger_file
+        implicit_mhd.lorentz_force_current = self.lorentz_force_current
+        implicit_mhd.vacuum_drag_kinetic_drain = self.vacuum_drag_kinetic_drain
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
         implicit_mhd.floor_consistency_width_fraction = (
             self.floor_consistency_width_fraction

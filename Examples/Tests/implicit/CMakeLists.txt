@@ -4759,3 +4759,98 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
 )
+
+# ============ The external field's in-domain current force ============
+# A uniform static plasma column in an external field that carries a
+# current inside the domain (a soft-core coil filament inside the bore does
+# this; here A_theta = c r^3):
+# today's conservative rows integrate -div of the TOTAL Maxwell stress and
+# push the fluid with the external current's own force (the "total" run
+# measures f_ext t); implicit_mhd.lorentz_force_current = plasma subtracts
+# it cell by cell (the fluid stays at rest to truncation, the ion-energy
+# work pairs with the corrected force); a zero external current is the
+# plain solver bit for bit under both settings.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_total  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_external_current  # inputs
+    "analysis_mhd_external_current.py total diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_plasma  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current implicit_mhd.lorentz_force_current=plasma"  # inputs
+    "analysis_mhd_external_current.py plasma diags/diag000000 diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_total/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_total  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_zero  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current my_constants.c_ext=0.0"  # inputs
+    "analysis_mhd_external_current.py total diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_null  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current my_constants.c_ext=0.0 implicit_mhd.lorentz_force_current=plasma"  # inputs
+    "analysis_mhd_twin_bytes.py diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_zero/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_zero  # dependency
+)
+
+# ============ The vacuum dust drag's kinetic drain ============
+# Uniform dust sliding under the vacuum drag: without the drain the lost
+# kinetic energy is ion heat (the "off" run measures it), with
+# implicit_mhd.vacuum_drag_kinetic_drain = 1 the internal energy is
+# constant; nu = 0 is the plain solver bit for bit under both settings.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_off  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain  # inputs
+    "analysis_mhd_vacuum_drag_drain.py off diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain implicit_mhd.vacuum_drag_kinetic_drain=1"  # inputs
+    "analysis_mhd_vacuum_drag_drain.py on diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_off  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_zero  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain my_constants.nu=0.0"  # inputs
+    "analysis_mhd_vacuum_drag_drain.py zero diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_null  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain my_constants.nu=0.0 implicit_mhd.vacuum_drag_kinetic_drain=1"  # inputs
+    "analysis_mhd_twin_bytes.py diags/diag000010 ../test_1d_theta_implicit_mhd_vacuum_drag_drain_zero/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_zero  # dependency
+)
