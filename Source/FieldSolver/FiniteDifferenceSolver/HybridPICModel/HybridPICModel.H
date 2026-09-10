@@ -2651,8 +2651,26 @@ public:
      *  body only (the MHD masked-band rule); > 0 = C^1 smoothstep of the
      *  level-set distance over that many (largest) cells outside the wall. */
     amrex::Real m_density_pedestal_eb_taper_cells = 0.0;
-    /** Set by AllocateLevelMFs (init, restart, regrid): the pedestal field
-     *  must be (re)filled before its next use. */
+    /** density_pedestal_track_floor (default false = bit-identical): keep the
+     *  pedestal SYNCHRONISED with the runtime density floor. A deck that moves
+     *  the engine floor during the run (through the python binding
+     *  set_hybrid_pic_density_floor, e.g. a floor held at a fraction of the
+     *  measured peak density) otherwise leaves the pedestal at the value it
+     *  was built with at t = 0, so the two references drift apart and
+     *  n_eff = n_dep + n_ped no longer sits on the floor the positivity
+     *  backstop uses. With this on, that setter marks the pedestal image
+     *  STALE and the next EnsureDensityPedestal refills it; because the refill
+     *  of an EMPTY density_pedestal_profile uses n_uniform = m_n_floor, the
+     *  refilled pedestal IS the new floor by construction (the EB exclusion
+     *  and taper are unchanged, and the inventory is retallied with it).
+     *  It therefore REQUIRES an empty density_pedestal_profile(x,y,z): a
+     *  parser image is a fixed spatial profile with no floor in it and cannot
+     *  follow, so that combination is refused at init instead of silently
+     *  ignored. */
+    bool m_density_pedestal_track_floor = false;
+    /** Set by AllocateLevelMFs (init, restart, regrid), and by the runtime
+     *  density-floor setter when density_pedestal_track_floor is on: the
+     *  pedestal field must be (re)filled before its next use. */
     mutable bool m_density_pedestal_stale = true;
     /** Pedestal electron inventory sum(n_ped dV) over all levels [electrons]. */
     mutable amrex::Real m_density_pedestal_inventory = 0.0;
