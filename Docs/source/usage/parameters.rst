@@ -5848,6 +5848,41 @@ Jacobian probes.
     converged solve books the removal to the nonlinear solver
     tolerance).
 
+.. pp:param:: implicit_mhd.lorentz_force_current
+    :type: ``string``
+    :default: ``total`` (bit-identical)
+
+    Which current the fluid rows feel through the magnetic force.
+    ``total``: the conservative (``hlld``/``central``) momentum rows
+    integrate :math:`-\nabla\cdot\mathsf{T}` of the Maxwell stress of the
+    TOTAL field, i.e. :math:`(\mathbf{j}_\text{plasma} +
+    \mathbf{j}_\text{ext})\times\mathbf{B}` with
+    :math:`\mathbf{j}_\text{ext} = \nabla\times\mathbf{B}_\text{ext}/\mu_0`
+    the current the split external field
+    (:pp:param:`hybrid_pic_model.add_external_fields`) carries INSIDE the
+    domain -- exactly zero only when every external source sits outside
+    it; a softened in-domain coil filament puts part of its current inside
+    the fluid cells, which then feel the coil's own hoop force and, through
+    the paired work term, book it as ion energy. ``plasma``: the rows
+    subtract :math:`\mathbf{j}_\text{ext}\times\mathbf{B}_\text{total}`
+    cell by cell (the external current from the same discrete Ampere
+    operator as the plasma current, refreshed with every external-field
+    refresh), so the fluid feels
+    :math:`\mathbf{j}_\text{plasma}\times\mathbf{B}_\text{total}` to
+    truncation and the ion-energy work pairs with it. Requires the
+    conservative flux form and the split external fields.
+
+.. pp:param:: implicit_mhd.vacuum_drag_kinetic_drain
+    :type: ``bool``
+    :default: ``0`` (off, bit-identical)
+
+    Pair the vacuum dust drag (:pp:param:`implicit_mhd.vacuum_drag_rate`)
+    with the ion total-energy channel exactly like the pedestal-band drag
+    already is: :math:`E_i` loses the kinetic decay
+    :math:`-\nu_\text{vac}\,|\mathbf{m}|^2/\rho` the drag causes. Off, a
+    dust wind that a body force holds at its terminal velocity against the
+    drag books the force's whole work as ion INTERNAL energy every step.
+
 .. pp:param:: implicit_mhd.floor_consistency_width_fraction
     :type: ``float``
     :default: ``0.1``

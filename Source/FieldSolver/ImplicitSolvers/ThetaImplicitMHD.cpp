@@ -237,6 +237,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_electron_temperature_floor);
     utils::parser::queryWithParser(pp, "vacuum_mass_density", m_vacuum_mass_density);
     utils::parser::queryWithParser(pp, "vacuum_drag_rate", m_vacuum_drag_rate);
+    pp.query("vacuum_drag_kinetic_drain", m_vacuum_drag_kinetic_drain);
+    pp.query("lorentz_force_current", m_lorentz_force_current_name);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_current_name == "total" ||
+            m_lorentz_force_current_name == "plasma",
+        "implicit_mhd.lorentz_force_current must be 'total' (the fluid rows "
+        "integrate -div of the total Maxwell stress) or 'plasma' (the external "
+        "field's in-domain current force is subtracted)");
+    m_exclude_external_current_force = (m_lorentz_force_current_name == "plasma");
     utils::parser::queryWithParser(pp, "halo_pedestal_fraction",
                                    m_halo_pedestal_fraction);
     utils::parser::queryWithParser(pp, "halo_pedestal_drag_rate",
@@ -2070,6 +2079,22 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
+    if (m_exclude_external_current_force) {
+        // lorentz_force_current = plasma: the external field's in-domain
+        // current, edge components staggered (and guarded) exactly like the
+        // plasma current -- the same Ampere operator fills both, on tiles
+        // grown by one cell -- plus the cell-centered gather the fluid rows
+        // read. The hybrid registers are allocated before this solver's.
+        using ablastr::fields::Direction;
+        const auto plasma_current =
+            fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+        for (int idir = 0; idir < 3; ++idir) {
+            fields.alloc_init(ExternalCurrentFPName, Direction{idir}, lev,
+                              amrex::convert(ba, plasma_current[idir]->ixType()),
+                              dm, 1, plasma_current[idir]->nGrowVect(), 0.0_rt);
+        }
+        fields.alloc_init(ExternalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
+    }
     // Cell-centered stage-E gather of the Ohm-current Joule quench
     // (joule_ohm_current). Allocated unconditionally (the register remake
     // machinery wants a static field list); filled only when the quench
@@ -2654,6 +2679,19 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.fluid_flux = hlld or central: the density-keyed "
         "vacuum resistivity boosts the solver-assembled Ohm field advance "
         "only (Joule heating keeps the un-boosted user resistivity)");
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_exclude_external_current_force || m_use_recast,
+        "implicit_mhd.lorentz_force_current = plasma requires "
+        "implicit_mhd.fluid_flux = hlld or central: only the recast fluid rows "
+        "integrate the total-stress divergence (the pointwise-force path "
+        "already uses j_plasma x B)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_exclude_external_current_force ||
+            m_hybrid_pic_model->m_add_external_fields,
+        "implicit_mhd.lorentz_force_current = plasma requires "
+        "hybrid_pic_model.add_external_fields: without a split external field "
+        "there is no external current to take out of the fluid rows");
 
     if (m_vacuum_mass_density > 0.0_rt) {
         // Holmstrom-style vacuum cell switching for the ion fluid: cells
@@ -3959,6 +3997,18 @@ void ThetaImplicitMHD::PrintParameters () const
                        : (m_fused_residual_level >= 2 ? "off: several boxes or a periodic domain"
                                                       : "off"))
                    << ")\n"
+                   << "Lorentz force current:         " << m_lorentz_force_current_name
+                   << (m_exclude_external_current_force
+                           ? " (the external field's in-domain current force is "
+                             "subtracted from the fluid rows)"
+                           : " (the fluid rows integrate -div of the total "
+                             "Maxwell stress)")
+                   << "\n"
+                   << "Vacuum drag kinetic drain:     "
+                   << (m_vacuum_drag_kinetic_drain
+                           ? "on (E_i loses the kinetic decay of the vacuum drag)"
+                           : "off")
+                   << "\n"
                    << "Ion charge-to-mass [C/kg]:     " << m_ion_charge_to_mass << "\n"
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
@@ -6195,6 +6245,41 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
 #endif
 }
 
+void ThetaImplicitMHD::FillExternalCurrent ()
+{
+    // lorentz_force_current = plasma: the current the split external field
+    // carries inside the domain, j_ext = curl B_ext / mu0, through the SAME
+    // discrete Ampere operator that forms the plasma current from the
+    // response field (so the two are curls of the two halves of the total
+    // field), then gathered to cell centers exactly like total_current_cc.
+    // Called after every external-field refresh (the circuit hook runs
+    // ahead of the cell-centered assembly) and before the fluid rows. The
+    // external B carries exact ghost curls (the analytic A fill covers the
+    // grown box), so the boundary-row curl is trustworthy.
+    const auto external_field =
+        m_WarpX->m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0);
+    auto external_current = m_WarpX->m_fields.get_alldirs(ExternalCurrentFPName, 0);
+    m_WarpX->get_pointer_fdtd_solver_fp(0)->CalculateCurrentAmpere(
+        external_current, external_field, m_WarpX->GetEBUpdateEFlag()[0], 0);
+
+    amrex::MultiFab& external_current_cc =
+        *m_WarpX->m_fields.get(ExternalCurrentCCName, 0);
+    const auto cell_stag = cell_staggering();
+    const auto coarsening = amrex::GpuArray<int, 3>{1, 1, 1};
+    for (int component = 0; component < 3; ++component) {
+        const auto current_stag = field_staggering(*external_current[component]);
+        for (amrex::MFIter mfi(external_current_cc); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto current_cc = external_current_cc.array(mfi);
+            const auto current = external_current[component]->const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                current_cc(i, j, k, component) = ablastr::coarsen::sample::Interp(
+                    current, current_stag, cell_stag, coarsening, i, j, k, 0);
+            });
+        }
+    }
+}
+
 void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
 {
     const auto total_current =
@@ -6321,6 +6406,10 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
         }
     }
     } // !m_fused_residual
+
+    if (m_exclude_external_current_force) {
+        FillExternalCurrent();
+    }
 
     if (m_fused_residual) {
         // Wave A: the axial ghost fills of both cell-centered fields (J a
@@ -9081,6 +9170,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
+    const bool vacuum_drag_kinetic_drain = m_vacuum_drag_kinetic_drain;
     // Halo source taper (see ComputeFluidRHSFromFaceFluxes): reactive
     // work sources taper C^1-smoothly to zero below twice the pedestal;
     // identically 1 when the pedestal is off.
@@ -9633,8 +9723,13 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // the pairing is discretely exact) -- otherwise the
                 // relaxed band would read as spurious internal heating.
                 // Outside plasma_weight, like the momentum drag term.
-                const amrex::Real drag_kinetic_drain =
+                amrex::Real drag_kinetic_drain =
                     halo_drag * 2.0_rt * kinetic_energy;
+                if (vacuum_drag_kinetic_drain) {
+                    // The vacuum dust drag gets the same pairing (see
+                    // m_vacuum_drag_kinetic_drain): off = today's expression.
+                    drag_kinetic_drain += vacuum_drag * 2.0_rt * kinetic_energy;
+                }
                 // Pedestal-band ion-energy relaxation (see
                 // m_halo_pedestal_energy_rate): drains ONLY the internal
                 // part E_i - |m|^2/(2 rho) toward the frozen pedestal
@@ -15334,6 +15429,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
+    const bool vacuum_drag_kinetic_drain = m_vacuum_drag_kinetic_drain;
+    // lorentz_force_current = plasma: the cell-centered external current the
+    // rows below subtract as j_ext x B (see FillExternalCurrent).
+    const bool exclude_external_force = m_exclude_external_current_force;
+    const amrex::MultiFab* const external_current_cc =
+        exclude_external_force ? m_WarpX->m_fields.get(ExternalCurrentCCName, 0)
+                               : nullptr;
     // Halo source taper (inert at pedestal 0, where the limiter is
     // identically 1): the reactive work terms and the CGL relaxation
     // exchange taper C^1-smoothly to zero below twice the pedestal.
@@ -15556,6 +15658,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         const auto ion_int = ion_internal_energy.const_array(mfi);
         const auto ion_int_old = old_ion_internal_energy.const_array(mfi);
         const auto j_plasma = current.const_array(mfi);
+        const auto j_ext = exclude_external_force
+                               ? external_current_cc->const_array(mfi)
+                               : amrex::Array4<amrex::Real const>{};
         const auto b_cc = magnetic_cc.const_array(mfi);
         const auto e_ohm = ohm_electric_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
@@ -15778,6 +15883,30 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 magnetic_force[1] -= inverse_radius * magnetic_theta_r;
             }
 #endif
+
+            if (exclude_external_force) {
+                // lorentz_force_current = plasma: the total-stress divergence
+                // above is (j_plasma + j_ext) x B_total, j_ext the current the
+                // split external field carries inside the domain. Take the
+                // external field's own force back out, cell by cell, so the
+                // fluid feels j_plasma x B_total (to truncation) and the
+                // ion-energy work below, which reads magnetic_force, pairs
+                // with the force the momentum rows actually apply.
+                const amrex::Real jx_e = j_ext(i, j, k, 0);
+                const amrex::Real jy_e = j_ext(i, j, k, 1);
+                const amrex::Real jz_e = j_ext(i, j, k, 2);
+                const amrex::Real bx_t = b_cc(i, j, k, 0);
+                const amrex::Real by_t = b_cc(i, j, k, 1);
+                const amrex::Real bz_t = b_cc(i, j, k, 2);
+                const amrex::Real external_force[3] = {
+                    jy_e * bz_t - jz_e * by_t, jz_e * bx_t - jx_e * bz_t,
+                    jx_e * by_t - jy_e * bx_t};
+                for (int component = 0; component < 3; ++component) {
+                    magnetic_force[component] -= external_force[component];
+                    divergence_momentum_flux[component] +=
+                        external_force[component];
+                }
+            }
 
             // Stage B+ magnetization weight of the gyrotropic closure,
             // w = Omega_ci^2 dx^2 / (Omega_ci^2 dx^2 + v_thi^2), i.e.
@@ -16238,8 +16367,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     momentum_square += mom(i, j, k, component) *
                                        mom(i, j, k, component);
                 }
-                const amrex::Real drag_kinetic_drain =
+                amrex::Real drag_kinetic_drain =
                     halo_drag * momentum_square / safe_density;
+                if (vacuum_drag_kinetic_drain) {
+                    // The vacuum dust drag gets the same pairing (see
+                    // m_vacuum_drag_kinetic_drain): off = today's expression.
+                    drag_kinetic_drain +=
+                        vacuum_drag * momentum_square / safe_density;
+                }
                 // Pedestal-band ion-energy relaxation (see
                 // m_halo_pedestal_energy_rate): drains ONLY the internal
                 // part E_i - |m|^2/(2 rho) toward the frozen pedestal

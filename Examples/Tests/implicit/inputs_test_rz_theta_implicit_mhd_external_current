@@ -1,0 +1,130 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# An external field that carries a current INSIDE the domain, over a
+# uniform static plasma column. The state field is the uniform B_z = B0
+# (no plasma current); the split external vector potential
+# A_theta = c_ext r^3 adds B_z,ext = 4 c_ext r^2, whose curl is the
+# in-domain external current j_theta,ext = -8 c_ext r / mu0 (a smeared
+# axisymmetric current distribution, the same kind a soft-core coil
+# filament puts inside the bore). Nothing physical acts on the fluid
+# (j_plasma = 0, uniform pressure, u = 0), so it must stay at rest. With
+# implicit_mhd.lorentz_force_current = total (the default) the conservative
+# momentum rows integrate -div of the TOTAL Maxwell stress and the fluid
+# accelerates radially under j_ext x B_total; with = plasma the external
+# force is subtracted and the fluid stays at rest to truncation. c_ext = 0
+# (command line) is the null twin: no external current, bitwise identical
+# under both settings.
+my_constants.n0 = 1.0e19
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 50.0
+my_constants.P0 = n0 * T0_ev * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.05
+my_constants.c_ext = 0.25
+my_constants.Lr = 0.1
+my_constants.Lz = 0.05
+my_constants.nr = 16
+my_constants.nz = 8
+my_constants.dt = 2.0e-9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 16
+amr.n_cell = nr nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+boundary.particle_lo = none periodic
+boundary.particle_hi = reflecting periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# The split external field: A_theta = c_ext r^3 (x is r in the RZ parser),
+# curl curl A nonzero inside the domain. A pure-theta axisymmetric A is
+# exactly divergence-free, so the cleaner stays off.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = sheet
+external_vector_potential.sheet.Ay_external_grid_function(x,y,z) = "c_ext*x*x*x"
+external_vector_potential.sheet.A_time_external_function(t) = "1.0"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE ######
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * P0
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = P0
+implicit_mhd.ion_pressure(x,y,z) = P0
+
+# The uniform state field (the plasma response carries no current).
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 16
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t implicit_mhd_momentum_z
+diag1.write_species = 0

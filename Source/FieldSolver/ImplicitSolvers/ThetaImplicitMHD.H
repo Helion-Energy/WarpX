@@ -395,6 +395,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * single-component diagnostic views (MomentumDiag*Name). */
     void PublishMomentumComponents () const;
     void FillCellCenteredElectromagneticFields ();
+    /** lorentz_force_current = plasma: refresh the external field's in-domain
+     * current j_ext = curl B_ext / mu0 (edge register, the plasma-current
+     * Ampere operator) and its cell-centered gather; called from
+     * FillCellCenteredElectromagneticFields, i.e. after every external-field
+     * refresh and before the fluid rows read it. */
+    void FillExternalCurrent ();
     /** Gather the assembled stage E (Efield_fp; plus the external E under
      * the split-field external-A scheme) to cell centers into
      * OhmElectricFieldCCName for the Ohm-current Joule quench (see
@@ -696,6 +702,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
+    /** Edge-centered curl of the split EXTERNAL field over mu0 -- the current
+     * the external field carries inside the domain -- staggered like
+     * hybrid_current_fp_plasma (the same Ampere operator fills both);
+     * allocated and refreshed only under lorentz_force_current = plasma. */
+    inline static constexpr char ExternalCurrentFPName[] = "implicit_mhd_external_current_fp";
+    /** Its cell-centered gather (three components), the operand of the
+     * j_ext x B correction of the recast fluid rows. */
+    inline static constexpr char ExternalCurrentCCName[] = "implicit_mhd_external_current_cc";
     /** Cell-centered electron temperature scratch of the temperature-primary
      * nodal closure fill (see FillFluidSources): T_e = p_e/(n_f kB) is formed
      * NATIVELY on the cell grid (the same floored pressure recovery as the
@@ -1161,6 +1175,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_vacuum_mass_density = 0.0;
     // Velocity relaxation rate [1/s] applied to vacuum dust (0 disables).
     amrex::Real m_vacuum_drag_rate = 0.0;
+    // implicit_mhd.vacuum_drag_kinetic_drain (default off = bit-identical):
+    // pair the vacuum dust drag with the ion total-energy channel exactly
+    // like the pedestal-band drag already is (drag_kinetic_drain), so E_i
+    // loses the kinetic decay -nu_vac |m|^2/rho the drag causes. Without the
+    // pairing a dust wind that a body force holds at its terminal velocity
+    // against the drag books the force's whole work (the recast rows
+    // integrate u . (-div T) into E_i) as ion INTERNAL energy every step:
+    // measured on the production formation deck as the multi-GW ion heat
+    // source of the wall band (2026-09-09).
+    bool m_vacuum_drag_kinetic_drain = false;
+    // implicit_mhd.lorentz_force_current: which current the fluid rows feel
+    // through the magnetic force. "total" (default, bit-identical): the
+    // recast momentum rows integrate -div of the Maxwell stress of the TOTAL
+    // field, i.e. (j_plasma + j_ext) x B with j_ext = curl B_ext / mu0 the
+    // current the split external field carries INSIDE the domain -- exactly
+    // zero only when every external source sits outside it (a softened
+    // in-domain coil filament puts part of its current inside the fluid
+    // cells, and the fluid then feels the coil's own hoop force). "plasma":
+    // the rows subtract j_ext x B_total cell by cell (j_ext from the same
+    // discrete Ampere operator as the plasma current, refreshed with every
+    // external-field refresh), so the fluid feels j_plasma x B_total to
+    // truncation and the ion energy books the matching u . (j_plasma x B).
+    // Requires the recast (fluid_flux hlld/central; the pointwise-force path
+    // already uses j_plasma x B) and hybrid_pic_model.add_external_fields.
+    std::string m_lorentz_force_current_name = "total";
+    bool m_exclude_external_current_force = false;
     // ---- Offset-density (pedestal) halo formulation (0 disables). ----
     //
     // Fraction f of the instantaneous density peak defining the dynamic
