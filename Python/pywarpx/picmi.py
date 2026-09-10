@@ -3351,7 +3351,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         diluted). Species with a zero temperature keep the max() raise.
 
     halo_pedestal_ledger_file: str, optional
-        Pedestal refresh ledger (requires halo_pedestal_fraction > 0):
+        Pedestal refresh ledger (requires halo_pedestal_fraction > 0, or
+        pedestal_fraction > 0, under which the rows book the reference-rule
+        lifts only and read "0 0 0 0" otherwise):
         one row per step, "step raised_cells mass energy_e energy_i",
         cumulative injected mass [kg] and SIGNED electron / ion energy
         change [J] of the raise ([kg/m^2], [J/m^2] in 1D), booked exactly
@@ -3380,7 +3382,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     pedestal_reference_density: float, optional
         en0 in m^-3 for the change-of-variables pedestal, fixed at boot.
         Default (unset): the solver's vacuum reference base density (the
-        deck's vacuum reference n0, the reference code's card en0). An
+        deck's vacuum reference n0, the reference code's card en0); with
+        pedestal_fraction > 0 one of the two must be given (asserted: with
+        neither the change of variables would be a silent no-op). An
         explicit 0 gives a zero background (the machinery's null).
 
     pedestal_reference_density_update: {"off", "reference_rule"}, default="off"
@@ -3392,10 +3396,24 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         in the floor form, booked in halo_pedestal_ledger_file and the
         implicit_mhd_pedestal_injected_* fields and printed.
 
-    pedestal_temperature_e: float, default=0.5 (eV)
-    pedestal_temperature_i: float, default=0.1 (eV)
-        The background's electron / ion temperatures (the reference code's
-        floors); must be positive when the change of variables is on.
+    pedestal_temperature_e: float, default=2.0 (eV)
+    pedestal_temperature_i: float, default=2.0 (eV)
+        The background's electron / ion temperatures; must be positive when
+        the change of variables is on. The defaults are a numerical floor
+        (0.1 Pa at n_ped 3e17 m^-3 against a halo of hundreds of Pa). The
+        reference code's floors 0.5 / 0.1 eV are legitimate values subject
+        to: the background pressures n_ped kB T must exceed
+        electron_pressure_floor / ion_pressure_floor (asserted at boot; a
+        guard above the background would park the empty halo off the fixed
+        point; at 3e17 m^-3, 0.1 eV is 5.3e-3 Pa), and a colder background
+        (0.5 / 0.15 eV) was measured to stagnate the linear solve of a
+        formation run (GMRES 5-17x, 120 stagnation exits in 1.6 us) with
+        physics identical to the 2 eV run, which ran at the pedestal-free
+        control's cost. Unequal temperatures are not a fixed point of the
+        electron-ion exchange where electron_ion_equilibration is armed
+        (electrons pinned at the background floor, ions warming: a
+        floor-projection injection the pedestal ledger does not book);
+        keep them equal unless that is intended.
 
     pedestal_floor: {"background", "positivity"}, default="background"
         Admissible set under the change of variables: "background" makes

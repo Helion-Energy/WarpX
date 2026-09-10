@@ -1611,11 +1611,25 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_pedestal_temperature_e > 0.0_rt && m_pedestal_temperature_i > 0.0_rt,
             "implicit_mhd.pedestal_temperature_e / _i must be positive (the "
-            "background carries a fixed cold internal energy; the reference "
-            "code's floors 0.5 eV / 0.1 eV are the defaults)");
+            "background carries a fixed cold internal energy; defaults 2 eV "
+            "/ 2 eV, a numerical floor; the reference code's floors are "
+            "0.5 eV / 0.1 eV)");
         // en0: explicit, else the shared vacuum reference BASE density
         // (the deck's vacuum reference n0, the reference code's card en0),
         // converted to a number density through the ion charge-to-mass.
+        // One of the two must be given: with neither the background would
+        // be zero and the change of variables a silent no-op (the plain
+        // solver behind an armed knob); the explicit 0 stays the documented
+        // zero-background null.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_pedestal_reference_density_set ||
+                m_vacuum_reference_base_density > 0.0_rt,
+            "implicit_mhd.pedestal_fraction > 0 needs a reference density "
+            "en0: set implicit_mhd.pedestal_reference_density [m^-3] (an "
+            "explicit 0 is the documented zero-background null) or a "
+            "positive implicit_mhd.vacuum_reference_base_density (the "
+            "shared vacuum reference); with neither the background would be "
+            "zero and the change of variables a silent no-op");
         m_pedestal_en0_mass_density =
             m_pedestal_reference_density_set
                 ? m_pedestal_reference_density * PhysConst::q_e /
@@ -1636,8 +1650,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                      m_pedestal_ion_internal * (m_gamma_i - 1.0_rt) >
                          m_ion_pressure_floor),
                 "implicit_mhd.pedestal_temperature_e / _i: the background "
-                "pressures n_ped kB T must exceed the electron / ion pressure "
-                "floors");
+                "pressures p_ped = n_ped kB T_ped must exceed "
+                "implicit_mhd.electron_pressure_floor / "
+                "implicit_mhd.ion_pressure_floor (with pedestal_floor = "
+                "background a guard above the background would park the "
+                "empty halo at the guard, off the fixed point): raise the "
+                "background temperature or lower the floor -- the banner "
+                "line 'PEDESTAL background pressures' prints both");
         }
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -4226,6 +4245,43 @@ void ThetaImplicitMHD::PrintParameters () const
                                ? "background (deviations >= 0)"
                                : "positivity guards")
                        << "\n";
+        // The deck-floor constraint, explicit: the background pressures
+        // against the solver's pressure floors (asserted at boot), and the
+        // domain totals the background represents (the geometry's own
+        // measure: per m^2 in 1D).
+        const amrex::Real background_pressure_e =
+            m_pedestal_electron_energy * (m_gamma_e - 1.0_rt);
+        const amrex::Real background_pressure_i =
+            m_pedestal_ion_internal * (m_gamma_i - 1.0_rt);
+        amrex::Real domain_volume = 0.0_rt;
+        if (m_WarpX != nullptr) {
+            const auto lower = m_WarpX->Geom(0).ProbLoArray();
+            const auto upper = m_WarpX->Geom(0).ProbHiArray();
+#if defined(WARPX_DIM_RZ)
+            domain_volume = MathConst::pi *
+                            (upper[0] * upper[0] - lower[0] * lower[0]) *
+                            (upper[1] - lower[1]);
+#else
+            domain_volume = 1.0_rt;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                domain_volume *= upper[d] - lower[d];
+            }
+#endif
+        }
+        amrex::Print() << "PEDESTAL background pressures: p_e,ped "
+                       << background_pressure_e
+                       << " Pa (electron_pressure_floor "
+                       << m_electron_pressure_floor << "), p_i,ped "
+                       << background_pressure_i << " Pa (ion_pressure_floor "
+                       << m_ion_pressure_floor
+                       << "): both must exceed their floors (asserted); "
+                          "domain background totals over V = "
+                       << domain_volume << ": mass "
+                       << m_pedestal_mass_density * domain_volume
+                       << " kg, U_e "
+                       << m_pedestal_electron_energy * domain_volume
+                       << " J, e_i " << m_pedestal_ion_internal * domain_volume
+                       << " J\n";
     }
     if (m_halo_pedestal_number_density > 0.0_rt) {
         amrex::Print() << "Halo pedestal density:         static "
@@ -16149,14 +16205,24 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // SAME weighted, clamped stress the momentum divergence
                 // integrates -- and the (1/3, 2/3) split keeps isotropy
                 // a fixed point of pure compression at w = 0.
-                const amrex::Real pressure_parallel =
-                    2.0_rt * (upar(i, j, k) +
-                              (pedestal_cov
-                                   ? theta_implicit_mhd::pedestal_deviation_shift(
-                                         upar(i, j, k), pedestal_ion_parallel)
-                                   : 0.0_rt));
-                const amrex::Real pressure_perp =
-                    uperp(i, j, k) +
+                // The TOTAL pressures: every coefficient, instability
+                // measure, floor and the relaxation below read the state
+                // (the closure sees the totals, header contract) ...
+                const amrex::Real pressure_parallel = 2.0_rt * upar(i, j, k);
+                const amrex::Real pressure_perp = uperp(i, j, k);
+                // ... and the WORK pressures: under the change-of-variables
+                // pedestal the uniform background's compression work leaves
+                // the pointwise sources through the rectified deviation
+                // pressures (the shift is exactly 0.0 when off, so these
+                // are the totals to the bit).
+                const amrex::Real work_pressure_parallel =
+                    pressure_parallel +
+                    2.0_rt * (pedestal_cov
+                                  ? theta_implicit_mhd::pedestal_deviation_shift(
+                                        upar(i, j, k), pedestal_ion_parallel)
+                                  : 0.0_rt);
+                const amrex::Real work_pressure_perp =
+                    pressure_perp +
                     (pedestal_cov ? theta_implicit_mhd::pedestal_deviation_shift(
                                         uperp(i, j, k), pedestal_ion_perp)
                                   : 0.0_rt);
@@ -16164,22 +16230,25 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     safe_density * inverse_ion_mass;
                 const amrex::Real pressure_effective =
                     (pressure_parallel + 2.0_rt * pressure_perp) / 3.0_rt;
+                const amrex::Real work_pressure_effective =
+                    (work_pressure_parallel + 2.0_rt * work_pressure_perp) /
+                    3.0_rt;
                 const amrex::Real magnetization_weight =
                     null_weight(i, j, k);
                 const amrex::Real pressure_difference_clamped =
                     marginal_pressure_difference(i, j, k);
                 const amrex::Real isotropic_work =
-                    -pressure_effective * divergence_velocity;
+                    -work_pressure_effective * divergence_velocity;
                 amrex::Real parallel_work =
                     magnetization_weight *
-                        (-(pressure_effective +
+                        (-(work_pressure_effective +
                            (2.0_rt / 3.0_rt) * pressure_difference_clamped) *
                          parallel_gradient) +
                     (1.0_rt - magnetization_weight) *
                         (1.0_rt / 3.0_rt) * isotropic_work;
                 amrex::Real perp_work =
                     magnetization_weight *
-                        (-(pressure_effective -
+                        (-(work_pressure_effective -
                            (1.0_rt / 3.0_rt) * pressure_difference_clamped) *
                          (divergence_velocity - parallel_gradient)) +
                     (1.0_rt - magnetization_weight) *
@@ -17117,7 +17186,9 @@ bool ThetaImplicitMHD::UpdatePedestalBackground (const amrex::Real density_peak)
     m_pedestal_ion_internal = pressure_i / (m_gamma_i - 1.0_rt);
     m_pedestal_ion_parallel = 0.5_rt * pressure_i;
     m_pedestal_ion_perp = pressure_i;
-    return m_pedestal_mass_density != before;
+    // A RISE only: the reference rule max(en00, f x peak) can also fall,
+    // and nothing lies below a lower background (no lift, no message).
+    return m_pedestal_mass_density > before;
 }
 
 void ThetaImplicitMHD::RefreshHaloPedestal (const int step)

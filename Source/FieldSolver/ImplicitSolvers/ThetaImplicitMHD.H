@@ -1367,8 +1367,23 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_pedestal_reference_density = 0.0;
     bool m_pedestal_reference_density_set = false;
     bool m_pedestal_reference_rule = false;
-    amrex::Real m_pedestal_temperature_e = 0.5;
-    amrex::Real m_pedestal_temperature_i = 0.1;
+    // Background temperatures [eV], defaults 2 eV / 2 eV: a numerical floor
+    // (at n_ped ~ 3e17 m^-3 the background pressure is 0.1 Pa against a
+    // halo of hundreds of Pa). The reference code's floors are 0.5 eV
+    // (electrons) / 0.1 eV (ions) and are legitimate values here, but the
+    // background pressures n_ped kB T must exceed the solver's pressure
+    // floors (asserted: with pedestal_floor = background a guard above the
+    // background would park the empty halo at the guard, off the fixed
+    // point), and a colder background (0.5 / 0.15 eV) was measured to
+    // stagnate the linear solve of a formation run (GMRES 5-17x, 120
+    // stagnation exits in 1.6 us) where 2 eV ran at the pedestal-free
+    // control's cost. Unequal temperatures are not a fixed point of the
+    // electron-ion exchange where it is armed (the exchange drives the
+    // empty halo's electrons toward T_i,ped, the background floor pins
+    // them, the ions warm: a floor-projection injection the pedestal
+    // ledger does not book) -- keep them equal unless that is intended.
+    amrex::Real m_pedestal_temperature_e = 2.0;
+    amrex::Real m_pedestal_temperature_i = 2.0;
     bool m_pedestal_floor_background = true;
     // The background (per-solve constants; refreshed per step only under
     // the reference rule): [kg/m^3], [J/m^3].

@@ -5440,7 +5440,10 @@ Jacobian probes.
     :default: none
 
     Pedestal refresh ledger (requires a positive
-    :pp:param:`implicit_mhd.halo_pedestal_fraction`): one row per step,
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`, or a positive
+    :pp:param:`implicit_mhd.pedestal_fraction`, under which the rows book
+    the reference-rule lifts only and read ``0 0 0 0`` otherwise): one row
+    per step,
     ``step raised_cells mass energy_e energy_i`` -- the cumulative
     injected mass [kg] and the *signed* cumulative electron and ion
     energy change [J] of the raise ([kg/m^2], [J/m^2] in 1D: the
@@ -5498,8 +5501,12 @@ Jacobian probes.
     :unit: m^-3
     :default: the vacuum reference base density (:pp:param:`implicit_mhd.vacuum_reference_base_density` as a number density)
 
-    en0 of the change-of-variables pedestal, fixed at boot. An explicit
-    ``0`` gives a zero background (the machinery's bit-identical null).
+    en0 of the change-of-variables pedestal, fixed at boot. With a positive
+    :pp:param:`implicit_mhd.pedestal_fraction` one of the two must be given:
+    this knob, or a positive :pp:param:`implicit_mhd.vacuum_reference_base_density`
+    (asserted -- with neither the background would be zero and the change
+    of variables a silent no-op). An explicit ``0`` gives a zero background
+    (the machinery's bit-identical null).
 
 .. pp:param:: implicit_mhd.pedestal_reference_density_update
     :type: ``string``
@@ -5518,15 +5525,43 @@ Jacobian probes.
 .. pp:param:: implicit_mhd.pedestal_temperature_e
     :type: ``float``
     :unit: eV
-    :default: ``0.5``
+    :default: ``2.0``
 
 .. pp:param:: implicit_mhd.pedestal_temperature_i
     :type: ``float``
     :unit: eV
-    :default: ``0.1``
+    :default: ``2.0``
 
-    The background's electron and ion temperatures (the reference code's
-    floors); positive when the change of variables is on.
+    The background's electron and ion temperatures; positive when the
+    change of variables is on. The defaults are a numerical floor (at
+    :math:`n_\mathrm{ped} = 3\times 10^{17}` m^-3 the background pressure is
+    0.1 Pa against a halo of hundreds of Pa). The reference code's floors,
+    0.5 eV (electrons) / 0.1 eV (ions), are legitimate values here, subject
+    to two constraints. **Pressure floors:** the background pressures must
+    exceed the solver's own floors, :math:`n_\mathrm{ped} k_B T_{e,\mathrm{ped}}
+    >` :pp:param:`implicit_mhd.electron_pressure_floor` and
+    :math:`n_\mathrm{ped} k_B T_{i,\mathrm{ped}} >`
+    :pp:param:`implicit_mhd.ion_pressure_floor` (asserted at boot; the
+    banner line ``PEDESTAL background pressures`` prints both against their
+    floors). The refusal is deliberate: with ``pedestal_floor = background``
+    the admissible floor is the larger of the guard and the background, so a
+    guard above the background would park every empty cell at the guard,
+    off the fixed point -- lower the floor or raise the background
+    temperature; at :math:`3\times 10^{17}` m^-3, 0.1 eV is
+    :math:`5.3\times 10^{-3}` Pa. **Conditioning:** a colder background
+    (0.5 / 0.15 eV) was measured to stagnate the linear solve of a formation
+    run from 8 us on (GMRES per step 5-17x, 120 stagnation exits in 1.6 us,
+    15x the wall time) while the physics at matched times was identical to
+    the 2 eV run, which ran at the pedestal-free control's cost with no
+    stagnation: the background temperature only sets the coefficient range
+    of the empty halo. **Unequal temperatures** are not a fixed point of the
+    electron-ion exchange where :pp:param:`implicit_mhd.electron_ion_equilibration`
+    is armed: the exchange drives the empty halo's electrons toward
+    :math:`T_{i,\mathrm{ped}}`, the background floor holds them (a
+    bound-resident population, projected every step) and the ions warm -- a
+    floor-projection injection the pedestal ledger does not book (the floor
+    ledger and the Newton diagnostic's ``num_pinned`` see it). Keep them
+    equal unless that is intended.
 
 .. pp:param:: implicit_mhd.pedestal_floor
     :type: ``string``
