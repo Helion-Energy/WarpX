@@ -54,6 +54,10 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
         "HybridResistiveDrag requires the hybrid-PIC solver to be active.");
 
     auto const eta_func = hybrid_model->m_eta;
+    // ETATE: 4-argument resistivity -- Te [K] gathered at the particle from
+    // the nodal Te field, as the per-species overlay below does.
+    auto const eta_te_func = hybrid_model->m_eta_te;
+    bool const eta_has_Te  = hybrid_model->m_resistivity_has_Te_dependence;
     auto const t_now    = warpx.gett_new(0);
 
     // Per-species resistivity overlay (Phys. Plasmas 31, 012902 (2024), Eq. 10):
@@ -181,7 +185,12 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
                 if (rho_val <= rho_floor) { return; }
 
                 amrex::Real const Jmag = std::sqrt(Jxp*Jxp + Jyp*Jyp + Jzp*Jzp);
-                amrex::Real eta_s_eff = eta_func(rho_val, Jmag, t_now);
+                amrex::Real eta_s_eff = eta_has_Te
+                    ? eta_te_func(rho_val, Jmag,
+                                  ablastr::particles::doGatherScalarFieldNodal(
+                                      xp, yp, zp, Te_arr, dxi, plo),
+                                  t_now)
+                    : eta_func(rho_val, Jmag, t_now);
 
                 // Per-species overlay: add eta_s_per(rho_s, rho, Te, |J|,
                 // |J_s|, |B|, t) to eta_s_eff when registered for this

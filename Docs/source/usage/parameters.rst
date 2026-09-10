@@ -3989,6 +3989,25 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma resistivity in :math:`\Omega m`.
 
+.. pp:param:: hybrid_pic_model.plasma_resistivity(rho,J,Te,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Alternative, electron-temperature-dependent form of the plasma resistivity (:math:`\Omega m`), mutually
+    exclusive with :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)` (giving both aborts). The expression
+    may depend on the total charge density ``rho`` (:math:`C/m^3`), the plasma-current magnitude ``J``
+    (:math:`A/m^2`), the LIVE electron temperature ``Te`` of the QDSMC electron energy equation in **kelvin**
+    (SI; the storage unit of the ``Te`` field -- no unit conversion is applied to it; write ``Te*kb/q_e`` in
+    the expression where eV is wanted, e.g. a Spitzer form ``rC*max(Te*kb/q_e,Te_min)**(-1.5)``) and the time
+    ``t`` (s). Requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation` (aborts otherwise). ``Te``
+    lives on the nodal grid and is interpolated to each E-component staggering exactly as ``rho`` is; every
+    consumer of the resistivity -- the Ohm's-law E solve, the Joule-heating source when
+    :pp:param:`hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)` is unset, the ``hybrid_resistive_drag``
+    collision operator and the ``HybridDissipation`` reduced diagnostic -- evaluates this form. When this key
+    is absent the 3-argument form is used and every code path is unchanged. NOTE the unit difference to
+    :pp:param:`hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)`, whose ``Te`` argument is in eV
+    (legacy); a boot line ``[hybrid] plasma_resistivity: ...`` states which form is active and the ``Te`` unit.
+
 .. pp:param:: hybrid_pic_model.plasma_hyper_resistivity(rho,B)
     :type: ``float`` or ``str``
     :default: ``0``

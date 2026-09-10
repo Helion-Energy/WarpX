@@ -541,6 +541,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    // ETATE: 4-argument plasma_resistivity(rho,J,Te,t) -- Te = the live QDSMC
+    // electron temperature in KELVIN, interpolated from the nodal Te grid to
+    // each E component's staggering exactly as rho / rho_ped are (the
+    // per-species overlay's pattern). eta_has_Te false -> the legacy
+    // eta(rho, J, t) call, bit-identical.
+    const auto eta_te = hybrid_model->m_eta_te;
+    const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
+    amrex::MultiFab const * const te_mf = hybrid_model->ResistivityTe(lev);
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
@@ -889,6 +897,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> rho_ped;
         if (rho_ped_mf) { rho_ped = rho_ped_mf->const_array(mfi); }
+        // ETATE: nodal Te [K]; default-constructed (never indexed) unless eta_has_Te.
+        Array4<Real const> te_K;
+        if (te_mf) { te_K = te_mf->const_array(mfi); }
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
         Array4<Real> const& Btheta = Bfield[1]->array(mfi);
@@ -1015,7 +1026,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    Er(i, j, 0) += (eta_has_Te
+                        ? eta_te(rho_val, jtot_val,
+                                 Interp(te_K, nodal, Er_stag, coarsen, i, j, 0, 0), t_new)
+                        : eta(rho_val, jtot_val, t_new)) * Jr(i, j, 0);
                     // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
@@ -1129,7 +1143,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    Etheta(i, j, 0) += (eta_has_Te
+                        ? eta_te(rho_val, jtot_val,
+                                 Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
+                        : eta(rho_val, jtot_val, t_new)) * Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
                     if (include_hyper_resistivity_term && solve_for_Faraday) {
@@ -1244,7 +1261,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    Ez(i, j, 0) += (eta_has_Te
+                        ? eta_te(rho_val, jtot_val,
+                                 Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
+                        : eta(rho_val, jtot_val, t_new)) * Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
                     if (include_hyper_resistivity_term && solve_for_Faraday) {
@@ -1344,6 +1364,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    // ETATE: 4-argument plasma_resistivity(rho,J,Te,t) -- Te = the live QDSMC
+    // electron temperature in KELVIN, interpolated from the nodal Te grid to
+    // each E component's staggering exactly as rho / rho_ped are (the
+    // per-species overlay's pattern). eta_has_Te false -> the legacy
+    // eta(rho, J, t) call, bit-identical.
+    const auto eta_te = hybrid_model->m_eta_te;
+    const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
+    amrex::MultiFab const * const te_mf = hybrid_model->ResistivityTe(lev);
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
@@ -1566,6 +1594,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> rho_ped;
         if (rho_ped_mf) { rho_ped = rho_ped_mf->const_array(mfi); }
+        // ETATE: nodal Te [K]; default-constructed (never indexed) unless eta_has_Te.
+        Array4<Real const> te_K;
+        if (te_mf) { te_K = te_mf->const_array(mfi); }
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real> const& Bx = Bfield[0]->array(mfi);
         Array4<Real> const& By = Bfield[1]->array(mfi);
@@ -1665,7 +1696,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
+                Ex(i, j, k) += (eta_has_Te
+                    ? eta_te(rho_val, jtot_val,
+                             Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
+                    : eta(rho_val, jtot_val, t_new)) * Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
                 if (include_hyper_resistivity_term && solve_for_Faraday) {
@@ -1749,7 +1783,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
+                Ey(i, j, k) += (eta_has_Te
+                    ? eta_te(rho_val, jtot_val,
+                             Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
+                    : eta(rho_val, jtot_val, t_new)) * Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
                 if (include_hyper_resistivity_term && solve_for_Faraday) {
@@ -1833,7 +1870,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
+                Ez(i, j, k) += (eta_has_Te
+                    ? eta_te(rho_val, jtot_val,
+                             Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
+                    : eta(rho_val, jtot_val, t_new)) * Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
                 if (include_hyper_resistivity_term && solve_for_Faraday) {

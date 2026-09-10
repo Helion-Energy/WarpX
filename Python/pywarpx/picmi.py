@@ -2428,6 +2428,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Can be a constant value or an expression depending on ``rho`` (charge density),
         ``J`` (current density magnitude), and ``t`` (simulation time).
 
+    plasma_resistivity_Te: float or str, optional
+        Te-dependent alternative to ``plasma_resistivity`` (give one or the
+        other): emitted as ``hybrid_pic_model.plasma_resistivity(rho,J,Te,t)``,
+        an expression of ``rho``, ``J``, the LIVE QDSMC electron temperature
+        ``Te`` in KELVIN (SI, the Te field's storage unit; no conversion --
+        write ``Te*kb/q_e`` for eV) and ``t``. Requires
+        ``solve_electron_energy_equation``. Note the legacy
+        ``joule_heating_resistivity`` takes ``Te`` in eV.
+
     plasma_hyper_resistivity: float or str
         Value or expression to use for the plasma hyper-resistivity in Ohm*m^3.
         Can be a constant value or an expression depending on ``rho`` (charge density)
@@ -2707,6 +2716,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         gamma=None,
         n_floor=None,
         plasma_resistivity=None,
+        plasma_resistivity_Te=None,
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
         joule_heating_resistivity=None,
@@ -2756,6 +2766,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.gamma = gamma
         self.n_floor = n_floor
         self.plasma_resistivity = plasma_resistivity
+        self.plasma_resistivity_Te = plasma_resistivity_Te
+        if plasma_resistivity_Te is not None and plasma_resistivity is not None:
+            raise ValueError(
+                "HybridPICSolver: give plasma_resistivity (rho,J,t) OR "
+                "plasma_resistivity_Te (rho,J,Te,t; Te in kelvin), not both"
+            )
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
         self.plasma_resistivity_species = plasma_resistivity_species
 
@@ -2841,12 +2857,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.n0_ref = self.n0
         pywarpx.hybridpicmodel.gamma = self.gamma
         pywarpx.hybridpicmodel.n_floor = self.n_floor
-        pywarpx.hybridpicmodel.__setattr__(
-            "plasma_resistivity(rho,J,t)",
-            pywarpx.my_constants.mangle_expression(
-                self.plasma_resistivity, self.mangle_dict
-            ),
-        )
+        if self.plasma_resistivity_Te is not None:
+            # ETATE: the 4-argument Te-dependent form (Te in KELVIN); the
+            # 3-argument key is deliberately NOT written (the solver aborts
+            # when both are present).
+            pywarpx.hybridpicmodel.__setattr__(
+                "plasma_resistivity(rho,J,Te,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.plasma_resistivity_Te, self.mangle_dict
+                ),
+            )
+        else:
+            pywarpx.hybridpicmodel.__setattr__(
+                "plasma_resistivity(rho,J,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.plasma_resistivity, self.mangle_dict
+                ),
+            )
         pywarpx.hybridpicmodel.__setattr__(
             "plasma_hyper_resistivity(rho,B)",
             pywarpx.my_constants.mangle_expression(

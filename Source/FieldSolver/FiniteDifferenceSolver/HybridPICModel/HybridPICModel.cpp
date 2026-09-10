@@ -213,7 +213,25 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.n0_ref should be specified if hybrid_pic_model.gamma != 1");
     }
 
-    pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+    // Resistivity: the legacy 3-argument key, or (ETATE, Eric 2026-09-10) the
+    // 4-argument plasma_resistivity(rho,J,Te,t) with the live QDSMC Te in
+    // KELVIN. Exactly one of the two; the expression lands in
+    // m_eta_expression either way and the arity is remembered in
+    // m_resistivity_has_Te_dependence (compiled in InitData).
+    const bool has_eta_3arg =
+        pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+    std::string eta_te_expression;
+    const bool has_eta_4arg =
+        pp_hybrid.query("plasma_resistivity(rho,J,Te,t)", eta_te_expression);
+    if (has_eta_3arg && has_eta_4arg) {
+        Abort("hybrid_pic_model.plasma_resistivity(rho,J,t) and "
+              "hybrid_pic_model.plasma_resistivity(rho,J,Te,t) were both given: "
+              "specify exactly one resistivity form.");
+    }
+    if (has_eta_4arg) {
+        m_eta_expression = eta_te_expression;
+        m_resistivity_has_Te_dependence = true;
+    }
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
     m_n_floor_given =
@@ -1467,9 +1485,36 @@ void HybridPICModel::AllocateLevelMFs (
 
 void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 {
-    m_resistivity_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
-    m_eta = m_resistivity_parser->compile<3>();
+    if (m_resistivity_has_Te_dependence) {
+        // ETATE: 4-argument form, Te = the live QDSMC electron temperature
+        // in KELVIN (no conversion here; see the m_eta_te member doc).
+        if (!m_solve_electron_energy_equation) {
+            Abort("hybrid_pic_model.plasma_resistivity(rho,J,Te,t) (the Te-dependent "
+                  "4-argument resistivity) requires "
+                  "hybrid_pic_model.solve_electron_energy_equation = 1: Te is the live "
+                  "QDSMC electron temperature [K], which is not evolved without the "
+                  "electron energy equation. Use plasma_resistivity(rho,J,t) instead, "
+                  "or turn the energy equation on.");
+        }
+        m_resistivity_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(m_eta_expression, {"rho","J","Te","t"}));
+        m_eta_te = m_resistivity_parser->compile<4>();
+        amrex::Print() << "[hybrid] plasma_resistivity: 4-argument form "
+                          "plasma_resistivity(rho,J,Te,t) ACTIVE -- Te = the live QDSMC "
+                          "electron temperature in KELVIN (SI; the storage unit of "
+                          "hybrid_electron_temperature_fp; no K->eV conversion in the "
+                          "C++), interpolated from the nodal Te grid to each E "
+                          "component's staggering (E-solve, Joule fallback, resistive "
+                          "drag, dissipation diag); expression = "
+                       << m_eta_expression << "\n";
+    } else {
+        m_resistivity_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
+        m_eta = m_resistivity_parser->compile<3>();
+        amrex::Print() << "[hybrid] plasma_resistivity: 3-argument form "
+                          "plasma_resistivity(rho,J,t) (no Te dependence; legacy "
+                          "path)\n";
+    }
 
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
@@ -1882,7 +1927,9 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         // eta, and which additionally have a per-species overlay.
         if (amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "\n[HybridPICModel] Resistivity configuration\n";
-            amrex::Print() << "  global plasma_resistivity(rho,J,t) = "
+            amrex::Print() << (m_resistivity_has_Te_dependence
+                                   ? "  global plasma_resistivity(rho,J,Te,t) [Te in K] = "
+                                   : "  global plasma_resistivity(rho,J,t) = ")
                            << m_eta_expression << "\n";
             if (m_has_per_species_eta) {
                 amrex::Print() << "  per-species overlays (eta_s_eff = "
@@ -4945,6 +4992,11 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
     auto const eta           = m_eta;
+    // ETATE: the 4-argument E-solve resistivity (Te in KELVIN, no conversion)
+    // when the heating falls back to the E-solve eta; Te_arr is nodal here,
+    // like rho, so no interpolation is needed.
+    bool const eta_has_Te    = m_resistivity_has_Te_dependence;
+    auto const eta_te        = m_eta_te;
     // Physical-eta heating: when joule_heating_resistivity(rho,J,Te,t) is
     // given, the heating source uses it instead of the E-solve eta (whose
     // numerical vacuum-regularizer ramp was the liftoff runaway's ignition
@@ -5128,8 +5180,10 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // separate physical heating resistivity when specified. The
                 // per-species overlay below adds on top of either choice.
                 amrex::Real eta_s_eff = has_heat_eta
-                    ? eta_heat(rho_val, Jmag, Te_arr(i,j,k) / K_per_eV, t_new)
-                    : eta(rho_val, Jmag, t_new);
+                    ? eta_heat(rho_val, Jmag, Te_arr(i,j,k) / K_per_eV, t_new)   // Te in eV (legacy unit)
+                    : (eta_has_Te
+                       ? eta_te(rho_val, Jmag, Te_arr(i,j,k), t_new)            // ETATE: Te in K
+                       : eta(rho_val, Jmag, t_new));
 
                 // e-i relative drift = J_plasma/(e n_e), from the nodal plasma
                 // current and n_e. Energy-consistent with the eta*J dissipation
@@ -11825,6 +11879,14 @@ void HybridPICModel::WarnEnergyBudgetPathLimits (char const * path_name,
         std::string("hybrid_pic_model.qdsmc_energy_budget is set and this run "
                     "uses ") + path_name + ". " + limits,
         ablastr::warn_manager::WarnPriority::high);
+}
+
+amrex::MultiFab const * HybridPICModel::ResistivityTe (int const lev) const
+{
+    // ETATE: the live QDSMC Te [K] for the 4-argument resistivity; nullptr
+    // under the 3-argument form so every kernel keeps its legacy arithmetic.
+    if (!m_resistivity_has_Te_dependence) { return nullptr; }
+    return WarpX::GetInstance().m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
 }
 
 amrex::MultiFab const * HybridPICModel::DensityPedestal (int const lev) const

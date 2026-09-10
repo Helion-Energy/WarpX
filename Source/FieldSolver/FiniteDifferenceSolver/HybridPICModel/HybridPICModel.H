@@ -2748,11 +2748,43 @@ public:
      *  conduction EB pin. Requires boundary.eb_type = insulating. */
     bool m_eb_fields_transparent = false;
 
-    /** Plasma resistivity */
+    /** Plasma resistivity. Two mutually exclusive input forms:
+     *    hybrid_pic_model.plasma_resistivity(rho,J,t)     -> m_eta    (3-argument, legacy)
+     *    hybrid_pic_model.plasma_resistivity(rho,J,Te,t)  -> m_eta_te (4-argument, ETATE)
+     *  ETATE (Eric 2026-09-10 00:30 "Add a te dependence for the parser
+     *  expression", 00:50 "Please use SI units"): the 4-argument form sees
+     *  the LIVE QDSMC electron temperature Te in KELVIN -- the storage unit
+     *  of hybrid_electron_temperature_fp (Fields.H) and the SI unit; NO
+     *  K->eV conversion is applied in the C++ for this parser (a deck that
+     *  wants eV writes Te*kb/q_e in the string). NOTE the legacy Joule parser
+     *  joule_heating_resistivity(rho,J,Te,t) receives Te in eV (converted at
+     *  its call site, QDSMCAddJouleHeating); the two parsers differ in unit
+     *  -- a future unification should move the Joule parser to kelvin too.
+     *  Every consumer of the resistivity (the Ohm's-law E-solve kernels,
+     *  the Joule-heating fallback, the resistive-drag operator, the
+     *  HybridDissipation diagnostic) evaluates m_eta_te(rho, J, Te_K, t)
+     *  with Te interpolated from the nodal Te grid to the consumer's
+     *  staggering (the per-species overlay's Interp pattern) when
+     *  m_resistivity_has_Te_dependence, and m_eta(rho, J, t) bit-for-bit as
+     *  before otherwise. The 4-argument form requires
+     *  solve_electron_energy_equation (InitData aborts otherwise: Te is not
+     *  evolved without the energy equation). */
     std::string m_eta_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
+    /** True when the 4-argument plasma_resistivity(rho,J,Te,t) key was given
+     *  (the arity is detected by the declared argument list, as for
+     *  joule_heating_resistivity). */
+    bool m_resistivity_has_Te_dependence = false;
+    /** Compiled 4-argument resistivity (rho, J, Te [K], t); only valid (and
+     *  only called) when m_resistivity_has_Te_dependence. */
+    amrex::ParserExecutor<4> m_eta_te;
+    /** The electron-temperature field [K] the 4-argument resistivity reads
+     *  on level lev (hybrid_electron_temperature_fp), nullptr when the
+     *  3-argument form is active -- the DensityPedestal(lev) pattern for the
+     *  kernels (a null pointer = legacy arithmetic, bit-identical). */
+    [[nodiscard]] amrex::MultiFab const * ResistivityTe (int lev) const;
 
     /** False until the first AdvanceElectronEnergyQDSMC of the run has
      *  filled hybrid_current_fp_plasma. On later steps J_plasma is already
