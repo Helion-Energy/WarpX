@@ -2187,6 +2187,15 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
                       amrex::IntVect::TheZeroVector(), 0.0_rt);
     fields.alloc_init(PedestalInjectedIonEnergyName, lev, ba, dm, 1,
                       amrex::IntVect::TheZeroVector(), 0.0_rt);
+    // Per-cell cumulative dual-energy guard discard (see
+    // DualEnergyGuardDiscardName): valid cells only, zero-initialized,
+    // accumulated by the guard-ledger pass of FinishStateUpdate, plot-able
+    // by name. Allocated ONLY when the guard ledger file is named (the
+    // default has no register and no arithmetic: bit-identical).
+    if (!m_dual_energy_guard_ledger_file.empty()) {
+        fields.alloc_init(DualEnergyGuardDiscardName, lev, ba, dm, 1,
+                          amrex::IntVect::TheZeroVector(), 0.0_rt);
+    }
 }
 
 void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
@@ -18761,6 +18770,10 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                 using GuardTuple = typename GuardReduceData::Type;
                 GuardReduceOps guard_ops;
                 GuardReduceData guard_data(guard_ops);
+                // Per-cell cumulative discard register (allocated with the
+                // ledger file; same layout as the state blocks).
+                amrex::MultiFab& discard_mf =
+                    *m_WarpX->m_fields.get(DualEnergyGuardDiscardName, 0);
                 for (amrex::MFIter mfi(internal_block); mfi.isValid(); ++mfi) {
                     const amrex::Box box = mfi.validbox();
                     const auto rho = density_block.const_array(mfi);
@@ -18769,6 +18782,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                     const auto internal_old =
                         old_internal_block.const_array(mfi);
                     const auto internal = internal_block.const_array(mfi);
+                    const auto discard = discard_mf.array(mfi);
                     guard_ops.eval(
                         box, guard_data,
                         [=] AMREX_GPU_DEVICE (int i, int j, int k)
@@ -18812,8 +18826,14 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                                       (radial_lower +
                                        (i + 0.5_rt) * radial_cell_size);
 #endif
-                            return {amrex::Long(1),
-                                    measure * (ion_e(i, j, k) - rewritten)};
+                            const amrex::Real discarded_here =
+                                ion_e(i, j, k) - rewritten;
+                            // The per-cell register accumulates exactly the
+                            // summand of the ledger (J/m^3; the ledger's
+                            // measure-weighted domain sum equals its
+                            // RZ-volume integral).
+                            discard(i, j, k) += discarded_here;
+                            return {amrex::Long(1), measure * discarded_here};
                         });
                 }
                 const GuardTuple totals = guard_data.value(guard_ops);

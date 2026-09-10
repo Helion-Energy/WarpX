@@ -837,6 +837,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_pedestal_injected_electron_energy";
     inline static constexpr char PedestalInjectedIonEnergyName[] =
         "implicit_mhd_pedestal_injected_ion_energy";
+    // Per-cell cumulative dual-energy guard discard [J/m^3] (see
+    // m_dual_energy_guard_ledger_file): the sum over steps of
+    // (E_i,before - E_i,after) of the step-end mixmaster rewrite in the
+    // guarded cells (window < 1) -- the per-cell twin of the ledger's
+    // cumulative column, whose RZ-measure domain integral it equals.
+    // Allocated only when the ledger file is named; plot-able by name.
+    inline static constexpr char DualEnergyGuardDiscardName[] =
+        "implicit_mhd_dual_energy_guard_discard";
     // Resistive backward-Euler option (m_resistive_theta): the
     // beginning-of-step plasma current J^n (captured once per step) and
     // the per-residual resistive-stage scratch
@@ -1014,7 +1022,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // and arithmetic as the rewrite, BEFORE it, in a separate reduction so
     // the state-modifying kernel is untouched. First write of a run
     // truncates a stale file; the counter restarts at zero on a
-    // simulation restart, like the other ledgers.
+    // simulation restart, like the other ledgers. With the file named the
+    // cell-centred register DualEnergyGuardDiscardName is allocated and
+    // accumulated alongside (the WHERE of the discard: J/m^3 per cell).
     std::string m_dual_energy_guard_ledger_file;
     bool m_dual_energy_guard_ledger_started = false;
     amrex::Real m_dual_energy_guard_discarded = 0.0;

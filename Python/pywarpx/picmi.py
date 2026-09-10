@@ -3272,6 +3272,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         With a positive dual_energy_internal_guard: one row per step
         "step guarded_cells discarded_cum" -- guarded cells and the
         cumulative E_i the rewrite discarded over them [J] ([J/m^2] in 1D).
+        With the file named the cell-centred register
+        implicit_mhd_dual_energy_guard_discard (cumulative J/m^3 per cell,
+        the ledger's per-cell twin) is allocated and plot-able by name.
 
     dual_energy_sync_threshold: float, default=0.99
         With ion_closure="dual_energy": fk threshold of the end-of-step

@@ -680,6 +680,18 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# per-cell dual-energy guard discard register: its RZ-volume integral equals
+# the guard ledger's cumulative column at the last step
+add_warpx_test(
+    test_rz_theta_implicit_mhd_dual_energy_guard_map  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_dual_energy_guard_map  # inputs
+    "analysis_mhd_dual_energy_guard_map_rz.py diags/diag000008 diags/dual_energy_guard_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_rz_theta_implicit_mhd_pedestal_cov_stack_ref  # name
     RZ  # dims

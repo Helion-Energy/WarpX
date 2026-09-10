@@ -5120,7 +5120,12 @@ Jacobian probes.
     E_{i,\mathrm{after}})\,dV` [J] ([J/m\ :sup:`2`] in 1D), i.e. the
     measured :math:`E_i` excess the guarded closure discards. The first
     write of a run truncates a stale file; the counter restarts at zero on
-    a simulation restart.
+    a simulation restart. With the file named, the cell-centred register
+    ``implicit_mhd_dual_energy_guard_discard`` (cumulative J/m\ :sup:`3`
+    discarded in that cell, the ledger's per-cell twin: its RZ-volume
+    integral equals the ledger's cumulative column) is allocated and can be
+    written by the field diagnostics (``<diag>.fields_to_plot``); without
+    the file there is no register.
 
 .. pp:param:: implicit_mhd.dual_energy_sync_threshold
     :type: ``float``
