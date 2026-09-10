@@ -339,6 +339,33 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_dual_energy_stagnation  # dependency
 )
 
+# absolute low-internal-energy guard of the dual-energy blend
+# (implicit_mhd.dual_energy_internal_guard): with the guard above every
+# reachable U_i the closure is the pure internal-energy one -- E_i = KE + U_i
+# to round-off after the rewrite, the adiabat held, the ledger booking every
+# cell every step
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_guard  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_dual_energy_guard  # inputs
+    "analysis_mhd_dual_energy_guard.py diags/diag000032"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# null: a guard far below every U_i (window exactly 1, fk x 1.0) reproduces
+# the unguarded stagnation run bit for bit
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_guard_null  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_dual_energy_stagnation implicit_mhd.dual_energy_internal_guard=1.0e-7"  # inputs
+    "analysis_mhd_dual_energy_guard_null.py diags/diag000032 ../test_1d_theta_implicit_mhd_dual_energy_stagnation/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_dual_energy_stagnation  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_temperature_floor  # name
     1  # dims

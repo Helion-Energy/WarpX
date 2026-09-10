@@ -3256,6 +3256,23 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         pressure in the halo/dust); the max is a once-per-step step-old
         global reduction, frozen for the whole nonlinear solve.
 
+    dual_energy_internal_guard: float, default=0 (off), J/m^3
+        With ion_closure="dual_energy": an ABSOLUTE low-internal-energy guard
+        of the kinetic fraction. fk is multiplied by the C^1 window
+        floor_outflow_limiter(U_i_old, guard) (0 at/below the guard, 1
+        at/above twice it), so tenuous low-beta cells read their ion
+        pressure from the internal register U_i (no Lorentz work, no
+        total-minus-kinetic residual), the end-of-step mixmaster rewrite
+        discards the E_i excess there and the Enzo overwrite U_i := E_i - KE
+        is skipped. The reference code's mix=-2 structure with an absolute
+        threshold and a smooth window; step-old input, per-solve constant;
+        bit-identical where U_i_old >= 2 guard (and when off).
+
+    dual_energy_guard_ledger_file: str, default=None
+        With a positive dual_energy_internal_guard: one row per step
+        "step guarded_cells discarded_cum" -- guarded cells and the
+        cumulative E_i the rewrite discarded over them [J] ([J/m^2] in 1D).
+
     dual_energy_sync_threshold: float, default=0.99
         With ion_closure="dual_energy": fk threshold of the end-of-step
         Enzo re-sync U_i := E_i - KE (thermal cells only, where the
@@ -4204,6 +4221,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         hlld_kappa_denominator=None,
         ion_closure=None,
         dual_energy_internal_cutoff=None,
+        dual_energy_internal_guard=None,
+        dual_energy_guard_ledger_file=None,
         dual_energy_sync_threshold=None,
         dual_energy_sync=None,
         allow_dual_energy_sync_off=None,
@@ -4372,6 +4391,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.hlld_kappa_denominator = hlld_kappa_denominator
         self.ion_closure = ion_closure
         self.dual_energy_internal_cutoff = dual_energy_internal_cutoff
+        self.dual_energy_internal_guard = dual_energy_internal_guard
+        self.dual_energy_guard_ledger_file = dual_energy_guard_ledger_file
         self.dual_energy_sync_threshold = dual_energy_sync_threshold
         self.dual_energy_sync = dual_energy_sync
         self.allow_dual_energy_sync_off = allow_dual_energy_sync_off
@@ -4609,6 +4630,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.hlld_kappa_denominator = self.hlld_kappa_denominator
         implicit_mhd.ion_closure = self.ion_closure
         implicit_mhd.dual_energy_internal_cutoff = self.dual_energy_internal_cutoff
+        implicit_mhd.dual_energy_internal_guard = self.dual_energy_internal_guard
+        implicit_mhd.dual_energy_guard_ledger_file = self.dual_energy_guard_ledger_file
         implicit_mhd.dual_energy_sync_threshold = self.dual_energy_sync_threshold
         implicit_mhd.dual_energy_sync = self.dual_energy_sync
         implicit_mhd.allow_dual_energy_sync_off = self.allow_dual_energy_sync_off

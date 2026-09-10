@@ -156,6 +156,19 @@ struct FluxParameters {
     // frozen (step-old), so the branch is a constant for JFNK probes.
     amrex::Real dual_energy_internal_cutoff = 0.0;
     amrex::Real dual_energy_internal_old_max = 0.0;
+    // Absolute low-internal-energy GUARD of the kinetic fraction
+    // (ThetaImplicitMHD::m_dual_energy_internal_guard [J/m^3]; 0 = off, no
+    // arithmetic, bit-identical): fk is multiplied by the C^1 window
+    // floor_outflow_limiter(U_i_old, guard) -- exactly 0 at/below the
+    // guard, exactly 1 at/above twice it -- so tenuous low-beta cells read
+    // their ion pressure from U_i, the internal-energy register that
+    // carries no Lorentz work and no total-minus-kinetic residual, and the
+    // step-end mixmaster rewrite discards the E_i excess there (booked to
+    // the guard ledger). The input is the STEP-OLD U_i, so the window is a
+    // per-solve constant for the matrix-free Jacobian probes, exactly like
+    // the cutoff mask above; where U_i_old >= 2 guard the closure is
+    // today's to the bit (fk x 1.0).
+    amrex::Real dual_energy_internal_guard = 0.0;
     // Offset-density advection (0 = off, bit-identical): the absolute
     // background density rho_off = fraction * rho_ref [kg/m^3] the
     // ADVECTIVE MASS FLUX subtracts before transporting and re-adds
@@ -1398,6 +1411,15 @@ load_cell_state_hlld_cgl (const amrex::Array4<const amrex::Real>& density,
  * fk where the STEP-OLD U_i sits below cutoff * max_domain(U_i_old);
  * both the mask input and the max are per-solve frozen constants, so the
  * branch is state-independent for the probes.
+ *
+ * The optional absolute low-internal-energy GUARD (FluxParameters::
+ * dual_energy_internal_guard) multiplies fk by the C^1 window
+ * floor_outflow_limiter(U_i_old, guard): exactly 0 at/below the guard,
+ * exactly 1 at/above twice it. It is the same mix = -2 structure with an
+ * absolute threshold and a smooth window: below it the blend is the pure
+ * internal-energy closure and the step-end rewrite discards whatever the
+ * conservative E_i accumulated (the wall-band scrape-off accretion of a
+ * flow that advects no mass). Same step-old, per-solve-frozen input.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 dual_energy_kinetic_fraction (const amrex::Real ion_energy,
@@ -1409,6 +1431,15 @@ dual_energy_kinetic_fraction (const amrex::Real ion_energy,
                                   parameters.dual_energy_internal_old_max) {
         return 0.0;
     }
+    // Absolute low-internal-energy guard (0 = off: no arithmetic below).
+    amrex::Real guard_window = 1.0;
+    if (parameters.dual_energy_internal_guard > 0.0) {
+        guard_window = floor_outflow_limiter(
+            old_internal_energy, parameters.dual_energy_internal_guard);
+        if (guard_window <= 0.0) {
+            return 0.0;
+        }
+    }
     const amrex::Real internal_floor =
         parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
     const amrex::Real guarded_energy = smooth_positive_floor_width(
@@ -1416,7 +1447,10 @@ dual_energy_kinetic_fraction (const amrex::Real ion_energy,
         parameters.pressure_floor_width_factor * internal_floor);
     const amrex::Real raw =
         1.0 - kinetic_energy / (parameters.gamma_i * guarded_energy);
-    return smooth_max(raw, 0.0, parameters.dual_energy_fk_width);
+    const amrex::Real fk =
+        smooth_max(raw, 0.0, parameters.dual_energy_fk_width);
+    return (parameters.dual_energy_internal_guard > 0.0) ? guard_window * fk
+                                                         : fk;
 }
 
 /**

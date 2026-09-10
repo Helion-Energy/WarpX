@@ -302,6 +302,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * advanced: "step raised_cells mass energy_e energy_i" (cumulative
      * totals). No-op without halo_pedestal_ledger_file. */
     void WriteHaloPedestalLedgerRow (int step, amrex::Long raised_cells);
+    void WriteDualEnergyGuardLedgerRow (int step, amrex::Long guarded_cells);
     /** Recompute the dynamic vacuum-reference density once per step (the
      * The reference code's en0 update, step.f90 ~218: en0 = max(en00, 0.1 max(en))):
      * m_vacuum_reference_mass_density = vacuum_reference_peak_fraction
@@ -971,6 +972,42 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // pressure in the halo/dust). The max is a once-per-step step-old
     // global reduction, frozen for the whole nonlinear solve.
     amrex::Real m_dual_energy_internal_cutoff = 0.0;
+    // Absolute low-internal-energy guard of the dual-energy kinetic
+    // fraction (implicit_mhd.dual_energy_internal_guard [J/m^3]; 0 = off,
+    // bit-identical): fk is multiplied by the C^1 window
+    // floor_outflow_limiter(U_i_old, guard) -- exactly 0 at/below the
+    // guard, exactly 1 at/above twice it -- so tenuous low-beta cells read
+    // their ion pressure from the internal register U_i (whose equation
+    // carries no Lorentz work and no total-minus-kinetic residual) and the
+    // step-end mixmaster rewrite E_i := KE + p_blend/(gamma_i - 1) discards
+    // the excess the conservative E_i accumulated there; the Enzo overwrite
+    // U_i := E_i - KE is skipped (fk below the sync threshold). Measured
+    // need (2026-09-09, production formation deck, change-of-variables
+    // pedestal): the two wall-adjacent cells of the tenuous scrape-off
+    // accrete E_i under a wall-pressed cell velocity that advects no mass,
+    // with KE 1e-4 of the thermal energy so the kinetic gate is wide open,
+    // and the sync copies the excess into U_i: 15-32 keV ions at the wall
+    // at 12 us where the reference code (Dirichlet ions at its wall
+    // vertices) holds 10-45 eV. The reference code's mix = -2 structure with
+    // an absolute threshold and a smooth window (the max-relative hard
+    // cutoff above is unchanged). At fixed B an internal-energy threshold
+    // is a beta threshold: 50 J/m^3 at 0.5 T is beta 5e-4.
+    amrex::Real m_dual_energy_internal_guard = 0.0;
+    // Guard ledger (implicit_mhd.dual_energy_guard_ledger_file; requires a
+    // positive guard): one row per step "step guarded_cells discarded_cum"
+    // with the number of cells whose window is below 1 and the cumulative
+    // ion energy the step-end rewrite removed from (positive) or added to
+    // (negative) the conservative register over those cells,
+    // sum (E_i,before - E_i,after) dV [J] ([J/m^2] in 1D; the cell measure
+    // is the geometry's, RZ annulus 2 pi r_center dr dz) -- the measured
+    // E_i excess the guarded closure discards. Evaluated on the same state
+    // and arithmetic as the rewrite, BEFORE it, in a separate reduction so
+    // the state-modifying kernel is untouched. First write of a run
+    // truncates a stale file; the counter restarts at zero on a
+    // simulation restart, like the other ledgers.
+    std::string m_dual_energy_guard_ledger_file;
+    bool m_dual_energy_guard_ledger_started = false;
+    amrex::Real m_dual_energy_guard_discarded = 0.0;
     // Dual-energy end-of-step re-sync (the reference code's mixmaster temperature
     // update, ntb.f90): at every accepted step end E_i's internal
     // content is rewritten from the blended pressure,

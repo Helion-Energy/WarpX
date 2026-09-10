@@ -1031,6 +1031,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "'minmod', 'smart', or 'smart_upwind'");
     utils::parser::queryWithParser(pp, "dual_energy_internal_cutoff",
                                    m_dual_energy_internal_cutoff);
+    // Absolute low-internal-energy guard of fk and its ledger (see the
+    // header). Default 0 = off: no arithmetic anywhere, bit-identical.
+    utils::parser::queryWithParser(pp, "dual_energy_internal_guard",
+                                   m_dual_energy_internal_guard);
+    pp.query("dual_energy_guard_ledger_file",
+             m_dual_energy_guard_ledger_file);
     utils::parser::queryWithParser(pp, "dual_energy_sync_threshold",
                                    m_dual_energy_sync_threshold);
     // Verification switch for the dual-energy re-sync and the booking
@@ -1928,11 +1934,27 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             m_dual_energy_sync_threshold > 0.0_rt &&
                 m_dual_energy_sync_threshold <= 1.0_rt,
             "implicit_mhd.dual_energy_sync_threshold must be in (0, 1]");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(m_dual_energy_internal_guard) &&
+                m_dual_energy_internal_guard >= 0.0_rt,
+            "implicit_mhd.dual_energy_internal_guard [J/m^3] cannot be "
+            "negative (0 disables the low-internal-energy guard)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_dual_energy_guard_ledger_file.empty() ||
+                m_dual_energy_internal_guard > 0.0_rt,
+            "implicit_mhd.dual_energy_guard_ledger_file requires a positive "
+            "implicit_mhd.dual_energy_internal_guard (the ledger books the "
+            "guarded rewrite)");
     } else {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_dual_energy_internal_cutoff == 0.0_rt,
             "implicit_mhd.dual_energy_internal_cutoff requires "
             "implicit_mhd.ion_closure = dual_energy");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_dual_energy_internal_guard == 0.0_rt &&
+                m_dual_energy_guard_ledger_file.empty(),
+            "implicit_mhd.dual_energy_internal_guard (and its ledger) "
+            "require implicit_mhd.ion_closure = dual_energy");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_hllc_signal_closure == "consistent" ||
@@ -4414,6 +4436,18 @@ void ThetaImplicitMHD::PrintParameters () const
     if (m_ion_closure == "dual_energy") {
         amrex::Print() << "Dual-energy internal cutoff:   "
                        << m_dual_energy_internal_cutoff << "\n"
+                       << "Dual-energy internal guard [J/m^3]: "
+                       << m_dual_energy_internal_guard
+                       << (m_dual_energy_internal_guard > 0.0_rt
+                               ? std::string(" (fk x C^1 window on the "
+                                             "step-old U_i: 0 at/below, 1 "
+                                             "at/above twice; ledger ") +
+                                     (m_dual_energy_guard_ledger_file.empty()
+                                          ? std::string("(none)")
+                                          : m_dual_energy_guard_ledger_file) +
+                                     ")"
+                               : std::string(" (off)"))
+                       << "\n"
                        << "Dual-energy sync threshold:    "
                        << m_dual_energy_sync_threshold << "\n"
                        << "Dual-energy step-end re-sync:  "
@@ -8906,6 +8940,8 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_dual_energy_internal_cutoff;
     flux_parameters.dual_energy_internal_old_max =
         m_dual_energy_internal_old_max;
+    flux_parameters.dual_energy_internal_guard =
+        m_dual_energy_internal_guard;
     flux_parameters.pressure_corner_width_fraction =
         m_pressure_corner_width_fraction;
     flux_parameters.pressure_floor_width_factor =
@@ -17985,6 +18021,32 @@ void ThetaImplicitMHD::WriteHaloPedestalLedgerRow (const int step,
            << " " << m_halo_pedestal_energy_i << "\n";
 }
 
+void ThetaImplicitMHD::WriteDualEnergyGuardLedgerRow (const int step,
+                                                      const amrex::Long guarded_cells)
+{
+    if (m_dual_energy_guard_ledger_file.empty() ||
+        !amrex::ParallelDescriptor::IOProcessor()) {
+        return;
+    }
+    if (!m_dual_energy_guard_ledger_started) {
+        const auto parent =
+            std::filesystem::path(m_dual_energy_guard_ledger_file).parent_path();
+        if (!parent.empty()) {
+            std::error_code ignored;
+            std::filesystem::create_directories(parent, ignored);
+        }
+    }
+    // Truncate at the first write of the run, append afterwards (the
+    // other ledgers' convention).
+    std::ofstream ledger(m_dual_energy_guard_ledger_file,
+                         m_dual_energy_guard_ledger_started ? std::ios::app
+                                                            : std::ios::trunc);
+    m_dual_energy_guard_ledger_started = true;
+    ledger.precision(17);
+    ledger << step + 1 << " " << guarded_cells << " "
+           << m_dual_energy_guard_discarded << "\n";
+}
+
 void ThetaImplicitMHD::UpdateStagedViscosity (const amrex::Real time)
 {
     // Both guards are checked EVERY step, so a malformed table trips at
@@ -18675,6 +18737,95 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             const amrex::Real internal_abs_floor = bounds.floors[3];
             const amrex::Real internal_coefficient =
                 bounds.temperature_coefficients[3];
+            if (m_dual_energy_internal_guard > 0.0_rt &&
+                !m_dual_energy_guard_ledger_file.empty()) {
+                // Guard ledger (see the header): the E_i excess the
+                // mixmaster rewrite below is about to discard in GUARDED
+                // cells (window < 1), evaluated on the same state and the
+                // same arithmetic BEFORE the rewrite, in this separate
+                // reduction, so the state-modifying kernel stays untouched
+                // (its path is bit-identical with or without the ledger).
+                amrex::Real cell_volume = 1.0_rt;
+                for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
+                    cell_volume *= m_WarpX->Geom(0).CellSize(dim);
+                }
+                const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+                const amrex::Real radial_cell_size =
+                    m_WarpX->Geom(0).CellSize(0);
+                amrex::ignore_unused(radial_lower, radial_cell_size);
+                const amrex::Real guard = m_dual_energy_internal_guard;
+                using GuardReduceOps =
+                    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum>;
+                using GuardReduceData =
+                    amrex::ReduceData<amrex::Long, amrex::Real>;
+                using GuardTuple = typename GuardReduceData::Type;
+                GuardReduceOps guard_ops;
+                GuardReduceData guard_data(guard_ops);
+                for (amrex::MFIter mfi(internal_block); mfi.isValid(); ++mfi) {
+                    const amrex::Box box = mfi.validbox();
+                    const auto rho = density_block.const_array(mfi);
+                    const auto mom = momentum_block.const_array(mfi);
+                    const auto ion_e = ion_energy_block.const_array(mfi);
+                    const auto internal_old =
+                        old_internal_block.const_array(mfi);
+                    const auto internal = internal_block.const_array(mfi);
+                    guard_ops.eval(
+                        box, guard_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                            -> GuardTuple {
+                            if (wall_freeze) {
+                                const int jc = std::max(
+                                    wall_mz_lo, std::min(wall_mz_hi, j));
+                                if (i >= wall_fm[jc]) {
+                                    return {amrex::Long(0), 0.0_rt};
+                                }
+                            }
+                            const amrex::Real window =
+                                theta_implicit_mhd::floor_outflow_limiter(
+                                    internal_old(i, j, k), guard);
+                            if (window >= 1.0_rt) {
+                                return {amrex::Long(0), 0.0_rt};
+                            }
+                            amrex::Real kinetic_energy = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                kinetic_energy +=
+                                    mom(i, j, k, component) *
+                                    mom(i, j, k, component);
+                            }
+                            kinetic_energy *=
+                                0.5_rt /
+                                std::max(rho(i, j, k), density_floor);
+                            const amrex::Real pressure_blend =
+                                theta_implicit_mhd::
+                                    dual_energy_blended_pressure(
+                                        ion_e(i, j, k), kinetic_energy,
+                                        internal(i, j, k),
+                                        internal_old(i, j, k),
+                                        sync_parameters);
+                            const amrex::Real rewritten =
+                                kinetic_energy +
+                                pressure_blend * inverse_gamma_i_minus_one;
+                            amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                            measure = 2.0_rt * MathConst::pi *
+                                      (radial_lower +
+                                       (i + 0.5_rt) * radial_cell_size);
+#endif
+                            return {amrex::Long(1),
+                                    measure * (ion_e(i, j, k) - rewritten)};
+                        });
+                }
+                const GuardTuple totals = guard_data.value(guard_ops);
+                amrex::Long guarded_cells = amrex::get<0>(totals);
+                amrex::Real discarded = cell_volume * amrex::get<1>(totals);
+                amrex::ParallelAllReduce::Sum(
+                    guarded_cells, amrex::ParallelContext::CommunicatorSub());
+                amrex::ParallelAllReduce::Sum(
+                    discarded, amrex::ParallelContext::CommunicatorSub());
+                m_dual_energy_guard_discarded += discarded;
+                WriteDualEnergyGuardLedgerRow(step, guarded_cells);
+            }
             for (amrex::MFIter mfi(internal_block); mfi.isValid(); ++mfi) {
                 const amrex::Box box = mfi.validbox();
                 const auto rho = density_block.const_array(mfi);

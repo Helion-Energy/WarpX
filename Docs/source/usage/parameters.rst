@@ -5070,6 +5070,46 @@ Jacobian probes.
     (step-old) constants, so the branch is state-independent for the
     matrix-free Jacobian probes.
 
+.. pp:param:: implicit_mhd.dual_energy_internal_guard
+    :type: ``float`` (J/m\ :sup:`3`)
+    :default: ``0`` (off)
+
+    With ``ion_closure = dual_energy``: an ABSOLUTE low-internal-energy
+    guard of the kinetic fraction. :math:`f_k` is multiplied by the
+    :math:`C^1` window ``floor_outflow_limiter(U_i,old, guard)`` -- exactly
+    0 at/below the guard, exactly 1 at/above twice it -- so tenuous low-beta
+    cells read their ion pressure from the internal register :math:`U_i`
+    (whose equation carries no Lorentz work and no total-minus-kinetic
+    residual), the end-of-step mixmaster rewrite
+    :math:`E_i := K + p_i/(\gamma_i - 1)` discards the excess the
+    conservative :math:`E_i` accumulated there, and the Enzo overwrite
+    :math:`U_i := E_i - K` is skipped. The reference code's mix = -2
+    structure with an absolute threshold and a smooth window (the
+    max-relative hard ``dual_energy_internal_cutoff`` is unchanged). The
+    input is the step-old :math:`U_i`, a per-solve constant for the
+    matrix-free Jacobian probes; where :math:`U_{i,\mathrm{old}} \ge 2\,
+    \mathrm{guard}` the closure is today's to the bit. At fixed :math:`B`
+    an internal-energy threshold is a :math:`\beta` threshold
+    (:math:`50\,\mathrm{J/m^3}` at 0.5 T is :math:`\beta = 5\times10^{-4}`).
+    Motivation: the wall-adjacent cells of a tenuous scrape-off accrete
+    :math:`E_i` under a wall-pressed cell velocity that advects no mass
+    while :math:`K` is negligible, so the kinetic gate is open and the sync
+    turns the excess into keV ions where the reference code holds tens of eV.
+
+.. pp:param:: implicit_mhd.dual_energy_guard_ledger_file
+    :type: ``string``
+    :default: none
+
+    With a positive ``dual_energy_internal_guard``: append one row per
+    step ``step guarded_cells discarded_cum`` -- the number of cells whose
+    window is below 1 and the cumulative ion energy the end-of-step rewrite
+    removed from (positive) or added to (negative) the conservative
+    register over those cells, :math:`\sum (E_{i,\mathrm{before}} -
+    E_{i,\mathrm{after}})\,dV` [J] ([J/m\ :sup:`2`] in 1D), i.e. the
+    measured :math:`E_i` excess the guarded closure discards. The first
+    write of a run truncates a stale file; the counter restarts at zero on
+    a simulation restart.
+
 .. pp:param:: implicit_mhd.dual_energy_sync_threshold
     :type: ``float``
     :default: ``0.99``
