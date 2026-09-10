@@ -5165,7 +5165,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_pedestal_cov_wall_stack  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=2"  # inputs
     "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref/diags/diag000008"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref  # dependency
