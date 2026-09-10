@@ -2925,6 +2925,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * driver; aborts with a configuration message when circuit.coils /
      * circuit.engine are not set up. */
     [[nodiscard]] CircuitCoupler& NativeCircuitCoupler () const;
+  public:   // nvcc: the enclosing function of an extended __device__ lambda cannot be private (CUDA build)
     /** Fill the nodal (node r, node z) circuit linkage-weight register
      * CircuitCoupler::LinkageWeightName ("circuit_linkage_weight") with
      * the PHYSICAL SHARE of the current at every J_theta node,
@@ -2949,6 +2950,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * before every native MeasureLinkages when the coupler needs the
      * weight (CircuitCoupler::NeedsLinkageWeight); RZ only. */
     void FillCircuitLinkageWeight (amrex::Real time);
+  private:
     [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
 
     /** Per-block admissibility lower bounds of the fluid blocks, in the
