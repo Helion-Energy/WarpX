@@ -2134,6 +2134,12 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(FieldResistivityE1Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
+    // Circuit linkage weight w = eta_phys / eta_field on the J_theta /
+    // E_theta corners (see FillCircuitLinkageWeight); unit until filled,
+    // filled only when the circuit coupler asks for it.
+    fields.alloc_init(CircuitCoupler::LinkageWeightName, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 1.0_rt);
     fields.alloc_init(FieldResistivityE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
@@ -5194,6 +5200,87 @@ CircuitCoupler& ThetaImplicitMHD::NativeCircuitCoupler () const
     return *coupling->Coupler();
 }
 
+void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(time);
+    WARPX_ABORT_WITH_MESSAGE(
+        "the circuit linkage weight is an RZ (m = 0) measurement");
+#else
+    BL_PROFILE("ThetaImplicitMHD::FillCircuitLinkageWeight()");
+    using ablastr::fields::Direction;
+    amrex::MultiFab& weight =
+        *m_WarpX->m_fields.get(CircuitCoupler::LinkageWeightName, 0);
+    // The E_theta row's eta inputs, exactly as AssembleOhmElectricField
+    // captures them (nodal rho_fp and Te, the corner |J| from the plasma
+    // current, the Ohm guard, the vacuum boost keyed to the per-step
+    // frozen reference, the wall-band override tables).
+    const amrex::MultiFab& charge_density =
+        *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab& electron_temperature =
+        *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, 0);
+    const amrex::MultiFab& current_r = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
+    const amrex::MultiFab& current_theta = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
+    const amrex::MultiFab& current_z = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    const auto eta = m_hybrid_pic_model->m_eta;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+    const amrex::Real vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    const amrex::Real vacuum_division_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real vacuum_reference_charge_density =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
+    const WallBandEtaOverrideView wall_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const band_override_et = wall_band_view.first_band_et;
+    const amrex::Real band_eta_override = wall_band_view.eta_override;
+    for (amrex::MFIter mfi(weight); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto w = weight.array(mfi);
+        const auto j_r = current_r.const_array(mfi);
+        const auto j_theta = current_theta.const_array(mfi);
+        const auto j_z = current_z.const_array(mfi);
+        const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            // The E_theta corner's |J| (native J_theta, half-sum J_r and
+            // J_z) and eta arguments, term for term the Ohm assembly's.
+            const amrex::Real jt_corner = j_theta(i, j, k);
+            const amrex::Real jr_corner =
+                0.5_rt * (j_r(i - 1, j, k) + j_r(i, j, k));
+            const amrex::Real jz_corner =
+                0.5_rt * (j_z(i, j - 1, k) + j_z(i, j, k));
+            const amrex::Real current_magnitude =
+                std::sqrt(jr_corner * jr_corner + jt_corner * jt_corner +
+                          jz_corner * jz_corner);
+            const amrex::Real charge_density_value =
+                std::max(rho_q(i, j, k), charge_density_floor);
+            const amrex::Real eta_phys = eta(
+                charge_density_value, te_nodal(i, j, k), current_magnitude,
+                time);
+            amrex::Real eta_field =
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta_phys, rho_q(i, j, k), vacuum_reference_charge_density,
+                    vacuum_division_guard, vacuum_eta_scale);
+            if (band_override_et != nullptr && i >= band_override_et[j]) {
+                // The band override IS the field eta there (the Ohm row
+                // replaces the composed eta by the constant).
+                eta_field = band_eta_override;
+            }
+            // eta_field >= eta_phys >= 0 by construction (a quadrature
+            // max, or the positive override); a vanishing field eta
+            // (eta_phys = 0 with the boost off) carries the whole current
+            // physically.
+            w(i, j, k) = (eta_field > 0.0_rt) ? eta_phys / eta_field : 1.0_rt;
+        });
+    }
+#endif
+}
+
 void ThetaImplicitMHD::SaveMagneticField ()
 {
     using ablastr::fields::Direction;
@@ -6711,6 +6798,11 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
             // scales as segments; the shared refresh below realizes them
             // on the external fields exactly like the python path.
             CircuitCoupler& coupler = NativeCircuitCoupler();
+            if (coupler.NeedsLinkageWeight()) {
+                // Physical-share weight of THIS iterate's current at the
+                // theta-stage state the Ohm assembly below will use.
+                FillCircuitLinkageWeight(start_time + m_theta * m_dt);
+            }
             coupler.MeasureLinkages(false);
             if (!m_circuit_step_open) {
                 coupler.BeginStepMeasured(start_time, m_dt);
@@ -19334,6 +19426,11 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                 // latch NOW, in committed time. FinishStep closes the
                 // engine's per-step bookkeeping.
                 CircuitCoupler& coupler = NativeCircuitCoupler();
+                if (coupler.NeedsLinkageWeight()) {
+                    // The accepted end-of-step state's physical share
+                    // (the end-of-step Ohm assembly's eta ratio).
+                    FillCircuitLinkageWeight(end_time);
+                }
                 coupler.MeasureLinkages(false);
                 if (m_circuit_step_open) {
                     coupler.EvaluateInterval(end_time - m_dt, end_time,

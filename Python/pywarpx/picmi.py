@@ -4823,6 +4823,43 @@ class CircuitCoupling(object):
         advances target the theta-stage time) or 'full_step' (advance
         the whole step with the EMF differenced over the theta interval,
         the python hook's semantics; identical at theta = 1).
+
+    probe_region: str, optional
+        Region of the nodal J_theta mesh the J-based linkage probes
+        ('reciprocity', 'loop') integrate over: 'domain' (default; the
+        whole domain) or 'wall_interior' (nodes with r_i < r_wall(z_j)
+        only, r_wall the piecewise-linear, end-clamped interpolation of
+        the wall polyline -- numpy: r_node < np.interp(z_node, z_poly,
+        r_poly); excludes the resistive exterior, the two-cell wall band
+        and paint leakage from every coil's back-EMF). The disk probe is
+        unaffected.
+
+    probe_region_polyline_file: str, optional
+        Wall polyline CSV ("z, r" rows, one header line) of probe_region
+        = 'wall_interior' and of the region report; defaults to the
+        theta-implicit MHD wall's own implicit_mhd.wall_polyline_file.
+
+    probe_region_report: str, optional
+        File receiving, at every accepting evaluation and at the first
+        residual evaluation of every step, one row per J-based coil with
+        the unmasked, unweighted linkage split by radial region
+        (interior / 2-cell wall band / exterior) and by linkage-weight
+        class (plasma w > 0.9 / mixed / boost-dominated w < 0.1), the
+        weighted totals and the value the coupler used, plus the J_theta
+        RMS per region (default: no report). Works with the default
+        probe_region and probe_weight too; needs a wall polyline.
+
+    probe_weight: str, optional
+        Per-node weight of the J-based probe integrand: 'none' (default)
+        or 'physical_share', w = eta_phys / eta_field at the J_theta node
+        from the theta-implicit MHD solver's nodal register
+        "circuit_linkage_weight" (refreshed before every measurement;
+        readable in python through
+        fields.MultiFabWrapper(mf_name="circuit_linkage_weight", level=0)):
+        the current flowing where the density-keyed vacuum boost of the
+        field resistivity dominates is the solver's stand-in for the
+        displacement current and must not induce eddy currents. Requires
+        the theta-implicit MHD solver.
     """
 
     def __init__(
@@ -4839,6 +4876,10 @@ class CircuitCoupling(object):
         probe_exclusion_radius=None,
         linkage_reference=None,
         residual_advance=None,
+        probe_region=None,
+        probe_region_polyline_file=None,
+        probe_region_report=None,
+        probe_weight=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -4852,6 +4893,10 @@ class CircuitCoupling(object):
         self.probe_exclusion_radius = probe_exclusion_radius
         self.linkage_reference = linkage_reference
         self.residual_advance = residual_advance
+        self.probe_region = probe_region
+        self.probe_region_polyline_file = probe_region_polyline_file
+        self.probe_region_report = probe_region_report
+        self.probe_weight = probe_weight
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -4892,6 +4937,14 @@ class CircuitCoupling(object):
             pywarpx.circuit.linkage_reference = self.linkage_reference
         if self.residual_advance is not None:
             pywarpx.circuit.residual_advance = self.residual_advance
+        if self.probe_region is not None:
+            pywarpx.circuit.probe_region = self.probe_region
+        if self.probe_region_polyline_file is not None:
+            pywarpx.circuit.probe_region_polyline_file = self.probe_region_polyline_file
+        if self.probe_region_report is not None:
+            pywarpx.circuit.probe_region_report = self.probe_region_report
+        if self.probe_weight is not None:
+            pywarpx.circuit.probe_weight = self.probe_weight
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):

@@ -19,6 +19,8 @@
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_Reduce.H>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <utility>
@@ -76,6 +78,153 @@ CachedOwnerMask (const amrex::MultiFab& mf, const amrex::Periodicity& period)
         mf.boxArray(), mf.DistributionMap(), mf.ixType(), period_vect,
         mf.OwnerMask(period)});
     return *owner_mask_cache.back().mask;
+}
+
+double
+ProbeRegionTable::WallRadiusAt (const std::vector<double>& z_poly,
+                                const std::vector<double>& r_poly,
+                                const double z)
+{
+    // numpy.interp semantics (see the class comment): clamped ends, then
+    // the segment [z_k, z_{k+1}) with the LARGEST k such that z_k <= z,
+    // and the slope-first formula numpy evaluates.
+    if (z <= z_poly.front()) { return r_poly.front(); }
+    if (z >= z_poly.back()) { return r_poly.back(); }
+    // largest k with z_poly[k] <= z (z < z_poly.back() guarantees k + 1 < n
+    // and z_poly[k + 1] > z, so the segment has positive length)
+    const auto upper = std::upper_bound(z_poly.begin(), z_poly.end(), z);
+    const std::size_t k = static_cast<std::size_t>(upper - z_poly.begin()) - 1;
+    const double slope =
+        (r_poly[k + 1] - r_poly[k]) / (z_poly[k + 1] - z_poly[k]);
+    return slope * (z - z_poly[k]) + r_poly[k];
+}
+
+void
+ProbeRegionTable::Define (const amrex::Geometry& geom,
+                          const std::vector<double>& z_poly,
+                          const std::vector<double>& r_poly)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        z_poly.size() >= 2 && z_poly.size() == r_poly.size(),
+        "ProbeRegionTable: the wall polyline needs at least two (z, r) points");
+    for (std::size_t p = 1; p < z_poly.size(); ++p) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_poly[p] >= z_poly[p - 1],
+            "ProbeRegionTable: the wall polyline's z must be non-decreasing");
+    }
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(geom);
+    WARPX_ABORT_WITH_MESSAGE(
+        "ProbeRegionTable is an RZ (m = 0) classification");
+#else
+    const amrex::Box& domain = geom.Domain();
+    const double dz = geom.CellSize(1);
+    const double plo_z = geom.ProbLo(1);
+    m_j_lo = domain.smallEnd(1);
+    const int j_hi = domain.bigEnd(1) + 1;   // upper nodal plane
+    m_band_width = 2.0 * geom.CellSize(0);
+    m_r_wall_host.resize(static_cast<std::size_t>(j_hi - m_j_lo + 1));
+    std::vector<double> r_band_host(m_r_wall_host.size());
+    for (int j = m_j_lo; j <= j_hi; ++j) {
+        // the node's z exactly as the probe kernels form it
+        const double z = plo_z + j * dz;
+        const double r_wall = WallRadiusAt(z_poly, r_poly, z);
+        m_r_wall_host[static_cast<std::size_t>(j - m_j_lo)] = r_wall;
+        r_band_host[static_cast<std::size_t>(j - m_j_lo)] = r_wall - m_band_width;
+    }
+    m_r_wall.resize(m_r_wall_host.size());
+    m_r_band.resize(r_band_host.size());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_r_wall_host.begin(),
+                          m_r_wall_host.end(), m_r_wall.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, r_band_host.begin(),
+                          r_band_host.end(), m_r_band.begin());
+    amrex::Gpu::streamSynchronize();
+    m_defined = true;
+#endif
+}
+
+NodeSelector
+MakeNodeSelector (const ProbeNodeFilter& filter, const amrex::MFIter& mfi)
+{
+    NodeSelector sel;
+    if (filter.radial != RadialRegion::any) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            filter.region != nullptr && filter.region->IsDefined(),
+            "circuit probe node filter: a radial region was requested "
+            "without a defined wall-polyline region table");
+        sel.r_wall = filter.region->WallRadiusTable();
+        sel.r_band = filter.region->BandRadiusTable();
+        sel.j_lo = filter.region->JLo();
+        sel.radial = static_cast<int>(filter.radial);
+    }
+    if (filter.wclass != WeightClass::any) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(filter.weight != nullptr,
+            "circuit probe node filter: a weight class was requested "
+            "without the nodal linkage-weight field");
+        sel.w = filter.weight->const_array(mfi);
+        sel.wclass = static_cast<int>(filter.wclass);
+    }
+    return sel;
+}
+
+std::array<double, 3>
+NodalRmsByRegion (const amrex::MultiFab& J_theta,
+                  const ProbeRegionTable& region)
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(J_theta, region);
+    WARPX_ABORT_WITH_MESSAGE(
+        "NodalRmsByRegion is an RZ (m = 0) measurement");
+    return {0.0, 0.0, 0.0};
+#else
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(region.IsDefined(),
+        "NodalRmsByRegion requires a defined wall-polyline region table");
+    auto& warpx = WarpX::GetInstance();
+    const auto& geom = warpx.Geom(0);
+    const double dr = geom.CellSize(0);
+    const double plo_r = geom.ProbLo(0);
+    const amrex::Periodicity period = geom.periodicity();
+    const amrex::iMultiFab& owner = CachedOwnerMask(J_theta, period);
+    const double* const r_wall = region.WallRadiusTable();
+    const double* const r_band = region.BandRadiusTable();
+    const int j_lo = region.JLo();
+
+    ReduceOps<ReduceOpSum, ReduceOpSum, ReduceOpSum,
+              ReduceOpSum, ReduceOpSum, ReduceOpSum> reduce_op;
+    ReduceData<double, double, double, double, double, double>
+        reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (MFIter mfi(J_theta, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box tb = mfi.tilebox(amrex::IntVect(1));
+        const auto jt = J_theta.const_array(mfi);
+        const auto msk = owner.const_array(mfi);
+        reduce_op.eval(tb, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
+            {
+                if (msk(i, j, 0) == 0) {
+                    return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                }
+                const double r = plo_r + i * dr;
+                const double v = static_cast<double>(jt(i, j, 0, 0));
+                const double v2 = v * v;
+                const bool in_wall = (r < r_wall[j - j_lo]);
+                const bool in_interior = (r < r_band[j - j_lo]);
+                if (in_interior) { return {v2, 1.0, 0.0, 0.0, 0.0, 0.0}; }
+                if (in_wall) { return {0.0, 0.0, v2, 1.0, 0.0, 0.0}; }
+                return {0.0, 0.0, 0.0, 0.0, v2, 1.0};
+            });
+    }
+    ReduceTuple hv = reduce_data.value(reduce_op);
+    std::array<double, 6> sums = {
+        amrex::get<0>(hv), amrex::get<1>(hv), amrex::get<2>(hv),
+        amrex::get<3>(hv), amrex::get<4>(hv), amrex::get<5>(hv)};
+    ParallelDescriptor::ReduceRealSum(sums.data(), 6);
+    std::array<double, 3> rms = {0.0, 0.0, 0.0};
+    for (int q = 0; q < 3; ++q) {
+        const double count = sums[2 * q + 1];
+        rms[q] = (count > 0.0) ? std::sqrt(sums[2 * q] / count) : 0.0;
+    }
+    return rms;
+#endif
 }
 
 amrex::Real
@@ -140,11 +289,12 @@ DiskFluxLinkage (const Coil& coil, const amrex::MultiFab& Bz)
 
 amrex::Real
 ReciprocityLinkage (const amrex::MultiFab& A_theta,
-                    const amrex::MultiFab& J_theta)
+                    const amrex::MultiFab& J_theta,
+                    const ProbeNodeFilter& filter)
 {
     BL_PROFILE("warpx::circuit::ReciprocityLinkage");
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(A_theta, J_theta);
+    amrex::ignore_unused(A_theta, J_theta, filter);
     WARPX_ABORT_WITH_MESSAGE(
         "ReciprocityLinkage is an RZ (m = 0) measurement");
     return 0.0_rt;
@@ -169,11 +319,15 @@ ReciprocityLinkage (const amrex::MultiFab& A_theta,
         const auto jt = J_theta.const_array(mfi);
         const auto msk = owner.const_array(mfi);
         const int nr_l = nr;
+        const NodeSelector sel = MakeNodeSelector(filter, mfi);
         reduce_op.eval(tb, reduce_data,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> GpuTuple<double>
             {
                 if (msk(i, j, 0) == 0) { return 0.0; }
                 const double r = plo_r + i * dr;
+                // optional node filter (region mask / weight class):
+                // comparisons only, the integrand arithmetic is untouched
+                if (!sel.Contains(i, j, r)) { return 0.0; }
                 // trapezoid end-weights in r only
                 const double w_r = (i == 0 || i == nr_l) ? 0.5 : 1.0;
                 return w_r * r * static_cast<double>(a(i, j, 0, 0))
@@ -190,11 +344,11 @@ ReciprocityLinkage (const amrex::MultiFab& A_theta,
 
 amrex::Real
 LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
-             const double exclusion_radius)
+             const double exclusion_radius, const ProbeNodeFilter& filter)
 {
     BL_PROFILE("warpx::circuit::LoopLinkage");
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(coil, J_theta, exclusion_radius);
+    amrex::ignore_unused(coil, J_theta, exclusion_radius, filter);
     WARPX_ABORT_WITH_MESSAGE(
         "LoopLinkage is an RZ (m = 0) measurement");
     return 0.0_rt;
@@ -227,6 +381,7 @@ LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
         const auto msk = owner.const_array(mfi);
         const int nr_l = nr;
         const int nz_l = nz;
+        const NodeSelector sel = MakeNodeSelector(filter, mfi);
         reduce_op.eval(tb, reduce_data,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> GpuTuple<double>
             {
@@ -236,6 +391,7 @@ LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
                 const double z = plo_z + j * dz;
                 const double d2 = (r - r_c) * (r - r_c) + (z - z_c) * (z - z_c);
                 if (d2 < excl2) { return 0.0; }   // the exclusion mask
+                if (!sel.Contains(i, j, r)) { return 0.0; }   // node filter
                 // trapezoid end-weights in r only
                 const double w_r = (i == 0 || i == nr_l) ? 0.5 : 1.0;
                 return w_r * r * amps * YeeLoopATheta(r, z, r_c, z_c)
@@ -311,10 +467,12 @@ LinkageBatch::BuildPack (const CoilSet& coils,
                          const std::vector<double>& exclusion_radius,
                          const std::vector<const amrex::MultiFab*>& a_theta,
                          const amrex::MultiFab* bz,
-                         const amrex::MultiFab* j_theta)
+                         const amrex::MultiFab* j_theta,
+                         const ProbeNodeFilter& filter)
 {
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta);
+    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta,
+                         filter);
     WARPX_ABORT_WITH_MESSAGE(
         "LinkageBatch is an RZ (m = 0) measurement");
 #else
@@ -425,6 +583,10 @@ LinkageBatch::BuildPack (const CoilSet& coils,
             const auto it = m_jobs_j.find(mfi.index());
             if (it == m_jobs_j.end()) { continue; }
             const auto msk = owner.const_array(mfi);
+            // The static node filter (circuit.probe_region = wall_interior)
+            // is folded into the weights like the owner mask: a masked
+            // node's weight is exactly 0.
+            const NodeSelector sel = MakeNodeSelector(filter, mfi);
             for (const Job& job : it->second) {
                 const amrex::Box box = job.box;
                 const long w_offset = job.weight_offset;
@@ -458,7 +620,8 @@ LinkageBatch::BuildPack (const CoilSet& coils,
                             const double d2 = (r - r_c) * (r - r_c)
                                               + (z - z_c) * (z - z_c);
                             weights[w_offset + lin] =
-                                (msk(i, j, 0) == 0 || j == nz_l || d2 < excl2)
+                                (msk(i, j, 0) == 0 || j == nz_l || d2 < excl2 ||
+                                 !sel.Contains(i, j, r))
                                     ? 0.0
                                     : w_r * r * factor * amps
                                           * YeeLoopATheta(r, z, r_c, z_c);
@@ -475,7 +638,7 @@ LinkageBatch::BuildPack (const CoilSet& coils,
                         const double w_r =
                             (i == 0 || i == nr_l) ? 0.5 : 1.0;
                         weights[w_offset + lin] =
-                            (msk(i, j, 0) == 0)
+                            (msk(i, j, 0) == 0 || !sel.Contains(i, j, r))
                                 ? 0.0
                                 : w_r * r * factor
                                       * static_cast<double>(a(i, j, 0, 0));
@@ -541,7 +704,8 @@ LinkageBatch::Measure (const CoilSet& coils,
                        const std::vector<const amrex::MultiFab*>& a_theta,
                        const amrex::MultiFab* bz,
                        const amrex::MultiFab* j_theta,
-                       std::vector<amrex::Real>& lambda)
+                       std::vector<amrex::Real>& lambda,
+                       const ProbeNodeFilter& filter)
 {
     // The profiler count of this region IS the sync/all-reduce count of
     // the measurement path: one stream synchronization, one
@@ -550,7 +714,8 @@ LinkageBatch::Measure (const CoilSet& coils,
     // circuit.probe_crosscheck).
     BL_PROFILE("warpx::circuit::LinkageBatch::Measure");
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta);
+    amrex::ignore_unused(coils, probes, exclusion_radius, a_theta, bz, j_theta,
+                         filter);
     lambda.assign(coils.size(), 0.0);
     WARPX_ABORT_WITH_MESSAGE(
         "LinkageBatch is an RZ (m = 0) measurement");
@@ -568,7 +733,7 @@ LinkageBatch::Measure (const CoilSet& coils,
          (m_key_ba_bz == bz->boxArray() &&
           m_key_dm_bz == bz->DistributionMap()));
     if (!key_hit) {
-        BuildPack(coils, probes, exclusion_radius, a_theta, bz, j_theta);
+        BuildPack(coils, probes, exclusion_radius, a_theta, bz, j_theta, filter);
     }
 
     const double* const AMREX_RESTRICT weights = m_weights.data();

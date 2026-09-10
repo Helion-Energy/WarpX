@@ -19,6 +19,9 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_REAL.H>
 
+#include <string>
+#include <vector>
+
 /**
  * \brief Stair-step PEC (perfectly conducting) shaped-wall mask for the
  * theta-implicit MHD solver (RZ only).
@@ -477,6 +480,20 @@ public:
      * the ghost-extended axial range. Aborts outside RZ, on periodic z,
      * on a malformed polyline, or on a polyline that reaches the axis. */
     void Define (const amrex::Geometry& geom, const amrex::IntVect& ngrow);
+
+    /** Read a wall polyline CSV ("z, r" rows; one optional non-numeric
+     * header row; blank and '#' lines skipped; the path is resolved
+     * against AMREX_INPUTS_FILE_PREFIX like the inputs file itself when
+     * it does not open as given). Requires at least two points with
+     * non-decreasing z. The shared reader of implicit_mhd.wall_polyline_file
+     * and of the circuit coupling's probe-region polyline
+     * (circuit.probe_region_polyline_file); key_label names the input key
+     * in the abort messages. */
+    static void ReadPolylineFile (const std::string& file,
+                                  std::vector<double>& z_points,
+                                  std::vector<double>& r_points,
+                                  const std::string& key_label =
+                                      "implicit_mhd.wall_polyline_file");
 
     [[nodiscard]] bool IsActive () const { return m_active; }
 

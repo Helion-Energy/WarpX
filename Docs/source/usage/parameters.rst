@@ -9034,6 +9034,89 @@ Jacobian probes.
     as an in-phase spurious linkage with maximal weight. Overridden per coil by
     ``circuit.<name>.probe_exclusion_radius``.
 
+.. pp:param:: circuit.probe_region
+    :type: ``str``
+    :default: ``domain``
+    :optional:
+
+    Region of the nodal (node :math:`r`, node :math:`z`) plasma-current mesh the J-based
+    linkage probes (``reciprocity`` and ``loop``; see ``probe`` under :pp:param:`circuit.coils`)
+    integrate over. ``domain``: the whole domain (today's behaviour, bit-identical).
+    ``wall_interior``: only the nodes inside the wall polyline -- node :math:`(r_i, z_j)`,
+    :math:`r_i = r_\mathrm{lo} + i\,\Delta r`, :math:`z_j = z_\mathrm{lo} + j\,\Delta z`, counts
+    iff :math:`r_i < r_\mathrm{wall}(z_j)`, with :math:`r_\mathrm{wall}(z)` the piecewise-linear
+    interpolation in :math:`z` of the polyline of :pp:param:`circuit.probe_region_polyline_file`,
+    clamped (constant) beyond its ends, in ``numpy.interp`` semantics (python applies the identical
+    rule as ``r_node < np.interp(z_node, z_poly, r_poly)``). This excludes the resistive exterior
+    between the dielectric wall and the outer boundary, the two-cell wall band and any paint
+    leakage from every coil's back-EMF. The mask is folded into the batched weight tables (a masked
+    node's weight is exactly 0) and applied identically by the single-coil reference probes, so
+    :pp:param:`circuit.probe_crosscheck` validates both under the mask. The ``disk`` probe (a
+    :math:`B_z` surface integral) is not a current integral and is unaffected. The Green's-function
+    open-boundary source integral keeps the TOTAL current: only the back-EMF is masked.
+
+.. pp:param:: circuit.probe_region_polyline_file
+    :type: ``str``
+    :default: :pp:param:`implicit_mhd.wall_polyline_file`
+    :optional:
+
+    Wall polyline CSV (``z, r`` rows, one header line, :math:`z` non-decreasing; a relative path is
+    resolved like the inputs file) of :pp:param:`circuit.probe_region` = ``wall_interior`` and of
+    :pp:param:`circuit.probe_region_report`. Defaults to the theta-implicit MHD dielectric wall's own
+    polyline; the run aborts when either consumer is requested and no polyline is available. The
+    classification is NODAL (the J mesh) and differs from the wall mask's cell-centered stair
+    classification within half a cell of the contour, by construction.
+
+.. pp:param:: circuit.probe_region_report
+    :type: ``str``
+    :optional:
+
+    When set, the coupler appends to this file (I/O rank), at every ACCEPTING evaluation (once per
+    step under the theta-implicit MHD residual protocol, once per accepted substep under the
+    explicit substep protocol) and at the first residual evaluation of every step (the Newton
+    initial iterate, i.e. the committed :math:`t^n` state), one row per J-based coil:
+    ``kind step t coil lambda_total lambda_interior lambda_band lambda_exterior lambda_w_plasma
+    lambda_w_mixed lambda_w_boost lambda_weighted lambda_used jtheta_rms_interior jtheta_rms_band
+    jtheta_rms_exterior lambda_weighted_inside`` -- ``lambda_total`` the unmasked, unweighted
+    integral, split by radial region (interior :math:`r_i < r_\mathrm{wall} - 2\Delta r`, band
+    :math:`r_\mathrm{wall} - 2\Delta r \le r_i < r_\mathrm{wall}`, exterior :math:`r_i \ge
+    r_\mathrm{wall}`; they sum to the total to roundoff) and by linkage-weight class (plasma
+    :math:`w > 0.9`, mixed, boost-dominated :math:`w < 0.1`, with :math:`w` the
+    ``circuit_linkage_weight`` register of :pp:param:`circuit.probe_weight`; without the register
+    :math:`w \equiv 1`), :math:`\int w A_\theta J_\theta\,dV` over the domain
+    (``lambda_weighted``) and over the wall interior (``lambda_weighted_inside``), ``lambda_used``
+    the value the coupler used (its mask and weight applied), and the RMS of the nodal
+    :math:`J_\theta` over the interior, band and exterior nodes (per evaluation, repeated on every
+    coil row). The same columns as the python coupling reference's report. All reals ``%.17g``;
+    ``#`` lines document the columns. A measurement of the split, independent of the mask and weight settings (works with
+    the defaults); needs a wall polyline. Disk-probe coils are absent (not current integrals).
+
+.. pp:param:: circuit.probe_weight
+    :type: ``str``
+    :default: ``none``
+    :optional:
+
+    Per-node weight of the J-based probe integrand. ``none``: unit weight (bit-identical).
+    ``physical_share``: :math:`w = \eta_\mathrm{phys} / \eta_\mathrm{field}` at every
+    :math:`J_\theta` node, read from the nodal register ``circuit_linkage_weight`` that the
+    theta-implicit MHD solver fills right before every measurement from the same registers,
+    stencils and floors as its :math:`E_\theta` Ohm row: :math:`\eta_\mathrm{phys}` the user
+    resistivity (the un-boosted eta the Joule booking keeps) and :math:`\eta_\mathrm{field} =
+    \sqrt{\eta_\mathrm{phys}^2 + \eta_\mathrm{vac}^2}` the density-keyed vacuum-boosted field
+    resistivity (:pp:param:`implicit_mhd.vacuum_resistivity_diffusivity`), replaced by the constant
+    :pp:param:`implicit_mhd.wall_band_eta_override` at band-interior rows (so :math:`w =
+    \eta_\mathrm{phys}/\eta_\mathrm{override} \approx 0` there: the override is the field eta of
+    the band). That solver has no displacement current -- the vacuum is mocked by the boosted eta --
+    and the current flowing where the boost dominates is the numerical stand-in for the displacement
+    current, which must not induce eddy currents: the linkage becomes :math:`\int w\,m\,A_\theta
+    J_\theta\,dV` with :math:`m` the :pp:param:`circuit.probe_region` mask. :math:`w \to 1` in the
+    plasma (exactly 1 with the boost off), :math:`\eta_\mathrm{phys}/\eta_\mathrm{vac} \to 0` in
+    the deep vacuum. The weight is applied by pre-multiplying :math:`J_\theta`, so the batched and
+    reference probes see the same weighted current. Python reads the identical field through
+    ``pywarpx.fields.MultiFabWrapper(mf_name="circuit_linkage_weight", level=0)[...]`` (node
+    :math:`r` x node :math:`z`). Requires the theta-implicit MHD solver (the register does not
+    exist otherwise; the explicit hybrid has no boosted field eta).
+
 .. pp:param:: circuit.eps_lowpass_tau
     :type: ``float``
     :default: ``0.``

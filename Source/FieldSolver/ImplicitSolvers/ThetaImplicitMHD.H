@@ -2925,6 +2925,30 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * driver; aborts with a configuration message when circuit.coils /
      * circuit.engine are not set up. */
     [[nodiscard]] CircuitCoupler& NativeCircuitCoupler () const;
+    /** Fill the nodal (node r, node z) circuit linkage-weight register
+     * CircuitCoupler::LinkageWeightName ("circuit_linkage_weight") with
+     * the PHYSICAL SHARE of the current at every J_theta node,
+     *     w = eta_phys / eta_field,
+     * eta_phys = the user eta of the (rho_q, Te, |J|, t) parser at the
+     * node -- the un-boosted eta the Joule booking keeps -- and eta_field
+     * = the eta the Ohm assembly's E_theta row applies at that node:
+     * vacuum_keyed_resistivity(eta_phys, rho_q, ...) =
+     * sqrt(eta_phys^2 + eta_vac^2), REPLACED by the constant
+     * wall_band_eta_override at band-interior rows (so w =
+     * eta_phys / eta_override ~ 0 there: the override IS the field eta of
+     * the band). Same registers, stencils and floors as the E_theta row
+     * of AssembleOhmElectricField (nodal rho_fp, nodal Te, the corner
+     * |J| from the plasma current, the Ohm guard, the per-step frozen
+     * vacuum reference), evaluated on the CURRENT hybrid_current_fp_plasma
+     * (the current the linkage is measured on; the resistive_theta stage
+     * extrapolation of the intra-step assembly is not applied: the
+     * classification of mock vs physical current is a density statement,
+     * the |J| argument only enters through a current-keyed anomalous eta).
+     * w -> 1 in the plasma (exactly 1 with vacuum_resistivity_diffusivity
+     * = 0), eta_phys / eta_vac -> 0 in the deep vacuum. Called right
+     * before every native MeasureLinkages when the coupler needs the
+     * weight (CircuitCoupler::NeedsLinkageWeight); RZ only. */
+    void FillCircuitLinkageWeight (amrex::Real time);
     [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
 
     /** Per-block admissibility lower bounds of the fluid blocks, in the

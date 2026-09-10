@@ -31,58 +31,56 @@
 
 using namespace amrex::literals;
 
+void ImplicitMHDWallMask::ReadPolylineFile (const std::string& file,
+                                            std::vector<double>& z_points,
+                                            std::vector<double>& r_points,
+                                            const std::string& key_label)
+{
+    // The path is resolved against AMREX_INPUTS_FILE_PREFIX (the ctest
+    // convention for the inputs file itself) when it does not open as
+    // given.
+    std::string path = file;
+    if (!std::ifstream(path).good()) {
+        const char* prefix = std::getenv("AMREX_INPUTS_FILE_PREFIX");
+        if (prefix != nullptr) { path = std::string(prefix) + file; }
+    }
+    std::ifstream in(path);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(in.good(),
+        key_label + ": cannot open '" + file + "'");
+
+    std::string line;
+    bool first_content_line = true;
+    while (std::getline(in, line)) {
+        std::replace(line.begin(), line.end(), ',', ' ');
+        std::istringstream ls(line);
+        double z = 0.0;
+        double r = 0.0;
+        if (!(ls >> z >> r)) {
+            // allow a single non-numeric header row ("z, r") and
+            // blank/comment lines
+            std::istringstream probe(line);
+            std::string token;
+            const bool has_content = static_cast<bool>(probe >> token);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_content || first_content_line || token[0] == '#',
+                key_label + ": malformed row '" + line + "' in '" + path + "'");
+            if (has_content) { first_content_line = false; }
+            continue;
+        }
+        first_content_line = false;
+        z_points.push_back(z);
+        r_points.push_back(r);
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_points.size() >= 2,
+        key_label + ": need at least two (z, r) points in '" + path + "'");
+    for (std::size_t p = 1; p < z_points.size(); ++p) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_points[p] >= z_points[p - 1],
+            key_label + ": z must be non-decreasing");
+    }
+}
+
 namespace
 {
-    /** Read the wall polyline CSV ("z, r" rows, optional header). The
-     * path is resolved against AMREX_INPUTS_FILE_PREFIX (the ctest
-     * convention for the inputs file itself) when it does not open
-     * as given. */
-    void ReadWallPolyline (const std::string& file,
-                           std::vector<double>& z_points,
-                           std::vector<double>& r_points)
-    {
-        std::string path = file;
-        if (!std::ifstream(path).good()) {
-            const char* prefix = std::getenv("AMREX_INPUTS_FILE_PREFIX");
-            if (prefix != nullptr) { path = std::string(prefix) + file; }
-        }
-        std::ifstream in(path);
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(in.good(),
-            "implicit_mhd.wall_polyline_file: cannot open '" + file + "'");
-
-        std::string line;
-        bool first_content_line = true;
-        while (std::getline(in, line)) {
-            std::replace(line.begin(), line.end(), ',', ' ');
-            std::istringstream ls(line);
-            double z = 0.0;
-            double r = 0.0;
-            if (!(ls >> z >> r)) {
-                // allow a single non-numeric header row ("z, r") and
-                // blank/comment lines
-                std::istringstream probe(line);
-                std::string token;
-                const bool has_content = static_cast<bool>(probe >> token);
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                    !has_content || first_content_line || token[0] == '#',
-                    "implicit_mhd.wall_polyline_file: malformed row '" + line +
-                        "' in '" + path + "'");
-                if (has_content) { first_content_line = false; }
-                continue;
-            }
-            first_content_line = false;
-            z_points.push_back(z);
-            r_points.push_back(r);
-        }
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_points.size() >= 2,
-            "implicit_mhd.wall_polyline_file: need at least two (z, r) points in '"
-                + path + "'");
-        for (std::size_t p = 1; p < z_points.size(); ++p) {
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_points[p] >= z_points[p - 1],
-                "implicit_mhd.wall_polyline_file: z must be non-decreasing");
-        }
-    }
-
     /** Wall radius at axial position z: piecewise-linear interpolation of
      * the polyline, clamped to its axial range (constant extrapolation
      * beyond the ends). Zero-length (duplicate-z) segments take the
@@ -291,7 +289,7 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
 
     std::vector<double> z_points;
     std::vector<double> r_points;
-    ReadWallPolyline(polyline_file, z_points, r_points);
+    ReadPolylineFile(polyline_file, z_points, r_points);
 
     const amrex::Box& domain = geom.Domain();
     m_nz = domain.length(1);

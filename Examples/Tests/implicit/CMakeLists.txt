@@ -5085,6 +5085,71 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_circuit_parity_reference  # dependency
 )
 
+# circuit probe REGION MASK (circuit.probe_region), PHYSICAL-SHARE WEIGHT
+# (circuit.probe_weight) and the region REPORT (circuit.probe_region_report):
+# a synthetic compactly supported J_theta placed outside or inside the wall
+# polyline of a plain-input theta-implicit MHD deck with in-domain loop and
+# out-of-domain reciprocity probes under the Green's open r_hi boundary;
+# every arm pins the batched masked/weighted linkages against the reference
+# probes (circuit.probe_crosscheck) and the analysis checks the report's
+# partitions, its r_wall table against numpy.interp bitwise, and the arm's
+# exact-zero / identity contracts (see analysis_mhd_circuit_probe_region.py)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_region_domain  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region"  # inputs
+    "analysis_mhd_circuit_probe_region.py domain_outside ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_region_wall_outside  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_region=wall_interior"  # inputs
+    "analysis_mhd_circuit_probe_region.py wall_outside ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_region_wall_inside  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_region=wall_interior my_constants.rc=0.02 my_constants.wb=0.015"  # inputs
+    "analysis_mhd_circuit_probe_region.py wall_inside ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# physical-share weight arms: a vacuum exterior (rho = 1e-3 rho0 = the Ohm
+# reference density, with the density-keyed boost D = 1e3 m^2/s on:
+# eta_vac = mu0 D = 1.26e-3 ohm m against eta_phys = 1e-6, w = 7.96e-4)
+# around an outside bump (boost-dominated: its weighted linkage is w times
+# the unweighted one, asserted quantitatively) or an inside bump in the
+# plasma (w = 1 - 8e-7: unchanged). Deeper vacua (1e-4 rho0) are Newton-
+# hostile in this undamped dust deck. The crosscheck bound is loosened to 1e-8:
+# the weighted linkage of a Jacobian-probe state is a strongly cancelling
+# sum (results ~1e-15 from terms ~1e-11), so the two summation orders agree
+# to absolute roundoff (|delta| ~ 1e-26) but not to 1e-12 of the result.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_weight_boost  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_weight=physical_share my_constants.rho_vac_frac=1.0e-3 implicit_mhd.vacuum_resistivity_diffusivity=1.0e3 circuit.probe_crosscheck_rtol=1.0e-8 max_step=2"  # inputs
+    "analysis_mhd_circuit_probe_region.py weight_boost ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_weight_plasma  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_weight=physical_share my_constants.rho_vac_frac=1.0e-3 implicit_mhd.vacuum_resistivity_diffusivity=1.0e3 my_constants.rc=0.02 my_constants.wb=0.015 circuit.probe_crosscheck_rtol=1.0e-8 max_step=2"  # inputs
+    "analysis_mhd_circuit_probe_region.py weight_plasma ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name

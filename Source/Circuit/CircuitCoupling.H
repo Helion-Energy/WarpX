@@ -83,6 +83,14 @@ private:
      * the coil set; circuit.probe_exclusion_radius with a per-coil
      * override). */
     std::vector<double> m_probe_exclusion;
+    /** Wall polyline of circuit.probe_region = wall_interior and of the
+     * probe-region report: circuit.probe_region_polyline_file, defaulting
+     * to implicit_mhd.wall_polyline_file (the theta-implicit MHD
+     * dielectric wall's own polyline). Empty = none available. */
+    std::string m_probe_region_polyline_file;
+    /** The nodal J_theta-mesh region table built from it at InitData
+     * (defined only when the mask or the report is requested). */
+    warpx::circuit::ProbeRegionTable m_probe_region;
 
     std::string m_engine = "none";          //!< none | callbacks | external
     std::string m_plugin_library;           //!< engine = external only

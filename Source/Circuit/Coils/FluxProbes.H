@@ -11,12 +11,18 @@
 
 #include "CoilSet.H"
 
+#include <AMReX_Array4.H>
 #include <AMReX_Box.H>
+#include <AMReX_Geometry.H>
 #include <AMReX_GpuContainers.H>
+#include <AMReX_GpuQualifiers.H>
+#include <AMReX_MFIter.H>
 #include <AMReX_MultiFab.H>
+#include <AMReX_REAL.H>
 
 #include <array>
 #include <map>
+#include <string>
 #include <vector>
 
 namespace warpx::circuit
@@ -29,6 +35,175 @@ namespace warpx::circuit
         reciprocity, //!< free-space reciprocity dot with the plasma current
         loop         //!< reciprocity against the analytic loop A of the declared filament (LoopLinkage)
     };
+
+    /** Wall-polyline region classification of the nodal (node r, node z)
+     * J_theta mesh for the J-based linkage probes (circuit.probe_region,
+     * circuit.probe_region_report).
+     *
+     * THE RULE (binary, so the classification is the whole contract; the
+     * python coupling reference applies the identical rule with numpy):
+     * node (r_i, z_j), r_i = r_lo + i dr, z_j = z_lo + j dz, is INSIDE the
+     * wall iff
+     *     r_i < r_wall(z_j),
+     * where r_wall(z) is the piecewise-LINEAR interpolation in z of the
+     * wall polyline ("z, r" rows, z non-decreasing), CLAMPED at the ends
+     * (constant extrapolation), evaluated with numpy.interp semantics:
+     * for z <= z_0 -> r_0, for z >= z_last -> r_last, otherwise on the
+     * segment [z_k, z_{k+1}) with the LARGEST k such that z_k <= z (so a
+     * duplicate-z vertex pair resolves to the segment that follows it)
+     *     r_wall(z) = (r_{k+1} - r_k) / (z_{k+1} - z_k) * (z - z_k) + r_k,
+     * in exactly that floating-point order (bit-identical to
+     * numpy.interp(z, z_poly, r_poly)). Python:
+     *     r_node < np.interp(z_node, z_poly, r_poly)
+     * with r_node = r_lo + i * dr and z_node = z_lo + j * dz.
+     *
+     * The report's radial split refines the inside into the INTERIOR
+     * (r_i < r_wall(z_j) - 2 dr) and the two-cell wall BAND
+     * (r_wall(z_j) - 2 dr <= r_i < r_wall(z_j)); the EXTERIOR is
+     * r_i >= r_wall(z_j). The three regions partition the nodes exactly
+     * (both thresholds are tabulated once per z node and every kernel
+     * compares against the same tabulated values).
+     *
+     * This is a NODAL classification of the J_theta mesh and is NOT the
+     * theta-implicit MHD wall mask's cell-centered stair classification
+     * (that one marks a CELL conductor when its center radius is on or
+     * outside the polyline, and reduces zero-length vertical segments to
+     * the smaller radius); the two agree on which side of the wall a
+     * point lies except within half a cell of the contour, by
+     * construction of the different sample points.
+     *
+     * The disk probe (a B_z surface integral through the coil circle) is
+     * unaffected by the region mask: it is not a current integral.
+     * RZ (m = 0), level 0. */
+    class ProbeRegionTable
+    {
+    public:
+        /** Tabulate r_wall and r_wall - 2 dr at every z node of the
+         * level-0 domain (nodal j in [j_lo, j_hi]). z_poly must be
+         * non-decreasing with at least two points. */
+        void Define (const amrex::Geometry& geom,
+                     const std::vector<double>& z_poly,
+                     const std::vector<double>& r_poly);
+
+        [[nodiscard]] bool IsDefined () const { return m_defined; }
+
+        /** THE RULE's r_wall(z) (host; numpy.interp semantics, see the
+         * class comment). */
+        [[nodiscard]] static double WallRadiusAt (
+            const std::vector<double>& z_poly,
+            const std::vector<double>& r_poly, double z);
+
+        /** Device tables indexed by (j - JLo()). */
+        [[nodiscard]] const double* WallRadiusTable () const { return m_r_wall.data(); }
+        [[nodiscard]] const double* BandRadiusTable () const { return m_r_band.data(); }
+        [[nodiscard]] int JLo () const { return m_j_lo; }
+        [[nodiscard]] int NumNodes () const { return static_cast<int>(m_r_wall_host.size()); }
+        /** Host copy of r_wall(z_j), j - JLo() indexed. */
+        [[nodiscard]] const std::vector<double>& WallRadiusHost () const { return m_r_wall_host; }
+        [[nodiscard]] double BandWidth () const { return m_band_width; }
+
+    private:
+        bool m_defined = false;
+        int m_j_lo = 0;
+        double m_band_width = 0.0;   //!< 2 dr
+        std::vector<double> m_r_wall_host;
+        amrex::Gpu::DeviceVector<double> m_r_wall;
+        amrex::Gpu::DeviceVector<double> m_r_band;
+    };
+
+    /** Radial region of a J_theta node relative to the wall polyline
+     * (see ProbeRegionTable). */
+    enum class RadialRegion : int
+    {
+        any = 0,      //!< no radial restriction (the whole domain)
+        inside_wall,  //!< r < r_wall(z): the circuit.probe_region = wall_interior mask
+        interior,     //!< r < r_wall(z) - 2 dr
+        band,         //!< r_wall(z) - 2 dr <= r < r_wall(z)
+        exterior      //!< r >= r_wall(z)
+    };
+
+    /** Physical-share class of a J_theta node by the nodal linkage weight
+     * w = eta_phys / eta_field (the theta-implicit MHD solver's
+     * "circuit_linkage_weight" register; see CircuitCoupler::Params::
+     * probe_weight). */
+    enum class WeightClass : int
+    {
+        any = 0,  //!< no weight restriction
+        plasma,   //!< w > 0.9: the physical eta carries the current
+        mixed,    //!< 0.1 <= w <= 0.9
+        boost     //!< w < 0.1: the vacuum-boosted (mock displacement) current
+    };
+
+    /** Host-side node filter of the J-based probes: an optional radial
+     * region (needs a defined ProbeRegionTable) and an optional weight
+     * class (needs the nodal weight MultiFab on the J_theta layout).
+     * Default-constructed = no filter = the unrestricted integral,
+     * bit-identical to the probes without the filter argument. */
+    struct ProbeNodeFilter
+    {
+        const ProbeRegionTable* region = nullptr;
+        RadialRegion radial = RadialRegion::any;
+        const amrex::MultiFab* weight = nullptr;
+        WeightClass wclass = WeightClass::any;
+
+        [[nodiscard]] bool Active () const
+        {
+            return radial != RadialRegion::any || wclass != WeightClass::any;
+        }
+    };
+
+    /** Device-side (POD, captured by value) twin of ProbeNodeFilter for
+     * one box; built by MakeNodeSelector. */
+    struct NodeSelector
+    {
+        const double* r_wall = nullptr;
+        const double* r_band = nullptr;
+        int j_lo = 0;
+        int radial = 0;
+        amrex::Array4<const amrex::Real> w;
+        int wclass = 0;
+
+        /** Whether node (i, j) at radius r passes the filter. Pure
+         * comparisons: the probe arithmetic is untouched, so an inactive
+         * selector (radial = wclass = 0) is bit-identical to no filter. */
+        AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+        bool Contains (const int i, const int j, const double r) const noexcept
+        {
+            if (radial != 0) {
+                const double rw = r_wall[j - j_lo];
+                const double rb = r_band[j - j_lo];
+                const bool in_wall = (r < rw);
+                const bool in_interior = (r < rb);
+                if (radial == 1 && !in_wall) { return false; }
+                if (radial == 2 && !in_interior) { return false; }
+                if (radial == 3 && (in_interior || !in_wall)) { return false; }
+                if (radial == 4 && in_wall) { return false; }
+            }
+            if (wclass != 0) {
+                const double wv = static_cast<double>(w(i, j, 0));
+                const bool plasma = (wv > 0.9);
+                const bool boost = (wv < 0.1);
+                if (wclass == 1 && !plasma) { return false; }
+                if (wclass == 2 && (plasma || boost)) { return false; }
+                if (wclass == 3 && !boost) { return false; }
+            }
+            return true;
+        }
+    };
+
+    /** The device selector of a filter on one box (mfi must iterate the
+     * J_theta layout the weight MultiFab lives on). Aborts when a radial
+     * region is requested without a defined table, or a weight class
+     * without a weight MultiFab. */
+    NodeSelector MakeNodeSelector (const ProbeNodeFilter& filter,
+                                   const amrex::MFIter& mfi);
+
+    /** Root-mean-square of the nodal J_theta over the owner-masked nodes
+     * of each radial region -- interior, band, exterior (in that order;
+     * see RadialRegion) -- of a defined ProbeRegionTable; 0 for an empty
+     * region. Collective; RZ (m = 0), level 0. */
+    std::array<double, 3> NodalRmsByRegion (const amrex::MultiFab& J_theta,
+                                            const ProbeRegionTable& region);
 
     /** Plasma flux linkage of a coil by the DISK rule: the plasma-frame
      * B_z integrated over the coil's quarter-offset circle,
@@ -68,9 +243,13 @@ namespace warpx::circuit
      *                     (node r, node z), holding the field at
      *                     I_ref * n_turns, level 0
      * \param[in] J_theta  plasma-frame J_theta (node r, node z), level 0
+     * \param[in] filter   optional node filter (default: none = the whole
+     *                     domain, bit-identical to the unfiltered probe);
+     *                     see ProbeNodeFilter
      */
     amrex::Real ReciprocityLinkage (const amrex::MultiFab& A_theta,
-                                    const amrex::MultiFab& J_theta);
+                                    const amrex::MultiFab& J_theta,
+                                    const ProbeNodeFilter& filter = ProbeNodeFilter{});
 
     /** Plasma flux linkage of a coil by free-space reciprocity against the
      * ANALYTIC loop vector potential of the coil's declared filament,
@@ -98,9 +277,12 @@ namespace warpx::circuit
      * \param[in] J_theta           plasma-frame J_theta (node r, node z)
      * \param[in] exclusion_radius  mask radius [m] around the filament
      *                              (0 = no mask)
+     * \param[in] filter            optional node filter (default: none,
+     *                              bit-identical to the unfiltered probe)
      */
     amrex::Real LoopLinkage (const Coil& coil, const amrex::MultiFab& J_theta,
-                             double exclusion_radius);
+                             double exclusion_radius,
+                             const ProbeNodeFilter& filter = ProbeNodeFilter{});
 
     /** The coupling power Int J . E dV over the RZ (m = 0) domain, summed
      * component-wise on matched (E/J) staggerings with owner-masked nodal
@@ -168,6 +350,12 @@ namespace warpx::circuit
          *                      be null when no row uses reciprocity
          * \param[out] lambda   per-coil lambda_phys * I_ref * n_turns,
          *                      coil order, zeros for unmeasured rows
+         * \param[in]  filter   node filter of the J-based rows (the
+         *                      circuit.probe_region = wall_interior mask,
+         *                      folded into the weight tables; default
+         *                      none, bit-identical). Static like the
+         *                      other weight factors: a filter change
+         *                      requires a new LinkageBatch.
          */
         void Measure (const CoilSet& coils,
                       const std::vector<ProbeKind>& probes,
@@ -175,7 +363,8 @@ namespace warpx::circuit
                       const std::vector<const amrex::MultiFab*>& a_theta,
                       const amrex::MultiFab* bz,
                       const amrex::MultiFab* j_theta,
-                      std::vector<amrex::Real>& lambda);
+                      std::vector<amrex::Real>& lambda,
+                      const ProbeNodeFilter& filter = ProbeNodeFilter{});
 
         /** One weight-dot-field job: the cells of one box measured for
          * one coil row. Public for the CUDA extended-lambda rule (device
@@ -196,7 +385,8 @@ namespace warpx::circuit
                         const std::vector<double>& exclusion_radius,
                         const std::vector<const amrex::MultiFab*>& a_theta,
                         const amrex::MultiFab* bz,
-                        const amrex::MultiFab* j_theta);
+                        const amrex::MultiFab* j_theta,
+                        const ProbeNodeFilter& filter);
 
     private:
         bool m_built = false;

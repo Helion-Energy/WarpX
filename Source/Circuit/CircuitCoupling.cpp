@@ -13,6 +13,7 @@
 
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "FieldSolver/ImplicitSolvers/ImplicitMHDWallMask.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
@@ -150,6 +151,38 @@ CircuitCoupling::CircuitCoupling ()
             "circuit.linkage_reference / circuit.residual_advance shape the "
             "EMF the coupler hands a compiled engine and require "
             "circuit.engine = external");
+    }
+    // Probe region / weight / report (see CircuitCoupler::Params). All
+    // default off: domain, none, no report -- bit-identical to a coupler
+    // without the knobs.
+    {
+        std::string region = "domain";
+        pp_circuit.query("probe_region", region);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            region == "domain" || region == "wall_interior",
+            "circuit.probe_region must be 'domain' or 'wall_interior'");
+        m_coupler_params.probe_region = (region == "wall_interior")
+            ? CircuitCoupler::ProbeRegion::wall_interior
+            : CircuitCoupler::ProbeRegion::domain;
+        std::string weight = "none";
+        pp_circuit.query("probe_weight", weight);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            weight == "none" || weight == "physical_share",
+            "circuit.probe_weight must be 'none' or 'physical_share'");
+        m_coupler_params.probe_weight = (weight == "physical_share")
+            ? CircuitCoupler::ProbeWeight::physical_share
+            : CircuitCoupler::ProbeWeight::none;
+        pp_circuit.query("probe_region_report",
+                         m_coupler_params.probe_region_report);
+        // The polyline: the coupling's own key, else the theta-implicit
+        // MHD wall's polyline (queried here so a deck that relies on the
+        // fallback never trips the unused-input check on either key).
+        pp_circuit.query("probe_region_polyline_file",
+                         m_probe_region_polyline_file);
+        if (m_probe_region_polyline_file.empty()) {
+            const amrex::ParmParse pp_mhd("implicit_mhd");
+            pp_mhd.query("wall_polyline_file", m_probe_region_polyline_file);
+        }
     }
 }
 
@@ -374,9 +407,61 @@ CircuitCoupling::InitData ()
                 plugin->ReadCheckpoint(m_restart_dir);
             }
         }
+        // Wall-polyline region table of the probe mask and of the region
+        // report (either requested): the nodal J_theta-mesh classification
+        // r_i < r_wall(z_j) documented on warpx::circuit::ProbeRegionTable.
+        const bool wall_interior =
+            m_coupler_params.probe_region ==
+            CircuitCoupler::ProbeRegion::wall_interior;
+        const bool report = !m_coupler_params.probe_region_report.empty();
+        if (wall_interior || report) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !m_probe_region_polyline_file.empty(),
+                "circuit.probe_region = wall_interior and "
+                "circuit.probe_region_report need a wall polyline: set "
+                "circuit.probe_region_polyline_file (CSV of 'z, r' rows) or "
+                "implicit_mhd.wall_polyline_file");
+            std::vector<double> z_poly;
+            std::vector<double> r_poly;
+            ImplicitMHDWallMask::ReadPolylineFile(
+                m_probe_region_polyline_file, z_poly, r_poly,
+                "circuit.probe_region_polyline_file");
+            m_probe_region.Define(warpx.Geom(0), z_poly, r_poly);
+            amrex::Print() << "Circuit probe region: polyline '"
+                           << m_probe_region_polyline_file << "' ("
+                           << z_poly.size() << " points); rule: J_theta node "
+                           << "(r_i, z_j) is inside the wall iff r_i < "
+                           << "r_wall(z_j), r_wall = piecewise-linear in z, "
+                           << "clamped at the ends (numpy.interp); band = "
+                           << "r_wall - 2 dr <= r_i < r_wall (2 dr = "
+                           << m_probe_region.BandWidth() << " m)\n";
+        }
+        if (m_coupler_params.probe_weight ==
+            CircuitCoupler::ProbeWeight::physical_share) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                warpx.m_fields.has(CircuitCoupler::LinkageWeightName, 0),
+                "circuit.probe_weight = physical_share requires the "
+                "theta-implicit MHD solver (algo.evolve_scheme = "
+                "theta_implicit_mhd), which fills the nodal "
+                "circuit_linkage_weight register w = eta_phys / eta_field "
+                "before every linkage measurement; no other solver mocks "
+                "the vacuum with a boosted field resistivity");
+        }
         m_coupler = std::make_unique<CircuitCoupler>(
             m_coils, m_probes, m_probe_exclusion, m_coupler_params,
-            std::move(plugin));
+            std::move(plugin),
+            (wall_interior || report) ? &m_probe_region : nullptr);
+        m_coupler->InitRegionReport(!m_restart_dir.empty());
+        if (report) {
+            amrex::Print() << "Circuit probe region report: '"
+                           << m_coupler_params.probe_region_report
+                           << "' (per J-based coil at every accepting "
+                           << "evaluation and at the first residual "
+                           << "evaluation of every step: lambda split by "
+                           << "interior / band / exterior and by weight "
+                           << "class plasma / mixed / boost; J_theta RMS per "
+                           << "region)\n";
+        }
         // The coupler's own per-step memory (EMF low-pass state) is part
         // of the checkpoint; restore it with the engine state. Only a
         // compiled engine writes it (WriteCheckpointData), so only a
@@ -406,6 +491,17 @@ CircuitCoupling::InitData ()
                        << (m_coupler_params.residual_advance_full_step
                                ? "full_step [EMF over the theta interval]"
                                : "theta_stage")
+                       << ", probe_region = "
+                       << (wall_interior
+                               ? "wall_interior [J-based probes over r < "
+                                 "r_wall(z) only]"
+                               : "domain")
+                       << ", probe_weight = "
+                       << (m_coupler_params.probe_weight ==
+                                   CircuitCoupler::ProbeWeight::physical_share
+                               ? "physical_share [w = eta_phys / eta_field "
+                                 "at the J_theta nodes]"
+                               : "none")
                        << ")\n";
 #endif
     }

@@ -60,6 +60,20 @@
 class CircuitCoupler
 {
 public:
+    /** Region of the nodal J_theta mesh the J-based linkage probes
+     * (reciprocity, loop) integrate over (circuit.probe_region). */
+    enum class ProbeRegion
+    {
+        domain,        //!< the whole domain (default; today's behaviour, bit-identical)
+        wall_interior  //!< nodes with r < r_wall(z) of the wall polyline only (warpx::circuit::ProbeRegionTable)
+    };
+    /** Per-node weight of the J-based probe integrand (circuit.probe_weight). */
+    enum class ProbeWeight
+    {
+        none,           //!< unit weight (default; bit-identical)
+        physical_share  //!< w = eta_phys / eta_field from the "circuit_linkage_weight" register
+    };
+
     struct Params
     {
         int corrector_iterations = 1;
@@ -125,16 +139,101 @@ public:
          *           sub-cycles the full step and pushes [t^n, t^{n+1}]).
          *           Identical to theta_stage at theta = 1. */
         bool residual_advance_full_step = false;
+        /** Which nodes of the J_theta mesh the J-based probes (reciprocity
+         * and loop; the disk probe is a B_z surface integral and is not
+         * affected) integrate over (circuit.probe_region): the whole
+         * domain (default, bit-identical to a coupler without the knob),
+         * or the wall interior only -- node (r_i, z_j) counts iff
+         * r_i < r_wall(z_j) with r_wall the piecewise-linear, end-clamped
+         * interpolation of the wall polyline (the rule is documented on
+         * warpx::circuit::ProbeRegionTable). Excludes the resistive
+         * exterior between the dielectric wall and the outer boundary,
+         * the two-cell wall band and any paint leakage from every coil's
+         * back-EMF. The mask is folded into the batched weight tables
+         * (a masked node's weight is exactly 0) and applied identically
+         * by the single-coil reference probes (circuit.probe_crosscheck
+         * validates the two under the mask). */
+        ProbeRegion probe_region = ProbeRegion::domain;
+        /** Per-node weight of the J-based probe integrand
+         * (circuit.probe_weight): none (default, bit-identical), or the
+         * PHYSICAL SHARE of the current, w = eta_phys / eta_field at the
+         * J_theta node, read from the nodal "circuit_linkage_weight"
+         * register that the theta-implicit MHD solver fills right before
+         * every measurement (ThetaImplicitMHD::FillCircuitLinkageWeight;
+         * that solver has no displacement current: its vacuum is mocked
+         * by the density-keyed boosted field resistivity eta_field =
+         * sqrt(eta_phys^2 + eta_vac^2), and the current flowing where the
+         * boost dominates is the numerical stand-in for the displacement
+         * current, which must not induce eddy currents in the circuit).
+         * The linkage becomes Int w mask A_theta J_theta dV: the weight
+         * is applied by pre-multiplying J_theta (a scratch copy), so the
+         * batched tables and the reference probes see the same weighted
+         * current. w -> 1 in the plasma (exactly 1 with the boost off),
+         * ~eta_phys/eta_vac -> 0 in the deep vacuum, eta_phys/eta_override
+         * (~0) in the wall band under implicit_mhd.wall_band_eta_override
+         * -- the band override IS the field eta there. Requires the
+         * theta-implicit MHD solver (the register does not exist
+         * otherwise). The Green's-function open-boundary source integral
+         * keeps the TOTAL current (the ghost field must support the
+         * interior curl B as it is); only the back-EMF excludes the mock
+         * current. */
+        ProbeWeight probe_weight = ProbeWeight::none;
+        /** Optional region report file (circuit.probe_region_report; empty
+         * = off): at every ACCEPTING evaluation and at the first residual
+         * evaluation of every step, one row per J-based coil splitting
+         * the UNWEIGHTED, UNMASKED linkage by radial region
+         * (interior / band / exterior) and by weight class
+         * (plasma w > 0.9 / mixed / boost-dominated w < 0.1), plus the
+         * weighted totals, the value the coupler actually used and the
+         * RMS of J_theta over the interior, band and exterior nodes
+         * (columns: kind step t coil lambda_total lambda_interior
+         * lambda_band lambda_exterior lambda_w_plasma lambda_w_mixed
+         * lambda_w_boost lambda_weighted lambda_used jtheta_rms_interior
+         * jtheta_rms_band jtheta_rms_exterior lambda_weighted_inside;
+         * the python coupling reference's report carries the same
+         * columns). A measurement of the split,
+         * independent of probe_region / probe_weight (works with the
+         * defaults too). Needs a wall polyline. */
+        std::string probe_region_report;
     };
+
+    /** Name of the nodal (node r, node z) linkage-weight register the
+     * theta-implicit MHD solver fills for probe_weight = physical_share
+     * and for the report's weight-class split; python reads the identical
+     * field through
+     * pywarpx.fields.MultiFabWrapper(mf_name="circuit_linkage_weight",
+     * level=0)[...] (shape (nr + 1, nz + 1), node r x node z). */
+    inline static constexpr char LinkageWeightName[] = "circuit_linkage_weight";
 
     /** \param probes           per-coil probe kind
      *  \param probe_exclusion  per-coil mask radius [m] of the loop probe
-     *                          (ignored by the other kinds) */
+     *                          (ignored by the other kinds)
+     *  \param region           the wall-polyline region table (owned by
+     *                          the caller, must outlive the coupler);
+     *                          required when params.probe_region is
+     *                          wall_interior or a report is requested,
+     *                          may be null otherwise */
     CircuitCoupler (warpx::circuit::CoilSet const& coils,
                     std::vector<warpx::circuit::ProbeKind> probes,
                     std::vector<double> probe_exclusion,
                     Params params,
-                    std::unique_ptr<ExternalCircuit> plugin);
+                    std::unique_ptr<ExternalCircuit> plugin,
+                    const warpx::circuit::ProbeRegionTable* region = nullptr);
+
+    /** Whether the measurement needs the solver-filled linkage-weight
+     * register (probe_weight = physical_share, or the report's
+     * weight-class split): the theta-implicit MHD solver refreshes
+     * LinkageWeightName right before every MeasureLinkages when true. */
+    [[nodiscard]] bool NeedsLinkageWeight () const
+    {
+        return m_params.probe_weight == ProbeWeight::physical_share ||
+               !m_params.probe_region_report.empty();
+    }
+
+    /** Open the region report file (I/O rank): truncate and write the
+     * header, or append on a restart. Called once from
+     * CircuitCoupling::InitData. */
+    void InitRegionReport (bool restarting);
 
     /** Once per step, after the split-field subtraction (the evolved
      * fields hold the plasma response): seed the linkage registers at t^n
@@ -248,6 +347,19 @@ private:
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
     void FireEngine (char const* hook, bool accept);
     [[nodiscard]] std::vector<amrex::Real> CoupledScales (amrex::Real t) const;
+    /** The solver-filled nodal linkage weight, or nullptr when the
+     * register does not exist (no theta-implicit MHD solver). */
+    [[nodiscard]] const amrex::MultiFab* LinkageWeightField () const;
+    /** Refresh the scratch J_theta * w on the J layout. */
+    void RefreshWeightedCurrent (const amrex::MultiFab& j_theta,
+                                 const amrex::MultiFab& weight);
+    /** The node filter of the coupler's own measurement (the
+     * probe_region mask; no weight class). */
+    [[nodiscard]] warpx::circuit::ProbeNodeFilter MeasurementFilter () const;
+    /** Append the report rows of the current field registers
+     * (Params::probe_region_report); kind = "first" | "accept".
+     * Collective. */
+    void WriteRegionReport (const char* kind, amrex::Real time);
 
     warpx::circuit::CoilSet const& m_coils;
     std::vector<warpx::circuit::ProbeKind> m_probes;
@@ -279,6 +391,13 @@ private:
     warpx::circuit::LinkageBatch m_batch;               //!< batched probes
     std::vector<amrex::Real> m_lambda_scratch;
     std::vector<const amrex::MultiFab*> m_a_theta_scratch;
+    /** Wall-polyline region table of Params::probe_region and the report
+     * (caller-owned; null when neither is requested). */
+    const warpx::circuit::ProbeRegionTable* m_region = nullptr;
+    /** Scratch J_theta * w on the J_theta layout (Params::probe_weight and
+     * the report's weighted columns). */
+    amrex::MultiFab m_j_weighted;
+    bool m_report_header_written = false;
 };
 
 #endif // WARPX_CIRCUIT_CIRCUITCOUPLER_H_
