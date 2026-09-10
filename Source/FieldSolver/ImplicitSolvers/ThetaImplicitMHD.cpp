@@ -5237,7 +5237,6 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
     const WallBandEtaOverrideView wall_band_view =
         m_wall_mask.BandEtaOverrideView();
     const int* const band_override_et = wall_band_view.first_band_et;
-    const amrex::Real band_eta_override = wall_band_view.eta_override;
     for (amrex::MFIter mfi(weight); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto w = weight.array(mfi);
@@ -5267,14 +5266,20 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
                     eta_phys, rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_et != nullptr && i >= band_override_et[j]) {
-                // The band override IS the field eta there (the Ohm row
-                // replaces the composed eta by the constant).
-                eta_field = band_eta_override;
+                // The wall-band override row: the constant replaces the
+                // composed eta in the Ohm row, and the current that flows
+                // there is the override's (a numerical wall device, not
+                // plasma current) -- weight 0 by definition, whatever the
+                // parser eta evaluates to at that node (the production
+                // deck's anomalous term saturates near the override value
+                // in the tenuous band, which made the ratio ~1 and put the
+                // band current in the physical class: measured 2026-09-10).
+                w(i, j, k) = 0.0_rt;
+                return;
             }
             // eta_field >= eta_phys >= 0 by construction (a quadrature
-            // max, or the positive override); a vanishing field eta
-            // (eta_phys = 0 with the boost off) carries the whole current
-            // physically.
+            // max); a vanishing field eta (eta_phys = 0 with the boost off)
+            // carries the whole current physically.
             w(i, j, k) = (eta_field > 0.0_rt) ? eta_phys / eta_field : 1.0_rt;
         });
     }
