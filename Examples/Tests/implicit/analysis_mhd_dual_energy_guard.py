@@ -33,6 +33,7 @@ P0 = n0 * Ti0_eV * constants.elementary_charge
 pressure_floor = 1.0e-6 * P0
 
 state = load_fluid_state(sys.argv[1])
+initial = load_fluid_state(sys.argv[2])
 U = state["ion_internal_energy"]
 assert U is not None
 E = state["ion_energy"]
@@ -67,5 +68,15 @@ assert rows.shape[0] == max_step, "ledger must hold one row per step"
 assert (rows[:, 0] == np.arange(1, max_step + 1)).all(), "ledger step column"
 assert (rows[:, 1] == nz).all(), "the guard must cover every cell of this deck"
 assert np.isfinite(rows[:, 2]).all(), "ledger discard must be finite"
+
+# (iv) value gate: in this periodic box the only non-conservative change of
+# sum(E_i + U_e) is the guarded rewrite, so the domain budget closes on the
+# ledger: [sum(E_i + U_e)](32) - [sum(E_i + U_e)](0) = -discarded_cum (per unit
+# area in 1D: both sides carry the same dz).
+dz = 1.0 / nz
+budget = (np.sum(E + state["electron_energy"]) - np.sum(initial["ion_energy"] + initial["electron_energy"])) * dz
+print(f"dual_energy guard: value gate: energy change {budget:.9e} vs -ledger {-rows[-1, 2]:.9e} J/m^2 "
+      f"(rel {abs(budget + rows[-1, 2]) / abs(rows[-1, 2]):.3e})")
+np.testing.assert_allclose(budget, -rows[-1, 2], rtol=1.0e-9)
 
 print("dual_energy guard: PASS")

@@ -349,7 +349,7 @@ add_warpx_test(
     1  # dims
     1  # nprocs
     inputs_test_1d_theta_implicit_mhd_dual_energy_guard  # inputs
-    "analysis_mhd_dual_energy_guard.py diags/diag000032"  # analysis
+    "analysis_mhd_dual_energy_guard.py diags/diag000032 diags/diag000000"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -364,6 +364,19 @@ add_warpx_test(
     "analysis_mhd_dual_energy_guard_null.py diags/diag000032 ../test_1d_theta_implicit_mhd_dual_energy_stagnation/diags/diag000032"  # analysis
     OFF  # checksum
     test_1d_theta_implicit_mhd_dual_energy_stagnation  # dependency
+)
+
+# half-window twin: guard = P0 puts most cells INSIDE the C^1 window (partial
+# blend): rewrite identity with the step-old window input to round-off, ledger
+# cell count = the window's, domain energy budget closes on the ledger
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_guard_half  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_dual_energy_guard_half  # inputs
+    "analysis_mhd_dual_energy_guard_half.py diags/diag000032 diags/diag000031 diags/diag000000 diags/dual_energy_guard_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
 )
 
 add_warpx_test(

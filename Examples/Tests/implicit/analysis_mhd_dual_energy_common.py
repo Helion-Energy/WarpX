@@ -52,6 +52,26 @@ def blended_pressure(
     return fk * pressure_total + (1.0 - fk) * pressure_internal
 
 
+def window(u_old, guard):
+    """floor_outflow_limiter(u_old, guard): 0 at/below guard, 1 at/above 2 guard (C^1 smoothstep)."""
+    s = np.clip(u_old / guard - 1.0, 0.0, 1.0)
+    return s * s * (3.0 - 2.0 * s)
+
+
+def kinetic_fraction_guarded(ion_energy, kinetic_energy, u_old, gamma_i, pressure_floor, guard):
+    """fk_eff = window(U_i_old, guard) x fk (dual_energy_kinetic_fraction with the absolute guard)."""
+    w = window(u_old, guard)
+    fk = kinetic_fraction(ion_energy, kinetic_energy, gamma_i, pressure_floor)
+    return np.where(w <= 0.0, 0.0, w * fk)
+
+
+def blended_pressure_guarded(ion_energy, kinetic_energy, internal_energy, u_old, gamma_i, pressure_floor, guard):
+    fk = kinetic_fraction_guarded(ion_energy, kinetic_energy, u_old, gamma_i, pressure_floor, guard)
+    pressure_internal = smooth_positive_floor((gamma_i - 1.0) * internal_energy, pressure_floor)
+    pressure_total = recovered_pressure(ion_energy, kinetic_energy, gamma_i, pressure_floor)
+    return fk * pressure_total + (1.0 - fk) * pressure_internal
+
+
 def load_fluid_state(plotfile):
     """Covering-grid arrays of the implicit-MHD fluid dumps."""
     import yt
@@ -70,6 +90,7 @@ def load_fluid_state(plotfile):
     except Exception:
         pass
     fields = {
+        "electron_energy": data["boxlib", "implicit_mhd_electron_energy"].value.ravel(),
         "rho": rho,
         "momentum_z": momentum_z,
         "ion_energy": ion_energy,
