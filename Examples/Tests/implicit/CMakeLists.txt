@@ -379,6 +379,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# thermal half-window twin: v0/100 makes KE << internal (fk_kin ~ 1) while the
+# window keeps fk_eff ~ 0.5 below the sync threshold -- the Enzo overwrite must
+# stay OFF in the window-guarded cells (a decision blind to the window fails)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_guard_half_thermal  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_dual_energy_guard_half my_constants.v0=3.4e3"  # inputs
+    "analysis_mhd_dual_energy_guard_half.py diags/diag000032 diags/diag000031 diags/diag000000 diags/dual_energy_guard_ledger.txt thermal"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_temperature_floor  # name
     1  # dims

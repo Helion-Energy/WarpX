@@ -14,7 +14,9 @@
 # the number of cells with w(U_i(31)) < 1, strictly between 0 and nz; (iii)
 # the domain energy budget closes on the ledger; (iv) the adiabat is held.
 #
-# Usage: analysis_mhd_dual_energy_guard_half.py <diag000032> <diag000031> <diag000000> <ledger>
+# Usage: analysis_mhd_dual_energy_guard_half.py <diag000032> <diag000031> <diag000000> <ledger> [thermal]
+#   thermal: the quiescent twin (v0/100, KE << internal so fk_kin ~ 1): the window alone keeps the Enzo
+#   overwrite off (fk_eff ~ 0.5), which a window-blind decision would apply -- the S8 discriminant.
 
 import sys
 
@@ -22,6 +24,8 @@ import numpy as np
 import warpx_constants as constants
 from analysis_mhd_dual_energy_common import (
     blended_pressure_guarded,
+    kinetic_fraction,
+    kinetic_fraction_guarded,
     load_fluid_state,
     window,
 )
@@ -36,6 +40,7 @@ P0 = n0 * Ti0_eV * constants.elementary_charge
 pressure_floor = 1.0e-6 * P0
 guard = 1.0 * P0
 
+thermal = len(sys.argv) > 5 and sys.argv[5] == "thermal"
 final = load_fluid_state(sys.argv[1])
 previous = load_fluid_state(sys.argv[2])
 initial = load_fluid_state(sys.argv[3])
@@ -45,7 +50,10 @@ E, K, U = final["ion_energy"], final["kinetic_energy"], final["ion_internal_ener
 U_old = previous["ion_internal_energy"]
 w = window(U_old, guard)
 print(f"guard half: window at step 31: min {w.min():.4f} max {w.max():.4f}, cells with w < 1: {int((w < 1).sum())}, w = 0: {int((w <= 0).sum())}")
-assert 0 < int((w < 1).sum()) < nz, "the half window must split the domain"
+if thermal:
+    assert int((w < 1).sum()) == nz, "the quiescent twin keeps every cell inside the window"
+else:
+    assert 0 < int((w < 1).sum()) < nz, "the half window must split the domain"
 assert (w > 0).any() and ((w > 0) & (w < 1)).sum() > nz // 4, "most cells must be PARTIALLY guarded"
 
 # (i) rewrite identity with the partial blend. The kinetic fraction inside the
@@ -101,9 +109,32 @@ budget = (np.sum(E + final["electron_energy"]) - np.sum(initial["ion_energy"] + 
 print(f"guard half: 0-32 energy change {budget:.9e} vs -ledger {-ledger[-1, 2]:.9e} J/m^2 (ledger = guarded part only)")
 assert -budget > ledger[-1, 2] > 0.0
 
+# (v) the Enzo overwrite decision respects the window: where the GUARDED
+# fraction fk_eff = w fk_kin is at/below the sync threshold although the plain
+# kinetic fraction is above it, U_i must NOT have been overwritten by E_i - KE
+# (the two registers keep their O(1e-3) closure difference); where fk_eff is
+# above the threshold the overwrite must have happened (U_i = E_i - KE to
+# round-off). A decision blind to the window fails the first clause.
+fk_kin = kinetic_fraction(E, K, gamma_i, pressure_floor)
+fk_eff = kinetic_fraction_guarded(E, K, U_old, gamma_i, pressure_floor, guard)
+threshold = 0.99
+no_overwrite = (fk_eff <= threshold) & (fk_kin > threshold)
+overwrite = fk_eff > threshold
+gap = np.abs(U - (E - K)) / np.maximum(U, 1e-300)
+print(f"guard half: Enzo decision: {int(no_overwrite.sum())} cells guarded out of the overwrite (min |U - (E - KE)|/U there "
+      f"{gap[no_overwrite].min() if no_overwrite.any() else float('nan'):.3e}), {int(overwrite.sum())} cells overwritten "
+      f"(max gap {gap[overwrite].max() if overwrite.any() else 0.0:.3e})")
+if thermal:
+    assert no_overwrite.sum() > 0, "the thermal deck must hold cells whose overwrite the window suppresses"
+if no_overwrite.any():
+    assert gap[no_overwrite].min() > 1.0e-10, "U_i was overwritten in a window-guarded cell (decision blind to the window)"
+if overwrite.any():
+    assert gap[overwrite].max() < 1.0e-12, "a cell above the threshold was not synced"
+
 # (iv) adiabat of the pure-internal part (U_i) within the dual run's tolerance
 compression = final["rho"].max() / rho0
-assert compression > 1.2, "stagnation flow failed to compress"
+if not thermal:
+    assert compression > 1.2, "stagnation flow failed to compress"
 adiabat_error = np.abs((gamma_i - 1.0) * U / final["rho"] ** gamma_i / (P0 / rho0**gamma_i) - 1.0)
 print(f"guard half: max adiabat error (U_i) = {adiabat_error.max():.4e}")
 assert adiabat_error.max() < 0.08
