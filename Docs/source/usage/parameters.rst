@@ -7777,6 +7777,94 @@ Jacobian probes.
     solve the booked energy matches the interior's loss through the
     wall to the nonlinear tolerance.
 
+.. pp:param:: implicit_mhd.energy_audit_file
+    :type: ``string``
+
+    Optional file for the solver's **global energy audit** (off when
+    empty; the disarmed path is bit-identical). One row per audited step
+    (see ``energy_audit_interval``) closes the domain's energy budget in
+    joules (full :math:`2\pi` volumes in RZ, per unit cross-section in
+    1D): the totals at the end of the step (magnetic energy of the plasma
+    response, of the total field with the external coil field included,
+    and of the external field alone; :math:`U_e`, :math:`E_i`,
+    :math:`U_i`, kinetic energy, mass, and the change-of-variables
+    background's share of the thermal totals), their changes over the
+    step, the exact discrete Poynting inflow through every domain face
+    (:math:`E_{\rm ohm}^\theta \times B_{\rm tot}^\theta/\mu_0` with the
+    external inductive :math:`E` and :math:`B` included, in the
+    summation-by-parts form of the Yee curl pair, i.e. the face term the
+    discrete Faraday update exchanges with the volume), the fluid energy
+    and mass inflow per face and per block, the shaped-wall stair
+    deposition per block, the field-to-fluid transfer
+    :math:`\Delta t \sum E_{\rm ohm}^\theta \cdot J^\theta`, the circuit's
+    electromagnetic power into the domain
+    :math:`-\Delta t \sum E_{\rm ohm}^\theta \cdot J_{\rm coil}` with
+    :math:`J_{\rm coil} = \nabla \times B_{\rm ext}^\theta/\mu_0` (the coil
+    current sheet lies inside the domain, so the drive is a volume source,
+    not a boundary flux; split into the part against :math:`E_{\rm ext}`,
+    the vacuum field's own energy, and the part against the plasma-response
+    :math:`E`, the plasma's load on the circuit), the external field's
+    own exact identity (its Poynting faces ``poynt_in_ext_*``, its
+    quadrature term ``theta_diss_ext`` and its defect ``ext_defect``:
+    :math:`\Delta W_{B,\rm ext} = ` ``circuit_in_ext`` :math:`-`
+    ``poynt_out_ext`` :math:`-` ``theta_diss_ext``, exact for a
+    segment-driven or linear-in-time coil scale, which checks the coil
+    current, the :math:`E \cdot J` dot and the face formula against a
+    number none of them enters), the split of the field-to-fluid transfer
+    into the resistive dissipation with the resistivity the advance used
+    (``res_field``), the same with the un-boosted user resistivity
+    (``res_user``), their difference ``res_boost`` (the density-keyed
+    vacuum resistivity's mock dissipation: field energy removed and
+    returned as heat nowhere), the hyper-resistive dissipation
+    ``res_hyper``, the magnetic-force work the vacuum switch withholds
+    (``lorentz_withheld``) and the remainders ``exchange_rest`` /
+    ``exchange_rest2`` of the exchange after them, every volume
+    source of the fluid equations as deposited (magnetic-force work,
+    Joule heating by receiver, the electron pressure-work pair, the
+    dual-energy :math:`pdV` and viscous heating, the electron-ion
+    exchange, the pedestal-band drains, the change of variables' pressure
+    work shifts), the :math:`\theta`-quadrature term
+    :math:`(\theta - 1/2) \sum |\Delta B|^2/\mu_0` (zero at
+    :math:`\theta = 1/2`; the backward-Euler dissipation at
+    :math:`\theta = 1`; of the total field, so it includes the prescribed
+    external field's own quadrature term ``theta_diss_ext``, which is not
+    a scheme loss), the Faraday/boundary defect, the Newton defect per
+    block (:math:`\sum (U^\theta - U^n - \text{rhs}) \, dV/\theta`), the
+    end-of-step restorations (density eater, positivity floors, the
+    dual-energy sync's rewrite of :math:`E_i`) as total differences between
+    the stages of the state update, the between-step pedestal injections
+    (``inject_*``, reported and booked in neither residual: the step's
+    budget spans the step only), and the code's own ledgers (per-step
+    deltas, snapshotted every step, and cumulative). Two closure residuals
+    are written: ``resid_booked`` (the physical fluxes, the code's existing
+    bookings and ``res_boost`` as a named design term -- what the ledgers
+    leave unexplained) and ``resid_full`` (every named term; round-off by
+    construction when nothing is missing), per
+    step and cumulative, with fractions of the cumulative Poynting inflow
+    and of the plasma thermal energy. The header lines of the file name the
+    columns, the sign conventions (inflows positive into the domain, wall
+    terms positive into the wall) and the two residual definitions. The
+    audit reads the state and recomputes scratch registers at the accepted
+    theta state exactly like the wall ledger (plasma current, cell-centered
+    fields, face fluxes, the Ohm :math:`E` -- saved before and restored
+    after); it never writes the state, and its RHS evaluation is the only
+    time the kernel's source registers are written. Requires the
+    conservative flux path (``fluid_flux = central`` or ``hlld``) and
+    ``ion_closure = total_energy`` or ``dual_energy``. Cost: one extra
+    residual-class evaluation plus a few dozen reductions per audited step.
+
+.. pp:param:: implicit_mhd.energy_audit_interval
+    :type: ``integer``
+    :default: ``1``
+
+    Audit every this many steps. At ``1`` the cumulative columns close the
+    run's budget exactly; at a coarser interval each row is the exact
+    single-step budget of that step (the code's ledger counters are
+    snapshotted every step, so the per-step ledger columns are exact at
+    any interval; the cumulative columns then sum the audited steps only)
+    and the between-step ``inject_*`` columns are defined only when
+    consecutive steps are audited.
+
 .. pp:param:: implicit_mhd.absorb_ledger_interval
     :type: ``integer``
     :default: ``1``
