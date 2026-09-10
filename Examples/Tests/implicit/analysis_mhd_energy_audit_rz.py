@@ -99,8 +99,9 @@ if absorb_mode:
         assert abs(out_mass[i] - row[1]) < 1.0e-9 * max(abs(row[1]), 1.0e-300) + 1.0e-30, "r_hi mass export differs from the absorb ledger"
         assert abs(out_energy[i] - row[2]) < 1.0e-9 * max(abs(row[2]), 1.0e-300) + 1.0e-12 * scale, "r_hi energy export differs from the absorb ledger"
     assert np.all(a["wall_e"] == 0.0) and np.all(a["wall_i"] == 0.0), "no stair wall on this deck"
-    print(f"  Green's open r_hi: poynt_in_cum {a['poynt_in_cum'][-1]:.6e} J, faraday_defect_cum "
-          f"{a['faraday_defect_cum'][-1]:.6e} J, W_B_tot {a['W_B_tot'][-1]:.6e} J (ext {a['W_B_ext'][-1]:.6e})")
+    print(f"  Green's open r_hi: poynt_in_cum {a['poynt_in_cum'][-1]:.6e} J, circuit_in_cum "
+          f"{a['circuit_in_cum'][-1]:.6e} J (ext {np.sum(a['circuit_in_ext']):.6e}, plasma {np.sum(a['circuit_in_plasma']):.6e}), "
+          f"faraday_defect_cum {a['faraday_defect_cum'][-1]:.6e} J, W_B_tot {a['W_B_tot'][-1]:.6e} J (ext {a['W_B_ext'][-1]:.6e})")
     assert np.max(a["W_B_tot"]) > 0.0 and np.any(a["EJ"] != 0.0), "a magnetized column must exchange energy"
 else:
     # 2. wall deposition vs the solver's ledger (rows every step here)

@@ -7796,7 +7796,14 @@ Jacobian probes.
     discrete Faraday update exchanges with the volume), the fluid energy
     and mass inflow per face and per block, the shaped-wall stair
     deposition per block, the field-to-fluid transfer
-    :math:`\Delta t \sum E_{\rm ohm}^\theta \cdot J^\theta`, every volume
+    :math:`\Delta t \sum E_{\rm ohm}^\theta \cdot J^\theta`, the circuit's
+    electromagnetic power into the domain
+    :math:`-\Delta t \sum E_{\rm ohm}^\theta \cdot J_{\rm coil}` with
+    :math:`J_{\rm coil} = \nabla \times B_{\rm ext}^\theta/\mu_0` (the coil
+    current sheet lies inside the domain, so the drive is a volume source,
+    not a boundary flux; split into the part against :math:`E_{\rm ext}`,
+    the vacuum field's own energy, and the part against the plasma-response
+    :math:`E`, the plasma's load on the circuit), every volume
     source of the fluid equations as deposited (magnetic-force work,
     Joule heating by receiver, the electron pressure-work pair, the
     dual-energy :math:`pdV` and viscous heating, the electron-ion

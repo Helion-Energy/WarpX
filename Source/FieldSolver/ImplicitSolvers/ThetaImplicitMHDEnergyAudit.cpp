@@ -7,6 +7,7 @@
 #include "ThetaImplicitMHD.H"
 #include "ThetaImplicitMHD_K.H"
 
+#include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Fields.H"
 #include "Utils/WarpXConst.H"
@@ -427,6 +428,41 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
         }
         audit.ej = dt * EnergyAuditFieldDot(e_resp, j_plasma,
                                             add_external ? &e_ext : nullptr);
+
+        // The circuit's electromagnetic power into the domain: the coil
+        // current sheet lies INSIDE the domain (curl B_ext != 0 there), so
+        // the drive enters the field energy as -dt sum E_ohm . J_coil, not
+        // through the boundary Poynting flux. J_coil = curl B_ext^theta /
+        // mu0 with the solver's own Ampere operator (the discrete curl
+        // CalculatePlasmaCurrent applies to the response field), into the
+        // audit's scratch; split by the E it works against (E_ext: the
+        // vacuum field's own energy; E_resp: the work against the
+        // plasma-induced field, the plasma's load on the circuit).
+        audit.circuit_in = 0.0_rt;
+        audit.circuit_in_ext = 0.0_rt;
+        audit.circuit_in_plasma = 0.0_rt;
+        if (add_external) {
+            ablastr::fields::VectorField j_coil{};
+            std::array<const amrex::MultiFab*, 3> j_coil_const{};
+            for (int component = 0; component < 3; ++component) {
+                const amrex::MultiFab& reference = *j_plasma[component];
+                if (m_energy_audit_j_coil[component] == nullptr) {
+                    m_energy_audit_j_coil[component] = std::make_unique<amrex::MultiFab>(
+                        reference.boxArray(), reference.DistributionMap(),
+                        reference.nComp(), reference.nGrowVect());
+                }
+                m_energy_audit_j_coil[component]->setVal(0.0_rt);
+                j_coil[component] = m_energy_audit_j_coil[component].get();
+                j_coil_const[component] = m_energy_audit_j_coil[component].get();
+            }
+            const ablastr::fields::VectorField b_ext =
+                m_WarpX->m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0);
+            m_WarpX->get_pointer_fdtd_solver_fp(0)->CalculateCurrentAmpere(
+                j_coil, b_ext, m_WarpX->GetEBUpdateEFlag()[0], 0);
+            audit.circuit_in_ext = -dt * EnergyAuditFieldDot(e_ext, j_coil_const);
+            audit.circuit_in_plasma = -dt * EnergyAuditFieldDot(e_resp, j_coil_const);
+            audit.circuit_in = audit.circuit_in_ext + audit.circuit_in_plasma;
+        }
     }
 
     // Poynting outflow through the domain faces (exact discrete form, see
@@ -920,9 +956,12 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     const amrex::Real fluxw_i = a.rhs_sum[2] - (fluid_in_i - wall_i + src_i);
     const amrex::Real fluxw_ui = dual ? a.rhs_sum[3] - (fluid_in_ui - wall_ui + src_ui) : 0.0_rt;
 
-    // Field identity: sum B^theta . dB / mu0 = -dt (poynting_out + E.J) + defect.
+    // Field identity: sum B^theta . dB / mu0 = -dt (poynting_out + E.J) +
+    // circuit_in + defect (the coil current sheet inside the domain feeds
+    // the field through E . J_coil).
     const amrex::Real poynt_out_total = -poynt_in;
-    const amrex::Real faraday_defect = a.b_theta_dot_db + poynt_out_total + a.ej;
+    const amrex::Real faraday_defect =
+        a.b_theta_dot_db + poynt_out_total + a.ej - a.circuit_in;
     // Exchange mismatch: what the field lost minus what the fluid received.
     const amrex::Real exchange = a.ej - (a.src[R::lorentz] + a.src[R::joule_e] + a.src[R::joule_i]);
     const amrex::Real pw_pair = a.src[R::pw_e] + a.src[R::pw_i];
@@ -947,11 +986,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     // defect, halo relaxation outlet, eater) -- what the existing ledgers
     // leave unexplained. 'full': every measured term.
     const amrex::Real resid_booked =
-        dw_total - (poynt_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
+        dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
         eater_e - eater_i - inject_e - inject_i - d_ledger_floor_supply -
         d_ledger_pinned + d_ledger_halo_relax;
     const amrex::Real resid_full =
-        dw_total - (poynt_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
+        dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
         eater_e - eater_i - inject_e - inject_i -
         (a.src[R::fcs_e] + a.src[R::fcs_ei]) + (a.src[R::relax_e] + a.src[R::relax_ei]) +
         a.theta_diss - faraday_defect + exchange - pw_pair +
@@ -961,6 +1000,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_resid_booked += resid_booked;
     a.cum_resid_full += resid_full;
     a.cum_poynt_in += poynt_in;
+    a.cum_circuit_in += a.circuit_in;
     a.cum_fluid_in += fluid_in_e + fluid_in_i;
     a.cum_wall += wall_e + wall_i;
     a.cum_ej += a.ej;
@@ -1023,6 +1063,9 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"poynt_in_zlo", -a.poynt_out[1]},
         {"poynt_in_zhi", -a.poynt_out[2]},
         {"poynt_in", poynt_in},
+        {"circuit_in", a.circuit_in},
+        {"circuit_in_ext", a.circuit_in_ext},
+        {"circuit_in_plasma", a.circuit_in_plasma},
         {"fluid_in_mass_rhi", -a.export_domain[0][0]},
         {"fluid_in_mass_zlo", -a.export_domain[0][1]},
         {"fluid_in_mass_zhi", -a.export_domain[0][2]},
@@ -1108,6 +1151,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"resid_booked_cum", a.cum_resid_booked},
         {"resid_full_cum", a.cum_resid_full},
         {"poynt_in_cum", a.cum_poynt_in},
+        {"circuit_in_cum", a.cum_circuit_in},
         {"fluid_in_cum", a.cum_fluid_in},
         {"wall_cum", a.cum_wall},
         {"EJ_cum", a.cum_ej},
@@ -1123,13 +1167,15 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"fluxw_cum", a.cum_fluxw},
         {"dW_total_cum", a.cum_dw_total},
         {"frac_resid_booked_cum_of_poynt_in", safe_frac(a.cum_resid_booked, a.cum_poynt_in)},
+        {"frac_resid_booked_cum_of_delivered", safe_frac(a.cum_resid_booked, a.cum_poynt_in + a.cum_circuit_in)},
         {"frac_resid_booked_cum_of_thermal", safe_frac(a.cum_resid_booked, thermal)},
         {"frac_resid_full_cum_of_thermal", safe_frac(a.cum_resid_full, thermal)},
     };
 
     amrex::Print().SetPrecision(10)
         << "MHD energy audit: step " << step + 1 << " dW_total [J] = " << dw_total
-        << " poynt_in = " << poynt_in << " fluid_in = " << fluid_in_e + fluid_in_i
+        << " poynt_in = " << poynt_in << " circuit_in = " << a.circuit_in
+        << " fluid_in = " << fluid_in_e + fluid_in_i
         << " wall = " << wall_e + wall_i << " EJ = " << a.ej
         << " theta_diss = " << a.theta_diss << " exchange = " << exchange
         << " sync_Ei = " << sync_ei << " resid_booked = " << resid_booked
@@ -1155,17 +1201,20 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
             file << "# Conventions: totals are at the end of the step; d* are changes over the step; "
                     "poynt_in_* / fluid_in_* are positive INTO the domain (Poynting = E_ohm^theta x "
                     "B_tot^theta with the external inductive E and B included, the exact summation-by-parts "
-                    "face term of the Yee curl pair); wall_* are positive into the shaped wall; EJ = dt sum "
+                    "face term of the Yee curl pair); circuit_in = -dt sum E_ohm^theta . J_coil with J_coil = "
+                    "curl B_ext^theta/mu0 (the coil current sheet inside the domain: the circuit's electromagnetic "
+                    "power into the domain; _ext / _plasma = the parts against E_ext and against the plasma-response "
+                    "E); wall_* are positive into the shaped wall; EJ = dt sum "
                     "E_ohm^theta . J^theta (the field's loss to the fluid); the source columns are dt x the "
                     "RHS volume sources as deposited; theta_diss = (theta - 1/2) sum |dB_tot|^2/mu0; "
-                    "faraday_defect = sum B^theta . dB/mu0 + dt (poynt_out + EJ); exchange = EJ - (lorentz + "
+                    "faraday_defect = sum B^theta . dB/mu0 + dt (poynt_out + EJ) - circuit_in; exchange = EJ - (lorentz + "
                     "joule_e + joule_i); newton_* = sum (U^theta - U^n - rhs) dV/theta; fluxw_* = sum rhs "
                     "dV/theta - dt(-export - wall + sources); eater_*/floor_*/sync_* are the end-of-step "
                     "restorations (signed additions); inject_* = between-step changes.\n";
-            file << "# resid_booked = dW_total - (poynt_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
+            file << "# resid_booked = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
                     "eater_e - eater_i - inject_e - inject_i - ledger_floor_supply - ledger_pinned_defect + "
                     "ledger_halo_relax   (the code's own bookings)\n";
-            file << "# resid_full = dW_total - (poynt_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
+            file << "# resid_full = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
                     "eater_e - eater_i - inject_e - inject_i - (fcs_e + fcs_i) + (relax_e + relax_i) + "
                     "theta_diss - faraday_defect + exchange - pw_pair + drain_ei - newton_e - newton_i - "
                     "floor_e - floor_Ei - sync_Ei - post_e - post_i - fluxw_e - fluxw_i   (every measured term)\n";

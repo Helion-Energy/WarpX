@@ -460,7 +460,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //   the one the discrete Faraday update exchanges with the volume),
     //   the fluid energy/mass export per face and per block, the
     //   shaped-wall stair deposition per block, the field-to-fluid
-    //   transfer dt sum E_ohm . J, every volume source of the fluid RHS
+    //   transfer dt sum E_ohm . J, the circuit's electromagnetic power
+    //   into the domain -dt sum E_ohm . J_coil (J_coil = curl B_ext/mu0:
+    //   the coil current sheet lies inside the domain, so the drive
+    //   enters as a volume source, not through the boundary; split by
+    //   the E it works against), every volume source of the fluid RHS
     //   as deposited (registers the RHS kernel writes only during the
     //   audit's own evaluation at the accepted theta state), the
     //   theta-quadrature term (theta - 1/2) sum |dB|^2/mu0, the Newton
@@ -492,6 +496,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // Efield_fp as the solve left it (restored after the audit's Ohm
     // assembly so nothing downstream can see a different E).
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_e_saved;
+    // J_coil = curl B_ext^theta / mu0 on the current staggering (the coil
+    // current sheet inside the domain), for the circuit's power.
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_j_coil;
     WarpXSolverVec m_energy_audit_rhs;
     // Register components (cell-centered, as deposited by the RHS kernel:
     // wall_live x plasma_weight x term, per unit volume per unit time).
@@ -540,6 +547,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real export_domain[4][3] = {};            // block (mass,ue,ei,ui) x face
         amrex::Real export_wall[4] = {0.0, 0.0, 0.0, 0.0};
         amrex::Real ej = 0.0;
+        // the circuit's electromagnetic power into the domain, -dt sum
+        // E . J_coil with J_coil = curl B_ext^theta / mu0 (the coil current
+        // sheet lives inside the domain), split by the E it works against
+        amrex::Real circuit_in = 0.0;
+        amrex::Real circuit_in_ext = 0.0;
+        amrex::Real circuit_in_plasma = 0.0;
         amrex::Real src[EnergyAuditRegister::count] = {};
         amrex::Real rhs_sum[4] = {0.0, 0.0, 0.0, 0.0};   // sum rhs dV / theta
         amrex::Real newton[4] = {0.0, 0.0, 0.0, 0.0};
@@ -558,6 +571,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_resid_booked = 0.0;
         amrex::Real cum_resid_full = 0.0;
         amrex::Real cum_poynt_in = 0.0;
+        amrex::Real cum_circuit_in = 0.0;
         amrex::Real cum_fluid_in = 0.0;
         amrex::Real cum_wall = 0.0;
         amrex::Real cum_ej = 0.0;
