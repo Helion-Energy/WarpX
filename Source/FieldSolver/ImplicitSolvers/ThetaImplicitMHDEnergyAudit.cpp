@@ -369,7 +369,20 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
     }
     FillCellCenteredElectromagneticFields();
     ComputeFaceFluxes(theta_time);
+    // Edge resistivity registers on the E staggerings (see the member),
+    // armed for the audit's own Ohm assembly only.
+    for (int component = 0; component < 3; ++component) {
+        const amrex::MultiFab& reference =
+            *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{component}, 0);
+        if (m_energy_audit_eta[component] == nullptr) {
+            m_energy_audit_eta[component] = std::make_unique<amrex::MultiFab>(
+                reference.boxArray(), reference.DistributionMap(), 2, 0);
+        }
+        m_energy_audit_eta[component]->setVal(0.0_rt);
+    }
+    m_energy_audit_capture = true;
     AssembleOhmElectricField(theta_time, true);
+    m_energy_audit_capture = false;
     if (m_joule_ohm_current && m_include_joule_heating) {
         FillCellCenteredOhmElectricField();
     }
@@ -428,6 +441,53 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
         }
         audit.ej = dt * EnergyAuditFieldDot(e_resp, j_plasma,
                                             add_external ? &e_ext : nullptr);
+
+        // The field's resistive dissipation dt sum eta J_stage . J^theta
+        // with the resistivity the advance used (register component 0:
+        // vacuum boost and band override included) and with the un-boosted
+        // user eta (component 1). J_stage is the resistive-stage current
+        // when resistive_theta differs from theta, else J^theta.
+        {
+            const bool stage = (m_resistive_theta != m_theta);
+            amrex::Real res_field = 0.0_rt;
+            amrex::Real res_user = 0.0_rt;
+            for (int component = 0; component < 3; ++component) {
+                const amrex::MultiFab& j_theta_mf = *j_plasma[component];
+                const amrex::MultiFab& j_stage_mf =
+                    stage ? *m_WarpX->m_fields.get(ResistiveStageCurrentName,
+                                                   Direction{component}, 0)
+                          : j_theta_mf;
+#if defined(WARPX_DIM_1D_Z)
+                // Ex and Ey share the z-nodal register (component 0); the
+                // cell-centered Ez never enters the 1D resistive curl-curl.
+                if (component == 2) { continue; }
+                const amrex::MultiFab& eta_use = *m_energy_audit_eta[0];
+#else
+                const amrex::MultiFab& eta_use = *m_energy_audit_eta[component];
+#endif
+                if (eta_use.ixType() != j_theta_mf.ixType()) { continue; }
+                amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+                amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+                using ReduceTuple = typename decltype(reduce_data)::Type;
+                for (amrex::MFIter mfi(j_theta_mf); mfi.isValid(); ++mfi) {
+                    const amrex::Box box = mfi.validbox();
+                    const FieldDualVolume weight(j_theta_mf, box, geom);
+                    const auto eta_arr = eta_use.const_array(mfi);
+                    const auto jt = j_theta_mf.const_array(mfi);
+                    const auto js = j_stage_mf.const_array(mfi);
+                    reduce_op.eval(box, reduce_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                            const amrex::Real jj = js(i, j, k) * jt(i, j, k) * weight(i, j);
+                            return {eta_arr(i, j, k, 0) * jj, eta_arr(i, j, k, 1) * jj};
+                        });
+                }
+                auto sums = reduce_data.value(reduce_op);
+                res_field += amrex::get<0>(sums);
+                res_user += amrex::get<1>(sums);
+            }
+            audit.res_field = dt * all_reduce_sum(res_field);
+            audit.res_user = dt * all_reduce_sum(res_user);
+        }
 
         // The circuit's electromagnetic power into the domain: the coil
         // current sheet lies INSIDE the domain (curl B_ext != 0 there), so
@@ -1001,6 +1061,8 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_resid_full += resid_full;
     a.cum_poynt_in += poynt_in;
     a.cum_circuit_in += a.circuit_in;
+    a.cum_res_field += a.res_field;
+    a.cum_res_user += a.res_user;
     a.cum_fluid_in += fluid_in_e + fluid_in_i;
     a.cum_wall += wall_e + wall_i;
     a.cum_ej += a.ej;
@@ -1105,6 +1167,10 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"fcs_i", a.src[R::fcs_ei]},
         {"fcs_ui", a.src[R::fcs_ui]},
         {"exchange", exchange},
+        {"res_field", a.res_field},
+        {"res_user", a.res_user},
+        {"res_boost", a.res_field - a.res_user},
+        {"exchange_rest", exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i]},
         // scheme terms
         {"theta_diss", a.theta_diss},
         {"faraday_defect", faraday_defect},
@@ -1157,6 +1223,8 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"EJ_cum", a.cum_ej},
         {"theta_diss_cum", a.cum_theta_diss},
         {"exchange_cum", a.cum_exchange},
+        {"res_field_cum", a.cum_res_field},
+        {"res_user_cum", a.cum_res_user},
         {"pw_pair_cum", a.cum_pwpair},
         {"faraday_defect_cum", a.cum_faraday},
         {"newton_cum", a.cum_newton},
@@ -1207,7 +1275,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "E); wall_* are positive into the shaped wall; EJ = dt sum "
                     "E_ohm^theta . J^theta (the field's loss to the fluid); the source columns are dt x the "
                     "RHS volume sources as deposited; theta_diss = (theta - 1/2) sum |dB_tot|^2/mu0; "
-                    "faraday_defect = sum B^theta . dB/mu0 + dt (poynt_out + EJ) - circuit_in; exchange = EJ - (lorentz + "
+                    "faraday_defect = sum B^theta . dB/mu0 + dt (poynt_out + EJ) - circuit_in; res_field = dt sum eta_used "
+                    "J_stage . J^theta (the field's resistive dissipation with the resistivity the advance used: vacuum "
+                    "boost + wall-band override), res_user = the same with the un-boosted user eta, res_boost = res_field - "
+                    "res_user (the mock resistivity's cost), exchange_rest = exchange - res_field + joule_e + joule_i (the "
+                    "non-resistive exchange mismatch); exchange = EJ - (lorentz + "
                     "joule_e + joule_i); newton_* = sum (U^theta - U^n - rhs) dV/theta; fluxw_* = sum rhs "
                     "dV/theta - dt(-export - wall + sources); eater_*/floor_*/sync_* are the end-of-step "
                     "restorations (signed additions); inject_* = between-step changes.\n";

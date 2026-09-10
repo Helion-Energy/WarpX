@@ -14209,6 +14209,11 @@ bool ThetaImplicitMHD::PrepareResistiveStageCurrents (
 void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                                                  const bool at_resistive_stage) const
 {
+    // Global energy audit: the edge resistivity registers (see
+    // m_energy_audit_eta) are written only while the audit's own
+    // evaluation has them armed; the assembly arithmetic is unchanged.
+    const bool audit_capture =
+        m_energy_audit_capture && (m_energy_audit_eta[0] != nullptr);
 #if defined(WARPX_DIM_1D_Z)
     using ablastr::fields::Direction;
     // Resistive/Hall-MHD Ohm's law, E = -u x B [+ J x B/rho_q] + eta J,
@@ -14334,6 +14339,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
+        const auto audit_eta = audit_capture ? m_energy_audit_eta[0]->array(mfi)
+                                             : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jx = j_x(i, j, k);
             const amrex::Real jy = j_y(i, j, k);
@@ -14342,12 +14349,18 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::sqrt(jx * jx + jy * jy + jz * jz);
             const amrex::Real charge_density_value =
                 std::max(rho_q(i, j, k), charge_density_floor);
+            const amrex::Real eta_user =
+                eta(charge_density_value, te_nodal(i, j, k),
+                    current_magnitude, time);
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, te_nodal(i, j, k),
-                        current_magnitude, time),
+                    eta_user,
                     rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
+            if (audit_capture) {
+                audit_eta(i, j, k, 0) = resistivity;
+                audit_eta(i, j, k, 1) = eta_user;
+            }
             electric_x(i, j, k) =
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
             electric_y(i, j, k) =
@@ -14703,6 +14716,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
 
     // Er on z-faces (r-cc, z-nodal): direct induction flux + eta J_r.
     for (amrex::MFIter mfi(electric_field_r); mfi.isValid(); ++mfi) {
+        const auto audit_eta_r = audit_capture ? m_energy_audit_eta[0]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_r = electric_field_r.array(mfi);
         const auto zface = face_flux_z.const_array(mfi);
@@ -14732,16 +14747,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(charge_density_raw, charge_density_floor);
             const amrex::Real temperature_e =
                 0.5_rt * (te_nodal(i, j, k) + te_nodal(i + 1, j, k));
+            const amrex::Real eta_user =
+                eta(charge_density_value, temperature_e,
+                    current_magnitude, time);
             amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, temperature_e,
-                        current_magnitude, time),
+                    eta_user,
                     charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_er != nullptr && i >= band_override_er[j]) {
                 // Wall-band eta override (see the capture comment):
                 // REPLACES the composed eta, dEta/dState = 0.
                 resistivity = band_eta_override;
+            }
+            if (audit_capture) {
+                audit_eta_r(i, j, k, 0) = resistivity;
+                audit_eta_r(i, j, k, 1) = eta_user;
             }
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
@@ -14818,6 +14839,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     // the axis the face-flux row is zero by construction, leaving the
     // parity-exact Ez(axis) = eta J_z.
     for (amrex::MFIter mfi(electric_field_z); mfi.isValid(); ++mfi) {
+        const auto audit_eta_z = audit_capture ? m_energy_audit_eta[2]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_z = electric_field_z.array(mfi);
         const auto rface = face_flux_r.const_array(mfi);
@@ -14851,16 +14874,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(charge_density_raw, charge_density_floor);
             const amrex::Real temperature_e =
                 0.5_rt * (te_nodal(i, j, k) + te_nodal(i, j + 1, k));
+            const amrex::Real eta_user =
+                eta(charge_density_value, temperature_e,
+                    current_magnitude, time);
             amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, temperature_e,
-                        current_magnitude, time),
+                    eta_user,
                     charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_ez != nullptr && i >= band_override_ez[j]) {
                 // Wall-band eta override (see the capture comment):
                 // REPLACES the composed eta, dEta/dState = 0.
                 resistivity = band_eta_override;
+            }
+            if (audit_capture) {
+                audit_eta_z(i, j, k, 0) = resistivity;
+                audit_eta_z(i, j, k, 1) = eta_user;
             }
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
@@ -14940,6 +14969,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
 
     // Etheta on corners: smoothed UCT-HLL + eta J_theta; zero on axis.
     for (amrex::MFIter mfi(electric_field_theta); mfi.isValid(); ++mfi) {
+        const auto audit_eta_t = audit_capture ? m_energy_audit_eta[1]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_theta = electric_field_theta.array(mfi);
         const auto rface = face_flux_r.const_array(mfi);
@@ -15089,16 +15120,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                           jz_corner * jz_corner);
             const amrex::Real charge_density_value =
                 std::max(rho_q(i, j, k), charge_density_floor);
+            const amrex::Real eta_user =
+                eta(charge_density_value, te_nodal(i, j, k),
+                    current_magnitude, time);
             amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, te_nodal(i, j, k),
-                        current_magnitude, time),
+                    eta_user,
                     rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_et != nullptr && i >= band_override_et[j]) {
                 // Wall-band eta override (see the capture comment):
                 // REPLACES the composed eta, dEta/dState = 0.
                 resistivity = band_eta_override;
+            }
+            if (audit_capture) {
+                audit_eta_t(i, j, k, 0) = resistivity;
+                audit_eta_t(i, j, k, 1) = eta_user;
             }
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;

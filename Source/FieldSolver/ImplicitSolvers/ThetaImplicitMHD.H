@@ -499,6 +499,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // J_coil = curl B_ext^theta / mu0 on the current staggering (the coil
     // current sheet inside the domain), for the circuit's power.
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_j_coil;
+    // Edge resistivity registers on the E staggerings, written by the Ohm
+    // assembly only while the audit has them armed: component 0 = the
+    // resistivity the field advance used (vacuum boost and wall-band
+    // override included), component 1 = the un-boosted user eta at the
+    // same arguments. The field's resistive dissipation and the part the
+    // vacuum boost adds follow from J_stage . J with these weights.
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_eta;
     WarpXSolverVec m_energy_audit_rhs;
     // Register components (cell-centered, as deposited by the RHS kernel:
     // wall_live x plasma_weight x term, per unit volume per unit time).
@@ -553,6 +560,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real circuit_in = 0.0;
         amrex::Real circuit_in_ext = 0.0;
         amrex::Real circuit_in_plasma = 0.0;
+        // the field's resistive dissipation dt sum eta J_stage . J^theta
+        // with the resistivity the advance used (res_field) and with the
+        // un-boosted user eta (res_user); the difference is the vacuum
+        // boost's (and the wall-band override's) cost
+        amrex::Real res_field = 0.0;
+        amrex::Real res_user = 0.0;
         amrex::Real src[EnergyAuditRegister::count] = {};
         amrex::Real rhs_sum[4] = {0.0, 0.0, 0.0, 0.0};   // sum rhs dV / theta
         amrex::Real newton[4] = {0.0, 0.0, 0.0, 0.0};
@@ -572,6 +585,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_resid_full = 0.0;
         amrex::Real cum_poynt_in = 0.0;
         amrex::Real cum_circuit_in = 0.0;
+        amrex::Real cum_res_field = 0.0;
+        amrex::Real cum_res_user = 0.0;
         amrex::Real cum_fluid_in = 0.0;
         amrex::Real cum_wall = 0.0;
         amrex::Real cum_ej = 0.0;
