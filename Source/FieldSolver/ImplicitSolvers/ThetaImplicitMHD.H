@@ -506,6 +506,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // same arguments. The field's resistive dissipation and the part the
     // vacuum boost adds follow from J_stage . J with these weights.
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_eta;
+    // Hyper-resistive E contribution per edge (-eta_H laplacian J; 1D: x
+    // and y in components 0 and 1 of register 0), written by the Ohm
+    // assembly while armed: dt sum E_H . J is the hyper-resistive
+    // dissipation the field pays and the fluid never receives.
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_eh;
+    // External field at t^n (before the theta refresh), for the external
+    // field's own Faraday identity (ext_defect).
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_b_ext_old;
     WarpXSolverVec m_energy_audit_rhs;
     // Register components (cell-centered, as deposited by the RHS kernel:
     // wall_live x plasma_weight x term, per unit volume per unit time).
@@ -533,6 +541,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
             fcs_e,           // ... of U_e
             fcs_ei,          // ... of E_i
             fcs_ui,          // ... of U_i
+            lorentz_unweighted, // the gated magnetic-force work WITHOUT the
+                             // Holmstrom plasma_weight (wall_live only): the
+                             // difference to 'lorentz' is the work the vacuum
+                             // switch withholds
             count
         };
     };
@@ -566,6 +578,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
         // boost's (and the wall-band override's) cost
         amrex::Real res_field = 0.0;
         amrex::Real res_user = 0.0;
+        // hyper-resistive dissipation dt sum E_H . J^theta
+        amrex::Real res_hyper = 0.0;
+        // the external field's own identity: Poynting outflow of E_ext x
+        // B_ext per face, sum B_ext^theta . dB_ext / mu0, its quadrature term
+        amrex::Real poynt_out_ext[3] = {0.0, 0.0, 0.0};
+        amrex::Real b_ext_theta_dot_db = 0.0;
+        amrex::Real theta_diss_ext = 0.0;
         amrex::Real src[EnergyAuditRegister::count] = {};
         amrex::Real rhs_sum[4] = {0.0, 0.0, 0.0, 0.0};   // sum rhs dV / theta
         amrex::Real newton[4] = {0.0, 0.0, 0.0, 0.0};
@@ -587,6 +606,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_circuit_in = 0.0;
         amrex::Real cum_res_field = 0.0;
         amrex::Real cum_res_user = 0.0;
+        amrex::Real cum_res_hyper = 0.0;
+        amrex::Real cum_lorentz_withheld = 0.0;
+        amrex::Real cum_poynt_in_ext = 0.0;
+        amrex::Real cum_theta_diss_ext = 0.0;
+        amrex::Real cum_ext_defect = 0.0;
         amrex::Real cum_fluid_in = 0.0;
         amrex::Real cum_wall = 0.0;
         amrex::Real cum_ej = 0.0;
@@ -627,6 +651,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void EnergyAuditThetaStage (amrex::Real start_time);
     void EnergyAuditFinishStage (int stage);
     void EnergyAuditWriteRow (amrex::Real end_time, int step);
+    /** Every step (audited or not): snapshot the code's cumulative ledger
+     * counters so a row at any energy_audit_interval differences exactly
+     * one step of each ledger. */
+    void EnergyAuditSnapshotLedgers ();
     [[nodiscard]] EnergyAuditTotals EnergyAuditFluidTotals (
         const WarpXSolverVec& state) const;
     /** sum_{components} a . b x (field dual volume) over the valid boxes. */

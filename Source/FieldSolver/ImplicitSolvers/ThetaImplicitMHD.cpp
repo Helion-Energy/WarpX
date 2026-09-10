@@ -5894,6 +5894,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt, step);
     EnergyAuditWriteRow(start_time + m_dt, step);
+    EnergyAuditSnapshotLedgers();
     if (m_external_field_iteration) {
         // Sync-tax instrument: how many circuit-hook firings the step
         // cost (python round-trips, or native engine advances; the
@@ -14341,6 +14342,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto flux_arr = face_flux_mf.const_array(mfi);
         const auto audit_eta = audit_capture ? m_energy_audit_eta[0]->array(mfi)
                                              : amrex::Array4<amrex::Real>{};
+        const auto audit_eh = audit_capture ? m_energy_audit_eh[0]->array(mfi)
+                                            : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jx = j_x(i, j, k);
             const amrex::Real jy = j_y(i, j, k);
@@ -14427,6 +14430,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     inverse_dz2;
                 electric_x(i, j, k) -= hyper_resistivity * laplacian_jx;
                 electric_y(i, j, k) -= hyper_resistivity * laplacian_jy;
+                if (audit_capture) {
+                    audit_eh(i, j, k, 0) = -hyper_resistivity * laplacian_jx;
+                    audit_eh(i, j, k, 1) = -hyper_resistivity * laplacian_jy;
+                }
             }
         });
     }
@@ -14718,6 +14725,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     for (amrex::MFIter mfi(electric_field_r); mfi.isValid(); ++mfi) {
         const auto audit_eta_r = audit_capture ? m_energy_audit_eta[0]->array(mfi)
                                                : amrex::Array4<amrex::Real>{};
+        const auto audit_eh_r = audit_capture ? m_energy_audit_eh[0]->array(mfi)
+                                              : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_r = electric_field_r.array(mfi);
         const auto zface = face_flux_z.const_array(mfi);
@@ -14831,6 +14840,9 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                         inverse_dz2 -
                     jr / (radius * radius);
                 electric_r(i, j, k) -= hyper_resistivity * laplacian_jr;
+                if (audit_capture) {
+                    audit_eh_r(i, j, k, 0) = -hyper_resistivity * laplacian_jr;
+                }
             }
         });
     }
@@ -14841,6 +14853,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     for (amrex::MFIter mfi(electric_field_z); mfi.isValid(); ++mfi) {
         const auto audit_eta_z = audit_capture ? m_energy_audit_eta[2]->array(mfi)
                                                : amrex::Array4<amrex::Real>{};
+        const auto audit_eh_z = audit_capture ? m_energy_audit_eh[2]->array(mfi)
+                                              : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_z = electric_field_z.array(mfi);
         const auto rface = face_flux_r.const_array(mfi);
@@ -14963,6 +14977,9 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                         inverse_dr2;
                 }
                 electric_z(i, j, k) -= hyper_resistivity * laplacian_jz;
+                if (audit_capture) {
+                    audit_eh_z(i, j, k, 0) = -hyper_resistivity * laplacian_jz;
+                }
             }
         });
     }
@@ -14971,6 +14988,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     for (amrex::MFIter mfi(electric_field_theta); mfi.isValid(); ++mfi) {
         const auto audit_eta_t = audit_capture ? m_energy_audit_eta[1]->array(mfi)
                                                : amrex::Array4<amrex::Real>{};
+        const auto audit_eh_t = audit_capture ? m_energy_audit_eh[1]->array(mfi)
+                                              : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_theta = electric_field_theta.array(mfi);
         const auto rface = face_flux_r.const_array(mfi);
@@ -15209,6 +15228,9 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     jt_corner / (corner_radius * corner_radius);
                 electric_theta(i, j, k) -=
                     hyper_resistivity * laplacian_jt;
+                if (audit_capture) {
+                    audit_eh_t(i, j, k, 0) = -hyper_resistivity * laplacian_jt;
+                }
             }
         });
     }
@@ -15741,6 +15763,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int audit_fcs_e = EnergyAuditRegister::fcs_e;
     constexpr int audit_fcs_ei = EnergyAuditRegister::fcs_ei;
     constexpr int audit_fcs_ui = EnergyAuditRegister::fcs_ui;
+    constexpr int audit_lorentz_unweighted = EnergyAuditRegister::lorentz_unweighted;
 
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
@@ -16549,6 +16572,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 if (audit_capture) {
                     audit_reg(i, j, k, audit_lorentz) =
                         wall_live * plasma_weight * lorentz_work;
+                    audit_reg(i, j, k, audit_lorentz_unweighted) =
+                        wall_live * lorentz_work;
                     audit_reg(i, j, k, audit_pw_i) =
                         wall_live * plasma_weight * ion_pressure_work;
                     audit_reg(i, j, k, audit_joule_i) =

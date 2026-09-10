@@ -292,16 +292,39 @@ void ThetaImplicitMHD::EnergyAuditBeginStep (const int step)
     m_energy_audit.wb_total_old =
         EnergyAuditFieldDot(b_total, b_total) / (2.0_rt * PhysConst::mu0);
     if (m_hybrid_pic_model->m_add_external_fields) {
+        // B_ext(t^n): the stored externals before this step's theta refresh.
         std::array<const amrex::MultiFab*, 3> b_ext{};
         for (int component = 0; component < 3; ++component) {
-            b_ext[component] = m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external,
-                                                     Direction{component}, 0);
+            const amrex::MultiFab& field = *m_WarpX->m_fields.get(
+                FieldType::hybrid_B_fp_external, Direction{component}, 0);
+            if (m_energy_audit_b_ext_old[component] == nullptr) {
+                m_energy_audit_b_ext_old[component] = std::make_unique<amrex::MultiFab>(
+                    field.boxArray(), field.DistributionMap(), field.nComp(),
+                    field.nGrowVect());
+            }
+            amrex::MultiFab::Copy(*m_energy_audit_b_ext_old[component], field, 0, 0,
+                                  field.nComp(), field.nGrowVect());
+            b_ext[component] = m_energy_audit_b_ext_old[component].get();
         }
         m_energy_audit.wb_ext_old =
             EnergyAuditFieldDot(b_ext, b_ext) / (2.0_rt * PhysConst::mu0);
     } else {
         m_energy_audit.wb_ext_old = 0.0_rt;
     }
+}
+
+void ThetaImplicitMHD::EnergyAuditSnapshotLedgers ()
+{
+    if (m_energy_audit_file.empty()) { return; }
+    EnergyAuditStep& a = m_energy_audit;
+    a.prev_floor_supply = m_floor_supplied_energy;
+    a.prev_pinned = m_pinned_defect_energy;
+    a.prev_halo_relax = m_halo_relaxation_energy;
+    a.prev_eater = m_eater_removed_energy;
+    a.prev_wall_energy = m_shaped_wall_energy;
+    a.prev_absorb_energy = m_absorbed_wall_energy;
+    a.prev_pedestal_e = m_halo_pedestal_energy_e;
+    a.prev_pedestal_i = m_halo_pedestal_energy_i;
 }
 
 void ThetaImplicitMHD::EnergyAuditRecordOldState ()
@@ -379,6 +402,11 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
                 reference.boxArray(), reference.DistributionMap(), 2, 0);
         }
         m_energy_audit_eta[component]->setVal(0.0_rt);
+        if (m_energy_audit_eh[component] == nullptr) {
+            m_energy_audit_eh[component] = std::make_unique<amrex::MultiFab>(
+                reference.boxArray(), reference.DistributionMap(), 2, 0);
+        }
+        m_energy_audit_eh[component]->setVal(0.0_rt);
     }
     m_energy_audit_capture = true;
     AssembleOhmElectricField(theta_time, true);
@@ -465,7 +493,9 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
 #else
                 const amrex::MultiFab& eta_use = *m_energy_audit_eta[component];
 #endif
-                if (eta_use.ixType() != j_theta_mf.ixType()) { continue; }
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    eta_use.ixType() == j_theta_mf.ixType(),
+                    "ThetaImplicitMHD energy audit: resistivity register staggering");
                 amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
                 amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
                 using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -487,6 +517,41 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
             }
             audit.res_field = dt * all_reduce_sum(res_field);
             audit.res_user = dt * all_reduce_sum(res_user);
+        }
+
+        // Hyper-resistive dissipation dt sum E_H . J^theta (E_H registered
+        // per edge by the assembly; 1D: x and y share register 0).
+        {
+            amrex::Real res_hyper = 0.0_rt;
+            for (int component = 0; component < 3; ++component) {
+                const amrex::MultiFab& j_theta_mf = *j_plasma[component];
+#if defined(WARPX_DIM_1D_Z)
+                if (component == 2) { continue; }
+                const amrex::MultiFab& eh = *m_energy_audit_eh[0];
+                const int eh_comp = component;
+#else
+                const amrex::MultiFab& eh = *m_energy_audit_eh[component];
+                const int eh_comp = 0;
+#endif
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    eh.ixType() == j_theta_mf.ixType(),
+                    "ThetaImplicitMHD energy audit: hyper register staggering");
+                amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+                amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+                using ReduceTuple = typename decltype(reduce_data)::Type;
+                for (amrex::MFIter mfi(j_theta_mf); mfi.isValid(); ++mfi) {
+                    const amrex::Box box = mfi.validbox();
+                    const FieldDualVolume weight(j_theta_mf, box, geom);
+                    const auto eh_arr = eh.const_array(mfi);
+                    const auto jt = j_theta_mf.const_array(mfi);
+                    reduce_op.eval(box, reduce_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                            return {eh_arr(i, j, k, eh_comp) * jt(i, j, k) * weight(i, j)};
+                        });
+                }
+                res_hyper += amrex::get<0>(reduce_data.value(reduce_op));
+            }
+            audit.res_hyper = dt * all_reduce_sum(res_hyper);
         }
 
         // The circuit's electromagnetic power into the domain: the coil
@@ -526,8 +591,11 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
     }
 
     // Poynting outflow through the domain faces (exact discrete form, see
-    // the header) and the fluid export per face and per block.
+    // the header) for the TOTAL fields (E_resp + E_ext, B_resp + B_ext) and
+    // for the external fields alone (the external field's own identity),
+    // and the fluid export per face and per block.
     for (auto& v : audit.poynt_out) { v = 0.0_rt; }
+    for (auto& v : audit.poynt_out_ext) { v = 0.0_rt; }
     for (auto& row : audit.export_domain) { for (auto& v : row) { v = 0.0_rt; } }
     const amrex::Box& domain = geom.Domain();
     constexpr int flux_mass = FaceFluxComponent::mass;
@@ -568,65 +636,149 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
         const amrex::MultiFab& flux_r = *m_WarpX->m_fields.get(FaceFluxRName, 0);
         const amrex::MultiFab& flux_z = *m_WarpX->m_fields.get(FaceFluxZName, 0);
 
-        // r_hi face: sum over nodal j (E_theta Bbar_z, half weights at the
-        // nodal box ends) and over cell-centered j (E_z Btilde_theta).
-        {
-            amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-            amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
-            using ReduceTuple = typename decltype(reduce_data)::Type;
-            for (amrex::MFIter mfi(e_t); mfi.isValid(); ++mfi) {
-                const amrex::Box box = mfi.validbox();      // nodal r, nodal z
-                if (box.bigEnd(0) != nr) { continue; }
-                amrex::Box face = box;
-                face.setSmall(0, nr);
-                const int jlo = box.smallEnd(1);
-                const int jhi = box.bigEnd(1);
-                const auto et = e_t.const_array(mfi);
-                const auto ez = e_z.const_array(mfi);
-                const auto bz = b_z.const_array(mfi);
-                const auto bt = b_t.const_array(mfi);
-                const auto eet = add_external ? ext_e_t->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                const auto eez = add_external ? ext_e_z->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                const auto ebz = add_external ? ext_b_z->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                const auto ebt = add_external ? ext_b_t->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                const bool ext = add_external;
-                const amrex::Real r_in = rlo + (nr - 0.5_rt) * dr;
-                const amrex::Real r_out = rlo + (nr + 0.5_rt) * dr;
-                reduce_op.eval(face, reduce_data,
-                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                        // nodal-z term E_theta(nr, j) x mean B_z (interior + ghost)
-                        amrex::Real e_theta = et(i, j, k);
-                        amrex::Real bz_in = bz(i - 1, j, k);
-                        amrex::Real bz_out = bz(i, j, k);
-                        if (ext) {
-                            e_theta += eet(i, j, k);
-                            bz_in += ebz(i - 1, j, k);
-                            bz_out += ebz(i, j, k);
-                        }
-                        amrex::Real wj = 1.0_rt;
-                        if (j == jlo || j == jhi) { wj = 0.5_rt; }
-                        const amrex::Real nodal_term =
-                            wj * e_theta * 0.5_rt * (bz_in + bz_out);
-                        // cell-centered-z term E_z(nr, j+1/2) x r-weighted mean B_theta
-                        amrex::Real cc_term = 0.0_rt;
-                        if (j < jhi) {
-                            amrex::Real e_zed = ez(i, j, k);
-                            amrex::Real bt_in = bt(i - 1, j, k);
-                            amrex::Real bt_out = bt(i, j, k);
+        // The face sums for one (E, B) pair, each given as a base MultiFab
+        // per component plus an optional addend (nullptr = none): out[0] =
+        // r_hi outflow, out[1] = z_lo outflow, out[2] = z_hi outflow, all
+        // as dt x power.
+        auto poynting_faces = [&] (const amrex::MultiFab* er, const amrex::MultiFab* et,
+                                   const amrex::MultiFab* ez, const amrex::MultiFab* aer,
+                                   const amrex::MultiFab* aet, const amrex::MultiFab* aez,
+                                   const amrex::MultiFab* br, const amrex::MultiFab* bt,
+                                   const amrex::MultiFab* bz, const amrex::MultiFab* abr,
+                                   const amrex::MultiFab* abt, const amrex::MultiFab* abz,
+                                   amrex::Real* out) {
+            const bool ext = (aer != nullptr);
+            // r_hi face: sum over nodal j (E_theta Bbar_z, half weights at the
+            // nodal box ends) and over cell-centered j (E_z Btilde_theta).
+            {
+                amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+                amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+                using ReduceTuple = typename decltype(reduce_data)::Type;
+                for (amrex::MFIter mfi(*et); mfi.isValid(); ++mfi) {
+                    const amrex::Box box = mfi.validbox();      // nodal r, nodal z
+                    if (box.bigEnd(0) != nr) { continue; }
+                    amrex::Box face = box;
+                    face.setSmall(0, nr);
+                    const int jlo = box.smallEnd(1);
+                    const int jhi = box.bigEnd(1);
+                    const auto et_a = et->const_array(mfi);
+                    const auto ez_a = ez->const_array(mfi);
+                    const auto bz_a = bz->const_array(mfi);
+                    const auto bt_a = bt->const_array(mfi);
+                    const auto eet = ext ? aet->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                    const auto eez = ext ? aez->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                    const auto ebz = ext ? abz->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                    const auto ebt = ext ? abt->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                    const amrex::Real r_in = rlo + (nr - 0.5_rt) * dr;
+                    const amrex::Real r_out = rlo + (nr + 0.5_rt) * dr;
+                    reduce_op.eval(face, reduce_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                            amrex::Real e_theta = et_a(i, j, k);
+                            amrex::Real bz_in = bz_a(i - 1, j, k);
+                            amrex::Real bz_out = bz_a(i, j, k);
                             if (ext) {
-                                e_zed += eez(i, j, k);
-                                bt_in += ebt(i - 1, j, k);
-                                bt_out += ebt(i, j, k);
+                                e_theta += eet(i, j, k);
+                                bz_in += ebz(i - 1, j, k);
+                                bz_out += ebz(i, j, k);
                             }
-                            cc_term = e_zed * 0.5_rt * (r_in * bt_in + r_out * bt_out) / r_hi;
-                        }
-                        return {nodal_term, cc_term};
-                    });
+                            amrex::Real wj = 1.0_rt;
+                            if (j == jlo || j == jhi) { wj = 0.5_rt; }
+                            const amrex::Real nodal_term =
+                                wj * e_theta * 0.5_rt * (bz_in + bz_out);
+                            amrex::Real cc_term = 0.0_rt;
+                            if (j < jhi) {
+                                amrex::Real e_zed = ez_a(i, j, k);
+                                amrex::Real bt_in = bt_a(i - 1, j, k);
+                                amrex::Real bt_out = bt_a(i, j, k);
+                                if (ext) {
+                                    e_zed += eez(i, j, k);
+                                    bt_in += ebt(i - 1, j, k);
+                                    bt_out += ebt(i, j, k);
+                                }
+                                cc_term = e_zed * 0.5_rt * (r_in * bt_in + r_out * bt_out) / r_hi;
+                            }
+                            return {nodal_term, cc_term};
+                        });
+                }
+                auto sums = reduce_data.value(reduce_op);
+                const amrex::Real area = 2.0_rt * MathConst::pi * r_hi * dz;
+                out[0] = dt * area * inverse_mu0 *
+                         all_reduce_sum(amrex::get<0>(sums) - amrex::get<1>(sums));
             }
-            auto sums = reduce_data.value(reduce_op);
-            const amrex::Real area = 2.0_rt * MathConst::pi * r_hi * dz;
-            audit.poynt_out[0] = dt * area * inverse_mu0 *
-                                 all_reduce_sum(amrex::get<0>(sums) - amrex::get<1>(sums));
+            out[1] = 0.0_rt;
+            out[2] = 0.0_rt;
+            if (!z_periodic) {
+                for (int side = 0; side < 2; ++side) {
+                    const int jf = (side == 0) ? domain.smallEnd(1) : nz;
+                    const amrex::Real outward = (side == 0) ? -1.0_rt : 1.0_rt;
+                    // (E x B)_z = E_r B_theta - E_theta B_r on the face.
+                    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+                    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+                    using ReduceTuple = typename decltype(reduce_data)::Type;
+                    for (amrex::MFIter mfi(*er); mfi.isValid(); ++mfi) {
+                        const amrex::Box box = mfi.validbox();   // cc r, nodal z
+                        if (jf < box.smallEnd(1) || jf > box.bigEnd(1)) { continue; }
+                        amrex::Box face = box;
+                        face.setSmall(1, jf);
+                        face.setBig(1, jf);
+                        const int ilo = box.smallEnd(0);
+                        const int ihi = box.bigEnd(0);   // cc r: nodal E_theta reaches ihi+1
+                        const auto er_a = er->const_array(mfi);
+                        const auto et_a = et->const_array(mfi);
+                        const auto br_a = br->const_array(mfi);
+                        const auto bt_a = bt->const_array(mfi);
+                        const auto eer = ext ? aer->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                        const auto eet = ext ? aet->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                        const auto ebr = ext ? abr->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                        const auto ebt = ext ? abt->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                        reduce_op.eval(face, reduce_data,
+                            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                                amrex::Real e_rad = er_a(i, j, k);
+                                amrex::Real bt_in = bt_a(i, j - 1, k);
+                                amrex::Real bt_out = bt_a(i, j, k);
+                                if (ext) {
+                                    e_rad += eer(i, j, k);
+                                    bt_in += ebt(i, j - 1, k);
+                                    bt_out += ebt(i, j, k);
+                                }
+                                const amrex::Real r_cc = rlo + (i + 0.5_rt) * dr;
+                                const amrex::Real cc_term =
+                                    r_cc * e_rad * 0.5_rt * (bt_in + bt_out);
+                                amrex::Real nodal_term = 0.0_rt;
+                                for (int n = 0; n < 2; ++n) {
+                                    const int in = i + n;
+                                    if (n == 1 && i != ihi) { continue; }
+                                    const amrex::Real r_n = rlo + in * dr;
+                                    amrex::Real w = 1.0_rt;
+                                    if (in == ilo || in == ihi + 1) { w = 0.5_rt; }
+                                    amrex::Real e_theta = et_a(in, j, k);
+                                    amrex::Real br_in = br_a(in, j - 1, k);
+                                    amrex::Real br_out = br_a(in, j, k);
+                                    if (ext) {
+                                        e_theta += eet(in, j, k);
+                                        br_in += ebr(in, j - 1, k);
+                                        br_out += ebr(in, j, k);
+                                    }
+                                    nodal_term += w * r_n * e_theta * 0.5_rt * (br_in + br_out);
+                                }
+                                return {cc_term, nodal_term};
+                            });
+                    }
+                    auto sums = reduce_data.value(reduce_op);
+                    out[1 + side] =
+                        outward * dt * 2.0_rt * MathConst::pi * dr * inverse_mu0 *
+                        all_reduce_sum(amrex::get<0>(sums) - amrex::get<1>(sums));
+                }
+            }
+        };
+        // total fields: E_resp + E_ext, B_resp + B_ext
+        poynting_faces(&e_r, &e_t, &e_z, ext_e_r, ext_e_t, ext_e_z,
+                       &b_r, &b_t, &b_z, ext_b_r, ext_b_t, ext_b_z, audit.poynt_out);
+        // the external field alone (its own Faraday identity)
+        if (add_external) {
+            poynting_faces(ext_e_r, ext_e_t, ext_e_z, nullptr, nullptr, nullptr,
+                           ext_b_r, ext_b_t, ext_b_z, nullptr, nullptr, nullptr,
+                           audit.poynt_out_ext);
         }
         // r_hi fluid export (cell-centered j faces of the r-flux register).
         {
@@ -656,69 +808,6 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
             for (int side = 0; side < 2; ++side) {
                 const int jf = (side == 0) ? domain.smallEnd(1) : nz;
                 const amrex::Real outward = (side == 0) ? -1.0_rt : 1.0_rt;
-                // Poynting: (E x B)_z = E_r B_theta - E_theta B_r on the face.
-                amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-                amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
-                using ReduceTuple = typename decltype(reduce_data)::Type;
-                for (amrex::MFIter mfi(e_r); mfi.isValid(); ++mfi) {
-                    const amrex::Box box = mfi.validbox();   // cc r, nodal z
-                    if (jf < box.smallEnd(1) || jf > box.bigEnd(1)) { continue; }
-                    amrex::Box face = box;
-                    face.setSmall(1, jf);
-                    face.setBig(1, jf);
-                    const int ilo = box.smallEnd(0);
-                    const int ihi = box.bigEnd(0);   // cc r: nodal E_theta reaches ihi+1
-                    const auto er = e_r.const_array(mfi);
-                    const auto et = e_t.const_array(mfi);
-                    const auto br = b_r.const_array(mfi);
-                    const auto bt = b_t.const_array(mfi);
-                    const auto eer = add_external ? ext_e_r->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                    const auto eet = add_external ? ext_e_t->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                    const auto ebr = add_external ? ext_b_r->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                    const auto ebt = add_external ? ext_b_t->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-                    const bool ext = add_external;
-                    reduce_op.eval(face, reduce_data,
-                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                            // cc-r term at r_{i+1/2}: E_r x mean B_theta
-                            amrex::Real e_rad = er(i, j, k);
-                            amrex::Real bt_in = bt(i, j - 1, k);
-                            amrex::Real bt_out = bt(i, j, k);
-                            if (ext) {
-                                e_rad += eer(i, j, k);
-                                bt_in += ebt(i, j - 1, k);
-                                bt_out += ebt(i, j, k);
-                            }
-                            const amrex::Real r_cc = rlo + (i + 0.5_rt) * dr;
-                            const amrex::Real cc_term =
-                                r_cc * e_rad * 0.5_rt * (bt_in + bt_out);
-                            // nodal-r terms at r_i (and r_{ihi+1} from the
-                            // last cell of the box): E_theta x mean B_r,
-                            // half weights at the nodal box ends
-                            amrex::Real nodal_term = 0.0_rt;
-                            for (int n = 0; n < 2; ++n) {
-                                const int in = i + n;
-                                if (n == 1 && i != ihi) { continue; }
-                                const amrex::Real r_n = rlo + in * dr;
-                                amrex::Real w = 1.0_rt;
-                                if (in == ilo || in == ihi + 1) { w = 0.5_rt; }
-                                amrex::Real e_theta = et(in, j, k);
-                                amrex::Real br_in = br(in, j - 1, k);
-                                amrex::Real br_out = br(in, j, k);
-                                if (ext) {
-                                    e_theta += eet(in, j, k);
-                                    br_in += ebr(in, j - 1, k);
-                                    br_out += ebr(in, j, k);
-                                }
-                                nodal_term += w * r_n * e_theta * 0.5_rt * (br_in + br_out);
-                            }
-                            return {cc_term, nodal_term};
-                        });
-                }
-                auto sums = reduce_data.value(reduce_op);
-                audit.poynt_out[1 + side] =
-                    outward * dt * 2.0_rt * MathConst::pi * dr * inverse_mu0 *
-                    all_reduce_sum(amrex::get<0>(sums) - amrex::get<1>(sums));
-                // fluid export through the z face
                 amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum> flux_op;
                 amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real> flux_data(flux_op);
                 using FluxTuple = typename decltype(flux_data)::Type;
@@ -933,13 +1022,25 @@ void ThetaImplicitMHD::EnergyAuditFinishStage (const int stage)
         audit.theta_diss = (m_theta - 0.5_rt) * db2 / PhysConst::mu0;
         if (m_hybrid_pic_model->m_add_external_fields) {
             std::array<const amrex::MultiFab*, 3> b_ext{};
+            std::array<const amrex::MultiFab*, 3> b_ext_old{};
             for (int component = 0; component < 3; ++component) {
                 b_ext[component] = m_WarpX->m_fields.get(
                     FieldType::hybrid_B_fp_external, Direction{component}, 0);
+                b_ext_old[component] = m_energy_audit_b_ext_old[component].get();
             }
-            audit.wb_ext_new = EnergyAuditFieldDot(b_ext, b_ext) * inverse_2mu0;
+            const amrex::Real ext_nn = EnergyAuditFieldDot(b_ext, b_ext);
+            const amrex::Real ext_oo = EnergyAuditFieldDot(b_ext_old, b_ext_old);
+            const amrex::Real ext_no = EnergyAuditFieldDot(b_ext, b_ext_old);
+            audit.wb_ext_new = ext_nn * inverse_2mu0;
+            audit.b_ext_theta_dot_db =
+                ((1.0_rt - m_theta) * (ext_no - ext_oo) + m_theta * (ext_nn - ext_no)) /
+                PhysConst::mu0;
+            audit.theta_diss_ext =
+                (m_theta - 0.5_rt) * (ext_nn - 2.0_rt * ext_no + ext_oo) / PhysConst::mu0;
         } else {
             audit.wb_ext_new = 0.0_rt;
+            audit.b_ext_theta_dot_db = 0.0_rt;
+            audit.theta_diss_ext = 0.0_rt;
         }
         break;
     }
@@ -1029,29 +1130,43 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     // The code's own ledgers, per step (cumulative counters differenced
     // against the previous row; the wall ledger's counter is compared
     // with the audit's own stair sum in the tests).
+    // (the prev_* snapshots are refreshed EVERY step by
+    // EnergyAuditSnapshotLedgers, so these are one-step deltas at any
+    // energy_audit_interval)
     const amrex::Real d_ledger_floor_supply = m_floor_supplied_energy - a.prev_floor_supply;
     const amrex::Real d_ledger_pinned = m_pinned_defect_energy - a.prev_pinned;
     const amrex::Real d_ledger_halo_relax = m_halo_relaxation_energy - a.prev_halo_relax;
     const amrex::Real d_ledger_eater = m_eater_removed_energy - a.prev_eater;
     const amrex::Real d_ledger_wall = m_shaped_wall_energy - a.prev_wall_energy;
-    a.prev_floor_supply = m_floor_supplied_energy;
-    a.prev_pinned = m_pinned_defect_energy;
-    a.prev_halo_relax = m_halo_relaxation_energy;
-    a.prev_eater = m_eater_removed_energy;
-    a.prev_wall_energy = m_shaped_wall_energy;
-    a.prev_absorb_energy = m_absorbed_wall_energy;
+    const amrex::Real d_ledger_pedestal_e = m_halo_pedestal_energy_e - a.prev_pedestal_e;
+    const amrex::Real d_ledger_pedestal_i = m_halo_pedestal_energy_i - a.prev_pedestal_i;
+    // The external field's own Faraday identity: dW_B_ext = circuit_in_ext
+    // - poynt_out_ext - theta_diss_ext for an external field whose stored
+    // E_ext is the exact time derivative of its stored B_ext (segment-driven
+    // or linear-in-time scales); the defect is what is not.
+    const amrex::Real poynt_out_ext_total =
+        a.poynt_out_ext[0] + a.poynt_out_ext[1] + a.poynt_out_ext[2];
+    const amrex::Real ext_defect =
+        dwb_ext - a.circuit_in_ext + poynt_out_ext_total + a.theta_diss_ext;
+    const amrex::Real lorentz_withheld =
+        a.src[R::lorentz_unweighted] - a.src[R::lorentz];
+    const amrex::Real res_boost = a.res_field - a.res_user;
 
-    // Closure residuals. 'booked': the physical fluxes, the audit's wall
-    // sums and the code's own ledger bookings (floor supply, pinned
-    // defect, halo relaxation outlet, eater) -- what the existing ledgers
-    // leave unexplained. 'full': every measured term.
+    // Closure residuals. dW_total spans THIS step (the state after the
+    // between-step pedestal raise -> the end of the step), so the raise
+    // (inject_*) is reported but enters neither residual; the energy since
+    // the first row is dW_total_cum + inject_cum. 'booked': the physical
+    // fluxes, the audit's wall sums, the code's own ledger bookings (floor
+    // supply, pinned defect, halo relaxation outlet, eater) and the mock
+    // vacuum resistivity's dissipation res_boost as a named design term --
+    // what remains is the unintended loss. 'full': every measured term.
     const amrex::Real resid_booked =
         dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
-        eater_e - eater_i - inject_e - inject_i - d_ledger_floor_supply -
-        d_ledger_pinned + d_ledger_halo_relax;
+        eater_e - eater_i - d_ledger_floor_supply - d_ledger_pinned + d_ledger_halo_relax +
+        res_boost;
     const amrex::Real resid_full =
         dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
-        eater_e - eater_i - inject_e - inject_i -
+        eater_e - eater_i -
         (a.src[R::fcs_e] + a.src[R::fcs_ei]) + (a.src[R::relax_e] + a.src[R::relax_ei]) +
         a.theta_diss - faraday_defect + exchange - pw_pair +
         a.src[R::drain_ei] - a.newton[1] - a.newton[2] - floor_e - floor_ei -
@@ -1063,6 +1178,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_circuit_in += a.circuit_in;
     a.cum_res_field += a.res_field;
     a.cum_res_user += a.res_user;
+    a.cum_res_hyper += a.res_hyper;
+    a.cum_lorentz_withheld += lorentz_withheld;
+    a.cum_poynt_in_ext += -poynt_out_ext_total;
+    a.cum_theta_diss_ext += a.theta_diss_ext;
+    a.cum_ext_defect += ext_defect;
     a.cum_fluid_in += fluid_in_e + fluid_in_i;
     a.cum_wall += wall_e + wall_i;
     a.cum_ej += a.ej;
@@ -1125,6 +1245,10 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"poynt_in_zlo", -a.poynt_out[1]},
         {"poynt_in_zhi", -a.poynt_out[2]},
         {"poynt_in", poynt_in},
+        {"poynt_in_ext_rhi", -a.poynt_out_ext[0]},
+        {"poynt_in_ext_zlo", -a.poynt_out_ext[1]},
+        {"poynt_in_ext_zhi", -a.poynt_out_ext[2]},
+        {"poynt_in_ext", -poynt_out_ext_total},
         {"circuit_in", a.circuit_in},
         {"circuit_in_ext", a.circuit_in_ext},
         {"circuit_in_plasma", a.circuit_in_plasma},
@@ -1169,11 +1293,17 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"exchange", exchange},
         {"res_field", a.res_field},
         {"res_user", a.res_user},
-        {"res_boost", a.res_field - a.res_user},
+        {"res_boost", res_boost},
         {"exchange_rest", exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i]},
+        {"res_hyper", a.res_hyper},
+        {"lorentz_unweighted", a.src[R::lorentz_unweighted]},
+        {"lorentz_withheld", lorentz_withheld},
+        {"exchange_rest2", exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i] - a.res_hyper - lorentz_withheld},
         // scheme terms
         {"theta_diss", a.theta_diss},
+        {"theta_diss_ext", a.theta_diss_ext},
         {"faraday_defect", faraday_defect},
+        {"ext_defect", ext_defect},
         {"newton_mass", a.newton[0]},
         {"newton_e", a.newton[1]},
         {"newton_i", a.newton[2]},
@@ -1202,6 +1332,8 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"ledger_pinned_defect", d_ledger_pinned},
         {"ledger_halo_relax", d_ledger_halo_relax},
         {"ledger_eater_energy", d_ledger_eater},
+        {"ledger_pedestal_e", d_ledger_pedestal_e},
+        {"ledger_pedestal_i", d_ledger_pedestal_i},
         {"ledger_wall_energy_cum", ledger_wall},
         {"ledger_absorb_energy_cum", ledger_absorb},
         {"ledger_friction_cum", ledger_friction},
@@ -1225,6 +1357,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"exchange_cum", a.cum_exchange},
         {"res_field_cum", a.cum_res_field},
         {"res_user_cum", a.cum_res_user},
+        {"res_hyper_cum", a.cum_res_hyper},
+        {"lorentz_withheld_cum", a.cum_lorentz_withheld},
+        {"poynt_in_ext_cum", a.cum_poynt_in_ext},
+        {"theta_diss_ext_cum", a.cum_theta_diss_ext},
+        {"ext_defect_cum", a.cum_ext_defect},
         {"pw_pair_cum", a.cum_pwpair},
         {"faraday_defect_cum", a.cum_faraday},
         {"newton_cum", a.cum_newton},
@@ -1246,6 +1383,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         << " fluid_in = " << fluid_in_e + fluid_in_i
         << " wall = " << wall_e + wall_i << " EJ = " << a.ej
         << " theta_diss = " << a.theta_diss << " exchange = " << exchange
+        << " res_boost = " << res_boost << " ext_defect = " << ext_defect
         << " sync_Ei = " << sync_ei << " resid_booked = " << resid_booked
         << " resid_full = " << resid_full
         << " | cum booked = " << a.cum_resid_booked
@@ -1279,15 +1417,24 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "J_stage . J^theta (the field's resistive dissipation with the resistivity the advance used: vacuum "
                     "boost + wall-band override), res_user = the same with the un-boosted user eta, res_boost = res_field - "
                     "res_user (the mock resistivity's cost), exchange_rest = exchange - res_field + joule_e + joule_i (the "
-                    "non-resistive exchange mismatch); exchange = EJ - (lorentz + "
+                    "non-resistive exchange mismatch; res_hyper = dt sum E_H . J^theta the hyper-resistive "
+                    "dissipation, lorentz_withheld = the gated magnetic-force work the Holmstrom vacuum switch "
+                    "withholds, exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld the unnamed "
+                    "remainder); poynt_in_ext*, theta_diss_ext, ext_defect = the external field's own identity "
+                    "(dW_B_ext = circuit_in_ext - poynt_out_ext - theta_diss_ext + ext_defect; exact for a "
+                    "segment-driven or linear-in-time scale); theta_diss includes theta_diss_ext (the prescribed "
+                    "field's quadrature term, not a scheme loss); inject_* = the between-step pedestal raise, "
+                    "reported, in neither residual (the energy since the first row is dW_total_cum + inject_cum); "
+                    "res_boost is booked in resid_booked as the mock vacuum resistivity's DISSIPATION (a design "
+                    "term); exchange = EJ - (lorentz + "
                     "joule_e + joule_i); newton_* = sum (U^theta - U^n - rhs) dV/theta; fluxw_* = sum rhs "
                     "dV/theta - dt(-export - wall + sources); eater_*/floor_*/sync_* are the end-of-step "
                     "restorations (signed additions); inject_* = between-step changes.\n";
             file << "# resid_booked = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
-                    "eater_e - eater_i - inject_e - inject_i - ledger_floor_supply - ledger_pinned_defect + "
-                    "ledger_halo_relax   (the code's own bookings)\n";
+                    "eater_e - eater_i - ledger_floor_supply - ledger_pinned_defect + ledger_halo_relax + res_boost "
+                    "  (the code's own bookings + the mock dissipation as a design term)\n";
             file << "# resid_full = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
-                    "eater_e - eater_i - inject_e - inject_i - (fcs_e + fcs_i) + (relax_e + relax_i) + "
+                    "eater_e - eater_i - (fcs_e + fcs_i) + (relax_e + relax_i) + "
                     "theta_diss - faraday_defect + exchange - pw_pair + drain_ei - newton_e - newton_i - "
                     "floor_e - floor_Ei - sync_Ei - post_e - post_i - fluxw_e - fluxw_i   (every measured term)\n";
             file << "# columns:";

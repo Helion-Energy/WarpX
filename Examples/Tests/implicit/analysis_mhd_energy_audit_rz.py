@@ -121,9 +121,18 @@ for name in ["fluxw_mass", "fluxw_e", "fluxw_i", "fluxw_ui"]:
     print(f"  max |{name}| = {np.max(np.abs(a[name])):.3e}")
     assert np.all(np.abs(a[name]) < tol), f"{name} above round-off: an unregistered source or a missed face"
 
-# 4. full closure
+# 4. full closure, and the field-side gates (rev30 F1): the Faraday defect is the
+#    one field-side remainder -- with the coil work named it must sit at round-off
+#    on every step; where the external field varies in time its own identity
+#    (ext_defect) must too.
 print(f"  max |resid_full| = {np.max(np.abs(a['resid_full'])):.3e} J (bound {tol:.3e}); "
       f"cumulative {a['resid_full_cum'][-1]:.3e} J")
+print(f"  max |faraday_defect| = {np.max(np.abs(a['faraday_defect'])):.3e} J (bound {1.0e-12 * scale:.3e}); "
+      f"circuit_in_cum {a['circuit_in_cum'][-1]:.4e} J (ext {np.sum(a['circuit_in_ext']):.4e}); "
+      f"max |ext_defect| = {np.max(np.abs(a['ext_defect'])):.3e} J")
+assert np.all(np.abs(a["faraday_defect"]) < 1.0e-12 * scale), "Faraday defect above round-off: a field-side term is wrong or missing"
+if np.any(a["circuit_in_ext"] != 0.0):
+    assert np.all(np.abs(a["ext_defect"]) < 1.0e-12 * max(np.max(a["W_B_ext"]), 1.0e-300)), "external-field identity broken"
 print(f"  booked residual cumulative {a['resid_booked_cum'][-1]:.3e} J; poynt_in_cum {a['poynt_in_cum'][-1]:.3e}; "
       f"EJ_cum {a['EJ_cum'][-1]:.3e}; exchange_cum {a['exchange_cum'][-1]:.3e}; faraday_defect_cum "
       f"{a['faraday_defect_cum'][-1]:.3e}; sync_Ei_cum {a['sync_Ei_cum'][-1]:.3e}; floor_cum {a['floor_cum'][-1]:.3e}; "

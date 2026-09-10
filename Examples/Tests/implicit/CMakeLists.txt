@@ -5524,9 +5524,10 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# Magnetized column with the external-field split, a dielectric stair
-# wall (zero_flux, ledger), the floor-consistency supply, backward Euler,
-# total-energy ions, two boxes per rank: every named term live at once;
+# Field-free column with the external-field split machinery, a dielectric
+# stair wall (zero_flux, ledger), the floor-consistency supply, backward
+# Euler, total-energy ions, two boxes per rank: the fluid-side terms with
+# a stair wall and the supply live (the field-side columns are zero: B = 0);
 # closure and self-checks at round-off, the wall column against the ledger.
 add_warpx_test(
     test_rz_theta_implicit_mhd_energy_audit_field_wall  # name
@@ -5550,6 +5551,74 @@ add_warpx_test(
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_r_open_absorb_wall implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
     "analysis_mhd_energy_audit_rz.py diags/energy_audit.txt absorb:diags/absorb_ledger.txt 1.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# rev30 fix round. F2: the legacy pedestal raise injects BETWEEN steps; the
+# audit reports it (inject_* = the pedestal ledger's deltas) and books it in
+# neither residual -- closure at round-off with the raise firing.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_raise  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold implicit_mhd.energy_audit_file=diags/energy_audit.txt"  # inputs
+    "analysis_mhd_energy_audit_raise.py diags/energy_audit.txt diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# F3: energy_audit_interval = 4 writes exact single-step rows (the ledger
+# counters are snapshotted every step), identical to the interval-1 twin's
+# rows at the audited steps.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_wall_int4  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_floor_gate implicit_mhd.energy_audit_file=diags/energy_audit.txt implicit_mhd.energy_audit_interval=4"  # inputs
+    "analysis_mhd_energy_audit_interval.py diags/energy_audit.txt ../test_rz_theta_implicit_mhd_energy_audit_wall/diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_energy_audit_wall  # dependency
+)
+
+# F1: an independent expected value for the circuit power and the Poynting
+# faces -- a prescribed linear ramp of the coil field on the Green's-open
+# column: the external field's own Faraday identity must close at round-off
+# (dW_B_ext measured vs -dt sum E_ext.J_coil, the E_ext x B_ext face flux and
+# the quadrature term), W_B_ext(t) = s(t)^2 W_B_ext(0), and the total field's
+# Faraday defect must be at round-off.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_ramp  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_r_open_absorb_wall implicit_mhd.energy_audit_file=diags/energy_audit.txt external_vector_potential.bore.A_time_external_function(t)=1.0+t/2.0e-6"  # inputs
+    "analysis_mhd_energy_audit_ramp.py diags/energy_audit.txt 2.0e-6"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# F4: the Joule and resistive columns live. Uniform user resistivity on the
+# periodic wave: res_boost = 0, res_field = res_user = the Joule deposit to
+# 1 %, the non-resistive mismatch at round-off.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_resistive  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_evolve.theta=1.0 hybrid_pic_model.plasma_resistivity(rho,J,t)=1.0e-4"  # inputs
+    "analysis_mhd_energy_audit_resistive.py diags/energy_audit.txt uniform"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The density-keyed vacuum boost on a density step with the Ohm-current
+# Joule quench (the production mechanism): the boost's dissipation res_boost
+# is the exchange defect (> 90 %), the unnamed remainder < 2 %.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_boosted  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_evolve.theta=1.0 hybrid_pic_model.plasma_resistivity(rho,J,t)=1.0e-5 implicit_mhd.mass_density(x,y,z)=rho0*(0.02+0.98*0.5*(1+tanh((z-0.4*Lz)/(0.04*Lz)))*0.5*(1-tanh((z-0.75*Lz)/(0.04*Lz)))) implicit_mhd.vacuum_resistivity_diffusivity=1.0 implicit_mhd.vacuum_reference_base_density=rho0 implicit_mhd.joule_ohm_current=1"  # inputs
+    "analysis_mhd_energy_audit_resistive.py diags/energy_audit.txt boosted"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
