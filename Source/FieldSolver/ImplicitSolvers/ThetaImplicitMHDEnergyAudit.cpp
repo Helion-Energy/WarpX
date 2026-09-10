@@ -1243,6 +1243,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         dwb_ext - a.circuit_in_ext + poynt_out_ext_total + a.theta_diss_ext;
     const amrex::Real lorentz_withheld =
         a.src[R::lorentz_unweighted] - a.src[R::lorentz];
+    // The magnetic-force work the physical-share weight / band-cells mask
+    // withheld from the fluid rows (lorentz_force_current = physical,
+    // lorentz_force_band_cells); exactly zero when both are off, so every
+    // expression below that subtracts it is bit-identical then.
+    const amrex::Real force_withheld = a.src[R::force_withheld];
     const amrex::Real res_boost = a.res_field - a.res_user;
     // The Ohm's-law component split of the exchange remainder (see the
     // header): exchange_rest2 = ideal_mismatch + hall_work + inertia_work +
@@ -1250,9 +1255,11 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     // corner_diss_work exactly.
     const amrex::Real exchange_rest2 =
         exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i] - a.res_hyper -
-        lorentz_withheld;
-    const amrex::Real ideal_mismatch = a.ind_work - a.src[R::lorentz_unweighted];
-    const amrex::Real stagger_mismatch = a.ind_cc_work - a.src[R::lorentz_unweighted];
+        lorentz_withheld - force_withheld;
+    const amrex::Real ideal_mismatch =
+        a.ind_work - a.src[R::lorentz_unweighted] - force_withheld;
+    const amrex::Real stagger_mismatch =
+        a.ind_cc_work - a.src[R::lorentz_unweighted] - force_withheld;
     const amrex::Real recon_work = a.ind_work - a.ind_cc_work - a.corner_diss_work;
     const amrex::Real ohm_rest =
         a.ej - (a.ind_work + a.hall_work + a.inertia_work + a.res_field + a.res_hyper);
@@ -1270,7 +1277,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     const amrex::Real resid_booked =
         dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
         eater_e - eater_i - d_ledger_floor_supply - d_ledger_pinned + d_ledger_halo_relax +
-        res_boost;
+        res_boost + force_withheld;
     const amrex::Real resid_full =
         dw_total - (poynt_in + a.circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i -
         eater_e - eater_i -
@@ -1287,6 +1294,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_res_user += a.res_user;
     a.cum_res_hyper += a.res_hyper;
     a.cum_lorentz_withheld += lorentz_withheld;
+    a.cum_force_withheld += force_withheld;
     a.cum_poynt_in_ext += -poynt_out_ext_total;
     a.cum_theta_diss_ext += a.theta_diss_ext;
     a.cum_ext_defect += ext_defect;
@@ -1412,6 +1420,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"res_hyper", a.res_hyper},
         {"lorentz_unweighted", a.src[R::lorentz_unweighted]},
         {"lorentz_withheld", lorentz_withheld},
+        {"force_withheld", force_withheld},
         {"exchange_rest2", exchange_rest2},
         // the Ohm's-law component split of exchange_rest2
         {"ideal_edge_work", a.ind_work},
@@ -1484,6 +1493,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"res_user_cum", a.cum_res_user},
         {"res_hyper_cum", a.cum_res_hyper},
         {"lorentz_withheld_cum", a.cum_lorentz_withheld},
+        {"force_withheld_cum", a.cum_force_withheld},
         {"poynt_in_ext_cum", a.cum_poynt_in_ext},
         {"theta_diss_ext_cum", a.cum_theta_diss_ext},
         {"ext_defect_cum", a.cum_ext_defect},
@@ -1563,15 +1573,18 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "res_user (the mock resistivity's cost), exchange_rest = exchange - res_field + joule_e + joule_i (the "
                     "non-resistive exchange mismatch; res_hyper = dt sum E_H . J^theta the hyper-resistive "
                     "dissipation, lorentz_withheld = the gated magnetic-force work the Holmstrom vacuum switch "
-                    "withholds, exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld the "
+                    "withholds, force_withheld = the magnetic-force work the physical-share weight "
+                    "(lorentz_force_current = physical) / band-cells mask (lorentz_force_band_cells) withholds "
+                    "from the fluid rows (wall_live x (1 - w) x u . (j_plasma x B), ungated; zero when off), "
+                    "exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld - force_withheld the "
                     "remainder, decomposed by the Ohm's-law components: exchange_rest2 = ideal_mismatch + "
                     "hall_work + inertia_work + ohm_rest EXACTLY, where ideal_edge_work = dt sum E_ind . J^theta "
                     "with E_ind the induction (ideal) EMF as assembled (the face Riemann/central induction flux "
                     "for E_r and E_z, the UCT corner average + dissipation for E_theta), ideal_cc_work = the same "
                     "with the plain two-cell (four-cell at a corner) mean of the cell-centered -(u x B), "
-                    "ideal_mismatch = ideal_edge_work - lorentz_unweighted (the edge ideal work vs the "
-                    "cell-centered stress work the momentum kernel deposits: zero in the collocated 1D pairing, "
-                    "the RZ pairing defect), stagger_mismatch = ideal_cc_work - lorentz_unweighted (its "
+                    "ideal_mismatch = ideal_edge_work - lorentz_unweighted - force_withheld (the edge ideal work vs the "
+                    "cell-centered stress work the momentum kernel would deposit unweighted: zero in the collocated 1D pairing, "
+                    "the RZ pairing defect), stagger_mismatch = ideal_cc_work - lorentz_unweighted - force_withheld (its "
                     "plain-mean part: staggering, r-weights, axis), recon_work = ideal_edge_work - ideal_cc_work "
                     "- corner_diss_work (reconstruction and UCT upwind weighting), corner_diss_work = the UCT "
                     "corner dissipation's work (zero under the central flux), hall_work = dt sum E_Hall . J^theta, "
@@ -1587,13 +1600,14 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "field's quadrature term, not a scheme loss); inject_* = the between-step pedestal raise, "
                     "reported, in neither residual (the energy since the first row is dW_total_cum + inject_cum); "
                     "res_boost is booked in resid_booked as the mock vacuum resistivity's DISSIPATION (a design "
-                    "term); exchange = EJ - (lorentz + "
+                    "term), force_withheld likewise as the withheld mock-current force work (a design term); exchange = EJ - (lorentz + "
                     "joule_e + joule_i); newton_* = sum (U^theta - U^n - rhs) dV/theta; fluxw_* = sum rhs "
                     "dV/theta - dt(-export - wall + sources); eater_*/floor_*/sync_* are the end-of-step "
                     "restorations (signed additions); inject_* = between-step changes.\n";
             file << "# resid_booked = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
                     "eater_e - eater_i - ledger_floor_supply - ledger_pinned_defect + ledger_halo_relax + res_boost "
-                    "  (the code's own bookings + the mock dissipation as a design term)\n";
+                    "+ force_withheld   (the code's own bookings + the mock dissipation and the withheld mock-force "
+                    "work as design terms)\n";
             file << "# resid_full = dW_total - (poynt_in + circuit_in + fluid_in_e + fluid_in_i) + wall_e + wall_i - "
                     "eater_e - eater_i - (fcs_e + fcs_i) + (relax_e + relax_i) + "
                     "theta_diss - faraday_defect + exchange - pw_pair + drain_ei - newton_e - newton_i - "

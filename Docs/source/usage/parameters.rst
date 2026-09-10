@@ -5902,6 +5902,49 @@ Jacobian probes.
     inside the wall radius (exact softened-loop potential, r < 0.725 m).
     Works in 1D and RZ alike (both carry discriminant tests). Requires
     the conservative flux form and the split external fields.
+    ``physical``: the ``plasma`` force weighted cell by cell by the
+    PHYSICAL SHARE of the current, :math:`w = \eta_\text{phys} /
+    \eta_\text{field}` -- the weight the circuit probe applies under
+    ``circuit.probe_weight = physical_share``, composed like the
+    Ohm-current Joule quench at the same kernel site:
+    :math:`\eta_\text{phys}` the user ``(rho, Te, J, t)`` resistivity at
+    the stage state, :math:`\eta_\text{field} = \sqrt{\eta_\text{phys}^2
+    + \eta_\text{vac}^2}` with the density-keyed vacuum boost
+    (:pp:param:`implicit_mhd.vacuum_resistivity_diffusivity`) and the
+    wall-band override (:pp:param:`implicit_mhd.wall_band_eta_override`)
+    where they apply. Where the field advance runs on a mock resistivity,
+    :math:`\nabla\times\mathbf{B}/\mu_0` is mostly a numerical current of
+    the diffusing field rather than plasma current, and the fluid feels
+    only the share :math:`w` of its force: the rows integrate
+    :math:`-\nabla\cdot\mathsf{F}_\text{hydro} + w\,\mathbf{j}_\text{plasma}
+    \times\mathbf{B}`, the ion energy books :math:`w\,\mathbf{u}\cdot
+    (\mathbf{j}_\text{plasma}\times\mathbf{B})`, and the withheld
+    :math:`(1 - w)\,\mathbf{u}\cdot(\mathbf{j}_\text{plasma}\times\mathbf{B})`
+    is booked in the energy audit as ``force_withheld`` (a design term
+    like ``res_boost``). :math:`w` is smooth in the stage density and
+    electron energy wherever the resistivity expression is, and exactly
+    1 where :math:`\eta_\text{field} = \eta_\text{phys}` (no boost, no
+    band). Same requirements as ``plasma``; default off. Measured on the
+    production formation deck: the dielectric wall band's stair-corner
+    curl-B spikes do +2e9 W (19 us) to +3.4e10 W (27 us) of work on the
+    band fluid under ``plasma`` -- the whole domain's booked magnetic
+    work, drained through the wall ledger.
+
+.. pp:param:: implicit_mhd.lorentz_force_band_cells
+    :type: ``integer``
+    :default: ``0`` (off, bit-identical)
+
+    Switch the magnetic force off entirely in the last :math:`N` LIVE fluid
+    cells at the shaped wall (:pp:param:`implicit_mhd.wall_model`):
+    cells with :math:`i \ge \min(i_\text{masked}[j-1], i_\text{masked}[j],
+    i_\text{masked}[j+1]) - N`, so the cells radially and axially adjacent
+    to a stair corner count. Static geometry; the withheld work is booked
+    as ``force_withheld``; composes multiplicatively with
+    ``lorentz_force_current = physical``. The blunt alternative to the
+    density-keyed weight for the wall band, where that weight is 0.01-0.7
+    early in a formation (band densities 3e18-3e19 against a vacuum
+    reference of 3.3e19) and near zero only once the band has thinned.
+    Requires the shaped wall and the conservative flux form.
 
 .. pp:param:: implicit_mhd.vacuum_drag_kinetic_drain
     :type: ``bool``

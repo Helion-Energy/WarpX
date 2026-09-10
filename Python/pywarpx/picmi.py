@@ -3604,7 +3604,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         keep a fraction of the uncorrected force; in a ramping external
         field a screening conductor feels no force under "total" and the
         screening current's force under "plasma"). Requires
-        fluid_flux hlld/central and add_external_fields.
+        fluid_flux hlld/central and add_external_fields. "physical": the
+        "plasma" force weighted cell by cell by the physical share of the
+        current, w = eta_phys/eta_field (the circuit probe's
+        probe_weight = physical_share weight: the user eta at the stage
+        state over the vacuum-boosted, wall-band-overridden field eta the
+        Ohm-current Joule quench composes), so where the field advance
+        runs on a mock resistivity the mostly numerical curl-B current
+        pushes the fluid only with its physical share; the ion energy
+        books w u . (j_plasma x B) and the energy audit books the
+        withheld rest as force_withheld. Default-off; the "plasma"
+        requirements apply.
+
+    lorentz_force_band_cells: int, default=0
+        Switch the magnetic force off entirely in the last N live fluid
+        cells at the shaped wall (wall_model), radially and under the
+        stair corners (implicit_mhd.lorentz_force_band_cells); the
+        withheld work is booked as force_withheld. The blunt alternative
+        to lorentz_force_current = "physical" for the wall band, where the
+        density-keyed weight is 0.01-0.7 early in a formation. 0 = off
+        (bit-identical). Requires wall_model and fluid_flux hlld/central.
 
     vacuum_drag_kinetic_drain: bool, default=False
         Pair the vacuum dust drag (vacuum_drag_rate) with the ion
@@ -4186,6 +4205,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_relaxation_n_max=None,
         halo_relaxation_ledger_file=None,
         lorentz_force_current=None,
+        lorentz_force_band_cells=None,
         vacuum_drag_kinetic_drain=None,
         floor_consistency_rate=None,
         floor_consistency_width_fraction=None,
@@ -4357,6 +4377,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_relaxation_n_max = halo_relaxation_n_max
         self.halo_relaxation_ledger_file = halo_relaxation_ledger_file
         self.lorentz_force_current = lorentz_force_current
+        self.lorentz_force_band_cells = lorentz_force_band_cells
         self.vacuum_drag_kinetic_drain = vacuum_drag_kinetic_drain
         self.floor_consistency_rate = floor_consistency_rate
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
@@ -4544,6 +4565,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_relaxation_n_max = self.halo_relaxation_n_max
         implicit_mhd.halo_relaxation_ledger_file = self.halo_relaxation_ledger_file
         implicit_mhd.lorentz_force_current = self.lorentz_force_current
+        implicit_mhd.lorentz_force_band_cells = self.lorentz_force_band_cells
         implicit_mhd.vacuum_drag_kinetic_drain = self.vacuum_drag_kinetic_drain
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
         implicit_mhd.floor_consistency_width_fraction = (

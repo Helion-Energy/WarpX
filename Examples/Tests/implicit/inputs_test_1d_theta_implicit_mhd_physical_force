@@ -1,0 +1,147 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# The physical-share force weight (implicit_mhd.lorentz_force_current =
+# physical) in 1D: a uniform static column carries a plasma-RESPONSE
+# current through the state field B_x(z) = B0 (1 + a cos(k z)),
+# j_y = B0 a k sin(k z) / mu0, whose force f_z = j_y B_x = -(1/2 mu0)
+# d(B_x^2)/dz pushes the fluid along z. The field advance runs on a MOCK
+# resistivity: the user eta is a tiny constant eta0 and the density-keyed
+# vacuum boost (vacuum_reference_base_density = 100 rho0, D = 1e-3) makes
+# eta_field = sqrt(eta0^2 + (mu0 D 100^2)^2) = 1.26e-5 ohm m ~ 1257 eta0,
+# so the current's physical share is w = eta0/eta_field = 7.96e-4
+# everywhere (the field itself decays only 8e-5 over the run). The split
+# external field is present (the mode requires it) but carries nothing
+# (A_y = 0), so j_ext = 0 and "plasma" is the full force.
+#
+# lorentz_force_current = plasma (the twin): m_z follows f_z t (rms within
+# 5 %). = physical: the fluid feels w f_z -- m_z follows w f_z t (rms
+# within 10 %), i.e. is ~1e-3 of the twin's -- the ion and electron
+# entropy proxies stay constant to 1e-6 (the E_i work pairs with the
+# WEIGHTED force), and the energy audit books the withheld work: per cell
+# lorentz/force_withheld = w/(1 - w) exactly, so the summed columns keep
+# that ratio to the accuracy of w's uniformity (a few 1e-3 from the
+# compression). See analysis_mhd_physical_force_1d.py.
+# The column is dense (n0 = 1e21, v_A = 69 km/s) so the central scheme's
+# numerical induction dissipation, which scales with the fast speed,
+# decays the field perturbation by ~2 % over the run (35 % at 1e19); the
+# vacuum reference scales with n0, so w does not change.
+my_constants.n0 = 1.0e21
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 10.0
+my_constants.P0 = n0 * Te * q_e
+my_constants.B0 = 0.1
+my_constants.a_mod = 0.01
+my_constants.nz = 32
+my_constants.Lz = 1.0
+my_constants.k_mod = 2*pi/Lz
+my_constants.dt = 2.0e-8
+my_constants.eta0 = 1.0e-8
+my_constants.D_vac = 1.0e-3
+my_constants.ref_factor = 100.0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-12
+newton.max_iterations = 8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-12
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = eta0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# The split external field the mode requires; it carries no current.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = hold
+external_vector_potential.hold.Ay_external_grid_function(x,y,z) = "0.0"
+external_vector_potential.hold.A_time_external_function(t) = "1.0"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE ######
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = P0
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.include_joule_heating = false
+implicit_mhd.electron_pressure_floor = 1.0e-8
+implicit_mhd.ion_pressure_floor = 1.0e-8
+implicit_mhd.mass_density_floor = 1.0e-4*rho0
+# The mock field resistivity: the density-keyed vacuum boost against a
+# reference 100x the column density.
+implicit_mhd.vacuum_resistivity_diffusivity = D_vac
+implicit_mhd.vacuum_reference_base_density = ref_factor*rho0
+implicit_mhd.lorentz_force_current = plasma
+implicit_mhd.energy_audit_file = diags/energy_audit.txt
+implicit_mhd.energy_audit_interval = 1
+
+# The state field carries the response current.
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = "B0*(1.0 + a_mod*cos(k_mod*z))"
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx By Bz implicit_mhd_mass_density implicit_mhd_momentum_x implicit_mhd_momentum_y implicit_mhd_momentum_z \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0

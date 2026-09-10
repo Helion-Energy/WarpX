@@ -5440,6 +5440,49 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_external_current_zero  # dependency
 )
 
+# physical null twin: with a zero user resistivity eta_field == eta_phys
+# (no boost, no band), so the physical-share weight is exactly 1 and
+# lorentz_force_current = physical must be the plain run bit for bit
+# (plotfile and newton.txt against the zero twin)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_physical_null  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current my_constants.c_ext=0.0 implicit_mhd.lorentz_force_current=physical"  # inputs
+    "analysis_mhd_twin_bytes.py diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_zero/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_zero  # dependency
+)
+
+# ============ The band-cells force mask ============
+# lorentz_force_band_cells = N: the magnetic force off in the last N live
+# cells at the shaped wall. The external-current deck's wall variant (the
+# flat dielectric wall at r = 0.065, masked i >= 10, rigid under zero_flux;
+# open z ends; the column density raised to 1e20 so the pressure response
+# to the force difference stays at the percent level): the twin (N = 0)
+# follows f_r t in every live cell; with N = 2 the twin-minus-band momentum
+# difference is f_r t in cells 8-9 and zero in cells 1-7, and the audit
+# books the withheld work.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_wall_total  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_external_current_wall  # inputs
+    "analysis_mhd_force_band_cells.py twin diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_band_cells  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_wall implicit_mhd.lorentz_force_band_cells=2"  # inputs
+    "analysis_mhd_force_band_cells.py band diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_wall_total/diags/diag000016 2"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_wall_total  # dependency
+)
+
 # ============ The vacuum dust drag's kinetic drain ============
 # Uniform dust sliding under the vacuum drag: without the drain the lost
 # kinetic energy is ion heat (the "off" run measures it), with
@@ -5549,6 +5592,36 @@ add_warpx_test(
     "analysis_mhd_external_current_1d.py plasma diags/diag000000 diags/diag000010 ../test_1d_theta_implicit_mhd_external_current_total/diags/diag000010"  # analysis
     OFF  # checksum
     test_1d_theta_implicit_mhd_external_current_total  # dependency
+)
+
+# ============ The physical-share force weight ============
+# lorentz_force_current = physical: the plasma force weighted by the
+# physical share w = eta_phys / eta_field of the current (the circuit
+# probe's weight). A uniform column carries the response current of
+# B_x = B0 (1 + a cos kz) under a mock field resistivity (the vacuum boost
+# against a reference 100x the column density: eta_field ~ 1257 eta_phys,
+# w ~ 8e-4). The plasma twin follows f_z t; under physical the fluid
+# follows w f_z t (~1e-3 of the twin), the entropy proxies stay constant
+# to 1e-6 (the E_i work pairs with the weighted force) and the audit's
+# lorentz / force_withheld ratio equals w/(1 - w).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_physical_force_plasma  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_physical_force  # inputs
+    "analysis_mhd_physical_force_1d.py plasma diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_physical_force_physical  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_physical_force implicit_mhd.lorentz_force_current=physical"  # inputs
+    "analysis_mhd_physical_force_1d.py physical diags/diag000010 ../test_1d_theta_implicit_mhd_physical_force_plasma/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_physical_force_plasma  # dependency
 )
 
 # ============ The drain on the pointwise-force kernel ============

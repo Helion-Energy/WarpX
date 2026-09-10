@@ -241,11 +241,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("lorentz_force_current", m_lorentz_force_current_name);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_lorentz_force_current_name == "total" ||
-            m_lorentz_force_current_name == "plasma",
+            m_lorentz_force_current_name == "plasma" ||
+            m_lorentz_force_current_name == "physical",
         "implicit_mhd.lorentz_force_current must be 'total' (the fluid rows "
-        "integrate -div of the total Maxwell stress) or 'plasma' (the external "
-        "field's in-domain current force is subtracted)");
-    m_exclude_external_current_force = (m_lorentz_force_current_name == "plasma");
+        "integrate -div of the total Maxwell stress), 'plasma' (the external "
+        "field's in-domain current force is subtracted) or 'physical' (the "
+        "plasma force weighted by the physical share eta_phys / eta_field of "
+        "the current)");
+    m_physical_share_force = (m_lorentz_force_current_name == "physical");
+    m_exclude_external_current_force =
+        (m_lorentz_force_current_name == "plasma") || m_physical_share_force;
+    pp.query("lorentz_force_band_cells", m_lorentz_force_band_cells);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_cells >= 0,
+        "implicit_mhd.lorentz_force_band_cells cannot be negative (0 = off)");
     utils::parser::queryWithParser(pp, "halo_pedestal_fraction",
                                    m_halo_pedestal_fraction);
     utils::parser::queryWithParser(pp, "halo_pedestal_drag_rate",
@@ -2711,16 +2720,25 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_exclude_external_current_force || m_use_recast,
-        "implicit_mhd.lorentz_force_current = plasma requires "
+        "implicit_mhd.lorentz_force_current = plasma / physical requires "
         "implicit_mhd.fluid_flux = hlld or central: only the recast fluid rows "
         "integrate the total-stress divergence (the pointwise-force path "
         "already uses j_plasma x B)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_exclude_external_current_force ||
             m_hybrid_pic_model->m_add_external_fields,
-        "implicit_mhd.lorentz_force_current = plasma requires "
+        "implicit_mhd.lorentz_force_current = plasma / physical requires "
         "hybrid_pic_model.add_external_fields: without a split external field "
         "there is no external current to take out of the fluid rows");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_cells == 0 || m_use_recast,
+        "implicit_mhd.lorentz_force_band_cells requires "
+        "implicit_mhd.fluid_flux = hlld or central (the recast fluid rows)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_cells == 0 || m_wall_mask.IsActive(),
+        "implicit_mhd.lorentz_force_band_cells requires the shaped wall "
+        "(implicit_mhd.wall_model): the band is the last N live cells inside "
+        "the wall contour");
 
     if (m_vacuum_mass_density > 0.0_rt) {
         // Holmstrom-style vacuum cell switching for the ion fluid: cells
@@ -4027,11 +4045,22 @@ void ThetaImplicitMHD::PrintParameters () const
                                                       : "off"))
                    << ")\n"
                    << "Lorentz force current:         " << m_lorentz_force_current_name
-                   << (m_exclude_external_current_force
+                   << (m_physical_share_force
+                           ? " (the external field's in-domain current force is "
+                             "subtracted from the fluid rows and the plasma force "
+                             "is weighted by the physical share eta_phys / "
+                             "eta_field of the current)"
+                           : m_exclude_external_current_force
                            ? " (the external field's in-domain current force is "
                              "subtracted from the fluid rows)"
                            : " (the fluid rows integrate -div of the total "
                              "Maxwell stress)")
+                   << "\n"
+                   << "Lorentz force band cells:      " << m_lorentz_force_band_cells
+                   << (m_lorentz_force_band_cells > 0
+                           ? " (the magnetic force is off in the last N live cells "
+                             "at the shaped wall)"
+                           : " (off)")
                    << "\n"
                    << "Vacuum drag kinetic drain:     "
                    << (m_vacuum_drag_kinetic_drain
@@ -15741,6 +15770,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::MultiFab* const external_current_cc =
         exclude_external_force ? m_WarpX->m_fields.get(ExternalCurrentCCName, 0)
                                : nullptr;
+    // lorentz_force_current = physical / lorentz_force_band_cells: the
+    // physical-share weight of the magnetic force in the fluid rows (see the
+    // member comments). The weight reads the Joule quench's eta_field
+    // composition (host constants below) at the stage state; the band mask
+    // reads the cell-centered wall table over the row and its axial
+    // neighbours. Both off (the default): force_weighted is false and the
+    // rows are untouched.
+    const bool physical_share_force = m_physical_share_force;
+    const int force_band_cells = m_lorentz_force_band_cells;
+    const bool force_band_mask = (force_band_cells > 0) && m_wall_mask.IsActive();
+    const int* const AMREX_RESTRICT force_band_masked_cc =
+        force_band_mask ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const bool force_weighted = physical_share_force || force_band_mask;
     // Halo source taper (inert at pedestal 0, where the limiter is
     // identically 1): the reactive work terms and the CGL relaxation
     // exchange taper C^1-smoothly to zero below twice the pedestal.
@@ -15975,6 +16017,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int audit_fcs_ei = EnergyAuditRegister::fcs_ei;
     constexpr int audit_fcs_ui = EnergyAuditRegister::fcs_ui;
     constexpr int audit_lorentz_unweighted = EnergyAuditRegister::lorentz_unweighted;
+    constexpr int audit_force_withheld = EnergyAuditRegister::force_withheld;
 
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
@@ -16245,6 +16288,86 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
             }
 
+            // Cell state the Joule booking below and the physical-share
+            // force weight share: the plasma current, the floored electron
+            // pressure, |J|, the Ohm-floored charge density and Te [K] of
+            // the (rho, Te, J, t) parser -- the same temperature-primary
+            // cell ratio as FillFluidSources, from the already-recovered
+            // pressure over the already-floored density.
+            const amrex::Real jx = j_plasma(i, j, k, 0);
+            const amrex::Real jy = j_plasma(i, j, k, 1);
+            const amrex::Real jz = j_plasma(i, j, k, 2);
+            const amrex::Real pressure_e =
+                std::max(gamma_e_minus_one * energy(i, j, k), pressure_floor);
+            const amrex::Real current_magnitude =
+                std::sqrt(jx * jx + jy * jy + jz * jz);
+            const amrex::Real charge_density =
+                charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
+            const amrex::Real temperature_e =
+                pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
+
+            // lorentz_force_current = physical / lorentz_force_band_cells:
+            // weight the magnetic force the rows apply by the physical share
+            // w of the current (see the member comments). The rows keep
+            // -div F_hydro + w F_mag, so (1 - w) F_mag is taken back out of
+            // the total-stress divergence cell by cell exactly like the
+            // external-current correction above; the ion-energy work below
+            // reads the weighted magnetic_force and so books the matching
+            // w u . F_mag, and the withheld (1 - w) u . F_mag goes to the
+            // audit as force_withheld. Off: no arithmetic touches the rows.
+            amrex::Real magnetic_force_withheld[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+            if (force_weighted) {
+                amrex::Real force_weight = 1.0_rt;
+                if (physical_share_force) {
+                    // The Ohm-current Joule quench's eta_field composition
+                    // at this cell (see the Joule block below and
+                    // GetMHDFieldResistivityCCForPC): the user eta at the
+                    // stage state under the vacuum boost and the wall-band
+                    // override. eta_field >= eta_phys by construction; equal
+                    // (no boost, no band, or both zero) means w = 1 exactly.
+                    const amrex::Real eta_phys = eta(
+                        charge_density, temperature_e, current_magnitude, time);
+                    amrex::Real eta_field =
+                        theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta_phys, charge_to_mass * rho(i, j, k),
+                            joule_vacuum_reference,
+                            joule_vacuum_division_guard,
+                            joule_vacuum_eta_scale);
+                    if (joule_band_cc != nullptr && i >= joule_band_cc[j]) {
+                        eta_field = std::max(eta_field, joule_band_eta);
+                    }
+                    if (eta_field > eta_phys) {
+                        force_weight = eta_phys / eta_field;
+                    }
+                }
+                if (force_band_mask) {
+                    // The last N live cells at the shaped wall, radially
+                    // (this row) and axially (the two neighbouring rows, so
+                    // the cells under a stair corner count as band cells).
+                    const int jz_c = std::max(wall_mask_z_lo,
+                                              std::min(wall_mask_z_hi, j));
+                    const int jz_up = std::max(wall_mask_z_lo,
+                                               std::min(wall_mask_z_hi, j + 1));
+                    const int jz_down = std::max(wall_mask_z_lo,
+                                                 std::min(wall_mask_z_hi, j - 1));
+                    const int first_masked = std::min(
+                        force_band_masked_cc[jz_c],
+                        std::min(force_band_masked_cc[jz_up],
+                                 force_band_masked_cc[jz_down]));
+                    if (i >= first_masked - force_band_cells) {
+                        force_weight = 0.0_rt;
+                    }
+                }
+                for (int component = 0; component < 3; ++component) {
+                    magnetic_force_withheld[component] =
+                        (1.0_rt - force_weight) * magnetic_force[component];
+                    divergence_momentum_flux[component] +=
+                        magnetic_force_withheld[component];
+                    magnetic_force[component] -=
+                        magnetic_force_withheld[component];
+                }
+            }
+
             // Stage B+ magnetization weight of the gyrotropic closure,
             // w = Omega_ci^2 dx^2 / (Omega_ci^2 dx^2 + v_thi^2), i.e.
             // w = 1/(1 + (r_L/dx)^2): where the ion gyroradius is not
@@ -16481,20 +16604,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         : 0.0_rt;
             }
 
-            const amrex::Real jx = j_plasma(i, j, k, 0);
-            const amrex::Real jy = j_plasma(i, j, k, 1);
-            const amrex::Real jz = j_plasma(i, j, k, 2);
-            const amrex::Real pressure_e =
-                std::max(gamma_e_minus_one * energy(i, j, k), pressure_floor);
-            const amrex::Real current_magnitude =
-                std::sqrt(jx * jx + jy * jy + jz * jz);
-            const amrex::Real charge_density =
-                charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
-            // Te [K] of the (rho, Te, J, t) parser: the same
-            // temperature-primary cell ratio as FillFluidSources, from the
-            // already-recovered pressure over the already-floored density.
-            const amrex::Real temperature_e =
-                pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
+            // (jx, jy, jz, pressure_e, current_magnitude, charge_density and
+            // temperature_e are formed above the momentum rows, shared with
+            // the physical-share force weight.)
             amrex::Real joule_heating = 0.0_rt;
             if (include_joule_heating) {
                 const amrex::Real eta_joule = eta(
@@ -16504,7 +16616,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 if (joule_ohm_current) {
                     // Ohm-current quench (see the host constants): the
                     // cell-centered twin of the field advance's
-                    // eta_field, from the site's own eta_joule.
+                    // eta_field, from the site's own eta_joule (the
+                    // physical-share force weight above composes the
+                    // identical eta_field).
                     amrex::Real eta_field =
                         theta_implicit_mhd::vacuum_keyed_resistivity(
                             eta_joule, charge_to_mass * rho(i, j, k),
@@ -16696,6 +16810,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 if (audit_capture) {
                     audit_reg(i, j, k, audit_lorentz_raw) =
                         wall_live * plasma_weight * lorentz_work;
+                    // The work of the force part the physical-share weight /
+                    // band-cells mask withheld from the rows (ungated, no
+                    // plasma_weight: the field's ideal EMF still does it);
+                    // identically zero when both are off.
+                    amrex::Real withheld_work = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        withheld_work += mom(i, j, k, component) *
+                                         magnetic_force_withheld[component];
+                    }
+                    audit_reg(i, j, k, audit_force_withheld) =
+                        wall_live * withheld_work / safe_density;
                 }
                 amrex::Real ion_pressure_work =
                     (pressure_e + pedestal_shift_pressure_e) *

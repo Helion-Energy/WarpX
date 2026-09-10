@@ -557,6 +557,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
                              // Holmstrom plasma_weight (wall_live only): the
                              // difference to 'lorentz' is the work the vacuum
                              // switch withholds
+            force_withheld,  // the magnetic-force work the physical-share
+                             // weight / band-cells mask withholds from the
+                             // fluid: wall_live x (1 - w) x u . (j_plasma x B)
+                             // (ungated, no plasma_weight: the field still
+                             // does this ideal work; zero when both are off)
             count
         };
     };
@@ -631,6 +636,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_res_user = 0.0;
         amrex::Real cum_res_hyper = 0.0;
         amrex::Real cum_lorentz_withheld = 0.0;
+        amrex::Real cum_force_withheld = 0.0;
         amrex::Real cum_poynt_in_ext = 0.0;
         amrex::Real cum_theta_diss_ext = 0.0;
         amrex::Real cum_ideal_mismatch = 0.0;
@@ -1484,8 +1490,46 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // and RZ alike (both carry discriminant tests).
     // Requires the recast (fluid_flux hlld/central; the pointwise-force path
     // already uses j_plasma x B) and hybrid_pic_model.add_external_fields.
+    // "physical" (default off): the "plasma" force weighted cell by cell by
+    // the PHYSICAL SHARE of the current, w = eta_phys / eta_field -- the
+    // same weight the circuit probe applies (circuit.probe_weight =
+    // physical_share, FillCircuitLinkageWeight), composed like the
+    // Ohm-current Joule quench at the same kernel site: eta_phys = the
+    // user (rho_q, Te, |J|, t) parser eta at the stage state, eta_field =
+    // vacuum_keyed_resistivity(eta_phys, rho_q, ...) = sqrt(eta_phys^2 +
+    // eta_vac^2) with the wall-band override where it applies. Where the
+    // field advance runs on the mock (vacuum-boosted or wall-band)
+    // resistivity, curl B/mu0 is mostly a numerical current of the
+    // diffusing field, not plasma current, and the fluid feels only the
+    // share w of its force: the rows integrate -div F_hydro + w (j_plasma
+    // x B) and the ion energy books w u . (j_plasma x B); the withheld
+    // (1 - w) u . (j_plasma x B) is booked in the energy audit as
+    // force_withheld (a design term like res_boost). w is C-infinity in
+    // the stage density and electron energy wherever the parser eta is
+    // (the quadrature combination and the smooth density guard), 1
+    // exactly where eta_field == eta_phys (no boost, no band, eta_phys
+    // > 0) and where eta_phys == eta_field == 0. Measured on the
+    // production formation deck (2026-09-10): the dielectric wall band's
+    // stair-corner curl-B spikes (rms 2-3 MA/m^2 in the last live cells)
+    // do +2e9 W (19 us) .. +3.4e10 W (27 us) of work on the band fluid,
+    // the whole domain's booked magnetic work, drained through the wall
+    // ledger (wall_i tracks it 0.9-1.6x) with the band's KE flat at 1-4 J.
     std::string m_lorentz_force_current_name = "total";
     bool m_exclude_external_current_force = false;
+    bool m_physical_share_force = false;
+    // implicit_mhd.lorentz_force_band_cells (default 0 = off, bit-identical):
+    // the magnetic force switched off entirely in the last N LIVE fluid
+    // cells at the shaped wall (i >= min over j-1, j, j+1 of
+    // first_masked_cc - N, so the cells radially and axially adjacent to a
+    // stair corner are covered), i.e. w = 0 there and 1 elsewhere, composed
+    // multiplicatively with the "physical" weight when both are on. Static
+    // geometry (C-infinity for the JFNK probes like every wall mask); the
+    // withheld work is booked as force_withheld like the weight's. The
+    // blunt alternative to the density-keyed weight for the wall band,
+    // where the weight is 0.01-0.7 early in the formation (n 3e18-3e19)
+    // and ~0 only once the band has thinned. Requires the shaped wall
+    // (implicit_mhd.wall_model) and the recast.
+    int m_lorentz_force_band_cells = 0;
     // ---- Offset-density (pedestal) halo formulation (0 disables). ----
     //
     // Fraction f of the instantaneous density peak defining the dynamic
