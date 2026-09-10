@@ -5147,6 +5147,20 @@ add_warpx_test(
     ""  # dependency
 )
 
+# ... and the central deck with the dual-energy sync OFF (the solver's own
+# verification switch): U_i is then its own register, so a dropped shift in
+# the ion pressure work shows in the fields at first order (1.2e-4 of e_ped
+# against the 5e-6 gate) instead of only through the Newton convergence gate.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse_nosync  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse implicit_mhd.dual_energy_sync=0 implicit_mhd.allow_dual_energy_sync_off=1"  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
 # ============ The change-of-variables pedestal on the single-box NON-PERIODIC layout: fused-residual identity ============
 # The layout on which the fused-residual bookkeeping elides the ghost
 # exchanges that cannot move data; the twins (production stack, with and
