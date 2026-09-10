@@ -5149,6 +5149,32 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# fixture power (rev31 review F3): an irrational-slope polyline (slopes
+# -0.5723 and 0.2493, no node of the sloped section on a grid node) drives
+# the bitwise numpy.interp contract of the r_wall table through
+# non-representable arithmetic, keeping the wall_inside contracts (the
+# inside bump stays strictly interior, the exterior sheet outside); and a
+# theta = 0.5 twin of the boost weight arm (the weight is a state function,
+# not a stage function: the initial-state ratio W_BOOST is theta-blind).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_region_wall_inside_fine  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_region=wall_interior my_constants.rc=0.02 my_constants.wb=0.015 circuit.probe_region_polyline_file=wall_probe_region_slope_fine.csv"  # inputs
+    "analysis_mhd_circuit_probe_region.py wall_inside ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope_fine.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_weight_boost_theta05  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_weight=physical_share my_constants.rho_vac_frac=1.0e-3 implicit_mhd.vacuum_resistivity_diffusivity=1.0e3 circuit.probe_crosscheck_rtol=1.0e-8 implicit_evolve.theta=0.5"  # inputs
+    "analysis_mhd_circuit_probe_region.py weight_boost ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # python-path twins of the probe weight (picmi hook test, WarpX_PYTHON
 # builds): the drive coil measured with the analytic-loop J_theta probe
 # under the Green's open boundary, with a 1e-3 rho0 vacuum shell carrying
