@@ -1,0 +1,14 @@
+# The cold pedestal image column with a STATIC pedestal density
+# (implicit_mhd.halo_pedestal_density): the raise lands the halo on
+# n_static = 0.05 n0 -- HALF the peak-keyed pedestal f max(rho_peak,
+# rho_ref) = 0.1 rho0 the fraction alone would give, which discriminates
+# the two -- with the cold image again in pressure balance with the bulk
+# at the static density (T_ped = T_bulk n0 / n_static): the same
+# static-contact exactness, ledger closure and dual sync gates.
+FILE = inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold
+my_constants.n_static = 0.05 * n0
+implicit_mhd.halo_pedestal_density = n_static
+# (redefine the base deck's constants, which its key lines read: the
+# parser keeps the last definition of a name)
+my_constants.T_ped_e = Te_bulk * n0 / n_static
+my_constants.T_ped_i = Ti_bulk * n0 / n_static

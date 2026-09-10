@@ -165,6 +165,24 @@ struct FluxParameters {
     // ThetaImplicitMHD::m_advection_density_offset_fraction and
     // offset_density_shift below.
     amrex::Real advection_density_offset = 0.0;
+    // The pedestal as a CHANGE OF VARIABLES (ThetaImplicitMHD::
+    // m_pedestal_fraction; false = off, bit-identical): a uniform, static,
+    // cold background (density; electron energy; ion internal energy, or
+    // the CGL pair) is subtracted from every ADVECTED quantity, the
+    // rectified deviation transported and the background added back --
+    // the reference code's subtract / advect / re-add advance for every
+    // fluid channel, in the flux form of offset_density_shift (additive
+    // shifts, exactly zero when off). The background's compression work
+    // leaves the pressure-work sources through the same rectified
+    // deviation pressures (gamma - 1) D(U); wave speeds, dissipation
+    // jumps, the momentum flux (a uniform p_ped is gradient-free) and every
+    // closure coefficient see the totals. See pedestal_deviation_shift.
+    bool pedestal_cov = false;
+    amrex::Real pedestal_mass_density = 0.0;
+    amrex::Real pedestal_electron_energy = 0.0;
+    amrex::Real pedestal_ion_internal = 0.0;
+    amrex::Real pedestal_ion_parallel = 0.0;
+    amrex::Real pedestal_ion_perp = 0.0;
     // TVD reconstruction of the face states handed to the recast fluxes
     // (implicit_mhd.fluid_reconstruction; 0 = none, the bit-identical
     // donor-cell default -- see reconstruct_face_states). The mode is a
@@ -780,6 +798,42 @@ floor_consistency_deficit (const amrex::Real value,
 // offset. Same construction and the same choice of width as
 // floor_consistency_width_fraction.
 constexpr amrex::Real advection_offset_width_fraction = 0.1;
+
+// Rectifier width of the change-of-variables pedestal (fraction of the
+// background): D is exactly zero at and below the background and exact
+// (X - X_ped) at and above (1 + w) X_ped, C^1 in between.
+constexpr amrex::Real pedestal_cov_width_fraction = 0.1;
+
+/**
+ * \brief The pedestal as a change of variables: the additive shift D(X) - X
+ * applied to a transported cell quantity X (density, electron energy, ion
+ * internal energy, the CGL pair) so that the advective channel transports
+ * the RECTIFIED DEVIATION from the uniform static background X_ped,
+ *
+ *     D(X) = (X - X_ped) * smoothstep((X - X_ped) / (w X_ped)),
+ *
+ * the reference code's en -= f en0; advect; MAX(en, 0); en += f en0 written
+ * in flux form for every fluid channel (see offset_density_shift for the
+ * linearity argument that makes the shift exact at frozen wave speeds).
+ * Unlike the smooth-max of offset_density_shift, D vanishes EXACTLY at and
+ * below the background: the background is never transported, never
+ * compressed, and a cell resting on it contributes no flux at all -- the
+ * static cold floor. Exact (D = X - X_ped) at and above (1 + w) X_ped,
+ * C^1 in between (the floor_outflow_limiter smoothstep), and exactly zero
+ * for a zero background (the knob-off / null value).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+pedestal_deviation_shift (const amrex::Real value,
+                          const amrex::Real background) noexcept {
+    if (background <= 0.0) {
+        return 0.0;
+    }
+    const amrex::Real width = pedestal_cov_width_fraction * background;
+    const amrex::Real deviation = value - background;
+    const amrex::Real rectified =
+        deviation * floor_outflow_limiter(deviation + width, width);
+    return rectified - value;
+}
 
 /**
  * \brief Offset-density advection: the shift D(rho) - rho applied to the
@@ -2564,6 +2618,19 @@ hlld_flux (const CellState& left, const CellState& right,
             shift_right * fraction_right - shift_left * fraction_left,
             shift_right * (1.0 - fraction_right));
     }
+    if (parameters.pedestal_cov) {
+        // The pedestal as a change of variables (pedestal_deviation_shift):
+        // the same telescoped fan of the shift terms as the offset above.
+        const amrex::Real shift_left = pedestal_deviation_shift(
+            left.density, parameters.pedestal_mass_density);
+        const amrex::Real shift_right = pedestal_deviation_shift(
+            right.density, parameters.pedestal_mass_density);
+        flux.mass += central(
+            shift_left * u_left, shift_right * u_right,
+            shift_left * (fraction_left - 1.0),
+            shift_right * fraction_right - shift_left * fraction_left,
+            shift_right * (1.0 - fraction_right));
+    }
     flux.momentum[normal_direction] =
         central(momn_flux_left, momn_flux_right,
                 momn_star_left - left.momentum[normal_direction],
@@ -2590,6 +2657,27 @@ hlld_flux (const CellState& left, const CellState& right,
                 ue_star_left - left.electron_energy,
                 ue_star_right - ue_star_left,
                 right.electron_energy - ue_star_right);
+    // Change of variables (pedestal_deviation_shift): the star channel is
+    // linear in U_e (star value fraction x U_e), so the deviation form is
+    // the same fan of the shift terms as the mass channel's.
+    const amrex::Real cov_shift_e_left =
+        parameters.pedestal_cov
+            ? pedestal_deviation_shift(left.electron_energy,
+                                       parameters.pedestal_electron_energy)
+            : 0.0;
+    const amrex::Real cov_shift_e_right =
+        parameters.pedestal_cov
+            ? pedestal_deviation_shift(right.electron_energy,
+                                       parameters.pedestal_electron_energy)
+            : 0.0;
+    if (parameters.pedestal_cov) {
+        flux.electron_energy += central(
+            cov_shift_e_left * u_left, cov_shift_e_right * u_right,
+            cov_shift_e_left * (fraction_left - 1.0),
+            cov_shift_e_right * fraction_right -
+                cov_shift_e_left * fraction_left,
+            cov_shift_e_right * (1.0 - fraction_right));
+    }
     if (parameters.cgl_closure) {
         // CGL internal-energy channels: pure advection with the contact
         // (star values fraction * U, the U_e pattern). The CGL work terms
@@ -2617,6 +2705,28 @@ hlld_flux (const CellState& left, const CellState& right,
                     uperp_star_left - left.ion_perp_energy,
                     uperp_star_right - uperp_star_left,
                     right.ion_perp_energy - uperp_star_right);
+        if (parameters.pedestal_cov) {
+            // Change of variables: the same fan of the shift terms for
+            // the (isotropic) background pair.
+            const amrex::Real sp_left = pedestal_deviation_shift(
+                left.ion_parallel_energy, parameters.pedestal_ion_parallel);
+            const amrex::Real sp_right = pedestal_deviation_shift(
+                right.ion_parallel_energy, parameters.pedestal_ion_parallel);
+            flux.ion_parallel_energy += central(
+                sp_left * u_left, sp_right * u_right,
+                sp_left * (fraction_left - 1.0),
+                sp_right * fraction_right - sp_left * fraction_left,
+                sp_right * (1.0 - fraction_right));
+            const amrex::Real sq_left = pedestal_deviation_shift(
+                left.ion_perp_energy, parameters.pedestal_ion_perp);
+            const amrex::Real sq_right = pedestal_deviation_shift(
+                right.ion_perp_energy, parameters.pedestal_ion_perp);
+            flux.ion_perp_energy += central(
+                sq_left * u_left, sq_right * u_right,
+                sq_left * (fraction_left - 1.0),
+                sq_right * fraction_right - sq_left * fraction_left,
+                sq_right * (1.0 - fraction_right));
+        }
     }
     if (parameters.dual_energy_closure) {
         // Dual-energy auxiliary internal energy: pure advection with the
@@ -2636,6 +2746,17 @@ hlld_flux (const CellState& left, const CellState& right,
                     uint_star_left - left.ion_internal_energy,
                     uint_star_right - uint_star_left,
                     right.ion_internal_energy - uint_star_right);
+        if (parameters.pedestal_cov) {
+            const amrex::Real su_left = pedestal_deviation_shift(
+                left.ion_internal_energy, parameters.pedestal_ion_internal);
+            const amrex::Real su_right = pedestal_deviation_shift(
+                right.ion_internal_energy, parameters.pedestal_ion_internal);
+            flux.ion_internal_energy += central(
+                su_left * u_left, su_right * u_right,
+                su_left * (fraction_left - 1.0),
+                su_right * fraction_right - su_left * fraction_left,
+                su_right * (1.0 - fraction_right));
+        }
     }
     flux.induction_t1 =
         sqrt_mu0 *
@@ -2667,6 +2788,30 @@ hlld_flux (const CellState& left, const CellState& right,
     // near-static ion energy along strong-B_n field lines). The LLF
     // enthalpy channel is retained as a fallback
     // (FluxParameters::hlld_ion_energy_star = false).
+    // Change of variables, ion total energy: the channel is evaluated on the
+    // deviation inputs E_i' = E_i + s_int (the kinetic part stays with the
+    // deviation), p_gas' = p_gas + (gamma_i - 1) s_int + (gamma_e - 1) s_e
+    // and the fan's star gas pressure shifted by the face-mean pressure
+    // shift, at the totals' wave structure; every shift is exactly 0 when
+    // off, so the channel below is then bit-identical to the plain one.
+    const amrex::Real cov_shift_int_left =
+        parameters.pedestal_cov
+            ? pedestal_deviation_shift(left.ion_internal,
+                                       parameters.pedestal_ion_internal)
+            : 0.0;
+    const amrex::Real cov_shift_int_right =
+        parameters.pedestal_cov
+            ? pedestal_deviation_shift(right.ion_internal,
+                                       parameters.pedestal_ion_internal)
+            : 0.0;
+    const amrex::Real cov_shift_pgas_left =
+        (parameters.gamma_i - 1.0) * cov_shift_int_left +
+        (parameters.gamma_e - 1.0) * cov_shift_e_left;
+    const amrex::Real cov_shift_pgas_right =
+        (parameters.gamma_i - 1.0) * cov_shift_int_right +
+        (parameters.gamma_e - 1.0) * cov_shift_e_right;
+    const amrex::Real cov_ei_left = left.ion_energy + cov_shift_int_left;
+    const amrex::Real cov_ei_right = right.ion_energy + cov_shift_int_right;
     if (parameters.hlld_ion_energy_star) {
         const amrex::Real p_t_star =
             0.5 * ((p_fan_left + m_left * slip_left) +
@@ -2685,22 +2830,29 @@ hlld_flux (const CellState& left, const CellState& right,
         // Arranged with explicit slip/consistency factors: at S_M = u
         // (and hence p_gas* = p_gas) the star energy equals the input
         // state exactly, independent of the guarded gaps.
+        const amrex::Real cov_pg_left = p_gas_left + cov_shift_pgas_left;
+        const amrex::Real cov_pg_right = p_gas_right + cov_shift_pgas_right;
+        const amrex::Real cov_pg_star_shift =
+            0.5 * (cov_shift_pgas_left + cov_shift_pgas_right);
+        const amrex::Real cov_pg_star_left = p_gas_star_left + cov_pg_star_shift;
+        const amrex::Real cov_pg_star_right =
+            p_gas_star_right + cov_pg_star_shift;
         const amrex::Real ei_star_left =
-            left.ion_energy -
-            (slip_left * left.ion_energy + p_gas_star_left * s_mid -
-             p_gas_left * u_left) /
+            cov_ei_left -
+            (slip_left * cov_ei_left + cov_pg_star_left * s_mid -
+             cov_pg_left * u_left) /
                 gap_left;
         const amrex::Real ei_star_right =
-            right.ion_energy +
-            (slip_right * right.ion_energy + p_gas_star_right * s_mid -
-             p_gas_right * u_right) /
+            cov_ei_right +
+            (slip_right * cov_ei_right + cov_pg_star_right * s_mid -
+             cov_pg_right * u_right) /
                 gap_right;
         flux.ion_energy =
-            central(u_left * (left.ion_energy + p_gas_left),
-                    u_right * (right.ion_energy + p_gas_right),
-                    ei_star_left - left.ion_energy,
+            central(u_left * (cov_ei_left + cov_pg_left),
+                    u_right * (cov_ei_right + cov_pg_right),
+                    ei_star_left - cov_ei_left,
                     ei_star_right - ei_star_left,
-                    right.ion_energy - ei_star_right);
+                    cov_ei_right - ei_star_right);
     } else {
         // LLF enthalpy channel with the fast-speed alpha, assembled
         // C-infinity: both the |u_n| of each side (a hard kink exactly
@@ -2713,11 +2865,11 @@ hlld_flux (const CellState& left, const CellState& right,
             smooth_abs(u_right, signal_width) + right.fast_speed,
             signal_width);
         flux.ion_energy =
-            0.5 * (u_left * (left.ion_energy + left.ion_pressure +
-                             left.electron_pressure) +
-                   u_right * (right.ion_energy + right.ion_pressure +
-                              right.electron_pressure) -
-                   alpha_energy * (right.ion_energy - left.ion_energy));
+            0.5 * (u_left * (cov_ei_left + left.ion_pressure +
+                             left.electron_pressure + cov_shift_pgas_left) +
+                   u_right * (cov_ei_right + right.ion_pressure +
+                              right.electron_pressure + cov_shift_pgas_right) -
+                   alpha_energy * (cov_ei_right - cov_ei_left));
     }
     flux.electron_velocity =
         0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);
@@ -2871,6 +3023,18 @@ central_flux (const CellState& left, const CellState& right,
                                          parameters.advection_density_offset) *
                        u_right);
     }
+    if (parameters.pedestal_cov) {
+        // The pedestal as a change of variables: transport the rectified
+        // deviation from the static background (see pedestal_deviation_shift);
+        // the same additive construction as the offset above.
+        flux.mass +=
+            0.5 * (pedestal_deviation_shift(left.density,
+                                            parameters.pedestal_mass_density) *
+                       u_left +
+                   pedestal_deviation_shift(right.density,
+                                            parameters.pedestal_mass_density) *
+                       u_right);
+    }
     flux.momentum[normal_direction] =
         0.5 * ((left.momentum[normal_direction] * u_left + p_total_left -
                 bn2) +
@@ -2898,6 +3062,32 @@ central_flux (const CellState& left, const CellState& right,
                right.electron_energy * right.electron_velocity_normal);
     flux.ion_energy = 0.5 * (u_left * (left.ion_energy + p_gas_left) +
                              u_right * (right.ion_energy + p_gas_right));
+    if (parameters.pedestal_cov) {
+        // Change of variables, energy channels: the electron energy
+        // advects its rectified deviation; the ion total-energy channel
+        // carries the deviation's enthalpy u (E_i' + p_i' + p_e') with
+        // E_i' = E_i + s_int (the kinetic part stays with the deviation)
+        // and p' = p + (gamma - 1) s, dropping the background's enthalpy
+        // flux (its compression work).
+        const amrex::Real shift_e_left = pedestal_deviation_shift(
+            left.electron_energy, parameters.pedestal_electron_energy);
+        const amrex::Real shift_e_right = pedestal_deviation_shift(
+            right.electron_energy, parameters.pedestal_electron_energy);
+        flux.electron_energy +=
+            0.5 * (shift_e_left * left.electron_velocity_normal +
+                   shift_e_right * right.electron_velocity_normal);
+        if (parameters.total_energy_closure) {
+            const amrex::Real shift_int_left = pedestal_deviation_shift(
+                left.ion_internal, parameters.pedestal_ion_internal);
+            const amrex::Real shift_int_right = pedestal_deviation_shift(
+                right.ion_internal, parameters.pedestal_ion_internal);
+            flux.ion_energy +=
+                0.5 * (u_left * (parameters.gamma_i * shift_int_left +
+                                 (parameters.gamma_e - 1.0) * shift_e_left) +
+                       u_right * (parameters.gamma_i * shift_int_right +
+                                  (parameters.gamma_e - 1.0) * shift_e_right));
+        }
+    }
     if (parameters.dual_energy_closure) {
         // Dual-energy auxiliary internal energy: centered pure advection
         // (the q -> 0 limit of the hlld_flux star channel); the blended
@@ -2907,6 +3097,15 @@ central_flux (const CellState& left, const CellState& right,
         flux.ion_internal_energy =
             0.5 * (u_left * left.ion_internal_energy +
                    u_right * right.ion_internal_energy);
+        if (parameters.pedestal_cov) {
+            flux.ion_internal_energy +=
+                0.5 * (u_left * pedestal_deviation_shift(
+                                    left.ion_internal_energy,
+                                    parameters.pedestal_ion_internal) +
+                       u_right * pedestal_deviation_shift(
+                                     right.ion_internal_energy,
+                                     parameters.pedestal_ion_internal));
+        }
     }
     flux.electron_velocity =
         0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);

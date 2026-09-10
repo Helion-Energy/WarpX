@@ -3363,6 +3363,122 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    halo_pedestal_temperature_e: float, default=0 (off, bit-identical)
+        COLD pedestal image for the electrons, in eV (requires
+        halo_pedestal_fraction > 0). By default the pedestal's energy
+        image is f times the instantaneous PEAK, so a raised cell
+        carries the peak's temperature (f cancels in the image
+        temperature). A positive value replaces the electron image by
+        the cold image at the pedestal density, U_e,ped = rho_ped (q/m)
+        T_e / (gamma_e - 1) (n_ped kB T_e), recomputed with the pedestal
+        every step and consumed wherever the image is: the per-step
+        raise and the electron-energy donor-gate anchor. Must exceed the
+        electron pressure floor's image at the pedestal base
+        (halo_pedestal_fraction x reference_mass_density) and the
+        electron temperature floor.
+
+    halo_pedestal_temperature_i: float, default=0 (off, bit-identical)
+        COLD pedestal image for the ions, in eV (requires
+        halo_pedestal_fraction > 0 and an ion energy closure): the ion
+        internal image becomes e_i,ped = rho_ped (q/m) T_i / (gamma_i - 1)
+        under total_energy/dual_energy (raise: E_i = |m|^2/(2 rho_ped) +
+        e_ped and U_i = e_ped, exactly consistent), U_par = rho_ped (q/m)
+        T_i / 2 and U_perp = rho_ped (q/m) T_i under cgl; consumed by
+        the raise, the ion donor-gate anchors and the pedestal-band
+        ion-energy relaxation target (halo_pedestal_energy_rate then
+        drains the pinned band toward the COLD image). Same floor
+        conditions as the electron image.
+
+    halo_pedestal_density: float, default=0 (off, bit-identical)
+        STATIC pedestal density in m^-3 (requires halo_pedestal_fraction >
+        0, which stays the machinery's switch): an absolute pedestal
+        rho_ped = n m_i in place of the peak-keyed f max(rho_peak,
+        rho_ref), so the pedestal no longer steps up with every
+        compression peak of the density maximum. With the cold image and
+        halo_pedestal_cold_raise="floor" the pedestal is a numerical
+        floor and nothing else. Must exceed the mass density floor.
+
+    halo_pedestal_cold_raise: {"reset", "floor"}, default="reset"
+        How the raise applies a COLD image to a raised (sub-pedestal-
+        density) cell: "reset" SETS the species' energy to the image
+        (the raised cell IS pedestal-temperature plasma; a re-raised
+        band cell gives back heat gained since its last raise -- a
+        signed booking), "floor" takes max(own, image) (the peak-image
+        form: a pure source, a hotter cell keeps its energy and is only
+        diluted). Species with a zero temperature keep the max() raise.
+
+    halo_pedestal_ledger_file: str, optional
+        Pedestal refresh ledger (requires halo_pedestal_fraction > 0, or
+        pedestal_fraction > 0, under which the rows book the reference-rule
+        lifts only and read "0 0 0 0" otherwise):
+        one row per step, "step raised_cells mass energy_e energy_i",
+        cumulative injected mass [kg] and SIGNED electron / ion energy
+        change [J] of the raise ([kg/m^2], [J/m^2] in 1D), booked exactly
+        from the raise kernel (the deltas of the conserved blocks: rho,
+        U_e, E_i or U_par + U_perp; the auxiliary U_i is not booked).
+        First write of a run truncates a stale file.
+
+    pedestal_fraction: float, default=0 (off, bit-identical)
+        The pedestal as a CHANGE OF VARIABLES: a uniform, static, cold
+        background n_ped = pedestal_fraction x pedestal_reference_density
+        (density; electron energy n_ped kB T_e,ped / (gamma_e - 1); ion
+        internal energy n_ped kB T_i,ped / (gamma_i - 1), or the CGL pair;
+        no momentum) is subtracted from every advected fluid quantity, the
+        rectified deviation transported and the background added back (the
+        reference code's subtract / advect / re-add advance for every
+        channel, in flux form); the background's compression work leaves
+        the pressure-work sources; wave speeds, dissipation, momentum and
+        every closure coefficient see the totals. The halo is then a cold
+        static floor that is never transported, never compressed and
+        injects nothing. Requires fluid_flux="central" or "hlld"; excludes
+        halo_pedestal_fraction, halo_pedestal_density and
+        advection_density_offset_fraction (the deck arms the old pedestal
+        with any thermal wall: pass its fraction and rates as 0). The
+        reference code's value is 1e-3 (f_en_mn).
+
+    pedestal_reference_density: float, optional
+        en0 in m^-3 for the change-of-variables pedestal, fixed at boot.
+        Default (unset): the solver's vacuum reference base density (the
+        deck's vacuum reference n0, the reference code's card en0); with
+        pedestal_fraction > 0 one of the two must be given (asserted: with
+        neither the change of variables would be a silent no-op). An
+        explicit 0 gives a zero background (the machinery's null).
+
+    pedestal_reference_density_update: {"off", "reference_rule"}, default="off"
+        "reference_rule" follows the reference code's en0_upd = 1: en0 =
+        max(en00, vacuum_reference_peak_fraction x step-old density peak),
+        refreshed every step and frozen for the solve; when en0 rises the
+        cells below the risen background are lifted onto it (the
+        reference's MAX(en, 0) after the re-add) by the shared raise kernel
+        in the floor form, booked in halo_pedestal_ledger_file and the
+        implicit_mhd_pedestal_injected_* fields and printed.
+
+    pedestal_temperature_e: float, default=2.0 (eV)
+    pedestal_temperature_i: float, default=2.0 (eV)
+        The background's electron / ion temperatures; must be positive when
+        the change of variables is on. The defaults are a numerical floor
+        (0.1 Pa at n_ped 3e17 m^-3 against a halo of hundreds of Pa). The
+        reference code's floors 0.5 / 0.1 eV are legitimate values subject
+        to: the background pressures n_ped kB T must exceed
+        electron_pressure_floor / ion_pressure_floor (asserted at boot; a
+        guard above the background would park the empty halo off the fixed
+        point; at 3e17 m^-3, 0.1 eV is 5.3e-3 Pa), and a colder background
+        (0.5 / 0.15 eV) was measured to stagnate the linear solve of a
+        formation run (GMRES 5-17x, 120 stagnation exits in 1.6 us) with
+        physics identical to the 2 eV run, which ran at the pedestal-free
+        control's cost. Unequal temperatures are not a fixed point of the
+        electron-ion exchange where electron_ion_equilibration is armed
+        (electrons pinned at the background floor, ions warming: a
+        floor-projection injection the pedestal ledger does not book);
+        keep them equal unless that is intended.
+
+    pedestal_floor: {"background", "positivity"}, default="background"
+        Admissible set under the change of variables: "background" makes
+        the deviations non-negative (the background is also the floor of
+        every block -- a te >= T_ped-class floor, an active-set population
+        where a colder wall would cool a cell below it); "positivity" keeps
+        the tiny positivity guards.
+
     advection_density_offset_fraction: float, default=0 (off, bit-identical)
         Offset-density advection (requires fluid_flux="central" or
         "hlld"): fraction f_off of the shared vacuum reference density
@@ -3968,6 +4084,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
+        halo_pedestal_temperature_e=None,
+        halo_pedestal_temperature_i=None,
+        halo_pedestal_density=None,
+        halo_pedestal_cold_raise=None,
+        halo_pedestal_ledger_file=None,
+        pedestal_fraction=None,
+        pedestal_reference_density=None,
+        pedestal_reference_density_update=None,
+        pedestal_temperature_e=None,
+        pedestal_temperature_i=None,
+        pedestal_floor=None,
         advection_density_offset_fraction=None,
         halo_relaxation_rate=None,
         halo_relaxation_target=None,
@@ -4121,6 +4248,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
+        self.halo_pedestal_temperature_e = halo_pedestal_temperature_e
+        self.halo_pedestal_temperature_i = halo_pedestal_temperature_i
+        self.halo_pedestal_density = halo_pedestal_density
+        self.halo_pedestal_cold_raise = halo_pedestal_cold_raise
+        self.halo_pedestal_ledger_file = halo_pedestal_ledger_file
+        self.pedestal_fraction = pedestal_fraction
+        self.pedestal_reference_density = pedestal_reference_density
+        self.pedestal_reference_density_update = pedestal_reference_density_update
+        self.pedestal_temperature_e = pedestal_temperature_e
+        self.pedestal_temperature_i = pedestal_temperature_i
+        self.pedestal_floor = pedestal_floor
         self.advection_density_offset_fraction = advection_density_offset_fraction
         self.halo_relaxation_rate = halo_relaxation_rate
         self.halo_relaxation_target = halo_relaxation_target
@@ -4286,6 +4424,19 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
+        implicit_mhd.halo_pedestal_temperature_e = self.halo_pedestal_temperature_e
+        implicit_mhd.halo_pedestal_temperature_i = self.halo_pedestal_temperature_i
+        implicit_mhd.halo_pedestal_density = self.halo_pedestal_density
+        implicit_mhd.halo_pedestal_cold_raise = self.halo_pedestal_cold_raise
+        implicit_mhd.halo_pedestal_ledger_file = self.halo_pedestal_ledger_file
+        implicit_mhd.pedestal_fraction = self.pedestal_fraction
+        implicit_mhd.pedestal_reference_density = self.pedestal_reference_density
+        implicit_mhd.pedestal_reference_density_update = (
+            self.pedestal_reference_density_update
+        )
+        implicit_mhd.pedestal_temperature_e = self.pedestal_temperature_e
+        implicit_mhd.pedestal_temperature_i = self.pedestal_temperature_i
+        implicit_mhd.pedestal_floor = self.pedestal_floor
         implicit_mhd.advection_density_offset_fraction = (
             self.advection_density_offset_fraction
         )

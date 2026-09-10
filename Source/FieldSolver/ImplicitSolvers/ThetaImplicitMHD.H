@@ -290,11 +290,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * (rank-0 banner + a '#'-comment header row of wall_ledger_file).
      * No-op without the freeze. */
     void ClampWallExteriorState ();
-    /** Recompute the dynamic halo pedestal density once per step (frozen
+    /** Recompute the dynamic halo pedestal STATE once per step (frozen
      * for the whole nonlinear solve) and raise sub-pedestal cells onto
      * it. No-op when halo_pedestal_fraction = 0. See
-     * m_halo_pedestal_fraction for the offset-density rationale. */
-    void RefreshHaloPedestal ();
+     * m_halo_pedestal_fraction for the offset-density rationale and
+     * m_halo_pedestal_temperature_e for the cold image. Books the
+     * raise's injected mass and signed energy change per step when
+     * halo_pedestal_ledger_file is set (WriteHaloPedestalLedgerRow). */
+    void RefreshHaloPedestal (int step);
+    /** Append the pedestal refresh ledger row for the step about to be
+     * advanced: "step raised_cells mass energy_e energy_i" (cumulative
+     * totals). No-op without halo_pedestal_ledger_file. */
+    void WriteHaloPedestalLedgerRow (int step, amrex::Long raised_cells);
     /** Recompute the dynamic vacuum-reference density once per step (the
      * The reference code's en0 update, step.f90 ~218: en0 = max(en00, 0.1 max(en))):
      * m_vacuum_reference_mass_density = vacuum_reference_peak_fraction
@@ -818,6 +825,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_old_ion_perp_energy";
     inline static constexpr char OldIonInternalEnergyName[] =
         "implicit_mhd_old_ion_internal_energy";
+    // Per-cell CUMULATIVE pedestal refresh injections [kg/m^3], [J/m^3]
+    // (plot-able by name; zero-guard; not checkpointed): the raise kernel
+    // adds its per-cell deltas here, so the refresh's footprint can be
+    // located (halo band, separatrix-to-wall band, density class) from
+    // the dumps. The ledger is their measure-weighted domain sum.
+    inline static constexpr char PedestalInjectedMassName[] =
+        "implicit_mhd_pedestal_injected_mass";
+    inline static constexpr char PedestalInjectedElectronEnergyName[] =
+        "implicit_mhd_pedestal_injected_electron_energy";
+    inline static constexpr char PedestalInjectedIonEnergyName[] =
+        "implicit_mhd_pedestal_injected_ion_energy";
     // Resistive backward-Euler option (m_resistive_theta): the
     // beginning-of-step plasma current J^n (captured once per step) and
     // the per-residual resistive-stage scratch
@@ -1274,6 +1292,165 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the corresponding positivity floors so the drain can never
     // demand an inadmissible state.
     amrex::Real m_halo_pedestal_energy_rate = 0.0;
+    // ---- COLD pedestal image (0 = off, bit-identical): the pedestal
+    // STATE image the band is raised onto, gated at and relaxed toward
+    // is by default an f-scaled image of the instantaneous PEAK state
+    // (above), so a raised cell carries the PEAK'S TEMPERATURE --
+    // U_ped / rho_ped = max(U) / max(rho), f cancels -- whatever the
+    // fraction is. A positive temperature [eV] replaces that species'
+    // energy image by the cold image at the pedestal density,
+    //     U_e,ped   = rho_ped (q/m) T_e / (gamma_e - 1)      (electrons),
+    //     e_i,ped   = rho_ped (q/m) T_i / (gamma_i - 1)      (ion internal,
+    //                                            total_energy/dual_energy),
+    //     U_par,ped = rho_ped (q/m) T_i / 2,  U_perp,ped = rho_ped (q/m) T_i
+    //                                                              (cgl),
+    // through the z-wall ghost-fill identity n kB T = rho (q/m) T[eV]
+    // (the halo relaxation outlet's convention), recomputed with the
+    // pedestal density every step and frozen for the solve. It is
+    // consumed exactly where the peak image is: the per-step raise, the
+    // face-flux donor-gate anchors (FluxParameters::halo_pedestal_*)
+    // and the pedestal-band ion-energy relaxation target, so the band
+    // is a consistent COLD state. Measured motivation (the production
+    // formation run against the reference code): the band, 1e-3 of the
+    // peak density over ~85 % of the open-field volume, carried the
+    // peak's temperature image (electrons 170-290 eV, ions 600-1500 eV)
+    // where the reference keeps a cold static floor (2 eV / 12-45 eV)
+    // -- a 1.5-2.5x halo pressure excess that no windowed outlet can
+    // remove, because the raise re-imposes the image every step the
+    // pedestal rises. Each species switches independently (0 keeps that
+    // species' peak image). Both images must exceed the pressure
+    // floors' energy images at the pedestal base f rho_ref and the
+    // temperature floors (asserted): the raised band must stay an
+    // interior point of the admissible set. ----
+    amrex::Real m_halo_pedestal_temperature_e = 0.0;
+    amrex::Real m_halo_pedestal_temperature_i = 0.0;
+    // ---- STATIC pedestal density [m^-3] (0 = off, bit-identical): an
+    // absolute pedestal density in place of the peak-keyed
+    // f max(rho_peak, rho_ref) -- rho_ped = n (q / (q/m)) = n m_i, never
+    // stepping up with the compression peaks of n_max (measured on the
+    // production run: n_max oscillates 0.5-1.5e21 with a ~2 us period and
+    // the raised-class share of the halo band swings 20-60 % with it,
+    // every peak pushing a fresh band of cells under the pedestal). With
+    // the cold image and the floor raise this is the pedestal as a
+    // numerical floor and nothing else -- the reference code keeps a
+    // static floor of exactly this kind. halo_pedestal_fraction stays the
+    // machinery's on-switch (and the definition of the gates and tapers
+    // keyed to rho_ped); asserted above the mass density floor. ----
+    amrex::Real m_halo_pedestal_number_density = 0.0;
+    // How the raise applies a COLD image to a raised (sub-pedestal-
+    // density) cell (implicit_mhd.halo_pedestal_cold_raise): true =
+    // "reset": the species' energy is SET to the cold image, so the
+    // raised cell's temperature IS the pedestal temperature (dual-energy:
+    // E_i = |m|^2/(2 rho_ped) + e_ped and U_i = e_ped, exactly
+    // consistent) -- a signed change that also removes heat a re-raised
+    // band cell gained since its last raise; false = "floor": max(own,
+    // image), the lower-bound form of the peak-image raise (a pure
+    // source: a band cell hotter than the image keeps its energy and is
+    // only diluted by the injected mass). Species with a zero
+    // temperature keep the peak-image max() raise regardless.
+    bool m_halo_pedestal_cold_reset = true;
+    // Pedestal refresh ledger (empty = none; the totals are then never
+    // read): cumulative injected mass [kg] and SIGNED electron / ion
+    // energy change [J] of the raise ([kg/m^2], [J/m^2] in 1D: the
+    // geometry's own measure), booked from the raise kernel itself as
+    // the deltas of the CONSERVED blocks (rho; U_e; E_i under
+    // total_energy/dual_energy -- the auxiliary U_i is its mirror and is
+    // not booked; U_par + U_perp under cgl) summed over the raised cells
+    // with the cell measure (RZ annulus weight 2 pi r), so it is exact
+    // by construction, and appended as "step raised_cells mass energy_e
+    // energy_i" rows every step (first write of a run truncates a stale
+    // file). Counters restart at zero on a simulation restart.
+    std::string m_halo_pedestal_ledger_file;
+    bool m_halo_pedestal_ledger_started = false;
+    amrex::Real m_halo_pedestal_injected_mass = 0.0;
+    amrex::Real m_halo_pedestal_energy_e = 0.0;
+    amrex::Real m_halo_pedestal_energy_i = 0.0;
+    // ---- THE PEDESTAL AS A CHANGE OF VARIABLES (pedestal_fraction = 0 =
+    // off, bit-identical). A uniform, static, cold background
+    //     n_ped     = pedestal_fraction x pedestal_reference_density (en0),
+    //     rho_ped   = n_ped m_i,
+    //     U_e,ped   = n_ped kB T_e,ped / (gamma_e - 1),
+    //     e_i,ped   = n_ped kB T_i,ped / (gamma_i - 1)   (cgl: U_par = n kB T/2,
+    //                                                         U_perp = n kB T),
+    //     momentum  = 0,
+    // is SUBTRACTED from every advected fluid quantity, the rectified
+    // deviation is transported and the background added back -- the
+    // reference code's subtract / advect / re-add advance (en -= f en0;
+    // advect; MAX(en, 0); en += f en0) applied to every fluid channel,
+    // written in flux form (see pedestal_deviation_shift and the offset
+    // proof above it: every advective channel is linear in the transported
+    // cell quantity at frozen wave speeds, so the whole transformation is
+    // an additive face-flux shift that is exactly zero when off). The
+    // background's compression work is dropped from the pointwise
+    // pressure-work sources through the same rectified deviation
+    // pressures; wave speeds, dissipation jumps, the momentum equation
+    // (p_ped is gradient-free; rho_total carries the inertia) and every
+    // closure coefficient (T, chi, eta, exchange, the wall hooks) see the
+    // TOTALS, which remain the solver's state (a constant-shift
+    // reparameterization: identical Jacobians). Consequences: the halo is
+    // a cold static floor of density n_ped at T_ped that never moves, is
+    // never compressed and injects nothing (the per-cell injected fields
+    // stay identically zero; the only lift is the load-time sanitize onto
+    // the background, banner-booked); the near-vacuum Alfven and
+    // conduction stiffness is bounded by n_ped without any peak keying;
+    // temperature T = (gamma - 1) U_total / (n_total kB) reads T_ped where
+    // the deviation is zero. Admissibility (pedestal_floor = background,
+    // the default): the deviations are non-negative, so the background is
+    // also the floor of every block (a te >= T_ped-class floor, an
+    // active-set population where a sink -- a colder wall -- would cool a
+    // cell below it); pedestal_floor = positivity keeps the tiny
+    // positivity guards instead. pedestal_reference_density_update =
+    // reference_rule follows the reference code's en0_upd = 1 (en0 =
+    // max(en00, vacuum_reference_peak_fraction x step-old peak), refreshed
+    // every step, frozen for the solve): when en0 rises, the cells below
+    // the risen background are lifted onto it (the reference's MAX(en, 0)
+    // after the re-add) by the shared raise kernel in the FLOOR form, so
+    // that injection is booked in halo_pedestal_ledger_file and the
+    // injected fields and printed, never silent. Mutually exclusive with
+    // the halo_pedestal_* machinery and advection_density_offset_fraction
+    // (asserted). ----
+    amrex::Real m_pedestal_fraction = 0.0;
+    // en0 [m^-3]: default (unset) = vacuum_reference_base_density converted
+    // to a number density; an explicit 0 gives a zero background (the
+    // bit-identical null of the machinery).
+    amrex::Real m_pedestal_reference_density = 0.0;
+    bool m_pedestal_reference_density_set = false;
+    bool m_pedestal_reference_rule = false;
+    // Background temperatures [eV], defaults 2 eV / 2 eV: a numerical floor
+    // (at n_ped ~ 3e17 m^-3 the background pressure is 0.1 Pa against a
+    // halo of hundreds of Pa). The reference code's floors are 0.5 eV
+    // (electrons) / 0.1 eV (ions) and are legitimate values here, but the
+    // background pressures n_ped kB T must exceed the solver's pressure
+    // floors (asserted: with pedestal_floor = background a guard above the
+    // background would park the empty halo at the guard, off the fixed
+    // point), and a colder background (0.5 / 0.15 eV) was measured to
+    // stagnate the linear solve of a formation run (GMRES 5-17x, 120
+    // stagnation exits in 1.6 us) where 2 eV ran at the pedestal-free
+    // control's cost. Unequal temperatures are not a fixed point of the
+    // electron-ion exchange where it is armed (the exchange drives the
+    // empty halo's electrons toward T_i,ped, the background floor pins
+    // them, the ions warm: a floor-projection injection the pedestal
+    // ledger does not book) -- keep them equal unless that is intended.
+    amrex::Real m_pedestal_temperature_e = 2.0;
+    amrex::Real m_pedestal_temperature_i = 2.0;
+    bool m_pedestal_floor_background = true;
+    // The background (per-solve constants; refreshed per step only under
+    // the reference rule): [kg/m^3], [J/m^3].
+    amrex::Real m_pedestal_en0_mass_density = 0.0;
+    amrex::Real m_pedestal_mass_density = 0.0;
+    amrex::Real m_pedestal_electron_energy = 0.0;
+    amrex::Real m_pedestal_ion_internal = 0.0;
+    amrex::Real m_pedestal_ion_parallel = 0.0;
+    amrex::Real m_pedestal_ion_perp = 0.0;
+    [[nodiscard]] bool PedestalChangeOfVariables () const
+    {
+        return m_pedestal_fraction > 0.0;
+    }
+    /** Set the change-of-variables background from the reference density
+     * en0 = max(base, peak_fraction x density_peak) (the peak enters only
+     * under the reference rule; pass 0 for the static default). Returns
+     * true when the background density changed. */
+    bool UpdatePedestalBackground (amrex::Real density_peak);
     // ---- Windowed halo temperature-relaxation outlet (0 = off,
     // bit-identical when off): relaxes BOTH species' internal energies
     // toward the prescribed cold-medium temperature

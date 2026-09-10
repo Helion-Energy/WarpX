@@ -1,0 +1,132 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# The change-of-variables pedestal (implicit_mhd.pedestal_fraction): a hot
+# dense Gaussian bump expanding into a PURE cold background on a long
+# periodic line. In the total-variable form the expansion's sound wave
+# compresses the background cells it reaches (and the implicit solve
+# smears round-off-level changes over the whole line); under the change
+# of variables the background is never transported and never compressed:
+# a cell whose deviation is zero has zero mass and energy flux (D = 0
+# exactly at the background) and no pressure force (p_ped is uniform), so
+# every cell the deviation has not reached stays BITWISE on the
+# background (rho = rho_ped, U_e = U_e,ped, E_i = e_i,ped, m = 0) while
+# the bump spreads over the cells it does reach; the domain mass is
+# conserved exactly (periodic). Sabotage: dropping any channel's shift
+# transports or compresses the background (the far cells move); using
+# the deviations for a temperature or a wave speed reads 0/0 in the
+# background.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+# Background: fraction x reference = 0.01 n0, T_e = T_i = 2 eV (an
+# electron-ion equilibrium: the exchange source, evaluated on the totals,
+# leaves it stationary).
+my_constants.f_ped = 0.01
+my_constants.T_ped_e = 2.0
+my_constants.T_ped_i = 2.0
+# Bump: peak n0 (100 x the background) at 50 eV both species, half-width
+# 6 cells of 256 (Lz 1 m).
+my_constants.T_bump = 50.0
+my_constants.width = 6.0 / 256.0
+my_constants.nz = 256
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+# Density: background + bump; pressures n kB T with the local temperature
+# blend (background T_ped where the bump vanishes).
+# (bump(z) = exp(-((z - 0.5)/width)^2) is inlined below: the parser takes no user functions)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T_bump
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = 1.0e-4
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = n0 * T_bump * q_e
+implicit_mhd.mass_density(x,y,z) = rho0 * (f_ped + exp(-((z - 0.5)/width)^2))
+implicit_mhd.electron_pressure(x,y,z) = q_e * n0 * (f_ped * T_ped_e + exp(-((z - 0.5)/width)^2) * T_bump)
+implicit_mhd.ion_pressure(x,y,z) = q_e * n0 * (f_ped * T_ped_i + exp(-((z - 0.5)/width)^2) * T_bump)
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.electron_pressure_floor = 1.0e-8
+implicit_mhd.ion_pressure_floor = 1.0e-8
+implicit_mhd.include_joule_heating = true
+# The change of variables under test: n_ped = f_ped x n0, cold images.
+implicit_mhd.pedestal_fraction = f_ped
+implicit_mhd.pedestal_reference_density = n0
+implicit_mhd.pedestal_temperature_e = T_ped_e
+implicit_mhd.pedestal_temperature_i = T_ped_i
+implicit_mhd.halo_pedestal_ledger_file = halo_pedestal_ledger.txt
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 8
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy \
+                       implicit_mhd_pedestal_injected_mass \
+                       implicit_mhd_pedestal_injected_electron_energy \
+                       implicit_mhd_pedestal_injected_ion_energy
+diag1.write_species = 0

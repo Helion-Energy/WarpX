@@ -441,6 +441,238 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# COLD pedestal image (implicit_mhd.halo_pedestal_temperature_e / _i):
+# on a three-band static column (sub-pedestal halo loaded COLD on one
+# side and HOT on the other, cold image in pressure balance with the
+# bulk) the default "reset" raise lands every sub-pedestal cell exactly
+# on the cold state image for both species (dual-energy sync exact),
+# removing the hot band's excess heat, and the refresh ledger books the
+# signed change exactly; the column is a uniform-pressure static contact
+# afterwards, so the raised state rides unchanged. Discriminates the peak
+# image (hot band left hot, cold band lifted to 0.3x only) and the floor
+# form (hot band left hot).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold  # inputs
+    "analysis_mhd_halo_pedestal_cold.py reset diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The "floor" form of the cold raise: max(own, image) lifts the cold band
+# onto the image and leaves the hot band hot (checked after the first
+# step, before the hot band's pressure jump reaches the band interiors);
+# the ledger books a pure source.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_floor  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold implicit_mhd.halo_pedestal_cold_raise=floor"  # inputs
+    "analysis_mhd_halo_pedestal_cold.py floor diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The other ion energy closures: E_i alone (total_energy) and the CGL
+# pair (U_par = n_ped kB T_i / 2, U_perp = n_ped kB T_i).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_total_energy  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_total_energy  # inputs
+    "analysis_mhd_halo_pedestal_cold.py total_energy diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_cgl  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_cgl  # inputs
+    "analysis_mhd_halo_pedestal_cold.py cgl diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# STATIC pedestal density (implicit_mhd.halo_pedestal_density): the raise
+# lands on n_static = 0.05 n0, half the peak-keyed value the fraction alone
+# would give (discriminated), with the cold image in pressure balance at
+# that density; same exactness, ledger and injected-field gates.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_static  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_static  # inputs
+    "analysis_mhd_halo_pedestal_cold.py static diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The cold image under the production SOLVER stack (packed_gmres x
+# fused_vector_ops = 2 x active_set = 1 x fused_residual = 1): the raise
+# and its ledger sit outside the solve, and on the static column every
+# solve exits at iteration 0 -- the gate is that the four knobs boot,
+# parse and book identically with the cold image on.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_production_stack  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold.py reset diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ dynamic deck of the cold image with the production FLUID stack
+# (dual_energy, central + viscosity, theta 1, Braginskii, pedestal drag
+# and ion-energy relaxation, axial field): periodic z and a reflecting
+# outer wall make the refresh the only mass source, so the ledger's
+# injected mass must close against the domain mass change; the hot sparse
+# halo makes the electron booking negative and the ion booking positive;
+# the band riding the pedestal must stay near the cold image (the peak
+# image would put it at the core temperature). Two ranks, two boxes.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... under the production solver stack minus the fused residual
+# (packed_gmres x fused_vector_ops = 2 x active_set = 1): the same physics
+# gates (round-off-different Krylov process, same converged state).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ... the full production solver stack (adds implicit_evolve.fused_residual
+# = 1): bit-identical to the stack without it -- Newton diagnostic file
+# byte-equal, plotfile fields identical to the last bit -- the combination
+# gate every production knob set must carry.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_ref  # dependency
+)
+
+# ... and the single-box layout of a one-GPU production run (1 rank: the
+# fused bookkeeping skips the ghost exchanges that cannot move data), same
+# identity gate.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold amr.max_grid_size=64 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold amr.max_grid_size=64 newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_stack_1box_ref  # dependency
+)
+
+# The pedestal as a numerical floor and nothing else: STATIC density (3e-3
+# n0, three times the fraction-keyed value: discriminated) + cold 2 eV
+# images + the FLOOR raise, under the production fluid stack; ledger mass
+# closure, the injected fields' domain sums equal the ledger, source-only
+# bookings, the band's ions lifted exactly onto the image.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_halo_pedestal_cold_static  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_halo_pedestal_cold_static  # inputs
+    "analysis_mhd_halo_pedestal_cold_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt --static 3.0e16 --floor --te 2.0 --ti 2.0"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ============ The pedestal as a CHANGE OF VARIABLES (implicit_mhd.pedestal_fraction) ============
+# (the NULL twins depend on decks registered further down and sit at the end of this file)
+
+# The discriminant: a hot dense bump expanding into a pure cold background
+# on a 256-cell periodic line -- the cells the deviation has not reached stay
+# BITWISE on the background (never transported, never compressed), the mass
+# is conserved, the ledger and the injected fields stay zero.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_bump  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_bump diag1.intervals=1"  # inputs
+    "analysis_mhd_pedestal_cov_bump.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The cold-floor column where today's raise fires every step: under the
+# change of variables the sanitize lifts the halo once and the machinery
+# injects nothing afterwards (ledger zero, injected fields zero).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_cold_cov  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold_cov  # inputs
+    "analysis_mhd_halo_pedestal_cold.py cov diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# RZ dynamic column under the change of variables with the production fluid
+# stack (no injection, mass conserved, background intact), plain, under the
+# production solver stack minus the fused residual, and the fused-residual
+# identity on top of it.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_pedestal_cov  # inputs
+    "analysis_mhd_pedestal_cov_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_stack_ref  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_rz.py diags/diag000000 diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_stack  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_pedestal_cov_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_pedestal_cov_stack_ref  # dependency
+)
+
 # Offset-density advection (implicit_mhd.advection_density_offset_fraction,
 # The reference code's subtract/advect/re-add density advance), NULL TWIN: a
 # two-cell-edged top-hat entropy wave advecting across a featureless
@@ -4850,3 +5082,91 @@ if(WarpX_FFT)
         OFF  # dependency
     )
 endif()
+
+# ============ The change-of-variables pedestal, NULL twins (dependencies registered above) ============
+# NULL: a zero background arms every branch of the change of variables with
+# shifts that are exactly 0.0 and floors at the positivity guards -- byte-
+# identical to the plain twin (1D dynamic relaxation deck; RZ wall churn deck).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_null  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_relaxation implicit_mhd.pedestal_fraction=1.0e-3 implicit_mhd.pedestal_reference_density=0"  # inputs
+    "analysis_mhd_pedestal_cov_null.py diags/diag000008 ../test_1d_theta_implicit_mhd_halo_relaxation/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_halo_relaxation  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_null  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_active_set_churn newton.globalization_diagnostics=1 implicit_mhd.pedestal_fraction=1.0e-3 implicit_mhd.pedestal_reference_density=0"  # inputs
+    "analysis_mhd_pedestal_cov_null.py diags/diag000016 ../test_rz_theta_implicit_mhd_wall_active_set_churn/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
+)
+
+# ============ The change-of-variables pedestal, FIRST-ORDER discriminants ============
+# A velocity pulse on a PURE background: rho and U_e (and the CGL pair) must
+# stay BITWISE static while the momentum spreads; any single channel's shift
+# dropped moves the background at first order (div u dt ~ 3.5e-4 per step).
+# The bump / column gates above sit where u = 0, a fixed point of both forms.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ... the hlld fans (mass, U_e, dual U_i, the E_i star channel) without viscosity
+# (with the active set: on this deck the plain Newton's residual floors at the
+# pinned defect of the bound-resident background cells, ~1e-6 relative, and its
+# line search reports a stagnation; the active-set exit judges the free subspace).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true implicit_mhd.viscosity=0.0 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ... the CGL closure (hlld; U_par, U_perp bitwise static as well).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse_cgl  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse_cgl  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt --cgl"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ============ The change-of-variables pedestal on the single-box NON-PERIODIC layout: fused-residual identity ============
+# The layout on which the fused-residual bookkeeping elides the ghost
+# exchanges that cannot move data; the twins (production stack, with and
+# without implicit_evolve.fused_residual) must be byte-identical.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_ledger_zero.py diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref  # dependency
+)

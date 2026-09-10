@@ -1,0 +1,10 @@
+# The cold pedestal image column under the total_energy closure (E_i
+# alone, no auxiliary U_i block): same static-contact exactness.
+FILE = inputs_test_1d_theta_implicit_mhd_halo_pedestal_cold
+implicit_mhd.ion_closure = total_energy
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy \
+                       implicit_mhd_pedestal_injected_mass \
+                       implicit_mhd_pedestal_injected_electron_energy \
+                       implicit_mhd_pedestal_injected_ion_energy

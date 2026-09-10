@@ -5379,6 +5379,246 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.halo_pedestal_temperature_e
+    :type: ``float``
+    :unit: eV
+    :default: ``0`` (off, bit-identical)
+
+    COLD pedestal image for the electrons. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`. By default the
+    pedestal's energy images are :math:`f` times the instantaneous
+    peaks, so a raised cell carries the *peak's* temperature
+    (:math:`U_\mathrm{ped}/\rho_\mathrm{ped} = \max U / \max\rho`:
+    the fraction cancels in the image temperature, whatever :math:`f`
+    is). A positive value replaces the electron image by the cold image
+    at the pedestal density,
+
+    .. math::
+
+       U_{e,\mathrm{ped}} = \rho_\mathrm{ped}\,(q/m)\,T_e / (\gamma_e - 1)
+       \quad (= n_\mathrm{ped} k_B T_e / (\gamma_e - 1)),
+
+    recomputed with the pedestal density every step and frozen for the
+    solve, and consumed exactly where the peak image is: the per-step
+    raise of sub-pedestal cells and the electron-energy donor-gate
+    anchor. Motivation (measured on the production formation run against
+    the reference code): the pedestal band -- :math:`10^{-3}` of the
+    peak density over most of the open-field volume -- carried the peak's
+    temperature image (170-290 eV electrons, 600-1500 eV ions) where the
+    reference keeps a cold static floor (2 eV / 12-45 eV), a 1.5-2.5x
+    halo pressure excess that no windowed outlet can remove because the
+    raise re-imposes the image every step the pedestal rises. Asserted:
+    the cold image must exceed
+    :pp:param:`implicit_mhd.electron_pressure_floor`'s energy image at
+    the pedestal base :math:`f\,\rho_\mathrm{ref}` (the lowest the
+    dynamic pedestal can sit) and the electron temperature floor, so the
+    raised band stays an interior point of the admissible set.
+
+.. pp:param:: implicit_mhd.halo_pedestal_temperature_i
+    :type: ``float``
+    :unit: eV
+    :default: ``0`` (off, bit-identical)
+
+    COLD pedestal image for the ions. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction` and
+    ``implicit_mhd.ion_closure = total_energy``, ``dual_energy`` or
+    ``cgl``. The ion internal image becomes
+    :math:`e_{i,\mathrm{ped}} = \rho_\mathrm{ped}\,(q/m)\,T_i /
+    (\gamma_i - 1)` under ``total_energy``/``dual_energy`` (the raise
+    sets :math:`E_i = |\mathbf{m}|^2/(2\rho_\mathrm{ped}) +
+    e_{i,\mathrm{ped}}` and :math:`U_i = e_{i,\mathrm{ped}}`, exactly
+    consistent) and :math:`U_\parallel = \rho_\mathrm{ped}\,(q/m)\,T_i
+    / 2`, :math:`U_\perp = \rho_\mathrm{ped}\,(q/m)\,T_i` under
+    ``cgl``; it is consumed by the raise, the ion donor-gate anchors
+    (:math:`E_i`, :math:`U_i`, the CGL pair) and the pedestal-band
+    ion-energy relaxation target
+    (:pp:param:`implicit_mhd.halo_pedestal_energy_rate` then drains the
+    pinned band toward the *cold* image). Same floor conditions as the
+    electron image, against :pp:param:`implicit_mhd.ion_pressure_floor`
+    and the ion temperature floor.
+
+.. pp:param:: implicit_mhd.halo_pedestal_density
+    :type: ``float``
+    :unit: m^-3
+    :default: ``0`` (off, bit-identical)
+
+    STATIC pedestal density. Requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction` (which stays the
+    pedestal machinery's switch and the reference of its gates and
+    tapers); when set, the pedestal density is the absolute
+    :math:`\rho_\mathrm{ped} = n\,m_i` (through the ion charge-to-mass)
+    instead of the peak-keyed :math:`f\,\max(\rho_\mathrm{peak},
+    \rho_\mathrm{ref})`, so it no longer steps up with every compression
+    peak of the density maximum (measured on the production formation
+    run: the peak oscillates by a factor 3 with a ~2 us period and each
+    peak pushes a fresh band of halo cells under the pedestal, whose
+    temperatures are then reset to the image). With
+    :pp:param:`implicit_mhd.halo_pedestal_temperature_e` / ``_i`` and
+    ``implicit_mhd.halo_pedestal_cold_raise = floor`` the pedestal is a
+    numerical floor and nothing else -- the static cold floor the
+    reference code keeps. Must exceed
+    :pp:param:`implicit_mhd.mass_density_floor`. The per-cell cumulative
+    injections of the refresh are available as the plot fields
+    ``implicit_mhd_pedestal_injected_mass`` [kg/m^3],
+    ``implicit_mhd_pedestal_injected_electron_energy`` and
+    ``implicit_mhd_pedestal_injected_ion_energy`` [J/m^3] (not
+    checkpointed), whose measure-weighted domain sums are the ledger's
+    columns.
+
+.. pp:param:: implicit_mhd.halo_pedestal_cold_raise
+    :type: ``string``
+    :default: ``reset``
+
+    How the raise applies a COLD image to a raised (sub-pedestal-density)
+    cell. ``reset``: the species' energy is *set* to the cold image, so
+    the raised cell is pedestal-temperature plasma; a band cell re-raised
+    by a rising pedestal gives back the heat it gained since its last
+    raise (a signed booking in the refresh ledger). ``floor``:
+    :math:`\max(\text{own}, \text{image})`, the form of the peak-image
+    raise -- a pure source: a cell hotter than the image keeps its energy
+    and is only diluted by the injected mass. Species whose cold
+    temperature is zero keep the :math:`\max` raise onto their peak
+    image regardless.
+
+.. pp:param:: implicit_mhd.halo_pedestal_ledger_file
+    :type: ``string``
+    :default: none
+
+    Pedestal refresh ledger (requires a positive
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`, or a positive
+    :pp:param:`implicit_mhd.pedestal_fraction`, under which the rows book
+    the reference-rule lifts only and read ``0 0 0 0`` otherwise): one row
+    per step,
+    ``step raised_cells mass energy_e energy_i`` -- the cumulative
+    injected mass [kg] and the *signed* cumulative electron and ion
+    energy change [J] of the raise ([kg/m^2], [J/m^2] in 1D: the
+    geometry's own measure, the RZ annulus weight :math:`2\pi r`
+    included), booked from the raise kernel itself as the deltas of the
+    conserved blocks (:math:`\rho`; :math:`U_e`; :math:`E_i` under
+    ``total_energy``/``dual_energy`` -- the auxiliary :math:`U_i` is its
+    mirror and is not booked; :math:`U_\parallel + U_\perp` under
+    ``cgl``) summed over the raised cells, so it is exact by
+    construction. Rows are written every step (zero raised cells when
+    nothing was sub-pedestal); the first write of a run truncates a stale
+    file. Without the file the totals are never read.
+
+.. pp:param:: implicit_mhd.pedestal_fraction
+    :type: ``float``
+    :default: ``0`` (off, bit-identical)
+
+    **The pedestal as a change of variables.** A uniform, static, cold
+    background
+
+    .. math::
+
+       n_\mathrm{ped} = f\,\mathrm{en0},\quad
+       U_{e,\mathrm{ped}} = n_\mathrm{ped} k_B T_{e,\mathrm{ped}}/(\gamma_e - 1),\quad
+       e_{i,\mathrm{ped}} = n_\mathrm{ped} k_B T_{i,\mathrm{ped}}/(\gamma_i - 1)
+
+    (the CGL pair :math:`U_\parallel = n k_B T/2`, :math:`U_\perp = n k_B T`;
+    no momentum) is subtracted from every advected fluid quantity, the
+    rectified deviation :math:`D(X) = (X - X_\mathrm{ped})\,
+    \mathrm{smoothstep}((X - X_\mathrm{ped})/(0.1 X_\mathrm{ped}))` is
+    transported and the background added back -- the reference code's
+    ``en -= f en0; advect; MAX(en, 0); en += f en0`` advance for every
+    channel, written in flux form (every advective channel is linear in
+    the transported cell quantity at frozen wave speeds, so the
+    transformation is an additive face-flux shift that is exactly zero
+    when off). The background's compression work leaves the pointwise
+    pressure-work sources through the same rectified deviation pressures
+    :math:`(\gamma - 1) D(U)`; wave speeds, dissipation jumps, the
+    momentum equation (a uniform :math:`p_\mathrm{ped}` is gradient-free,
+    :math:`\rho_\mathrm{total}` carries the inertia) and every closure
+    coefficient (:math:`T`, :math:`\chi`, :math:`\eta`, exchange, the wall
+    hooks) see the **totals**, which remain the solver's state. The halo is
+    then a cold static floor of density :math:`n_\mathrm{ped}` at
+    :math:`T_\mathrm{ped}` that is never transported, never compressed
+    and injects nothing (the ``implicit_mhd_pedestal_injected_*`` fields
+    stay identically zero; the only lift is the load-time sanitize onto
+    the background, banner-booked). Requires ``implicit_mhd.fluid_flux =
+    central`` or ``hlld``; excludes :pp:param:`implicit_mhd.halo_pedestal_fraction`,
+    :pp:param:`implicit_mhd.halo_pedestal_density` and
+    :pp:param:`implicit_mhd.advection_density_offset_fraction` (asserted).
+    The reference code's fraction is :math:`10^{-3}`.
+
+.. pp:param:: implicit_mhd.pedestal_reference_density
+    :type: ``float``
+    :unit: m^-3
+    :default: the vacuum reference base density (:pp:param:`implicit_mhd.vacuum_reference_base_density` as a number density)
+
+    en0 of the change-of-variables pedestal, fixed at boot. With a positive
+    :pp:param:`implicit_mhd.pedestal_fraction` one of the two must be given:
+    this knob, or a positive :pp:param:`implicit_mhd.vacuum_reference_base_density`
+    (asserted -- with neither the background would be zero and the change
+    of variables a silent no-op). An explicit ``0`` gives a zero background
+    (the machinery's bit-identical null).
+
+.. pp:param:: implicit_mhd.pedestal_reference_density_update
+    :type: ``string``
+    :default: ``off``
+
+    ``reference_rule``: the reference code's ``en0_upd = 1``, en0 =
+    max(en00, :pp:param:`implicit_mhd.vacuum_reference_peak_fraction`
+    :math:`\times` step-old density peak), refreshed every step and frozen
+    for the solve. When en0 rises, the cells below the risen background are
+    lifted onto it (the reference's ``MAX(en, 0)`` after the re-add) by the
+    pedestal raise kernel in the floor form, booked in
+    :pp:param:`implicit_mhd.halo_pedestal_ledger_file` and the
+    ``implicit_mhd_pedestal_injected_*`` fields and printed -- reproducible,
+    never silent.
+
+.. pp:param:: implicit_mhd.pedestal_temperature_e
+    :type: ``float``
+    :unit: eV
+    :default: ``2.0``
+
+.. pp:param:: implicit_mhd.pedestal_temperature_i
+    :type: ``float``
+    :unit: eV
+    :default: ``2.0``
+
+    The background's electron and ion temperatures; positive when the
+    change of variables is on. The defaults are a numerical floor (at
+    :math:`n_\mathrm{ped} = 3\times 10^{17}` m^-3 the background pressure is
+    0.1 Pa against a halo of hundreds of Pa). The reference code's floors,
+    0.5 eV (electrons) / 0.1 eV (ions), are legitimate values here, subject
+    to two constraints. **Pressure floors:** the background pressures must
+    exceed the solver's own floors, :math:`n_\mathrm{ped} k_B T_{e,\mathrm{ped}}
+    >` :pp:param:`implicit_mhd.electron_pressure_floor` and
+    :math:`n_\mathrm{ped} k_B T_{i,\mathrm{ped}} >`
+    :pp:param:`implicit_mhd.ion_pressure_floor` (asserted at boot; the
+    banner line ``PEDESTAL background pressures`` prints both against their
+    floors). The refusal is deliberate: with ``pedestal_floor = background``
+    the admissible floor is the larger of the guard and the background, so a
+    guard above the background would park every empty cell at the guard,
+    off the fixed point -- lower the floor or raise the background
+    temperature; at :math:`3\times 10^{17}` m^-3, 0.1 eV is
+    :math:`5.3\times 10^{-3}` Pa. **Conditioning:** a colder background
+    (0.5 / 0.15 eV) was measured to stagnate the linear solve of a formation
+    run from 8 us on (GMRES per step 5-17x, 120 stagnation exits in 1.6 us,
+    15x the wall time) while the physics at matched times was identical to
+    the 2 eV run, which ran at the pedestal-free control's cost with no
+    stagnation: the background temperature only sets the coefficient range
+    of the empty halo. **Unequal temperatures** are not a fixed point of the
+    electron-ion exchange where :pp:param:`implicit_mhd.electron_ion_equilibration`
+    is armed: the exchange drives the empty halo's electrons toward
+    :math:`T_{i,\mathrm{ped}}`, the background floor holds them (a
+    bound-resident population, projected every step) and the ions warm -- a
+    floor-projection injection the pedestal ledger does not book (the floor
+    ledger and the Newton diagnostic's ``num_pinned`` see it). Keep them
+    equal unless that is intended.
+
+.. pp:param:: implicit_mhd.pedestal_floor
+    :type: ``string``
+    :default: ``background``
+
+    The admissible set under the change of variables. ``background``: the
+    deviations are non-negative, i.e. the background is also the floor of
+    every block (a :math:`T_e \ge T_{e,\mathrm{ped}}`-class floor at the
+    background density; an active-set population where a sink -- a colder
+    wall -- would cool a cell below it). ``positivity``: the tiny positivity
+    guards stay the floors.
+
 .. pp:param:: implicit_mhd.advection_density_offset_fraction
     :type: ``float``
     :default: ``0`` (off, bit-identical)
