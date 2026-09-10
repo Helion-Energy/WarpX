@@ -1,0 +1,23 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# The RAMPED twin of inputs_test_rz_theta_implicit_mhd_external_current: the
+# same uniform static ideal column in the same in-domain external current,
+# but the split external vector potential now ramps linearly from zero to
+# its full value over the run, A_time(t) = t / t_ramp with t_ramp = max_step
+# dt. The split scheme advances the total field by -curl E_ohm, and for the
+# ideal static column E_ohm = 0: the column SCREENS the ramping external
+# field (B_z stays B0 inside; the plasma carries j_plasma = -j_ext(t)).
+# Under implicit_mhd.lorentz_force_current = total the rows integrate -div
+# of the TOTAL Maxwell stress, (j_plasma + j_ext) x B = 0: the conductor
+# feels no force at all and the fluid must not move. Under = plasma the
+# fluid feels the screening current's real force j_plasma x B0 = -j_ext(t)
+# x B0 and after the ramp carries m_r = int_0^T 8 c(t) r B0/mu0 dt =
+# 4 c_ext r B0 t_ramp/mu0. Because j_ext(t) changes every step, the twin
+# also proves that the external current is refreshed with every residual: a
+# j_ext frozen at the first residual (1/32 of the final one) leaves the
+# plasma run at 0.83 of the screened integral.
+FILE = inputs_test_rz_theta_implicit_mhd_external_current
+my_constants.t_ramp = 3.2e-8   # = max_step dt (16 x 2.0e-9 s): the ramp ends with the run (the analysis checks)
+external_vector_potential.sheet.A_time_external_function(t) = "t/t_ramp"

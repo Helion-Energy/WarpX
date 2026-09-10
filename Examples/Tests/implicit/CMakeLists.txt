@@ -5344,3 +5344,95 @@ add_warpx_test(
     OFF  # checksum
     test_1d_theta_implicit_mhd_vacuum_drag_drain_zero  # dependency
 )
+
+# ============ The ramped external field: screening, and the per-residual refresh of j_ext ============
+# The same column with the external vector potential ramping linearly over
+# the run: the ideal static column screens the ramp (B_z stays B0 inside,
+# j_plasma = -j_ext(t)), so under "total" the conductor feels no force at
+# all and must not move, while under "plasma" it feels the screening
+# current's real force and follows the screened integral 4 c r B0 T/mu0 to
+# 1 %. The external current changes every step: a j_ext frozen at the first
+# residual (1/32 of the final one) leaves the plasma twin at 0.83.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_ramp_total  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_external_current_ramp  # inputs
+    "analysis_mhd_external_current_ramp.py total diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_ramp_plasma  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_ramp implicit_mhd.lorentz_force_current=plasma"  # inputs
+    "analysis_mhd_external_current_ramp.py plasma diags/diag000000 diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_ramp_total/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_ramp_total  # dependency
+)
+
+# ... the knob on the production fused-residual path (level 2) must
+# reproduce the unfused plasma run bit for bit.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_plasma_fused  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current implicit_mhd.lorentz_force_current=plasma implicit_evolve.fused_residual=2"  # inputs
+    "analysis_mhd_twin_bytes.py diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_plasma/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_plasma  # dependency
+)
+
+# ============ The 1D external current: the same discriminant without walls or axis ============
+# A_y(z) = A0 sin(k z) over a periodic uniform column: B_x,ext = -A0 k cos(k z)
+# and j_y,ext = A0 k^2 sin(k z)/mu0 inside the domain. "total" moves along z
+# by -j_y,ext B_x,total t (rms within 10 %), "plasma" stays at rest (rms below
+# 1 % of the total twin's motion): the 1D split external field carries its
+# current like the RZ one.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_external_current_total  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_external_current  # inputs
+    "analysis_mhd_external_current_1d.py total diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_external_current_plasma  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_external_current implicit_mhd.lorentz_force_current=plasma"  # inputs
+    "analysis_mhd_external_current_1d.py plasma diags/diag000000 diags/diag000010 ../test_1d_theta_implicit_mhd_external_current_total/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_external_current_total  # dependency
+)
+
+# ============ The drain on the pointwise-force kernel ============
+# The drain deck refuses the pointwise path as written (viscosity requires
+# the recast); fluid_flux = rusanov with viscosity 0 runs it: the same
+# heating without the drain (|d internal| 0.12) and the same exact pairing
+# with it (1e-16) -- the drain dropped from the pointwise kernel alone
+# fails here.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_pointwise_off  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain implicit_mhd.fluid_flux=rusanov implicit_mhd.viscosity=0.0"  # inputs
+    "analysis_mhd_vacuum_drag_drain.py off diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_pointwise  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_vacuum_drag_drain implicit_mhd.fluid_flux=rusanov implicit_mhd.viscosity=0.0 implicit_mhd.vacuum_drag_kinetic_drain=1"  # inputs
+    "analysis_mhd_vacuum_drag_drain.py on diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_vacuum_drag_drain_pointwise_off  # dependency
+)
