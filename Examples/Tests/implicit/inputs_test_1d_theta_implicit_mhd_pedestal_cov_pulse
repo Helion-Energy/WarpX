@@ -1,0 +1,139 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# The change-of-variables pedestal (implicit_mhd.pedestal_fraction), the
+# FIRST-ORDER discriminant: a PURE cold background (every cell exactly on
+# the background: n_ped = 0.01 n0, T_e = T_i = 2 eV, zero deviation
+# everywhere) carrying a Gaussian VELOCITY pulse (u0 = 1e3 m/s, KE/e_int
+# = 1.7e-3) on a periodic line, 8 theta = 1 steps. Under the change of
+# variables the background is never transported and never compressed:
+# with D = 0 in every cell the mass and electron-energy fluxes vanish
+# identically and the pressure work (gamma - 1) D(U) div u is zero, so
+# rho and U_e stay BITWISE static (from step 3 on: the load-time sanitize
+# slack re-lands once at steps 1-2) while the momentum spreads (viscous
+# or numerical) and the ion internal energy changes only through the
+# O(KE div u) kinetic bookkeeping and the viscous heating on the totals
+# (~1e-6 of e_ped). In the TOTAL-variable form -- i.e. with ANY single
+# channel's shift dropped -- the flow transports or compresses the
+# background at first order: div(u) dt ~ 3.5e-4 per step of rho, U_e or
+# E_i where the pulse sits (the earlier bump deck cannot see this: its
+# gates sit where u = 0, a fixed point of both forms). The Newton solve
+# is not required to converge so that a sabotaged build shows the damage
+# in the fields instead of aborting.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+# Background: fraction x reference = 0.01 n0, T_e = T_i = 2 eV (an
+# electron-ion equilibrium: the exchange source, evaluated on the totals,
+# leaves it stationary).
+my_constants.f_ped = 0.01
+my_constants.T_ped_e = 2.0
+my_constants.T_ped_i = 2.0
+# Bump: peak n0 (100 x the background) at 50 eV both species, half-width
+# 6 cells of 256 (Lz 1 m).
+my_constants.T_bump = 50.0
+my_constants.u0 = 1.0e3
+my_constants.width = 6.0 / 256.0
+my_constants.nz = 256
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+# Density: background + bump; pressures n kB T with the local temperature
+# blend (background T_ped where the bump vanishes).
+# (bump(z) = exp(-((z - 0.5)/width)^2) is inlined below: the parser takes no user functions)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 12
+newton.require_convergence = false
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T_bump
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = 1.0e-4
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = n0 * T_bump * q_e
+implicit_mhd.mass_density(x,y,z) = rho0 * f_ped
+implicit_mhd.electron_pressure(x,y,z) = q_e * n0 * f_ped * T_ped_e
+implicit_mhd.ion_pressure(x,y,z) = q_e * n0 * f_ped * T_ped_i
+implicit_mhd.velocity_z(x,y,z) = u0 * exp(-((z - 0.5)/width)^2)
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.electron_pressure_floor = 1.0e-8
+implicit_mhd.ion_pressure_floor = 1.0e-8
+implicit_mhd.include_joule_heating = true
+# The change of variables under test: n_ped = f_ped x n0, cold images.
+implicit_mhd.pedestal_fraction = f_ped
+implicit_mhd.pedestal_reference_density = n0
+implicit_mhd.pedestal_temperature_e = T_ped_e
+implicit_mhd.pedestal_temperature_i = T_ped_i
+implicit_mhd.halo_pedestal_ledger_file = halo_pedestal_ledger.txt
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy implicit_mhd_momentum_z \
+                       implicit_mhd_pedestal_injected_mass \
+                       implicit_mhd_pedestal_injected_electron_energy \
+                       implicit_mhd_pedestal_injected_ion_energy
+diag1.write_species = 0

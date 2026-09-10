@@ -4759,3 +4759,67 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_active_set_churn  # dependency
 )
+
+# ============ The change-of-variables pedestal, FIRST-ORDER discriminants ============
+# A velocity pulse on a PURE background: rho and U_e (and the CGL pair) must
+# stay BITWISE static while the momentum spreads; any single channel's shift
+# dropped moves the background at first order (div u dt ~ 3.5e-4 per step).
+# The bump / column gates above sit where u = 0, a fixed point of both forms.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ... the hlld fans (mass, U_e, dual U_i, the E_i star channel) without viscosity
+# (with the active set: on this deck the plain Newton's residual floors at the
+# pinned defect of the bound-resident background cells, ~1e-6 relative, and its
+# line search reports a stagnation; the active-set exit judges the free subspace).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true implicit_mhd.viscosity=0.0 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ... the CGL closure (hlld; U_par, U_perp bitwise static as well).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_pedestal_cov_pulse_cgl  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_pedestal_cov_pulse_cgl  # inputs
+    "analysis_mhd_pedestal_cov_pulse.py diags/diag000003 diags/diag000008 halo_pedestal_ledger.txt --cgl"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+# ============ The change-of-variables pedestal on the single-box NON-PERIODIC layout: fused-residual identity ============
+# The layout on which the fused-residual bookkeeping elides the ghost
+# exchanges that cannot move data; the twins (production stack, with and
+# without implicit_evolve.fused_residual) must be byte-identical.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1"  # inputs
+    "analysis_mhd_pedestal_cov_ledger_zero.py diags/diag000008 diags/halo_pedestal_ledger.txt"  # analysis
+    OFF  # checksum
+    ""  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_pedestal_cov_wall newton.linear_solver=packed_gmres implicit_evolve.fused_vector_ops=2 newton.active_set=1 implicit_evolve.fused_residual=1"  # inputs
+    "analysis_mhd_fused_residual_identity.py diags/diag000008 ../test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_pedestal_cov_wall_stack_ref  # dependency
+)
