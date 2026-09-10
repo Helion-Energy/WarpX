@@ -1530,6 +1530,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // and ~0 only once the band has thinned. Requires the shaped wall
     // (implicit_mhd.wall_model) and the recast.
     int m_lorentz_force_band_cells = 0;
+    // implicit_mhd.lorentz_force_weight_eta [ohm m] (default -1 = off, bit-
+    // identical): under lorentz_force_current = physical, replace the LIVE
+    // user eta in the physical-share weight by this constant reference,
+    // w = eta_ref / sqrt(eta_ref^2 + eta_vac^2) (the band override still
+    // applies), so w becomes a pure density statement -- 1 where the
+    // vacuum boost is small against eta_ref, 0 deep in the halo -- and no
+    // longer falls in a HOT dense plasma merely because its Spitzer eta is
+    // smaller than the boost (with the live eta the production formation
+    // deck's FRC core at n 1e20 sits at w 0.94 at 150 eV and 0.44 at
+    // 500 eV; with eta_ref = the band's 20 eV Spitzer value 6e-6 the core
+    // is at 0.9998, the band at n 6e18 at 0.15 and at 1e18 at 5e-3). The
+    // Joule booking and the circuit probe keep their own weights.
+    amrex::Real m_lorentz_force_weight_eta = -1.0;
     // ---- Offset-density (pedestal) halo formulation (0 disables). ----
     //
     // Fraction f of the instantaneous density peak defining the dynamic

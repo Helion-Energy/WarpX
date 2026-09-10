@@ -5930,6 +5930,25 @@ Jacobian probes.
     band fluid under ``plasma`` -- the whole domain's booked magnetic
     work, drained through the wall ledger.
 
+.. pp:param:: implicit_mhd.lorentz_force_weight_eta
+    :type: ``float`` [ohm m]
+    :default: ``-1`` (off, bit-identical)
+
+    Under ``lorentz_force_current = physical``, replace the live user
+    resistivity in the physical-share weight by this constant reference:
+    :math:`w = \eta_\text{ref} / \sqrt{\eta_\text{ref}^2 +
+    \eta_\text{vac}^2}` (the wall-band override still applies). The weight
+    then is a pure density statement -- 1 where the vacuum boost is small
+    against :math:`\eta_\text{ref}`, 0 deep in the halo -- and no longer
+    falls in a HOT dense plasma merely because its Spitzer resistivity is
+    smaller than the boost: with the live eta the production formation
+    deck's core at :math:`n = 10^{20}` sits at :math:`w = 0.94` (150 eV) and
+    :math:`0.44` (500 eV); with :math:`\eta_\text{ref}` = the band's 20 eV
+    Spitzer value :math:`6\times10^{-6}` the core is at 0.9998, the band at
+    :math:`n = 6\times10^{18}` at 0.15 and at :math:`10^{18}` at
+    :math:`5\times10^{-3}`. The Joule booking and the circuit probe keep
+    their own weights. Requires ``lorentz_force_current = physical``.
+
 .. pp:param:: implicit_mhd.lorentz_force_band_cells
     :type: ``integer``
     :default: ``0`` (off, bit-identical)

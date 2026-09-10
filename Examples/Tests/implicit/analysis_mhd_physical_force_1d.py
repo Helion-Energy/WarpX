@@ -18,7 +18,9 @@ present but carries no current, so this is the full force): m_z(t) follows
 f_z t (rms within 5 %) and the entropy proxies stay constant to 1e-4.
 
 mode "physical": the rows feel w f_z: m_z follows w f_z t (rms within 10 %),
-hence ~1e-3 of the twin's; both entropy proxies stay constant to 1e-6 (the E_i
+hence ~1e-3 of the twin's (with implicit_mhd.lorentz_force_weight_eta = 100 eta0
+the weight is a constant-reference density statement, w = 7.9e-2, and the same
+checks apply with that w); both entropy proxies stay constant to 1e-6 (the E_i
 work pairs with the WEIGHTED force); the energy audit's force_withheld column is
 positive and the summed lorentz/force_withheld ratio equals w/(1 - w) to a few
 1e-3 (per cell the ratio is exact; the compression modulates w by O(1e-3)). The
@@ -69,10 +71,15 @@ t_final = max_step * dt
 k_mod = 2.0 * np.pi / Lz
 rho0 = n0 * m_p
 
-# the physical share of the current: eta0 over the vacuum-boosted field eta
+# the physical share of the current: the weight's reference eta (the live user
+# eta = eta0 here, or the constant implicit_mhd.lorentz_force_weight_eta when
+# set) over the vacuum-boosted field eta
 eta_vac = mu0 * D_vac * ref_factor ** 2
-w = eta0 / np.sqrt(eta0 ** 2 + eta_vac ** 2)
-print(f"eta0 {eta0:.3e}, eta_vac {eta_vac:.3e} ohm m -> physical share w = {w:.4e}")
+weight_eta = float(input_value("implicit_mhd.lorentz_force_weight_eta", "-1"))
+eta_ref = weight_eta if weight_eta >= 0.0 else eta0
+w = eta_ref / np.sqrt(eta_ref ** 2 + eta_vac ** 2)
+print(f"eta0 {eta0:.3e}, weight reference eta {eta_ref:.3e} (lorentz_force_weight_eta {weight_eta}), "
+      f"eta_vac {eta_vac:.3e} ohm m -> physical share w = {w:.4e}")
 
 NAMES = ("implicit_mhd_mass_density", "implicit_mhd_momentum_x", "implicit_mhd_momentum_y",
          "implicit_mhd_momentum_z", "implicit_mhd_ion_energy", "implicit_mhd_electron_energy", "Bx")

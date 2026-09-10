@@ -255,6 +255,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_lorentz_force_band_cells >= 0,
         "implicit_mhd.lorentz_force_band_cells cannot be negative (0 = off)");
+    utils::parser::queryWithParser(pp, "lorentz_force_weight_eta",
+                                   m_lorentz_force_weight_eta);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_weight_eta < 0.0_rt || m_physical_share_force,
+        "implicit_mhd.lorentz_force_weight_eta requires "
+        "implicit_mhd.lorentz_force_current = physical (it is the reference "
+        "eta of that mode's physical-share weight)");
     utils::parser::queryWithParser(pp, "halo_pedestal_fraction",
                                    m_halo_pedestal_fraction);
     utils::parser::queryWithParser(pp, "halo_pedestal_drag_rate",
@@ -4055,6 +4062,11 @@ void ThetaImplicitMHD::PrintParameters () const
                              "subtracted from the fluid rows)"
                            : " (the fluid rows integrate -div of the total "
                              "Maxwell stress)")
+                   << (m_physical_share_force && m_lorentz_force_weight_eta >= 0.0_rt
+                           ? " [weight reference eta " +
+                                 std::to_string(m_lorentz_force_weight_eta) +
+                                 " ohm m: a density-only weight]"
+                           : "")
                    << "\n"
                    << "Lorentz force band cells:      " << m_lorentz_force_band_cells
                    << (m_lorentz_force_band_cells > 0
@@ -15783,6 +15795,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const int* const AMREX_RESTRICT force_band_masked_cc =
         force_band_mask ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
     const bool force_weighted = physical_share_force || force_band_mask;
+    // Constant reference eta of the physical-share weight (-1 = the live
+    // user eta; see the member comment).
+    const amrex::Real force_weight_eta = m_lorentz_force_weight_eta;
     // Halo source taper (inert at pedestal 0, where the limiter is
     // identically 1): the reactive work terms and the CGL relaxation
     // exchange taper C^1-smoothly to zero below twice the pedestal.
@@ -16325,8 +16340,11 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     // stage state under the vacuum boost and the wall-band
                     // override. eta_field >= eta_phys by construction; equal
                     // (no boost, no band, or both zero) means w = 1 exactly.
-                    const amrex::Real eta_phys = eta(
-                        charge_density, temperature_e, current_magnitude, time);
+                    const amrex::Real eta_phys =
+                        force_weight_eta >= 0.0_rt
+                            ? force_weight_eta
+                            : eta(charge_density, temperature_e,
+                                  current_magnitude, time);
                     amrex::Real eta_field =
                         theta_implicit_mhd::vacuum_keyed_resistivity(
                             eta_phys, charge_to_mass * rho(i, j, k),

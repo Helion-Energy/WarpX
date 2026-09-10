@@ -5624,6 +5624,19 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_physical_force_plasma  # dependency
 )
 
+# the constant-reference (density-only) weight: eta_ref = 100 eta0 puts the
+# same column at w = 7.9e-2; m_z follows w f_z t and the audit ratio is
+# w/(1 - w) as above
+add_warpx_test(
+    test_1d_theta_implicit_mhd_physical_force_weight_eta  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_physical_force implicit_mhd.lorentz_force_current=physical implicit_mhd.lorentz_force_weight_eta=1.0e-6"  # inputs
+    "analysis_mhd_physical_force_1d.py physical diags/diag000010 ../test_1d_theta_implicit_mhd_physical_force_plasma/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_physical_force_plasma  # dependency
+)
+
 # ============ The drain on the pointwise-force kernel ============
 # The drain deck refuses the pointwise path as written (viscosity requires
 # the recast); fluid_flux = rusanov with viscosity 0 runs it: the same

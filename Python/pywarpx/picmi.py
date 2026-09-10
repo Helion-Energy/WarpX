@@ -3616,6 +3616,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         withheld rest as force_withheld. Default-off; the "plasma"
         requirements apply.
 
+    lorentz_force_weight_eta: float, default=-1 (off)
+        Under lorentz_force_current = "physical", replace the live user
+        eta in the physical-share weight by this constant reference
+        [ohm m], w = eta_ref/sqrt(eta_ref^2 + eta_vac^2), so the weight is
+        a pure density statement (1 where the vacuum boost is small
+        against eta_ref, 0 deep in the halo) and no longer falls in a hot
+        dense plasma whose Spitzer eta merely happens to be smaller than
+        the boost (implicit_mhd.lorentz_force_weight_eta).
+
     lorentz_force_band_cells: int, default=0
         Switch the magnetic force off entirely in the last N live fluid
         cells at the shaped wall (wall_model), radially and under the
@@ -4206,6 +4215,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_relaxation_ledger_file=None,
         lorentz_force_current=None,
         lorentz_force_band_cells=None,
+        lorentz_force_weight_eta=None,
         vacuum_drag_kinetic_drain=None,
         floor_consistency_rate=None,
         floor_consistency_width_fraction=None,
@@ -4378,6 +4388,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_relaxation_ledger_file = halo_relaxation_ledger_file
         self.lorentz_force_current = lorentz_force_current
         self.lorentz_force_band_cells = lorentz_force_band_cells
+        self.lorentz_force_weight_eta = lorentz_force_weight_eta
         self.vacuum_drag_kinetic_drain = vacuum_drag_kinetic_drain
         self.floor_consistency_rate = floor_consistency_rate
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
@@ -4566,6 +4577,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_relaxation_ledger_file = self.halo_relaxation_ledger_file
         implicit_mhd.lorentz_force_current = self.lorentz_force_current
         implicit_mhd.lorentz_force_band_cells = self.lorentz_force_band_cells
+        implicit_mhd.lorentz_force_weight_eta = self.lorentz_force_weight_eta
         implicit_mhd.vacuum_drag_kinetic_drain = self.vacuum_drag_kinetic_drain
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
         implicit_mhd.floor_consistency_width_fraction = (
