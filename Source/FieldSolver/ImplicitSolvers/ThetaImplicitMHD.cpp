@@ -18825,6 +18825,14 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                     discarded, amrex::ParallelContext::CommunicatorSub());
                 m_dual_energy_guard_discarded += discarded;
                 WriteDualEnergyGuardLedgerRow(step, guarded_cells);
+                // Banner twin of the ledger row (every step, like the
+                // pinned-defect ledger): the readout quotes the artefact
+                // size from run.log without parsing the file.
+                amrex::Print() << "MHD dual-energy guard ledger: step "
+                               << step + 1 << " guarded_cells "
+                               << guarded_cells << " discarded_cum "
+                               << m_dual_energy_guard_discarded
+                               << " J (this step " << discarded << ")\n";
             }
             for (amrex::MFIter mfi(internal_block); mfi.isValid(); ++mfi) {
                 const amrex::Box box = mfi.validbox();

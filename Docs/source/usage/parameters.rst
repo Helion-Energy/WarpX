@@ -5090,7 +5090,19 @@ Jacobian probes.
     matrix-free Jacobian probes; where :math:`U_{i,\mathrm{old}} \ge 2\,
     \mathrm{guard}` the closure is today's to the bit. At fixed :math:`B`
     an internal-energy threshold is a :math:`\beta` threshold
-    (:math:`50\,\mathrm{J/m^3}` at 0.5 T is :math:`\beta = 5\times10^{-4}`).
+    (:math:`50\,\mathrm{J/m^3}` at 0.5 T is :math:`\beta = 5\times10^{-4}`);
+    in temperature, :math:`T_i = G/(1.5\,n\,k_B)`: 50 J/m\ :sup:`3` is
+    630 eV at :math:`n = 3.3\times10^{17}\,\mathrm{m^{-3}}` (the production
+    pedestal density), 63 eV at ten times it and 0.6 eV at
+    :math:`3.3\times10^{20}`, so a tenuous scrape-off is guarded at the
+    reference code's halo temperatures (10-45 eV) while dense plasma never
+    sees it. 50 J/m\ :sup:`3` is the reference code's own mix = -2 cutoff
+    level, :math:`f_\mathrm{pr,mn} \max(w_\mathrm{io}) = 10^{-4} \times
+    5\times10^{5}\,\mathrm{J/m^3}` at its 12 us peak (the flown reference
+    cards used mix = -1, no cutoff). With a ledger file named, the solver
+    also prints ``MHD dual-energy guard ledger: step N guarded_cells M
+    discarded_cum X J`` every step, so the artefact size can be read from
+    the log.
     Motivation: the wall-adjacent cells of a tenuous scrape-off accrete
     :math:`E_i` under a wall-pressed cell velocity that advects no mass
     while :math:`K` is negligible, so the kinetic gate is open and the sync

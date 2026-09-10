@@ -991,7 +991,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // vertices) holds 10-45 eV. The reference code's mix = -2 structure with
     // an absolute threshold and a smooth window (the max-relative hard
     // cutoff above is unchanged). At fixed B an internal-energy threshold
-    // is a beta threshold: 50 J/m^3 at 0.5 T is beta 5e-4.
+    // is a beta threshold: 50 J/m^3 at 0.5 T is beta 5e-4. In temperature,
+    // T_i = G/(1.5 n kB): 50 J/m^3 is 630 eV at the production pedestal
+    // density 3.3e17 m^-3, 63 eV at ten times it, 0.6 eV at 3.3e20 -- the
+    // whole floor/pedestal class of the formation deck is guarded at the
+    // reference code's halo temperatures (10-45 eV) and released only at
+    // keV x 1e18; the core (1e5 J/m^3) never sees it. Why 50: it is the
+    // reference code's own mix = -2 cutoff level, f_pr_mn x max(wio) =
+    // 1e-4 x (2.2e21 m^-3 x 1 keV total / (gamma - 1) ~ 5e5 J/m^3) at its
+    // 12 us peak (f_pr_mn = f_en_mn f_t_mn = 1e-3 x 0.1; the flown
+    // reference cards used mix = -1, i.e. no cutoff, and did not need one:
+    // its wall vertices are Dirichlet for both species with v = 0).
     amrex::Real m_dual_energy_internal_guard = 0.0;
     // Guard ledger (implicit_mhd.dual_energy_guard_ledger_file; requires a
     // positive guard): one row per step "step guarded_cells discarded_cum"
