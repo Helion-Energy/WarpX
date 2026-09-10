@@ -131,6 +131,27 @@ print(f"  max |faraday_defect| = {np.max(np.abs(a['faraday_defect'])):.3e} J (bo
       f"circuit_in_cum {a['circuit_in_cum'][-1]:.4e} J (ext {np.sum(a['circuit_in_ext']):.4e}); "
       f"max |ext_defect| = {np.max(np.abs(a['ext_defect'])):.3e} J")
 assert np.all(np.abs(a["faraday_defect"]) < 1.0e-12 * scale), "Faraday defect above round-off: a field-side term is wrong or missing"
+# the Ohm's-law component split (v5): its arithmetic identity, and the
+# reduction weights from the header (the cell-centered-in-r staggering sums
+# to the domain volume; the nodal-in-r ones to one axis disk more)
+assert np.all(np.abs(a["exchange_rest3"]) < tol), "the component split's arithmetic identity broken"
+print(f"  component split (cum): ideal_edge {np.sum(a['ideal_edge_work']):.4e}, lorentz {np.sum(a['lorentz']):.4e}, "
+      f"ideal_mismatch {np.sum(a['ideal_mismatch']):.3e}, stagger {np.sum(a['stagger_mismatch']):.3e}, "
+      f"recon {np.sum(a['recon_work']):.3e}, corner_diss {np.sum(a['corner_diss_work']):.3e}, hall {np.sum(a['hall_work']):.3e}, "
+      f"ohm_rest {np.sum(a['ohm_rest']):.3e}")
+with open(sys.argv[1]) as _f:
+    for _line in _f:
+        if not _line.startswith("#"):
+            break
+        if "domain volume = " in _line:
+            _v = float(_line.split("domain volume = ")[1].split()[0])
+        if _line.startswith("# Weights:"):
+            _w = {k: float(_line.split(k + " ")[1].split()[0].rstrip(",")) for k in ["E_r", "E_theta", "E_z"]}
+assert abs(_w["E_r"] - _v) < 1.0e-12 * _v, "E_r dual volumes must sum to the domain volume"
+assert abs(_w["E_theta"] - _w["E_z"]) < 1.0e-12 * _v and _w["E_theta"] > _v, "nodal-in-r dual volumes"
+_nr = np.sqrt(_v / (4.0 * (_w["E_theta"] - _v)))
+assert abs(_nr - round(_nr)) < 1.0e-6, "the nodal-in-r excess is not exactly one axis disk"
+print(f"  weights: E_r = V; E_theta = E_z = V + pi dr^2 L_z/4 (implied nr {_nr:.6f})")
 if np.any(a["circuit_in_ext"] != 0.0):
     assert np.all(np.abs(a["ext_defect"]) < 1.0e-12 * max(np.max(a["W_B_ext"]), 1.0e-300)), "external-field identity broken"
 print(f"  booked residual cumulative {a['resid_booked_cum'][-1]:.3e} J; poynt_in_cum {a['poynt_in_cum'][-1]:.3e}; "

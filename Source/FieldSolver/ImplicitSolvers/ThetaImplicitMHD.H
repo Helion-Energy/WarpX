@@ -511,6 +511,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // assembly while armed: dt sum E_H . J is the hyper-resistive
     // dissipation the field pays and the fluid never receives.
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_eh;
+    // Ohm's-law component registers per edge (the E staggerings), written
+    // by the assembly while armed: component 0 = the induction (ideal) part
+    // as assembled -- the face Riemann/central induction flux for E_r and
+    // E_z, the UCT corner average plus its dissipation for E_theta; 1 = the
+    // plain two-cell (four-cell at a corner) mean of the cell-centered ideal
+    // EMF -(u x B) at the same edge; 2 = the Hall EMF; 3 = the electron-
+    // inertia field; 4 = the UCT corner dissipation alone (E_theta). 1D:
+    // E_x uses components 0-4 and E_y components 5-9 of register 0. With
+    // the eta and E_H registers these are EVERY term the assembly adds, so
+    // EJ minus their works is what the post-assembly boundary projections
+    // contribute (ohm_rest).
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_ohm;
     // External field at t^n (before the theta refresh), for the external
     // field's own Faraday identity (ext_defect).
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_energy_audit_b_ext_old;
@@ -581,10 +593,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
         // hyper-resistive dissipation dt sum E_H . J^theta
         amrex::Real res_hyper = 0.0;
         // the external field's own identity: Poynting outflow of E_ext x
-        // B_ext per face, sum B_ext^theta . dB_ext / mu0, its quadrature term
+        // B_ext per face and its quadrature term
         amrex::Real poynt_out_ext[3] = {0.0, 0.0, 0.0};
-        amrex::Real b_ext_theta_dot_db = 0.0;
         amrex::Real theta_diss_ext = 0.0;
+        // Ohm's-law component works dt sum E_c . J^theta from the edge
+        // registers (see m_energy_audit_ohm): the induction part as
+        // assembled, the plain cell-mean ideal EMF at the same edges, the
+        // Hall EMF, the electron-inertia field, the UCT corner dissipation
+        amrex::Real ind_work = 0.0;
+        amrex::Real ind_cc_work = 0.0;
+        amrex::Real hall_work = 0.0;
+        amrex::Real inertia_work = 0.0;
+        amrex::Real corner_diss_work = 0.0;
+        // sums of the reduction weights (the dual volumes of the three E
+        // staggerings), for the header's weight-consistency line
+        amrex::Real dual_volume_total[3] = {0.0, 0.0, 0.0};
         amrex::Real src[EnergyAuditRegister::count] = {};
         amrex::Real rhs_sum[4] = {0.0, 0.0, 0.0, 0.0};   // sum rhs dV / theta
         amrex::Real newton[4] = {0.0, 0.0, 0.0, 0.0};
@@ -610,6 +633,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_lorentz_withheld = 0.0;
         amrex::Real cum_poynt_in_ext = 0.0;
         amrex::Real cum_theta_diss_ext = 0.0;
+        amrex::Real cum_ideal_mismatch = 0.0;
+        amrex::Real cum_stagger_mismatch = 0.0;
+        amrex::Real cum_recon_work = 0.0;
+        amrex::Real cum_corner_diss_work = 0.0;
+        amrex::Real cum_hall_work = 0.0;
+        amrex::Real cum_inertia_work = 0.0;
+        amrex::Real cum_ohm_rest = 0.0;
         amrex::Real cum_ext_defect = 0.0;
         amrex::Real cum_fluid_in = 0.0;
         amrex::Real cum_wall = 0.0;
@@ -657,6 +687,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void EnergyAuditSnapshotLedgers ();
     [[nodiscard]] EnergyAuditTotals EnergyAuditFluidTotals (
         const WarpXSolverVec& state) const;
+    /** sum of the field dual volumes of one staggering over the valid boxes
+     *  (the reduction weights of the audit's edge/face sums). */
+    [[nodiscard]] amrex::Real EnergyAuditDualVolumeTotal (const amrex::MultiFab& mf) const;
     /** sum_{components} a . b x (field dual volume) over the valid boxes. */
     [[nodiscard]] amrex::Real EnergyAuditFieldDot (
         const std::array<const amrex::MultiFab*, 3>& a,

@@ -14449,10 +14449,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
         const auto audit_eta = audit_capture ? m_energy_audit_eta[0]->array(mfi)
                                              : amrex::Array4<amrex::Real>{};
         const auto audit_eh = audit_capture ? m_energy_audit_eh[0]->array(mfi)
                                             : amrex::Array4<amrex::Real>{};
+        const auto audit_ohm = audit_capture ? m_energy_audit_ohm[0]->array(mfi)
+                                             : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jx = j_x(i, j, k);
             const amrex::Real jy = j_y(i, j, k);
@@ -14472,6 +14476,24 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             if (audit_capture) {
                 audit_eta(i, j, k, 0) = resistivity;
                 audit_eta(i, j, k, 1) = eta_user;
+                // Ohm component registers (see m_energy_audit_ohm): the
+                // induction flux as assembled and the plain mean of the
+                // two cells' ideal EMF -(u x B) at this node.
+                audit_ohm(i, j, k, 0) = flux_arr(i, j, k, flux_induction_t2);
+                audit_ohm(i, j, k, 5) = -flux_arr(i, j, k, flux_induction_t1);
+                amrex::Real emf_x = 0.0_rt;
+                amrex::Real emf_y = 0.0_rt;
+                for (int ic = i - 1; ic <= i; ++ic) {
+                    const amrex::Real inverse_density =
+                        1.0_rt / std::max(rho(ic, j, k), density_floor);
+                    const amrex::Real ux = mom(ic, j, k, 0) * inverse_density;
+                    const amrex::Real uy = mom(ic, j, k, 1) * inverse_density;
+                    const amrex::Real uz = mom(ic, j, k, 2) * inverse_density;
+                    emf_x += uz * b_cc(ic, j, k, 1) - uy * b_cc(ic, j, k, 2);
+                    emf_y += ux * b_cc(ic, j, k, 2) - uz * b_cc(ic, j, k, 0);
+                }
+                audit_ohm(i, j, k, 1) = 0.5_rt * emf_x;
+                audit_ohm(i, j, k, 6) = 0.5_rt * emf_y;
             }
             electric_x(i, j, k) =
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
@@ -14501,10 +14523,16 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 const amrex::Real hall_charge_density =
                     theta_implicit_mhd::smooth_positive_floor(
                         rho_q(i, j, k), charge_density_floor);
-                electric_x(i, j, k) +=
+                const amrex::Real hall_x =
                     (jhy * bz - jhz * by) / hall_charge_density;
-                electric_y(i, j, k) +=
+                const amrex::Real hall_y =
                     (jhz * bx - jhx * bz) / hall_charge_density;
+                electric_x(i, j, k) += hall_x;
+                electric_y(i, j, k) += hall_y;
+                if (audit_capture) {
+                    audit_ohm(i, j, k, 2) = hall_x;
+                    audit_ohm(i, j, k, 7) = hall_y;
+                }
             }
             if (include_inertia) {
                 // Electron-inertia field, NATIVE on the transverse z-node
@@ -14513,6 +14541,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 // response).
                 electric_x(i, j, k) += ei_nodal(i, j, k, 0);
                 electric_y(i, j, k) += ei_nodal(i, j, k, 1);
+                if (audit_capture) {
+                    audit_ohm(i, j, k, 3) = ei_nodal(i, j, k, 0);
+                    audit_ohm(i, j, k, 8) = ei_nodal(i, j, k, 1);
+                }
             }
             if (include_hyper_resistivity) {
                 // E -= eta_H laplacian(J), same operator as the hybrid
@@ -14849,6 +14881,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
+        const auto audit_ohm_r = audit_capture ? m_energy_audit_ohm[0]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jr = j_r(i, j, k);
             // J_theta is corner-staggered (r-nodal, z-nodal).
@@ -14881,6 +14917,19 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             if (audit_capture) {
                 audit_eta_r(i, j, k, 0) = resistivity;
                 audit_eta_r(i, j, k, 1) = eta_user;
+                // Ohm component registers (see m_energy_audit_ohm): the
+                // face induction flux as assembled and the plain mean of
+                // the two cells' ideal EMF E_r = u_z B_theta - u_theta B_z.
+                audit_ohm_r(i, j, k, 0) = zface(i, j, k, flux_induction_t2);
+                amrex::Real emf_r = 0.0_rt;
+                for (int jc = j - 1; jc <= j; ++jc) {
+                    const amrex::Real inverse_density =
+                        1.0_rt / std::max(rho(i, jc, k), density_floor);
+                    const amrex::Real ut = mom(i, jc, k, 1) * inverse_density;
+                    const amrex::Real uz = mom(i, jc, k, 2) * inverse_density;
+                    emf_r += uz * b_cc(i, jc, k, 1) - ut * b_cc(i, jc, k, 2);
+                }
+                audit_ohm_r(i, j, k, 1) = 0.5_rt * emf_r;
             }
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
@@ -14910,15 +14959,19 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 const amrex::Real hall_charge_density =
                     theta_implicit_mhd::smooth_positive_floor(
                         charge_density_raw, charge_density_floor);
-                electric_r(i, j, k) +=
+                const amrex::Real hall_r =
                     (jht * bz - jhz * bt) / hall_charge_density;
+                electric_r(i, j, k) += hall_r;
+                if (audit_capture) { audit_ohm_r(i, j, k, 2) = hall_r; }
             }
             if (include_inertia && !seam_guarded) {
                 // Electron-inertia field: the corner (nodal) assembly
                 // averaged in r to the z-face (the rho_q stencil of this
                 // kernel).
-                electric_r(i, j, k) += 0.5_rt *
+                const amrex::Real inertia_r = 0.5_rt *
                     (ei_nodal(i, j, k, 0) + ei_nodal(i + 1, j, k, 0));
+                electric_r(i, j, k) += inertia_r;
+                if (audit_capture) { audit_ohm_r(i, j, k, 3) = inertia_r; }
             }
             if (include_hyper_resistivity && !seam_guarded) {
                 // E_r -= eta_H (laplacian J)_r with the m = 0 cylindrical
@@ -14977,6 +15030,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
+        const auto audit_ohm_z = audit_capture ? m_energy_audit_ohm[2]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             // r-index of the lower cell column; clamped at the physical
             // axis where no below-axis staggered current exists (the
@@ -15013,6 +15070,34 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             if (audit_capture) {
                 audit_eta_z(i, j, k, 0) = resistivity;
                 audit_eta_z(i, j, k, 1) = eta_user;
+                // Ohm component registers (see m_energy_audit_ohm): the
+                // face induction flux as assembled and the plain mean of
+                // the two cells' ideal EMF E_z = u_theta B_r - u_r B_theta
+                // (zero on the axis face like the flux row; the clamped
+                // single cell at a non-axis inner boundary).
+                audit_ohm_z(i, j, k, 0) = -rface(i, j, k, flux_induction_t1);
+                const amrex::Real face_radius =
+                    radial_lower + i * radial_cell_size;
+                amrex::Real emf_z = 0.0_rt;
+                if (i - 1 < domain_lo_r) {
+                    if (face_radius > 0.5_rt * radial_cell_size) {
+                        const amrex::Real inverse_density =
+                            1.0_rt / std::max(rho(i, j, k), density_floor);
+                        emf_z = (mom(i, j, k, 1) * b_cc(i, j, k, 0) -
+                                 mom(i, j, k, 0) * b_cc(i, j, k, 1)) *
+                                inverse_density;
+                    }
+                } else {
+                    for (int ic = i - 1; ic <= i; ++ic) {
+                        const amrex::Real inverse_density =
+                            1.0_rt / std::max(rho(ic, j, k), density_floor);
+                        emf_z += 0.5_rt *
+                                 (mom(ic, j, k, 1) * b_cc(ic, j, k, 0) -
+                                  mom(ic, j, k, 0) * b_cc(ic, j, k, 1)) *
+                                 inverse_density;
+                    }
+                }
+                audit_ohm_z(i, j, k, 1) = emf_z;
             }
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
@@ -15040,15 +15125,19 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 const amrex::Real hall_charge_density =
                     theta_implicit_mhd::smooth_positive_floor(
                         charge_density_raw, charge_density_floor);
-                electric_z(i, j, k) +=
+                const amrex::Real hall_z =
                     (jhr * bt - jht * br) / hall_charge_density;
+                electric_z(i, j, k) += hall_z;
+                if (audit_capture) { audit_ohm_z(i, j, k, 2) = hall_z; }
             }
             if (include_inertia && !seam_guarded) {
                 // Electron-inertia field: the corner (nodal) assembly
                 // averaged in z to the r-face (the rho_q stencil of this
                 // kernel).
-                electric_z(i, j, k) += 0.5_rt *
+                const amrex::Real inertia_z = 0.5_rt *
                     (ei_nodal(i, j, k, 2) + ei_nodal(i, j + 1, k, 2));
+                electric_z(i, j, k) += inertia_z;
+                if (audit_capture) { audit_ohm_z(i, j, k, 3) = inertia_z; }
             }
             if (include_hyper_resistivity && !seam_guarded) {
                 // E_z -= eta_H (laplacian J)_z. On axis the geometric
@@ -15099,6 +15188,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                                                : amrex::Array4<amrex::Real>{};
         const auto audit_eh_t = audit_capture ? m_energy_audit_eh[1]->array(mfi)
                                               : amrex::Array4<amrex::Real>{};
+        const auto audit_ohm_t = audit_capture ? m_energy_audit_ohm[1]->array(mfi)
+                                               : amrex::Array4<amrex::Real>{};
         const amrex::Box box = mfi.validbox();
         const auto electric_theta = electric_field_theta.array(mfi);
         const auto rface = face_flux_r.const_array(mfi);
@@ -15264,6 +15355,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             if (audit_capture) {
                 audit_eta_t(i, j, k, 0) = resistivity;
                 audit_eta_t(i, j, k, 1) = eta_user;
+                // Ohm component registers (see m_energy_audit_ohm): the
+                // UCT corner EMF as assembled (average + dissipation), the
+                // plain mean of the four cells' ideal EMF, the dissipation
+                // alone.
+                audit_ohm_t(i, j, k, 0) = average + dissipation;
+                audit_ohm_t(i, j, k, 1) =
+                    0.25_rt * (emf_mm + emf_mp + emf_pm + emf_pp);
+                audit_ohm_t(i, j, k, 4) = dissipation;
             }
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
@@ -15296,14 +15395,17 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 const amrex::Real hall_charge_density =
                     theta_implicit_mhd::smooth_positive_floor(
                         rho_q(i, j, k), charge_density_floor);
-                electric_theta(i, j, k) +=
+                const amrex::Real hall_t =
                     (jhz * br - jhr * bz) / hall_charge_density;
+                electric_theta(i, j, k) += hall_t;
+                if (audit_capture) { audit_ohm_t(i, j, k, 2) = hall_t; }
             }
             if (include_inertia && !seam_guarded) {
                 // Electron-inertia field, NATIVE on the corner staggering
                 // (the nodal assembly grid); the axis corner returned
                 // exactly zero above, preserving the m = 0 parity.
                 electric_theta(i, j, k) += ei_nodal(i, j, k, 1);
+                if (audit_capture) { audit_ohm_t(i, j, k, 3) = ei_nodal(i, j, k, 1); }
             }
             if (include_hyper_resistivity && !seam_guarded) {
                 // E_theta -= eta_H (laplacian J)_theta at the corner

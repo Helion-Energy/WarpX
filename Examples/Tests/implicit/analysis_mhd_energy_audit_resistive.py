@@ -65,6 +65,21 @@ print(f"{sys.argv[1]} ({mode}): {n} rows; EJ {np.sum(a['EJ']):.4e} J; joule {jou
       f"exchange_rest2 {rest2:.3e}; res_hyper {np.sum(a['res_hyper']):.3e}; lorentz_withheld {np.sum(a['lorentz_withheld']):.3e}; "
       f"max |resid_full| {np.max(np.abs(a['resid_full'])):.3e} (bound {tol:.3e})")
 assert np.all(np.abs(a["resid_full"]) < tol), "full closure residual above round-off"
+# the Ohm's-law component split (v5) on the line: the ideal pairing exact, no
+# projections, Hall/inertia/corners off
+for name in ["ohm_rest", "exchange_rest3"]:
+    assert np.all(np.abs(a[name]) < tol), f"{name} above round-off on the line: {np.max(np.abs(a[name])):.3e}"
+for name in ["hall_work", "inertia_work", "corner_diss_work"]:
+    assert np.all(a[name] == 0.0), f"{name} must be exactly zero here"
+ideal_mismatch = np.sum(a["ideal_mismatch"])
+if mode == "uniform":
+    # uniform density, plain central flux: the face induction flux is exactly
+    # paired with the face stress work
+    assert np.all(np.abs(a["ideal_mismatch"]) < tol), f"ideal pairing defect above round-off: {np.max(np.abs(a['ideal_mismatch'])):.3e}"
+else:
+    # the density step breaks the exact pairing at the 1e-5 level of sum |EJ|
+    assert abs(ideal_mismatch) < 1.0e-4 * np.sum(np.abs(a["EJ"])), f"the density step's pairing defect {ideal_mismatch:.3e} J is not small"
+    print(f"  ideal pairing defect of the density step: {ideal_mismatch:.3e} J = {ideal_mismatch / np.sum(np.abs(a['EJ'])):.2e} of sum |EJ|")
 if mode == "uniform":
     assert np.all(a["joule_e"] > 0.0), "the Joule deposit must be live on every step"
     assert np.all(a["res_boost"] == 0.0), "no vacuum boost: res_boost must be exactly zero"

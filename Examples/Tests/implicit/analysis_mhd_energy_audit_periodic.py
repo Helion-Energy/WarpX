@@ -106,6 +106,15 @@ for name in ["fluxw_mass", "fluxw_e", "fluxw_i", "fluxw_ui"]:
     print(f"  max |{name}| = {np.max(np.abs(a[name])):.3e}")
     assert np.all(np.abs(a[name]) < tol), f"{name} above round-off: an unregistered source"
 
+# 4b. the Ohm's-law component split (v5): on the collocated line the face
+#     induction flux is exactly paired with the face stress work, there are
+#     no corners and no post-assembly projections; Hall and inertia are off
+for name in ["ideal_mismatch", "recon_work", "stagger_mismatch", "ohm_rest", "exchange_rest3"]:
+    assert np.all(np.abs(a[name]) < tol), f"{name} above round-off on the periodic line: {np.max(np.abs(a[name])):.3e}"
+for name in ["hall_work", "inertia_work", "corner_diss_work"]:
+    assert np.all(a[name] == 0.0), f"{name} must be exactly zero here"
+print(f"  component split at round-off (ideal_edge_work cum {a['ideal_edge_work'].sum():.6e} J = lorentz cum {a['lorentz'].sum():.6e} J)")
+
 # 5. theta term
 if abs(theta - 0.5) < 1.0e-12:
     assert np.all(a["theta_diss"] == 0.0), "theta_diss must vanish identically at theta = 1/2"

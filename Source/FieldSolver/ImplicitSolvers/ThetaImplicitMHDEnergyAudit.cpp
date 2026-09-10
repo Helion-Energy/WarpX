@@ -228,6 +228,24 @@ ThetaImplicitMHD::EnergyAuditFluidTotals (const WarpXSolverVec& state) const
     return totals;
 }
 
+amrex::Real ThetaImplicitMHD::EnergyAuditDualVolumeTotal (const amrex::MultiFab& mf) const
+{
+    const amrex::Geometry& geom = m_WarpX->Geom(0);
+    amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const FieldDualVolume weight(mf, box, geom);
+        reduce_op.eval(box, reduce_data,
+                       [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                           amrex::ignore_unused(k);
+                           return {weight(i, j)};
+                       });
+    }
+    return all_reduce_sum(amrex::get<0>(reduce_data.value(reduce_op)));
+}
+
 amrex::Real ThetaImplicitMHD::EnergyAuditFieldDot (
     const std::array<const amrex::MultiFab*, 3>& a,
     const std::array<const amrex::MultiFab*, 3>& b,
@@ -349,6 +367,17 @@ void ThetaImplicitMHD::EnergyAuditRecordOldState ()
 #endif
         }
         m_energy_audit.domain_volume = v;
+        // The reduction weights of the three E staggerings (the header's
+        // weight-consistency line): the FieldEnergy dual volumes sum to
+        // the domain volume for a cell-centered-in-r staggering and to the
+        // domain volume plus pi dr^2 L_z / 4 for a nodal-in-r one (the
+        // axis disk pi dr^2/4 and the half-weighted outer node together
+        // exceed the exact dual annuli by one axis disk).
+        for (int component = 0; component < 3; ++component) {
+            m_energy_audit.dual_volume_total[component] = EnergyAuditDualVolumeTotal(
+                *m_WarpX->m_fields.get(FieldType::Efield_fp,
+                                       ablastr::fields::Direction{component}, 0));
+        }
     }
 }
 
@@ -407,6 +436,19 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
                 reference.boxArray(), reference.DistributionMap(), 2, 0);
         }
         m_energy_audit_eh[component]->setVal(0.0_rt);
+        // Ohm's-law component registers (see the member): five per E
+        // component; 1D packs E_x and E_y into register 0.
+#if defined(WARPX_DIM_1D_Z)
+        constexpr int ohm_register_components = 10;
+#else
+        constexpr int ohm_register_components = 5;
+#endif
+        if (m_energy_audit_ohm[component] == nullptr) {
+            m_energy_audit_ohm[component] = std::make_unique<amrex::MultiFab>(
+                reference.boxArray(), reference.DistributionMap(),
+                ohm_register_components, 0);
+        }
+        m_energy_audit_ohm[component]->setVal(0.0_rt);
     }
     m_energy_audit_capture = true;
     AssembleOhmElectricField(theta_time, true);
@@ -552,6 +594,61 @@ void ThetaImplicitMHD::EnergyAuditThetaStage (const amrex::Real start_time)
                 res_hyper += amrex::get<0>(reduce_data.value(reduce_op));
             }
             audit.res_hyper = dt * all_reduce_sum(res_hyper);
+        }
+
+        // Ohm's-law component works dt sum E_c . J^theta from the edge
+        // registers: the induction (ideal) part as assembled, the plain
+        // cell-mean ideal EMF at the same edges, the Hall EMF, the
+        // electron-inertia field and the UCT corner dissipation (1D: E_x
+        // and E_y packed into register 0; the cell-centered 1D E_z carries
+        // no current).
+        {
+            amrex::Real works[5] = {0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
+            for (int component = 0; component < 3; ++component) {
+                const amrex::MultiFab& j_theta_mf = *j_plasma[component];
+#if defined(WARPX_DIM_1D_Z)
+                if (component == 2) { continue; }
+                const amrex::MultiFab& reg = *m_energy_audit_ohm[0];
+                const int offset = 5 * component;
+#else
+                const amrex::MultiFab& reg = *m_energy_audit_ohm[component];
+                const int offset = 0;
+#endif
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    reg.ixType() == j_theta_mf.ixType(),
+                    "ThetaImplicitMHD energy audit: Ohm component register staggering");
+                amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                                 amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+                amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real>
+                    reduce_data(reduce_op);
+                using ReduceTuple = typename decltype(reduce_data)::Type;
+                for (amrex::MFIter mfi(j_theta_mf); mfi.isValid(); ++mfi) {
+                    const amrex::Box box = mfi.validbox();
+                    const FieldDualVolume weight(j_theta_mf, box, geom);
+                    const auto reg_arr = reg.const_array(mfi);
+                    const auto jt = j_theta_mf.const_array(mfi);
+                    reduce_op.eval(box, reduce_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                            const amrex::Real jj = jt(i, j, k) * weight(i, j);
+                            return {reg_arr(i, j, k, offset) * jj,
+                                    reg_arr(i, j, k, offset + 1) * jj,
+                                    reg_arr(i, j, k, offset + 2) * jj,
+                                    reg_arr(i, j, k, offset + 3) * jj,
+                                    reg_arr(i, j, k, offset + 4) * jj};
+                        });
+                }
+                const auto sums = reduce_data.value(reduce_op);
+                works[0] += amrex::get<0>(sums);
+                works[1] += amrex::get<1>(sums);
+                works[2] += amrex::get<2>(sums);
+                works[3] += amrex::get<3>(sums);
+                works[4] += amrex::get<4>(sums);
+            }
+            audit.ind_work = dt * all_reduce_sum(works[0]);
+            audit.ind_cc_work = dt * all_reduce_sum(works[1]);
+            audit.hall_work = dt * all_reduce_sum(works[2]);
+            audit.inertia_work = dt * all_reduce_sum(works[3]);
+            audit.corner_diss_work = dt * all_reduce_sum(works[4]);
         }
 
         // The circuit's electromagnetic power into the domain: the coil
@@ -1032,14 +1129,10 @@ void ThetaImplicitMHD::EnergyAuditFinishStage (const int stage)
             const amrex::Real ext_oo = EnergyAuditFieldDot(b_ext_old, b_ext_old);
             const amrex::Real ext_no = EnergyAuditFieldDot(b_ext, b_ext_old);
             audit.wb_ext_new = ext_nn * inverse_2mu0;
-            audit.b_ext_theta_dot_db =
-                ((1.0_rt - m_theta) * (ext_no - ext_oo) + m_theta * (ext_nn - ext_no)) /
-                PhysConst::mu0;
             audit.theta_diss_ext =
                 (m_theta - 0.5_rt) * (ext_nn - 2.0_rt * ext_no + ext_oo) / PhysConst::mu0;
         } else {
             audit.wb_ext_new = 0.0_rt;
-            audit.b_ext_theta_dot_db = 0.0_rt;
             audit.theta_diss_ext = 0.0_rt;
         }
         break;
@@ -1151,6 +1244,20 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     const amrex::Real lorentz_withheld =
         a.src[R::lorentz_unweighted] - a.src[R::lorentz];
     const amrex::Real res_boost = a.res_field - a.res_user;
+    // The Ohm's-law component split of the exchange remainder (see the
+    // header): exchange_rest2 = ideal_mismatch + hall_work + inertia_work +
+    // ohm_rest exactly, ideal_mismatch = stagger_mismatch + recon_work +
+    // corner_diss_work exactly.
+    const amrex::Real exchange_rest2 =
+        exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i] - a.res_hyper -
+        lorentz_withheld;
+    const amrex::Real ideal_mismatch = a.ind_work - a.src[R::lorentz_unweighted];
+    const amrex::Real stagger_mismatch = a.ind_cc_work - a.src[R::lorentz_unweighted];
+    const amrex::Real recon_work = a.ind_work - a.ind_cc_work - a.corner_diss_work;
+    const amrex::Real ohm_rest =
+        a.ej - (a.ind_work + a.hall_work + a.inertia_work + a.res_field + a.res_hyper);
+    const amrex::Real exchange_rest3 =
+        exchange_rest2 - (ideal_mismatch + a.hall_work + a.inertia_work + ohm_rest);
 
     // Closure residuals. dW_total spans THIS step (the state after the
     // between-step pedestal raise -> the end of the step), so the raise
@@ -1183,6 +1290,13 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_poynt_in_ext += -poynt_out_ext_total;
     a.cum_theta_diss_ext += a.theta_diss_ext;
     a.cum_ext_defect += ext_defect;
+    a.cum_ideal_mismatch += ideal_mismatch;
+    a.cum_stagger_mismatch += stagger_mismatch;
+    a.cum_recon_work += recon_work;
+    a.cum_corner_diss_work += a.corner_diss_work;
+    a.cum_hall_work += a.hall_work;
+    a.cum_inertia_work += a.inertia_work;
+    a.cum_ohm_rest += ohm_rest;
     a.cum_fluid_in += fluid_in_e + fluid_in_i;
     a.cum_wall += wall_e + wall_i;
     a.cum_ej += a.ej;
@@ -1298,7 +1412,18 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"res_hyper", a.res_hyper},
         {"lorentz_unweighted", a.src[R::lorentz_unweighted]},
         {"lorentz_withheld", lorentz_withheld},
-        {"exchange_rest2", exchange - a.res_field + a.src[R::joule_e] + a.src[R::joule_i] - a.res_hyper - lorentz_withheld},
+        {"exchange_rest2", exchange_rest2},
+        // the Ohm's-law component split of exchange_rest2
+        {"ideal_edge_work", a.ind_work},
+        {"ideal_cc_work", a.ind_cc_work},
+        {"ideal_mismatch", ideal_mismatch},
+        {"stagger_mismatch", stagger_mismatch},
+        {"recon_work", recon_work},
+        {"corner_diss_work", a.corner_diss_work},
+        {"hall_work", a.hall_work},
+        {"inertia_work", a.inertia_work},
+        {"ohm_rest", ohm_rest},
+        {"exchange_rest3", exchange_rest3},
         // scheme terms
         {"theta_diss", a.theta_diss},
         {"theta_diss_ext", a.theta_diss_ext},
@@ -1362,6 +1487,13 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"poynt_in_ext_cum", a.cum_poynt_in_ext},
         {"theta_diss_ext_cum", a.cum_theta_diss_ext},
         {"ext_defect_cum", a.cum_ext_defect},
+        {"ideal_mismatch_cum", a.cum_ideal_mismatch},
+        {"stagger_mismatch_cum", a.cum_stagger_mismatch},
+        {"recon_work_cum", a.cum_recon_work},
+        {"corner_diss_work_cum", a.cum_corner_diss_work},
+        {"hall_work_cum", a.cum_hall_work},
+        {"inertia_work_cum", a.cum_inertia_work},
+        {"ohm_rest_cum", a.cum_ohm_rest},
         {"pw_pair_cum", a.cum_pwpair},
         {"faraday_defect_cum", a.cum_faraday},
         {"newton_cum", a.cum_newton},
@@ -1393,6 +1525,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         std::ofstream file(m_energy_audit_file,
                            m_energy_audit_started ? std::ios::app : std::ios::trunc);
         if (!m_energy_audit_started) {
+            file.precision(17);
             file << "# ThetaImplicitMHD global energy audit: one row per audited step "
                     "(implicit_mhd.energy_audit_interval = " << m_energy_audit_interval
                  << "); all energies in J"
@@ -1404,6 +1537,17 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     ", mass in kg; theta = " << m_theta
                  << "; ion_closure = " << m_ion_closure
                  << "; domain volume = " << a.domain_volume << "\n";
+            file << "# Weights: the field sums use the FieldEnergy dual volumes (2 pi r dr dz; pi dr^2/4 dz on "
+                    "the axis; half weights at the nodal ends), which total"
+#if defined(WARPX_DIM_RZ)
+                    " E_r " << a.dual_volume_total[0] << ", E_theta " << a.dual_volume_total[1]
+                 << ", E_z " << a.dual_volume_total[2]
+                 << " (a nodal-in-r staggering sums to the domain volume + pi dr^2 L_z/4, a cell-centered-in-r "
+                    "one to the domain volume exactly); the fluid sums use the cell volumes (= the domain volume)\n";
+#else
+                    " E_x " << a.dual_volume_total[0] << ", E_y " << a.dual_volume_total[1]
+                 << ", E_z " << a.dual_volume_total[2] << " (all = the domain length)\n";
+#endif
             file << "# Conventions: totals are at the end of the step; d* are changes over the step; "
                     "poynt_in_* / fluid_in_* are positive INTO the domain (Poynting = E_ohm^theta x "
                     "B_tot^theta with the external inductive E and B included, the exact summation-by-parts "
@@ -1419,8 +1563,25 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "res_user (the mock resistivity's cost), exchange_rest = exchange - res_field + joule_e + joule_i (the "
                     "non-resistive exchange mismatch; res_hyper = dt sum E_H . J^theta the hyper-resistive "
                     "dissipation, lorentz_withheld = the gated magnetic-force work the Holmstrom vacuum switch "
-                    "withholds, exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld the unnamed "
-                    "remainder); poynt_in_ext*, theta_diss_ext, ext_defect = the external field's own identity "
+                    "withholds, exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld the "
+                    "remainder, decomposed by the Ohm's-law components: exchange_rest2 = ideal_mismatch + "
+                    "hall_work + inertia_work + ohm_rest EXACTLY, where ideal_edge_work = dt sum E_ind . J^theta "
+                    "with E_ind the induction (ideal) EMF as assembled (the face Riemann/central induction flux "
+                    "for E_r and E_z, the UCT corner average + dissipation for E_theta), ideal_cc_work = the same "
+                    "with the plain two-cell (four-cell at a corner) mean of the cell-centered -(u x B), "
+                    "ideal_mismatch = ideal_edge_work - lorentz_unweighted (the edge ideal work vs the "
+                    "cell-centered stress work the momentum kernel deposits: zero in the collocated 1D pairing, "
+                    "the RZ pairing defect), stagger_mismatch = ideal_cc_work - lorentz_unweighted (its "
+                    "plain-mean part: staggering, r-weights, axis), recon_work = ideal_edge_work - ideal_cc_work "
+                    "- corner_diss_work (reconstruction and UCT upwind weighting), corner_diss_work = the UCT "
+                    "corner dissipation's work (zero under the central flux), hall_work = dt sum E_Hall . J^theta, "
+                    "inertia_work = dt sum E_inertia . J^theta, ohm_rest = EJ - (ideal_edge_work + hall_work + "
+                    "inertia_work + res_field + res_hyper) = the work of the post-assembly boundary projections "
+                    "(domain field BCs, wall projection; zero when none touches an edge with J != 0), "
+                    "exchange_rest3 = exchange_rest2 - (ideal_mismatch + hall_work + inertia_work + ohm_rest) "
+                    "identically zero -- the column arithmetic's own check); the recast Ohm's law has no grad p_e "
+                    "term (the electron pressure acts through the fluid work pair), so there is no gradpe_work; "
+                    "poynt_in_ext*, theta_diss_ext, ext_defect = the external field's own identity "
                     "(dW_B_ext = circuit_in_ext - poynt_out_ext - theta_diss_ext + ext_defect; exact for a "
                     "segment-driven or linear-in-time scale); theta_diss includes theta_diss_ext (the prescribed "
                     "field's quadrature term, not a scheme loss); inject_* = the between-step pedestal raise, "

@@ -5762,3 +5762,73 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+
+# Energy audit v5: the Ohm's-law component split of the exchange remainder
+# (ideal_edge_work / ideal_cc_work / ideal_mismatch / stagger_mismatch /
+# recon_work / corner_diss_work / hall_work / inertia_work / ohm_rest,
+# exchange_rest2 = ideal_mismatch + hall_work + inertia_work + ohm_rest
+# exactly). On the collocated line one component at a time carries the
+# exchange; the RZ column is where the pairing defect lives.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_recon  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_energy_audit_components.py diags/energy_audit.txt recon"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_hall  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic hybrid_pic_model.include_hall_term=1"  # inputs
+    "analysis_mhd_energy_audit_components.py diags/energy_audit.txt hall"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_hyper  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic hybrid_pic_model.plasma_hyper_resistivity(rho,B)=2.0e-4"  # inputs
+    "analysis_mhd_energy_audit_components.py diags/energy_audit.txt hyper"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_audit_holmstrom  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_audit_periodic implicit_evolve.theta=1.0 implicit_mhd.mass_density(x,y,z)=rho0*(0.02+0.98*0.5*(1+tanh((z-0.4*Lz)/(0.04*Lz)))*0.5*(1-tanh((z-0.75*Lz)/(0.04*Lz)))) implicit_mhd.vacuum_mass_density=0.1*rho0 implicit_mhd.vacuum_drag_rate=0.0"  # inputs
+    "analysis_mhd_energy_audit_components.py diags/energy_audit.txt holmstrom"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Magnetized flowing RZ column, production flux stack, E.J live: closure,
+# the split's identity, the corner terms, the reduction weights (axis /
+# r-weights) and -- against the twin at twice the resolution -- the
+# convergence of the RZ pairing defect.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_central_fine  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_energy_audit_central my_constants.nr=32 my_constants.nz=64"  # inputs
+    "analysis_mhd_energy_audit_central.py diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_central  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_energy_audit_central  # inputs
+    "analysis_mhd_energy_audit_central.py diags/energy_audit.txt ../test_rz_theta_implicit_mhd_energy_audit_central_fine/diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_energy_audit_central_fine  # dependency
+)

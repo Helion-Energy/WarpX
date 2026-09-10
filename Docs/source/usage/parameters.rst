@@ -7818,7 +7818,23 @@ Jacobian probes.
     returned as heat nowhere), the hyper-resistive dissipation
     ``res_hyper``, the magnetic-force work the vacuum switch withholds
     (``lorentz_withheld``) and the remainders ``exchange_rest`` /
-    ``exchange_rest2`` of the exchange after them, every volume
+    ``exchange_rest2`` of the exchange after them, the Ohm's-law component
+    split of that remainder (exact by construction:
+    ``exchange_rest2 = ideal_mismatch + hall_work + inertia_work +
+    ohm_rest`` with ``ideal_edge_work`` the work of the induction (ideal)
+    EMF as assembled -- the face Riemann/central induction flux for
+    :math:`E_r`, :math:`E_z` and the UCT corner average plus dissipation
+    for :math:`E_\theta` -- ``ideal_cc_work`` the same with the plain
+    cell-mean :math:`-u \times B` at the edges, ``ideal_mismatch =
+    ideal_edge_work - lorentz_unweighted`` the pairing defect between the
+    edge ideal work and the cell-centered stress work the momentum kernel
+    deposits (zero on the collocated 1D line, the RZ-specific term),
+    ``stagger_mismatch`` its plain-mean part, ``recon_work`` the
+    reconstruction / upwind-weighting part, ``corner_diss_work`` the UCT
+    corner dissipation's work, ``hall_work`` and ``inertia_work`` the Hall
+    and electron-inertia EMF works, and ``ohm_rest`` the work of the
+    post-assembly boundary projections; the recast Ohm's law has no
+    :math:`\nabla p_e` term, so there is no such column), every volume
     source of the fluid equations as deposited (magnetic-force work,
     Joule heating by receiver, the electron pressure-work pair, the
     dual-energy :math:`pdV` and viscous heating, the electron-ion
