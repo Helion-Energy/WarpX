@@ -8590,6 +8590,26 @@ Jacobian probes.
     economy. The engine passes the measured per-interval EMF unfiltered;
     any smoothing is engine-side policy.
 
+.. pp:param:: implicit_mhd.circuit_linkage_weight_fill
+    :type: ``bool``
+    :default: ``0``
+
+    Python circuit driver only (:pp:param:`implicit_mhd.circuit_driver` =
+    ``python``; the native driver fills on demand and ignores this key).
+    When on, the solver refreshes the nodal ``circuit_linkage_weight``
+    register -- the physical share :math:`w = \eta_\mathrm{phys} /
+    \eta_\mathrm{field}` of the J_theta node's current, the same weight
+    :pp:param:`circuit.probe_weight` = ``physical_share`` applies inside
+    the C++ engine -- right before every ``externalcoiltheta`` callback
+    (the iterate's theta-stage state) and every ``externalcoilfinish``
+    callback (the accepted end-of-step state), so a python coupler that
+    reads the register (``pywarpx.fields.MultiFabWrapper(mf_name=
+    "circuit_linkage_weight")``) in those callbacks weights its linkage
+    integrand with exactly the native engine's weight. Off (default,
+    bit-identical), the register keeps its unit initialization under the
+    python driver: a coupler reading it then integrates the UNWEIGHTED
+    current. RZ only.
+
 .. pp:param:: implicit_mhd.mass_density(x,y,z)
     :type: ``string``
     :unit: :math:`\mathrm{kg\,m^{-3}}`
@@ -9103,10 +9123,11 @@ Jacobian probes.
     stencils and floors as its :math:`E_\theta` Ohm row: :math:`\eta_\mathrm{phys}` the user
     resistivity (the un-boosted eta the Joule booking keeps) and :math:`\eta_\mathrm{field} =
     \sqrt{\eta_\mathrm{phys}^2 + \eta_\mathrm{vac}^2}` the density-keyed vacuum-boosted field
-    resistivity (:pp:param:`implicit_mhd.vacuum_resistivity_diffusivity`), replaced by the constant
-    :pp:param:`implicit_mhd.wall_band_eta_override` at band-interior rows (so :math:`w =
-    \eta_\mathrm{phys}/\eta_\mathrm{override} \approx 0` there: the override is the field eta of
-    the band). That solver has no displacement current -- the vacuum is mocked by the boosted eta --
+    resistivity (:pp:param:`implicit_mhd.vacuum_resistivity_diffusivity`); at the wall-band override
+    rows of :pp:param:`implicit_mhd.wall_band_eta_override` (from the wall contour outward under
+    ``wall_model = dielectric``, the band-interior table in the conductor modes) :math:`w = 0` exactly:
+    the override row's current is a numerical wall device's, not plasma current (those rows lie
+    outside the ``wall_interior`` mask anyway). That solver has no displacement current -- the vacuum is mocked by the boosted eta --
     and the current flowing where the boost dominates is the numerical stand-in for the displacement
     current, which must not induce eddy currents: the linkage becomes :math:`\int w\,m\,A_\theta
     J_\theta\,dV` with :math:`m` the :pp:param:`circuit.probe_region` mask. :math:`w \to 1` in the

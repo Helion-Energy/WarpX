@@ -169,9 +169,10 @@ public:
          * is applied by pre-multiplying J_theta (a scratch copy), so the
          * batched tables and the reference probes see the same weighted
          * current. w -> 1 in the plasma (exactly 1 with the boost off),
-         * ~eta_phys/eta_vac -> 0 in the deep vacuum, eta_phys/eta_override
-         * (~0) in the wall band under implicit_mhd.wall_band_eta_override
-         * -- the band override IS the field eta there. Requires the
+         * ~eta_phys/eta_vac -> 0 in the deep vacuum, and exactly 0 at the
+         * wall-band override rows of implicit_mhd.wall_band_eta_override
+         * (from the wall contour outward under wall_model = dielectric;
+         * outside the wall_interior mask anyway). Requires the
          * theta-implicit MHD solver (the register does not exist
          * otherwise). The Green's-function open-boundary source integral
          * keeps the TOTAL current (the ghost field must support the

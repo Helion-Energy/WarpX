@@ -5149,6 +5149,55 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+# python-path twins of the probe weight (picmi hook test, WarpX_PYTHON
+# builds): the drive coil measured with the analytic-loop J_theta probe
+# under the Green's open boundary, with a 1e-3 rho0 vacuum shell carrying
+# the density-keyed field-eta boost (w ~ 8e-4 there, 1 - O(1e-7) in the
+# plasma). loop_python / loop_native pin the python loop-probe mirror
+# against the engine's batched loop row (unweighted); weight_python fills
+# the circuit_linkage_weight register through
+# implicit_mhd.circuit_linkage_weight_fill and weights its integrand with
+# it, weight_native lets the engine weight the same probe
+# (circuit.probe_weight = physical_share): the committed per-step coil
+# scales, weighted linkages and register extrema agree to solver tolerance.
+# Each python arm asserts the register's teeth itself (boost-class nodes
+# present, weighted != unweighted): an unfilled register fails there.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_loop_python  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver python --r-open --drive-probe loop --vacuum-shell"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_loop_native  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --r-open --drive-probe loop --vacuum-shell --crosscheck"  # inputs
+    "analysis_mhd_circuit_native_parity.py ../test_rz_theta_implicit_mhd_circuit_loop_python"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_loop_python  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_weight_python  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver python --r-open --drive-probe loop --vacuum-shell --probe-weight physical_share"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_weight_native  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --r-open --drive-probe loop --vacuum-shell --probe-weight physical_share --crosscheck"  # inputs
+    "analysis_mhd_circuit_native_parity.py ../test_rz_theta_implicit_mhd_circuit_weight_python"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_weight_python  # dependency
+)
 
 
 add_warpx_test(

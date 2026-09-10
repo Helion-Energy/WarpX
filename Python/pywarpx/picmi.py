@@ -3958,6 +3958,18 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         round-trips per step, converged answer unchanged to solver
         tolerance).
 
+    circuit_linkage_weight_fill: int, default=0
+        Python circuit driver only: 1 refreshes the nodal register
+        ``circuit_linkage_weight`` (the physical-share linkage weight
+        w = eta_phys / eta_field of the theta-implicit MHD solver, the
+        same weight the native engine's circuit.probe_weight =
+        physical_share applies) right before every externalcoiltheta
+        callback (theta-stage state) and externalcoilfinish callback
+        (accepted end-of-step state), so a python coupler reading the
+        register through pywarpx.fields.MultiFabWrapper applies the same
+        weight as the native driver. Off (default): the register keeps
+        its init value 1.0 on the python path.
+
     circuit_driver: str, default="python"
         Which coupler fires at the circuit hook points when
         external_field_iteration is on. "python" (bit-identical
@@ -4134,6 +4146,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         external_field_iteration=None,
         circuit_hook_scope=None,
         circuit_driver=None,
+        circuit_linkage_weight_fill=None,
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
@@ -4302,6 +4315,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.external_field_iteration = external_field_iteration
         self.circuit_hook_scope = circuit_hook_scope
         self.circuit_driver = circuit_driver
+        self.circuit_linkage_weight_fill = circuit_linkage_weight_fill
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
@@ -4482,6 +4496,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.external_field_iteration = self.external_field_iteration
         implicit_mhd.circuit_hook_scope = self.circuit_hook_scope
         implicit_mhd.circuit_driver = self.circuit_driver
+        implicit_mhd.circuit_linkage_weight_fill = self.circuit_linkage_weight_fill
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate

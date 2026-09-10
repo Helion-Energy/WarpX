@@ -41,6 +41,11 @@ BASELINE_DIRECTORY = (
     sys.argv[1] if len(sys.argv) > 1 else "../test_rz_theta_implicit_mhd_circuit_hook_residual"
 )
 HISTORY_FILE = "circuit_hook_history.csv"
+# Written by the analytic-loop drive-probe arms (--drive-probe loop): per
+# step the weighted and unweighted loop integrands of the drive coil and the
+# extrema of the solver's circuit_linkage_weight register. Compared when
+# both runs wrote it.
+WEIGHT_CHECK_FILE = "circuit_weight_check.csv"
 
 SCALE_RTOL = 1.0e-8
 
@@ -87,6 +92,32 @@ def main():
         f"native-driver committed linkages deviate from the python reference: "
         f"{lam_err:.3e} > {SCALE_RTOL:.1e}"
     )
+
+    if os.path.exists(WEIGHT_CHECK_FILE) and os.path.exists(
+        os.path.join(BASELINE_DIRECTORY, WEIGHT_CHECK_FILE)
+    ):
+        native_w = np.atleast_2d(np.loadtxt(WEIGHT_CHECK_FILE))
+        reference_w = np.atleast_2d(np.loadtxt(os.path.join(BASELINE_DIRECTORY, WEIGHT_CHECK_FILE)))
+        assert native_w.shape == reference_w.shape == (native.shape[0], 6), "malformed weight check"
+        print("--- drive-coil loop integrand and linkage-weight register, per step ---")
+        for k in range(native_w.shape[0]):
+            print(
+                f"step {int(native_w[k, 0])}: lambda_w native = {native_w[k, 1]:.6e} "
+                f"python = {reference_w[k, 1]:.6e}  lambda_u native = {native_w[k, 2]:.6e} "
+                f"python = {reference_w[k, 2]:.6e}  w_min = {native_w[k, 3]:.6e} / "
+                f"{reference_w[k, 3]:.6e}  w_max = {native_w[k, 4]:.10f} / {reference_w[k, 4]:.10f}"
+            )
+        for col, name in ((1, "weighted loop linkage"), (2, "unweighted loop linkage")):
+            norm = np.max(np.abs(reference_w[:, col]))
+            assert norm > 0.0, f"dead {name} column"
+            err = np.max(np.abs(native_w[:, col] - reference_w[:, col])) / norm
+            print(f"max relative {name} mismatch = {err:.3e}")
+            assert err <= SCALE_RTOL, f"{name}: {err:.3e} > {SCALE_RTOL:.1e}"
+        for col, name in ((3, "w_min"), (4, "w_max")):
+            err = np.max(np.abs(native_w[:, col] - reference_w[:, col]))
+            print(f"max absolute register {name} mismatch = {err:.3e}")
+            assert err <= SCALE_RTOL, f"register {name}: {err:.3e} > {SCALE_RTOL:.1e}"
+        assert np.array_equal(native_w[:, 5], reference_w[:, 5]), "boost-class node counts differ"
     print("PASS")
 
 

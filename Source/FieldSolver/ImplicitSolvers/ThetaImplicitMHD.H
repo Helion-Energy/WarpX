@@ -2880,6 +2880,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // evaluation's (first step open loop) -- see CircuitCoupler::Params.
     // Default false (driver = python, bit-identical).
     bool m_circuit_native = false;
+    /** implicit_mhd.circuit_linkage_weight_fill (python driver only,
+     * default 0 = bit-identical): 1 = refresh the nodal register
+     * circuit_linkage_weight (FillCircuitLinkageWeight) right before every
+     * externalcoiltheta callback (the theta-stage state, as the native
+     * driver's in-residual fill) and every externalcoilfinish callback (the
+     * accepted end-of-step state), so a python coupler that reads the
+     * register through the pywarpx field wrapper applies the SAME
+     * physical-share weight as the native engine's circuit.probe_weight =
+     * physical_share. Without it the register keeps its init value 1.0 on
+     * the python path (never refreshed): a python coupler must not assume
+     * the weight is live -- it checks the register or this knob. The
+     * native driver fills on the coupler's request and ignores the knob. */
+    int m_circuit_linkage_weight_fill = 0;
     // Whether the native circuit step is open: BeginStep is fired lazily
     // at the FIRST qualifying residual evaluation of the step, where the
     // just-computed plasma current is exactly the committed t^n state
@@ -2934,10 +2947,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * node -- the un-boosted eta the Joule booking keeps -- and eta_field
      * = the eta the Ohm assembly's E_theta row applies at that node:
      * vacuum_keyed_resistivity(eta_phys, rho_q, ...) =
-     * sqrt(eta_phys^2 + eta_vac^2), REPLACED by the constant
-     * wall_band_eta_override at band-interior rows (so w =
-     * eta_phys / eta_override ~ 0 there: the override IS the field eta of
-     * the band). Same registers, stencils and floors as the E_theta row
+     * sqrt(eta_phys^2 + eta_vac^2); at the wall-band override rows
+     * (ImplicitMHDWallMask::BandEtaOverrideView: from the wall contour
+     * OUTWARD under wall_model = dielectric, the band-interior table in
+     * the conductor modes) w = 0 exactly -- the override row's current is
+     * a numerical wall device's, not plasma current, whatever the parser
+     * eta evaluates to there; those rows lie outside the wall_interior
+     * mask anyway. Same registers, stencils and floors as the E_theta row
      * of AssembleOhmElectricField (nodal rho_fp, nodal Te, the corner
      * |J| from the plasma current, the Ohm guard, the per-step frozen
      * vacuum reference), evaluated on the CURRENT hybrid_current_fp_plasma

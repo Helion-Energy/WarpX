@@ -405,6 +405,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             circuit_driver == "python" || circuit_driver == "native",
             "implicit_mhd.circuit_driver must be 'python' or 'native'");
         m_circuit_native = (circuit_driver == "native");
+        // Python driver only: refresh the nodal circuit_linkage_weight
+        // register before every externalcoiltheta / externalcoilfinish
+        // callback (see m_circuit_linkage_weight_fill). The native driver
+        // fills it on the coupler's request (CircuitCoupler::
+        // NeedsLinkageWeight) and ignores this knob.
+        pp.query("circuit_linkage_weight_fill", m_circuit_linkage_weight_fill);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_circuit_native || m_external_field_iteration,
             "implicit_mhd.circuit_driver = native requires "
@@ -6828,6 +6834,12 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
                                                                 : theta_dt),
                 false, theta_dt);
         } else {
+            if (m_circuit_linkage_weight_fill) {
+                // Same weight, same state and time as the native driver's
+                // in-residual fill: a python coupler that reads the register
+                // in this callback applies the identical physical share.
+                FillCircuitLinkageWeight(start_time + m_theta * m_dt);
+            }
             ExecutePythonCallback("externalcoiltheta");
         }
         ++m_circuit_hook_calls;
@@ -19444,6 +19456,11 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                     m_circuit_step_open = false;
                 }
             } else {
+                if (m_circuit_linkage_weight_fill) {
+                    // The accepted end-of-step state's physical share, as
+                    // the native accept-time fill.
+                    FillCircuitLinkageWeight(end_time);
+                }
                 ExecutePythonCallback("externalcoilfinish");
             }
         }
