@@ -1080,6 +1080,28 @@ public:
      * boundary does not introduce a new hard seam in the sub-floor halo. */
     amrex::Real m_holmstrom_axis_rolloff = 0.0;
 
+    /** z_hi boundary band [m] of the Holmstrom vacuum gate (RZ only; HOLMZHI).
+     * With band L > 0 the Holmstrom VACUUM treatment -- the whole
+     * ((J - J_i) x B - grad Pe)/(e n) part of the Ohm's-law E dropped, so
+     * E -> eta J (+ eta_H, + the electron-inertia correction) -- is FORCED
+     * in the last L metres before the z_hi DOMAIN face regardless of the
+     * local density, at every r (independent of the axis confinement).
+     * Band mask 0.5*(1 + tanh((z - (z_hi - L))/w)), w = holmstrom_zhi_rolloff
+     * (w = 0: hard edge at z_hi - L). Composition with the density gate: in
+     * the smooth (transition_width > 0) branch the effective vacuum weight
+     * is max(density vacuum weight, band mask); in the hard rho branch the
+     * E = 0 condition is extended by a hard z cutoff at z_hi - L (the axis
+     * block's precedent). Motivation (2026-09-10): the formation arms'
+     * |E| blow-up sits on the z_hi face rows near the axis at n above the
+     * floor, where the density-keyed gate is inactive -- the junction of
+     * the Holmstrom-treated axis and the open z_hi cap, with the 1/r
+     * geometric factor of the RZ curl. Requires holmstrom_vacuum_region = 1.
+     * 0 (default) = no band, every kernel expression untouched. */
+    amrex::Real m_holmstrom_zhi_band = 0.0;
+
+    /** Rolloff width [m] of the z_hi band mask; 0 (default) = hard edge. */
+    amrex::Real m_holmstrom_zhi_rolloff = 0.0;
+
     /** Independent Ohm's-law term controls: whether the Hall contribution
      * (the curl-B total current in the (J - J_i) x B / (e n) term; with it
      * off the term reduces to the ideal -u_i x B motional field) and the

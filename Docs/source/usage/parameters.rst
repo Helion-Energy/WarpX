@@ -5409,6 +5409,37 @@ Maxwell solver: kinetic-fluid hybrid
     solver; the smooth blend restores differentiability. ``0`` (default)
     keeps the legacy hard branch.
 
+.. pp:param:: hybrid_pic_model.holmstrom_zhi_band
+    :type: ``float`` (m)
+    :default: ``0``
+    :optional:
+
+    RZ only; requires :pp:param:`hybrid_pic_model.holmstrom_vacuum_region`.
+    With a band :math:`L > 0` the Holmström vacuum treatment -- the whole
+    :math:`((\mathbf{J} - \mathbf{J}_i)\times\mathbf{B} - \nabla p_e)/(e n)`
+    part of the Ohm's-law electric field dropped, so :math:`\mathbf{E} \to \eta \mathbf{J}`
+    (plus the hyper-resistive and electron-inertia corrections) -- is forced in
+    the last :math:`L` metres before the :math:`z_{hi}` domain face regardless of
+    the local density, at every :math:`r` and independently of the axis
+    confinement. The band mask is
+    :math:`\tfrac{1}{2}(1 + \tanh((z - (z_{hi} - L))/w))` with
+    :math:`w` = :pp:param:`hybrid_pic_model.holmstrom_zhi_rolloff`
+    (:math:`w = 0`: a hard edge at :math:`z_{hi} - L`). With a smooth
+    transition width the effective vacuum weight is
+    :math:`\max(w_{density}, \text{mask})`; with the hard density branch the
+    :math:`\mathbf{E} = 0` condition is extended by a hard :math:`z` cutoff at
+    :math:`z_{hi} - L`. Intended for an open (Green's-function) :math:`z_{hi}`
+    face whose boundary rows sit above the density floor. ``0`` (default)
+    leaves the gate density-keyed only.
+
+.. pp:param:: hybrid_pic_model.holmstrom_zhi_rolloff
+    :type: ``float`` (m)
+    :default: ``0``
+    :optional:
+
+    Rolloff width of the :pp:param:`hybrid_pic_model.holmstrom_zhi_band` mask;
+    ``0`` (default) is a hard edge. Only read when the band is positive.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``

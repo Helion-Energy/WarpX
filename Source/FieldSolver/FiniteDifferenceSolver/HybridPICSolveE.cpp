@@ -598,6 +598,29 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         (hybrid_model->m_holmstrom_axis_rolloff > 0._rt)
         ? 1._rt / hybrid_model->m_holmstrom_axis_rolloff
         : 0._rt;
+    // z_hi boundary band of the Holmstrom gate (HOLMZHI; knob doc in
+    // HybridPICModel.H): with band L > 0 the VACUUM treatment -- the whole
+    // ((J - J_i) x B - grad Pe)/(e n) part of the Ohm E dropped, so
+    // E -> eta J (+ eta_H, + the inertia correction) -- is FORCED in the
+    // last L metres before the z_hi DOMAIN face whatever the local density,
+    // at every r (independent of the axis confinement). Band mask
+    // 0.5*(1 + tanh((z - z_edge)/w)), z_edge = z_hi - L, w = zhi_rolloff
+    // (w = 0: hard edge). Composition with the density gate: smooth branch,
+    // effective vacuum weight = max(density vacuum weight, band mask); hard
+    // rho branch, a hard z cutoff at z_edge (the axis block's precedent).
+    // Band 0 (default) leaves every kernel expression below untouched.
+    const bool holmstrom_zhi_band_on =
+        holmstrom_vacuum_region && (hybrid_model->m_holmstrom_zhi_band > 0._rt);
+    const amrex::Geometry& geom_gate = WarpX::GetInstance().Geom(lev);
+    const Real holmstrom_zhi_edge = holmstrom_zhi_band_on
+        ? geom_gate.ProbHi(1) - hybrid_model->m_holmstrom_zhi_band
+        : 0._rt;
+    const Real holmstrom_zhi_inv_w =
+        (hybrid_model->m_holmstrom_zhi_rolloff > 0._rt)
+        ? 1._rt / hybrid_model->m_holmstrom_zhi_rolloff
+        : 0._rt;
+    const Real zmin_gate = geom_gate.ProbLo(1);
+    const Real dz_gate = geom_gate.CellSize(1);
 
     // Energy-equation-era gating (see the drag/battery ledger in the
     // HybridPICModel docs):
@@ -975,8 +998,18 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             (r_gate_c - holmstrom_axis_r) * holmstrom_axis_inv_w))
                         : (r_gate_c < holmstrom_axis_r ? 1._rt : 0._rt));
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
-                    && (!holmstrom_axis_confined || r_gate_c < holmstrom_axis_r)) {
+                // z_hi band mask (1 = vacuum treatment forced); Er is nodal in z.
+                const Real z_gate = zmin_gate + j*dz_gate;
+                const Real zhi_mask = !holmstrom_zhi_band_on ? 0._rt
+                    : (holmstrom_zhi_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt + std::tanh(
+                            (z_gate - holmstrom_zhi_edge) * holmstrom_zhi_inv_w))
+                        : (z_gate >= holmstrom_zhi_edge ? 1._rt : 0._rt));
+
+                if (holmstrom_vacuum_region && !holmstrom_smooth
+                    && ((rho_val < rho_floor
+                         && (!holmstrom_axis_confined || r_gate_c < holmstrom_axis_r))
+                        || (holmstrom_zhi_band_on && z_gate >= holmstrom_zhi_edge))) {
                     Er(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -999,9 +1032,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
-                        // Legacy arithmetic when unconfined (bit-identical).
-                        ohm_val *= (holmstrom_axis_confined
-                                    ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (holmstrom_zhi_band_on) {
+                            // HOLMZHI: effective vacuum weight = max(density
+                            // vacuum weight 1 - g (axis-masked when confined),
+                            // z_hi band mask).
+                            const Real w_vac = std::max(
+                                (1._rt - g) * (holmstrom_axis_confined ? ax_mask : 1._rt),
+                                zhi_mask);
+                            ohm_val *= 1._rt - w_vac;
+                        } else {
+                            // Legacy arithmetic when unconfined (bit-identical).
+                            ohm_val *= (holmstrom_axis_confined
+                                        ? 1._rt - (1._rt - g)*ax_mask : g);
+                        }
                     }
                     Er(i, j, 0) = ohm_val;
                 }
@@ -1096,8 +1139,18 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             (r - holmstrom_axis_r) * holmstrom_axis_inv_w))
                         : (r < holmstrom_axis_r ? 1._rt : 0._rt));
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
-                    && (!holmstrom_axis_confined || r < holmstrom_axis_r)) {
+                // z_hi band mask (1 = vacuum treatment forced); Etheta is nodal in z.
+                const Real z_gate = zmin_gate + j*dz_gate;
+                const Real zhi_mask = !holmstrom_zhi_band_on ? 0._rt
+                    : (holmstrom_zhi_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt + std::tanh(
+                            (z_gate - holmstrom_zhi_edge) * holmstrom_zhi_inv_w))
+                        : (z_gate >= holmstrom_zhi_edge ? 1._rt : 0._rt));
+
+                if (holmstrom_vacuum_region && !holmstrom_smooth
+                    && ((rho_val < rho_floor
+                         && (!holmstrom_axis_confined || r < holmstrom_axis_r))
+                        || (holmstrom_zhi_band_on && z_gate >= holmstrom_zhi_edge))) {
                     Etheta(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
@@ -1116,9 +1169,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
-                        // Legacy arithmetic when unconfined (bit-identical).
-                        ohm_val *= (holmstrom_axis_confined
-                                    ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (holmstrom_zhi_band_on) {
+                            // HOLMZHI: effective vacuum weight = max(density
+                            // vacuum weight 1 - g (axis-masked when confined),
+                            // z_hi band mask).
+                            const Real w_vac = std::max(
+                                (1._rt - g) * (holmstrom_axis_confined ? ax_mask : 1._rt),
+                                zhi_mask);
+                            ohm_val *= 1._rt - w_vac;
+                        } else {
+                            // Legacy arithmetic when unconfined (bit-identical).
+                            ohm_val *= (holmstrom_axis_confined
+                                        ? 1._rt - (1._rt - g)*ax_mask : g);
+                        }
                     }
                     Etheta(i, j, 0) = ohm_val;
                 }
@@ -1210,8 +1273,18 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             (r_gate_n - holmstrom_axis_r) * holmstrom_axis_inv_w))
                         : (r_gate_n < holmstrom_axis_r ? 1._rt : 0._rt));
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
-                    && (!holmstrom_axis_confined || r_gate_n < holmstrom_axis_r)) {
+                // z_hi band mask (1 = vacuum treatment forced); Ez is cell-centered in z.
+                const Real z_gate = zmin_gate + (j + 0.5_rt)*dz_gate;
+                const Real zhi_mask = !holmstrom_zhi_band_on ? 0._rt
+                    : (holmstrom_zhi_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt + std::tanh(
+                            (z_gate - holmstrom_zhi_edge) * holmstrom_zhi_inv_w))
+                        : (z_gate >= holmstrom_zhi_edge ? 1._rt : 0._rt));
+
+                if (holmstrom_vacuum_region && !holmstrom_smooth
+                    && ((rho_val < rho_floor
+                         && (!holmstrom_axis_confined || r_gate_n < holmstrom_axis_r))
+                        || (holmstrom_zhi_band_on && z_gate >= holmstrom_zhi_edge))) {
                     Ez(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -1234,9 +1307,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
-                        // Legacy arithmetic when unconfined (bit-identical).
-                        ohm_val *= (holmstrom_axis_confined
-                                    ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (holmstrom_zhi_band_on) {
+                            // HOLMZHI: effective vacuum weight = max(density
+                            // vacuum weight 1 - g (axis-masked when confined),
+                            // z_hi band mask).
+                            const Real w_vac = std::max(
+                                (1._rt - g) * (holmstrom_axis_confined ? ax_mask : 1._rt),
+                                zhi_mask);
+                            ohm_val *= 1._rt - w_vac;
+                        } else {
+                            // Legacy arithmetic when unconfined (bit-identical).
+                            ohm_val *= (holmstrom_axis_confined
+                                        ? 1._rt - (1._rt - g)*ax_mask : g);
+                        }
                     }
                     Ez(i, j, 0) = ohm_val;
                 }

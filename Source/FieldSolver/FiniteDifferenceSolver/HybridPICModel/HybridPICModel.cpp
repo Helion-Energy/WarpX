@@ -197,6 +197,34 @@ void HybridPICModel::ReadParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_holmstrom_axis_radius <= 0._rt || m_holmstrom_vacuum_region,
         "hybrid_pic_model.holmstrom_axis_radius requires holmstrom_vacuum_region = 1");
+    // HOLMZHI: z_hi boundary band of the Holmstrom gate (RZ only; see the
+    // member doc). Default 0 = off, bit-identical.
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_zhi_band", m_holmstrom_zhi_band);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_zhi_rolloff", m_holmstrom_zhi_rolloff);
+#ifndef WARPX_DIM_RZ
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_holmstrom_zhi_band <= 0._rt,
+        "hybrid_pic_model.holmstrom_zhi_band is only supported in RZ geometry");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_holmstrom_zhi_band <= 0._rt || m_holmstrom_vacuum_region,
+        "hybrid_pic_model.holmstrom_zhi_band requires holmstrom_vacuum_region = 1 "
+        "(the band forces the vacuum treatment of an ARMED Holmstrom gate)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_holmstrom_zhi_rolloff >= 0._rt,
+        "hybrid_pic_model.holmstrom_zhi_rolloff must be >= 0 (0 = hard edge)");
+    if (m_holmstrom_vacuum_region) {
+        if (m_holmstrom_zhi_band > 0._rt) {
+            amrex::Print() << "[hybrid] Holmstrom z_hi band: ON (vacuum treatment forced in the last "
+                << m_holmstrom_zhi_band << " m before the z_hi domain face at every r, "
+                << (m_holmstrom_zhi_rolloff > 0._rt ? "tanh rolloff " : "hard edge, rolloff ")
+                << m_holmstrom_zhi_rolloff << " m; effective vacuum weight = max(density weight, band mask): "
+                << "Hall + motional + grad Pe -> 0, E -> eta J there)\n";
+        } else {
+            amrex::Print() << "[hybrid] Holmstrom z_hi band: OFF (holmstrom_zhi_band = 0; the gate stays density-keyed"
+                << (m_holmstrom_axis_radius > 0._rt ? ", axis-confined" : "") << ")\n";
+        }
+    }
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
 
