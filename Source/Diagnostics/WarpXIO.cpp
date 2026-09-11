@@ -22,6 +22,7 @@
 #include "Fields.H"
 #include "FieldIO.H"
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
+#include "Particles/Collision/BackgroundMCC/MCCBackgroundField.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
@@ -351,6 +352,29 @@ WarpX::InitFromCheckpoint ()
                         amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "jy_fp"));
             VisMF::Read(*m_fields.get(FieldType::current_fp, Direction{2}, lev),
                         amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "jz_fp"));
+        }
+
+        // Mesh-resident neutral density of every depleting MCC background. A
+        // checkpoint written before this field existed, or by a run that did
+        // not deplete, simply carries no such file; in that case the analytic
+        // fill already applied at allocation stands, which is why the fill
+        // happens there rather than on the fresh-start path only.
+        for (auto const& background : mypc->getDepletableBackgrounds())
+        {
+            const std::string field_name =
+                MCCBackgroundField::fieldName(background.m_background_name);
+            const std::string field_prefix = amrex::MultiFabFileFullPrefix(
+                lev, restart_chkfile, level_prefix, field_name);
+
+            if (amrex::FileExists(field_prefix + "_H")) {
+                VisMF::Read(*m_fields.get(field_name, lev), field_prefix);
+            } else {
+                amrex::Print() << Utils::TextMsg::Info(
+                    "Checkpoint holds no '" + field_name + "' for level "
+                    + std::to_string(lev) + "; keeping the density from "
+                    + "background_density. A run restarted this way begins "
+                    + "with an undepleted background.");
+            }
         }
 
         if (lev > 0)
