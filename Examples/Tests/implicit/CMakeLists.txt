@@ -4062,6 +4062,54 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_band_eta_conductive  # dependency
 )
 
+# wall-band eta TREATMENT (implicit_mhd.wall_band_eta_mode), the
+# reference twin: the hard override on the wall_eta_mode deck (dense
+# plasma up to the contour, override 500x the plasma eta, 24 x 12,
+# z-only decomposition) -- the analytic stepped eta table asserted from
+# the plotted PC register in the flat wall sections, the screening
+# sheet against the step in the last live cells, the in-run resistive
+# assembly validation
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_eta_mode_override  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_eta_mode implicit_mhd.wall_band_eta_mode=override"  # inputs
+    "analysis_mhd_wall_eta_mode.py diags/diag000006 override"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# wall_band_eta_mode = neumann (the deck default): the masked E rows
+# within 3 cells of the contour carry EXACTLY the nearest live row's
+# composed eta (bit-equal to the plasma value here), the override only
+# beyond; no step at the contour, the eta table monotone in every row;
+# the sheet leaves the last live cells (< 0.7x the override twin's) for
+# the band (> 0.5x) while the total screening current stays comparable
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_eta_mode_neumann  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_eta_mode  # inputs
+    "analysis_mhd_wall_eta_mode.py diags/diag000006 neumann ../test_rz_theta_implicit_mhd_wall_eta_mode_override/diags/diag000006"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_eta_mode_override  # dependency
+)
+
+# wall_band_eta_mode = transparent: the last 3 live E rows carry the
+# log-linear ramp eta_k = eta_c^(k/3) override^((3-k)/3) (analytic
+# values asserted from the register), the sheet leaves the ramp cells
+# (< 0.3x) for the first composed cells inward (> 1.5x), total
+# comparable
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_eta_mode_transparent  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_eta_mode implicit_mhd.wall_band_eta_mode=transparent"  # inputs
+    "analysis_mhd_wall_eta_mode.py diags/diag000006 transparent ../test_rz_theta_implicit_mhd_wall_eta_mode_override/diags/diag000006"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_eta_mode_override  # dependency
+)
+
 # shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze, work item
 # B), the headline T-B1: the conductive contrast deck (band-eta
 # override OFF -- band |j_theta| ~3.2e4 dominating the interior) with
@@ -5184,6 +5232,31 @@ add_warpx_test(
     1  # nprocs
     "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_weight=physical_share my_constants.rho_vac_frac=1.0e-3 implicit_mhd.vacuum_resistivity_diffusivity=1.0e3 my_constants.rc=0.02 my_constants.wb=0.015 circuit.probe_crosscheck_rtol=1.0e-8 max_step=2"  # inputs
     "analysis_mhd_circuit_probe_region.py weight_plasma ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# wall-band EXCLUSION of the back-EMF (circuit.probe_exclude_wall_band_cells
+# = 3): the inside bump's outermost node (r = 3 dr) lies inside the widened
+# 3-cell band, so under probe_region = wall_interior the coupler measures
+# lambda_interior only (used == interior, band != 0, used != total) and
+# under domain everything but the band (used == interior + exterior); the
+# report header states the band width and the exclusion, the crosscheck
+# pins the batched masked linkage against the reference probes
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_exclude_band_wall  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_region=wall_interior circuit.probe_exclude_wall_band_cells=3 my_constants.rc=0.02 my_constants.wb=0.015"  # inputs
+    "analysis_mhd_circuit_probe_region.py wall_inside_exclude ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_exclude_band_domain  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_exclude_wall_band_cells=3 my_constants.rc=0.02 my_constants.wb=0.015"  # inputs
+    "analysis_mhd_circuit_probe_region.py domain_inside_exclude ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

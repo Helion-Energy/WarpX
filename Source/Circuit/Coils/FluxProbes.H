@@ -58,11 +58,17 @@ namespace warpx::circuit
      * with r_node = r_lo + i * dr and z_node = z_lo + j * dz.
      *
      * The report's radial split refines the inside into the INTERIOR
-     * (r_i < r_wall(z_j) - 2 dr) and the two-cell wall BAND
-     * (r_wall(z_j) - 2 dr <= r_i < r_wall(z_j)); the EXTERIOR is
-     * r_i >= r_wall(z_j). The three regions partition the nodes exactly
-     * (both thresholds are tabulated once per z node and every kernel
-     * compares against the same tabulated values).
+     * (r_i < r_wall(z_j) - N dr) and the N-cell wall BAND
+     * (r_wall(z_j) - N dr <= r_i < r_wall(z_j)); the EXTERIOR is
+     * r_i >= r_wall(z_j). N = 2 by default (the report's original
+     * two-cell band); circuit.probe_exclude_wall_band_cells = N > 0
+     * widens the band to N cells AND drops it from the back-EMF
+     * (the coupler measures the interior under probe_region =
+     * wall_interior, everything but the band under domain), so the
+     * report's lambda_band is exactly the excluded linkage. The three
+     * regions partition the nodes exactly (both thresholds are
+     * tabulated once per z node and every kernel compares against the
+     * same tabulated values).
      *
      * This is a NODAL classification of the J_theta mesh and is NOT the
      * theta-implicit MHD wall mask's cell-centered stair classification
@@ -78,12 +84,14 @@ namespace warpx::circuit
     class ProbeRegionTable
     {
     public:
-        /** Tabulate r_wall and r_wall - 2 dr at every z node of the
-         * level-0 domain (nodal j in [j_lo, j_hi]). z_poly must be
-         * non-decreasing with at least two points. */
+        /** Tabulate r_wall and r_wall - band_cells dr at every z node of
+         * the level-0 domain (nodal j in [j_lo, j_hi]). z_poly must be
+         * non-decreasing with at least two points; band_cells >= 1 (the
+         * default 2 is the report's original two-cell band). */
         void Define (const amrex::Geometry& geom,
                      const std::vector<double>& z_poly,
-                     const std::vector<double>& r_poly);
+                     const std::vector<double>& r_poly,
+                     int band_cells = 2);
 
         [[nodiscard]] bool IsDefined () const { return m_defined; }
 
@@ -101,11 +109,13 @@ namespace warpx::circuit
         /** Host copy of r_wall(z_j), j - JLo() indexed. */
         [[nodiscard]] const std::vector<double>& WallRadiusHost () const { return m_r_wall_host; }
         [[nodiscard]] double BandWidth () const { return m_band_width; }
+        [[nodiscard]] int BandCells () const { return m_band_cells; }
 
     private:
         bool m_defined = false;
         int m_j_lo = 0;
-        double m_band_width = 0.0;   //!< 2 dr
+        int m_band_cells = 2;        //!< band width in cells
+        double m_band_width = 0.0;   //!< band_cells * dr
         std::vector<double> m_r_wall_host;
         amrex::Gpu::DeviceVector<double> m_r_wall;
         amrex::Gpu::DeviceVector<double> m_r_band;
@@ -117,9 +127,10 @@ namespace warpx::circuit
     {
         any = 0,      //!< no radial restriction (the whole domain)
         inside_wall,  //!< r < r_wall(z): the circuit.probe_region = wall_interior mask
-        interior,     //!< r < r_wall(z) - 2 dr
-        band,         //!< r_wall(z) - 2 dr <= r < r_wall(z)
-        exterior      //!< r >= r_wall(z)
+        interior,     //!< r < r_wall(z) - N dr
+        band,         //!< r_wall(z) - N dr <= r < r_wall(z)
+        exterior,     //!< r >= r_wall(z)
+        outside_band  //!< everything but the band: circuit.probe_exclude_wall_band_cells under probe_region = domain
     };
 
     /** Physical-share class of a J_theta node by the nodal linkage weight
@@ -178,6 +189,7 @@ namespace warpx::circuit
                 if (radial == 2 && !in_interior) { return false; }
                 if (radial == 3 && (in_interior || !in_wall)) { return false; }
                 if (radial == 4 && in_wall) { return false; }
+                if (radial == 5 && (in_wall && !in_interior)) { return false; }
             }
             if (wclass != 0) {
                 const double wv = static_cast<double>(w(i, j, 0));

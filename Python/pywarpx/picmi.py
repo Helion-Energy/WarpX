@@ -4340,6 +4340,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         energy_audit_file=None,
         energy_audit_interval=None,
         wall_band_eta_override=None,
+        wall_band_eta_mode=None,
+        wall_band_eta_neumann_cells=None,
+        wall_band_eta_transparent_cells=None,
         wall_field_freeze=None,
         conduction_coefficient_state=None,
         absorb_ledger_interval=None,
@@ -4522,6 +4525,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.energy_audit_file = energy_audit_file
         self.energy_audit_interval = energy_audit_interval
         self.wall_band_eta_override = wall_band_eta_override
+        # implicit_mhd.wall_band_eta_mode = override | neumann | transparent
+        # and the two band widths (see the solver's ImplicitMHDWallMask)
+        self.wall_band_eta_mode = wall_band_eta_mode
+        self.wall_band_eta_neumann_cells = wall_band_eta_neumann_cells
+        self.wall_band_eta_transparent_cells = wall_band_eta_transparent_cells
         self.wall_field_freeze = wall_field_freeze
         self.conduction_coefficient_state = conduction_coefficient_state
         self.absorb_ledger_interval = absorb_ledger_interval
@@ -4773,6 +4781,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.energy_audit_file = self.energy_audit_file
         implicit_mhd.energy_audit_interval = self.energy_audit_interval
         implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
+        implicit_mhd.wall_band_eta_mode = self.wall_band_eta_mode
+        implicit_mhd.wall_band_eta_neumann_cells = self.wall_band_eta_neumann_cells
+        implicit_mhd.wall_band_eta_transparent_cells = (
+            self.wall_band_eta_transparent_cells
+        )
         implicit_mhd.wall_field_freeze = self.wall_field_freeze
         implicit_mhd.conduction_coefficient_state = self.conduction_coefficient_state
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
@@ -4975,6 +4988,18 @@ class CircuitCoupling(object):
         field resistivity dominates is the solver's stand-in for the
         displacement current and must not induce eddy currents. Requires
         the theta-implicit MHD solver.
+
+    probe_exclude_wall_band_cells: int, optional
+        Drop the linkage of the J_theta nodes within this many cells
+        INSIDE the wall contour (r_wall(z_j) - N dr <= r_i < r_wall(z_j))
+        from every J-based back-EMF (default 0 = off, bit-identical):
+        under probe_region = 'wall_interior' the probes measure the
+        interior r_i < r_wall - N dr, under 'domain' everything but the
+        band. The region report's band widens to N cells, so its
+        lambda_band is exactly the excluded linkage. Needs a wall
+        polyline. The currents a dense wall gas carries next to a
+        dielectric wall (the coil-ramp screening sheet) then do not
+        couple back into the coil circuits.
     """
 
     def __init__(
@@ -4995,6 +5020,7 @@ class CircuitCoupling(object):
         probe_region_polyline_file=None,
         probe_region_report=None,
         probe_weight=None,
+        probe_exclude_wall_band_cells=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -5012,6 +5038,7 @@ class CircuitCoupling(object):
         self.probe_region_polyline_file = probe_region_polyline_file
         self.probe_region_report = probe_region_report
         self.probe_weight = probe_weight
+        self.probe_exclude_wall_band_cells = probe_exclude_wall_band_cells
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -5060,6 +5087,10 @@ class CircuitCoupling(object):
             pywarpx.circuit.probe_region_report = self.probe_region_report
         if self.probe_weight is not None:
             pywarpx.circuit.probe_weight = self.probe_weight
+        if self.probe_exclude_wall_band_cells is not None:
+            pywarpx.circuit.probe_exclude_wall_band_cells = (
+                self.probe_exclude_wall_band_cells
+            )
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):

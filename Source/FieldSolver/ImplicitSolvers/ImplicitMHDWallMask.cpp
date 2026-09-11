@@ -106,7 +106,8 @@ namespace
 }
 
 void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
-                                  const amrex::IntVect& ngrow)
+                                  const amrex::IntVect& ngrow,
+                                  const int eta_argument_axial_ghosts)
 {
     const amrex::ParmParse pp("implicit_mhd");
     std::string wall_model = "none";
@@ -138,6 +139,58 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "implicit_mhd.wall_band_eta_override requires an active "
         "implicit_mhd.wall_model (the override acts on the masked wall "
         "band)");
+    // How the field-advance eta crosses the contour (see
+    // WallBandEtaOverrideView): the default hard override is
+    // bit-identical; the two continuous alternatives need the dielectric
+    // standoff (the conductor contracts pin the masked rows outright, so
+    // a Neumann extension into them is meaningless and a ramp on the live
+    // side would be a different device) and an override value to
+    // continue toward / keep beyond the band. Parsed before the early
+    // return so a mode without a wall is a loud input error.
+    {
+        std::string band_eta_mode = "override";
+        pp.query("wall_band_eta_mode", band_eta_mode);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            band_eta_mode == "override" || band_eta_mode == "neumann" ||
+                band_eta_mode == "transparent",
+            "implicit_mhd.wall_band_eta_mode must be 'override', 'neumann' "
+            "or 'transparent'");
+        m_band_eta_mode = (band_eta_mode == "neumann")
+                              ? BandEtaMode::neumann
+                              : ((band_eta_mode == "transparent")
+                                     ? BandEtaMode::transparent
+                                     : BandEtaMode::override_constant);
+        const bool has_neumann_cells = pp.query(
+            "wall_band_eta_neumann_cells", m_band_eta_neumann_cells);
+        const bool has_transparent_cells = pp.query(
+            "wall_band_eta_transparent_cells", m_band_eta_transparent_cells);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_band_eta_mode == BandEtaMode::override_constant ||
+                (wall_model == "dielectric" && m_band_eta_override > 0.0),
+            "implicit_mhd.wall_band_eta_mode = " + band_eta_mode +
+            " requires implicit_mhd.wall_model = dielectric and a positive "
+            "implicit_mhd.wall_band_eta_override (the composed eta is "
+            "continued toward, or ramped up to, that value; the masked rows "
+            "beyond the band keep it)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_neumann_cells || m_band_eta_mode == BandEtaMode::neumann,
+            "implicit_mhd.wall_band_eta_neumann_cells requires "
+            "implicit_mhd.wall_band_eta_mode = neumann");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_transparent_cells ||
+                m_band_eta_mode == BandEtaMode::transparent,
+            "implicit_mhd.wall_band_eta_transparent_cells requires "
+            "implicit_mhd.wall_band_eta_mode = transparent");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_band_eta_neumann_cells == -1 || m_band_eta_neumann_cells >= 1,
+            "implicit_mhd.wall_band_eta_neumann_cells must be >= 1 (masked "
+            "rows within this many cells of the contour) or -1 (every "
+            "masked row)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_band_eta_transparent_cells >= 1,
+            "implicit_mhd.wall_band_eta_transparent_cells must be >= 1 (the "
+            "last this many live rows ramp to the override)");
+    }
 
     // Field-side freeze of the masked band (work item B, see the class
     // comment): parsed before the early return so a freeze without a
@@ -274,7 +327,7 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     }
 
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(geom, ngrow);
+    amrex::ignore_unused(geom, ngrow, eta_argument_axial_ghosts);
     WARPX_ABORT_WITH_MESSAGE(
         "implicit_mhd.wall_model requires cylindrical RZ geometry "
         "(the wall is a revolved poloidal polyline)");
@@ -542,6 +595,21 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::copy(bt_f.begin(), bt_f.end(), m_first_frozen_bt.begin());
     std::copy(bz_f.begin(), bz_f.end(), m_first_frozen_bz.begin());
 
+    // neumann band-eta mode: the source lookup reads the eta arguments of
+    // the nearest live row -- up to N cells inward in the same row, and
+    // axially only as far as the argument fields' filled ghosts (and the
+    // tables' ghost extension) allow, so a lookup never leaves filled data.
+    if (m_band_eta_mode == BandEtaMode::neumann) {
+        const int argument_ghosts = (eta_argument_axial_ghosts >= 0)
+                                        ? eta_argument_axial_ghosts
+                                        : m_ng;
+        const int reach_bound = std::max(0, std::min(argument_ghosts - 1, m_ng));
+        m_band_eta_axial_reach =
+            (m_band_eta_neumann_cells < 0)
+                ? 0
+                : std::min(m_band_eta_neumann_cells, reach_bound);
+    }
+
     // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
     // m_active, so printing first reports "thermal BC none" for an
     // engaged mode (caught by the RR12 boot-banner gate).
@@ -571,7 +639,27 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     }
     if (m_band_eta_override > 0.0) {
         amrex::Print() << "; band eta override " << m_band_eta_override
-                       << " ohm m (constant at band-interior E rows)";
+                       << " ohm m ("
+                       << (m_dielectric ? "constant at every masked E row "
+                                          "incl. the contour node"
+                                        : "constant at band-interior E rows")
+                       << "; mode " << BandEtaModeName();
+        if (m_band_eta_mode == BandEtaMode::neumann) {
+            amrex::Print() << ": masked rows within "
+                           << m_band_eta_neumann_cells
+                           << " cells of the contour take the nearest live "
+                              "row's composed eta (axial reach "
+                           << m_band_eta_axial_reach
+                           << " rows, ghost-limited), the override beyond";
+            if (m_band_eta_neumann_cells < 0) {
+                amrex::Print() << " [-1: every masked row, same-row source]";
+            }
+        } else if (m_band_eta_mode == BandEtaMode::transparent) {
+            amrex::Print() << ": the last " << m_band_eta_transparent_cells
+                           << " live rows ramp log-linearly from their "
+                              "composed eta to the override at the contour";
+        }
+        amrex::Print() << ")";
     }
     if (m_no_slip) {
         amrex::Print() << "; no-slip face condition active (u_t = 0 at the "
@@ -587,6 +675,13 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     }
     amrex::Print() << "\n";
 #endif
+}
+
+const char* ImplicitMHDWallMask::BandEtaModeName () const
+{
+    if (m_band_eta_mode == BandEtaMode::neumann) { return "neumann"; }
+    if (m_band_eta_mode == BandEtaMode::transparent) { return "transparent"; }
+    return "override";
 }
 
 const char* ImplicitMHDWallMask::ThermalBCName () const
@@ -642,6 +737,21 @@ WallBandEtaOverrideView ImplicitMHDWallMask::BandEtaOverrideView () const
     view.active = m_active && (m_band_eta_override > 0.0);
     if (view.active) {
         view.eta_override = m_band_eta_override;
+        // The treatment mode and its band width (see the struct comment);
+        // override needs neither. The tables' valid axial ranges let the
+        // classifier clamp its neighbouring-row lookups.
+        if (m_band_eta_mode == BandEtaMode::neumann) {
+            view.mode = WallBandEtaOverrideView::neumann;
+            view.cells = m_band_eta_neumann_cells;
+            view.axial_reach = m_band_eta_axial_reach;
+        } else if (m_band_eta_mode == BandEtaMode::transparent) {
+            view.mode = WallBandEtaOverrideView::transparent;
+            view.cells = m_band_eta_transparent_cells;
+        }
+        view.z_lo_nodal = -m_ng;
+        view.z_hi_nodal = m_nz + m_ng;
+        view.z_lo_cell = -m_ng;
+        view.z_hi_cell = m_nz - 1 + m_ng;
         if (m_dielectric) {
             // Dielectric standoff: the override covers ALL masked E
             // rows INCLUDING the interface node on the contour. The

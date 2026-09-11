@@ -174,6 +174,15 @@ CircuitCoupling::CircuitCoupling ()
             : CircuitCoupler::ProbeWeight::none;
         pp_circuit.query("probe_region_report",
                          m_coupler_params.probe_region_report);
+        // Drop the N-cell wall band inside the contour from every J-based
+        // back-EMF (see CircuitCoupler::Params); default 0 is bit-identical
+        // and keeps the report's original two-cell band.
+        pp_circuit.query("probe_exclude_wall_band_cells",
+                         m_coupler_params.probe_exclude_wall_band_cells);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_coupler_params.probe_exclude_wall_band_cells >= 0,
+            "circuit.probe_exclude_wall_band_cells must be >= 0 (cells inside "
+            "the wall contour whose linkage the back-EMF probes drop)");
         // The polyline: the coupling's own key, else the theta-implicit
         // MHD wall's polyline (queried here so a deck that relies on the
         // fallback never trips the unused-input check on either key).
@@ -414,27 +423,44 @@ CircuitCoupling::InitData ()
             m_coupler_params.probe_region ==
             CircuitCoupler::ProbeRegion::wall_interior;
         const bool report = !m_coupler_params.probe_region_report.empty();
-        if (wall_interior || report) {
+        const int exclude_cells =
+            m_coupler_params.probe_exclude_wall_band_cells;
+        if (wall_interior || report || exclude_cells > 0) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 !m_probe_region_polyline_file.empty(),
-                "circuit.probe_region = wall_interior and "
-                "circuit.probe_region_report need a wall polyline: set "
-                "circuit.probe_region_polyline_file (CSV of 'z, r' rows) or "
-                "implicit_mhd.wall_polyline_file");
+                "circuit.probe_region = wall_interior, "
+                "circuit.probe_region_report and "
+                "circuit.probe_exclude_wall_band_cells need a wall polyline: "
+                "set circuit.probe_region_polyline_file (CSV of 'z, r' rows) "
+                "or implicit_mhd.wall_polyline_file");
             std::vector<double> z_poly;
             std::vector<double> r_poly;
             ImplicitMHDWallMask::ReadPolylineFile(
                 m_probe_region_polyline_file, z_poly, r_poly,
                 "circuit.probe_region_polyline_file");
-            m_probe_region.Define(warpx.Geom(0), z_poly, r_poly);
+            // The band is the report's two-cell split unless the exclusion
+            // widens it to N cells (then lambda_band = the excluded part).
+            const int band_cells = (exclude_cells > 0) ? exclude_cells : 2;
+            m_probe_region.Define(warpx.Geom(0), z_poly, r_poly, band_cells);
             amrex::Print() << "Circuit probe region: polyline '"
                            << m_probe_region_polyline_file << "' ("
                            << z_poly.size() << " points); rule: J_theta node "
                            << "(r_i, z_j) is inside the wall iff r_i < "
                            << "r_wall(z_j), r_wall = piecewise-linear in z, "
                            << "clamped at the ends (numpy.interp); band = "
-                           << "r_wall - 2 dr <= r_i < r_wall (2 dr = "
-                           << m_probe_region.BandWidth() << " m)\n";
+                           << "r_wall - " << band_cells << " dr <= r_i < r_wall ("
+                           << band_cells << " dr = "
+                           << m_probe_region.BandWidth() << " m)";
+            if (exclude_cells > 0) {
+                amrex::Print() << "; probe_exclude_wall_band_cells = "
+                               << exclude_cells
+                               << ": the band's linkage is dropped from every "
+                                  "J-based back-EMF (measured set = "
+                               << (wall_interior ? "interior r_i < r_wall - N dr"
+                                                 : "interior + exterior")
+                               << ")";
+            }
+            amrex::Print() << "\n";
         }
         if (m_coupler_params.probe_weight ==
             CircuitCoupler::ProbeWeight::physical_share) {

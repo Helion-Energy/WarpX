@@ -2433,10 +2433,55 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     // is bit-identical to no wall.
     {
         using ablastr::fields::Direction;
+        // The smallest axial ghost width of the fields the composed eta
+        // reads (nodal charge density and electron temperature, the
+        // plasma current, the cell-centered density and temperature of the
+        // PC fills): it bounds how far the neumann band-eta mode may look
+        // for its source row in z (see WallBandEtaOverrideView).
+        int eta_argument_axial_ghosts =
+            m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0)
+                ->nGrowVect()[1];
+        for (const amrex::MultiFab* mf :
+             {m_WarpX->m_fields.get(FieldType::rho_fp, 0),
+              m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, 0),
+              m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{0}, 0),
+              m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{1}, 0),
+              m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{2}, 0),
+              m_WarpX->m_fields.get(MassDensityName, 0),
+              m_WarpX->m_fields.get(ElectronTemperatureCCName, 0)}) {
+            if (mf != nullptr) {
+                eta_argument_axial_ghosts =
+                    std::min(eta_argument_axial_ghosts, mf->nGrowVect()[1]);
+            }
+        }
         m_wall_mask.Define(
             m_WarpX->Geom(0),
             m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0)
-                ->nGrowVect());
+                ->nGrowVect(),
+            eta_argument_axial_ghosts);
+        if (m_wall_mask.BandEtaNeumannActive()) {
+            // The neumann source lookup reads the eta arguments of the
+            // same-row live E location up to wall_band_eta_neumann_cells
+            // cells radially inward of a masked row -- farther than the
+            // ghost width when the band straddles a radial box boundary.
+            // Boxes therefore must span the full radial domain (the
+            // production decks decompose along z only).
+            const amrex::BoxArray& ba = m_WarpX->boxArray(0);
+            const amrex::Box domain = m_WarpX->Geom(0).Domain();
+            for (int b = 0; b < static_cast<int>(ba.size()); ++b) {
+                const amrex::Box bx = ba[b];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    bx.smallEnd(0) == domain.smallEnd(0) &&
+                        bx.bigEnd(0) == domain.bigEnd(0),
+                    "implicit_mhd.wall_band_eta_mode = neumann requires every "
+                    "box to span the full radial domain (its source lookup "
+                    "reads the same-row live eta arguments up to "
+                    "wall_band_eta_neumann_cells cells inward of the masked "
+                    "rows, beyond the ghost width across a radial box "
+                    "boundary): set amr.max_grid_size_x >= amr.n_cell[0] and "
+                    "decompose along z only");
+            }
+        }
         // Where the no-slip friction work goes (see m_wall_friction_heating).
         // Queried UNCONDITIONALLY (not only with an active wall), so that
         // `drop` on a deck without a no-slip wall is an input error rather
@@ -3173,11 +3218,18 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
     // bound through its maximum, so masked cells take
     // max(composed, override) here -- never less than either the
     // overridden band-interior edges or the composed interface edges
-    // they neighbor.
+    // they neighbor. Under wall_band_eta_mode = neumann / transparent
+    // the cell-centered classification mirrors the edge fills (the
+    // neumann band cells take the same-row live composed value, the
+    // transparent live cells their ramped value), so the bound follows
+    // the same treatment; the overridden rows beyond the band keep the
+    // maximum.
     const WallBandEtaOverrideView wall_band_view =
         m_wall_mask.BandEtaOverrideView();
     const int* const band_override_cc = wall_band_view.first_band_cc;
     const amrex::Real band_eta_override = wall_band_view.eta_override;
+    const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
+    const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
     for (amrex::MFIter mfi(resistivity); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto eta_field = resistivity.array(mfi);
@@ -3193,8 +3245,28 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
                     eta(charge_density_value, te_cc(i, j, k), 0.0_rt, time),
                     charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
-            if (band_override_cc != nullptr && i >= band_override_cc[j]) {
-                value = std::max(value, band_eta_override);
+            if (band_override_cc != nullptr) {
+                const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
+                    wall_band_view, band_override_cc, band_eta_z_lo_cell,
+                    band_eta_z_hi_cell, i, j);
+                if (band_row.kind == 1) {
+                    value = std::max(value, band_eta_override);
+                } else if (band_row.kind != 0) {
+                    // the same composition at another cell (the neumann
+                    // source), or the ramp of this cell's own value
+                    const auto composed_cc = [&] (const int ii, const int jj) {
+                        const amrex::Real s_rho_raw =
+                            charge_to_mass * rho(ii, jj, k);
+                        const amrex::Real s_rho =
+                            std::max(s_rho_raw, charge_density_floor);
+                        return theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta(s_rho, te_cc(ii, jj, k), 0.0_rt, time),
+                            s_rho_raw, vacuum_reference_charge_density,
+                            vacuum_division_guard, vacuum_eta_scale);
+                    };
+                    value = warpx::mhd_wall_band::BandEta(
+                        band_row, band_eta_override, value, composed_cc);
+                }
             }
             eta_field(i, j, k) = value;
         });
@@ -3278,6 +3350,15 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
     const int* const band_override_et = wall_band_view.first_band_et;
     const int* const band_override_ez = wall_band_view.first_band_ez;
     const amrex::Real band_eta_override = wall_band_view.eta_override;
+    // Under wall_band_eta_mode = neumann / transparent the classifier
+    // (warpx::mhd_wall_band::ClassifyBandEtaRow) decides row by row,
+    // with the same family tables as the residual, whether a location
+    // takes the override, the nearest live row's composed eta or the
+    // ramp -- the residual/PC twin-ness of the override extends to both.
+    const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
+    const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
+    const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
+    const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
     for (amrex::MFIter mfi(azimuthal_resistivity); mfi.isValid(); ++mfi) {
         const auto eta_radial = radial_resistivity.array(mfi);
         const auto eta_azimuthal = azimuthal_resistivity.array(mfi);
@@ -3306,8 +3387,25 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                             0.0_rt, time),
                         charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
-                if (band_override_et != nullptr && i >= band_override_et[j]) {
-                    value = band_eta_override;
+                if (band_override_et != nullptr) {
+                    const auto band_row =
+                        warpx::mhd_wall_band::ClassifyBandEtaRow(
+                            wall_band_view, band_override_et,
+                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, i, j);
+                    if (band_row.kind != 0) {
+                        const auto composed_et = [&] (const int ii, const int jj) {
+                            const amrex::Real s_rho_raw =
+                                charge_to_mass * node_density(ii, jj);
+                            const amrex::Real s_rho =
+                                std::max(s_rho_raw, charge_density_floor);
+                            return theta_implicit_mhd::vacuum_keyed_resistivity(
+                                eta(s_rho, node_temperature(ii, jj), 0.0_rt, time),
+                                s_rho_raw, vacuum_reference_charge_density,
+                                vacuum_division_guard, vacuum_eta_scale);
+                        };
+                        value = warpx::mhd_wall_band::BandEta(
+                            band_row, band_eta_override, value, composed_et);
+                    }
                 }
                 eta_azimuthal(i, j, k) = value;
             });
@@ -3335,8 +3433,29 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                         eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
-                if (band_override_er != nullptr && i >= band_override_er[j]) {
-                    value = band_eta_override;
+                if (band_override_er != nullptr) {
+                    const auto band_row =
+                        warpx::mhd_wall_band::ClassifyBandEtaRow(
+                            wall_band_view, band_override_er,
+                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, i, j);
+                    if (band_row.kind != 0) {
+                        const auto composed_er = [&] (const int ii, const int jj) {
+                            const amrex::Real s_rho_raw =
+                                charge_to_mass * 0.5_rt *
+                                (node_density(ii, jj) + node_density(ii + 1, jj));
+                            const amrex::Real s_rho =
+                                std::max(s_rho_raw, charge_density_floor);
+                            const amrex::Real s_te = 0.5_rt *
+                                (node_temperature(ii, jj) +
+                                 node_temperature(ii + 1, jj));
+                            return theta_implicit_mhd::vacuum_keyed_resistivity(
+                                eta(s_rho, s_te, 0.0_rt, time), s_rho_raw,
+                                vacuum_reference_charge_density,
+                                vacuum_division_guard, vacuum_eta_scale);
+                        };
+                        value = warpx::mhd_wall_band::BandEta(
+                            band_row, band_eta_override, value, composed_er);
+                    }
                 }
                 eta_radial(i, j, k) = value;
             });
@@ -3364,8 +3483,29 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                         eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
-                if (band_override_ez != nullptr && i >= band_override_ez[j]) {
-                    value = band_eta_override;
+                if (band_override_ez != nullptr) {
+                    const auto band_row =
+                        warpx::mhd_wall_band::ClassifyBandEtaRow(
+                            wall_band_view, band_override_ez,
+                            band_eta_z_lo_cell, band_eta_z_hi_cell, i, j);
+                    if (band_row.kind != 0) {
+                        const auto composed_ez = [&] (const int ii, const int jj) {
+                            const amrex::Real s_rho_raw =
+                                charge_to_mass * 0.5_rt *
+                                (node_density(ii, jj) + node_density(ii, jj + 1));
+                            const amrex::Real s_rho =
+                                std::max(s_rho_raw, charge_density_floor);
+                            const amrex::Real s_te = 0.5_rt *
+                                (node_temperature(ii, jj) +
+                                 node_temperature(ii, jj + 1));
+                            return theta_implicit_mhd::vacuum_keyed_resistivity(
+                                eta(s_rho, s_te, 0.0_rt, time), s_rho_raw,
+                                vacuum_reference_charge_density,
+                                vacuum_division_guard, vacuum_eta_scale);
+                        };
+                        value = warpx::mhd_wall_band::BandEta(
+                            band_row, band_eta_override, value, composed_ez);
+                    }
                 }
                 eta_axial(i, j, k) = value;
             });
@@ -5376,6 +5516,9 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
     const WallBandEtaOverrideView wall_band_view =
         m_wall_mask.BandEtaOverrideView();
     const int* const band_override_et = wall_band_view.first_band_et;
+    const amrex::Real band_eta_override = wall_band_view.eta_override;
+    const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
+    const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
     for (amrex::MFIter mfi(weight); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto w = weight.array(mfi);
@@ -5387,24 +5530,48 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             // The E_theta corner's |J| (native J_theta, half-sum J_r and
             // J_z) and eta arguments, term for term the Ohm assembly's.
-            const amrex::Real jt_corner = j_theta(i, j, k);
-            const amrex::Real jr_corner =
-                0.5_rt * (j_r(i - 1, j, k) + j_r(i, j, k));
-            const amrex::Real jz_corner =
-                0.5_rt * (j_z(i, j - 1, k) + j_z(i, j, k));
-            const amrex::Real current_magnitude =
-                std::sqrt(jr_corner * jr_corner + jt_corner * jt_corner +
-                          jz_corner * jz_corner);
-            const amrex::Real charge_density_value =
-                std::max(rho_q(i, j, k), charge_density_floor);
-            const amrex::Real eta_phys = eta(
-                charge_density_value, te_nodal(i, j, k), current_magnitude,
-                time);
-            amrex::Real eta_field =
-                theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta_phys, rho_q(i, j, k), vacuum_reference_charge_density,
+            const auto corner_etas = [&] (const int ii, const int jj,
+                                          amrex::Real& phys) {
+                const amrex::Real jt_corner = j_theta(ii, jj, k);
+                const amrex::Real jr_corner =
+                    0.5_rt * (j_r(ii - 1, jj, k) + j_r(ii, jj, k));
+                const amrex::Real jz_corner =
+                    0.5_rt * (j_z(ii, jj - 1, k) + j_z(ii, jj, k));
+                const amrex::Real current_magnitude =
+                    std::sqrt(jr_corner * jr_corner + jt_corner * jt_corner +
+                              jz_corner * jz_corner);
+                const amrex::Real charge_density_value =
+                    std::max(rho_q(ii, jj, k), charge_density_floor);
+                phys = eta(charge_density_value, te_nodal(ii, jj, k),
+                           current_magnitude, time);
+                return theta_implicit_mhd::vacuum_keyed_resistivity(
+                    phys, rho_q(ii, jj, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
-            if (band_override_et != nullptr && i >= band_override_et[j]) {
+            };
+            amrex::Real eta_phys = 0.0_rt;
+            amrex::Real eta_field = corner_etas(i, j, eta_phys);
+            const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
+                wall_band_view, band_override_et, band_eta_z_lo_nodal,
+                band_eta_z_hi_nodal, i, j);
+            if (band_row.kind == 2) {
+                // wall_band_eta_mode = neumann: the Ohm row's eta is the
+                // nearest live row's composed eta and the current that
+                // flows here is that row's plasma-class current continued
+                // into the band -- the source row's physical share.
+                eta_field = corner_etas(band_row.si, band_row.sj, eta_phys);
+            } else if (band_row.kind == 3) {
+                // wall_band_eta_mode = transparent: the Ohm row's eta is the
+                // ramped value; the composed eta's share of it drops toward
+                // eta_phys / eta_override at the contour (the source lambda
+                // is never called for a ramp row).
+                eta_field = warpx::mhd_wall_band::BandEta(
+                    band_row, band_eta_override, eta_field,
+                    [&] (const int ii, const int jj) {
+                        amrex::Real unused_phys = 0.0_rt;
+                        return corner_etas(ii, jj, unused_phys);
+                    });
+            }
+            if (band_row.kind == 1) {
                 // The wall-band override row: the constant replaces the
                 // composed eta in the Ohm row, and the current that flows
                 // there is the override's (a numerical wall device, not
@@ -15006,6 +15173,18 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const int* const band_override_et = wall_band_view.first_band_et;
     const int* const band_override_ez = wall_band_view.first_band_ez;
     const amrex::Real band_eta_override = wall_band_view.eta_override;
+    // wall_band_eta_mode (see WallBandEtaOverrideView): under neumann /
+    // transparent the classifier decides row by row -- with the family
+    // table and the tables' valid axial ranges below -- whether the row
+    // takes the override, the nearest live row's composed eta (evaluated
+    // by a per-family composition lambda, term for term the block that
+    // computes the row's own composed eta) or the log-linear ramp of its
+    // own composed eta toward the override. The default override mode
+    // reproduces the hard replacement exactly.
+    const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
+    const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
+    const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
+    const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
     // lorentz_force_band_emf (see the member comment): the band cells'
     // velocity is frozen in the corner EMF states below (and in the
     // audit's plain-mean ideal EMF registers), matching the frozen face
@@ -15073,10 +15252,40 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     eta_user,
                     charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
-            if (band_override_er != nullptr && i >= band_override_er[j]) {
-                // Wall-band eta override (see the capture comment):
-                // REPLACES the composed eta, dEta/dState = 0.
-                resistivity = band_eta_override;
+            if (band_override_er != nullptr) {
+                // Wall-band eta treatment (see the capture comment): the
+                // override REPLACES the composed eta, dEta/dState = 0; the
+                // neumann source and the transparent ramp are evaluated by
+                // the classifier from the same family table.
+                const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
+                    wall_band_view, band_override_er, band_eta_z_lo_nodal,
+                    band_eta_z_hi_nodal, i, j);
+                if (band_row.kind != 0) {
+                    // the row's composition at another E_r location (the
+                    // neumann source), term for term the block above
+                    const auto composed_er = [&] (const int ii, const int jj) {
+                        const amrex::Real s_jr = j_r(ii, jj, k);
+                        const amrex::Real s_jt =
+                            0.5_rt * (j_theta(ii, jj, k) + j_theta(ii + 1, jj, k));
+                        const amrex::Real s_jz =
+                            0.25_rt * (j_z(ii, jj, k) + j_z(ii + 1, jj, k) +
+                                       j_z(ii, jj - 1, k) + j_z(ii + 1, jj - 1, k));
+                        const amrex::Real s_magnitude =
+                            std::sqrt(s_jr * s_jr + s_jt * s_jt + s_jz * s_jz);
+                        const amrex::Real s_rho_raw =
+                            0.5_rt * (rho_q(ii, jj, k) + rho_q(ii + 1, jj, k));
+                        const amrex::Real s_rho =
+                            std::max(s_rho_raw, charge_density_floor);
+                        const amrex::Real s_te =
+                            0.5_rt * (te_nodal(ii, jj, k) + te_nodal(ii + 1, jj, k));
+                        return theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta(s_rho, s_te, s_magnitude, time), s_rho_raw,
+                            vacuum_reference_charge_density,
+                            vacuum_division_guard, vacuum_eta_scale);
+                    };
+                    resistivity = warpx::mhd_wall_band::BandEta(
+                        band_row, band_eta_override, resistivity, composed_er);
+                }
             }
             if (audit_capture) {
                 audit_eta_r(i, j, k, 0) = resistivity;
@@ -15232,10 +15441,41 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     eta_user,
                     charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
-            if (band_override_ez != nullptr && i >= band_override_ez[j]) {
-                // Wall-band eta override (see the capture comment):
-                // REPLACES the composed eta, dEta/dState = 0.
-                resistivity = band_eta_override;
+            if (band_override_ez != nullptr) {
+                // Wall-band eta treatment (see the capture comment): the
+                // override REPLACES the composed eta, dEta/dState = 0; the
+                // neumann source and the transparent ramp are evaluated by
+                // the classifier from the same family table.
+                const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
+                    wall_band_view, band_override_ez, band_eta_z_lo_cell,
+                    band_eta_z_hi_cell, i, j);
+                if (band_row.kind != 0) {
+                    // the row's composition at another E_z location (the
+                    // neumann source), term for term the block above
+                    const auto composed_ez = [&] (const int ii, const int jj) {
+                        const int s_il = (ii - 1 < domain_lo_r) ? ii : ii - 1;
+                        const amrex::Real s_jr =
+                            0.25_rt * (j_r(s_il, jj, k) + j_r(ii, jj, k) +
+                                       j_r(s_il, jj + 1, k) + j_r(ii, jj + 1, k));
+                        const amrex::Real s_jt =
+                            0.5_rt * (j_theta(ii, jj, k) + j_theta(ii, jj + 1, k));
+                        const amrex::Real s_jz = j_z(ii, jj, k);
+                        const amrex::Real s_magnitude =
+                            std::sqrt(s_jr * s_jr + s_jt * s_jt + s_jz * s_jz);
+                        const amrex::Real s_rho_raw =
+                            0.5_rt * (rho_q(ii, jj, k) + rho_q(ii, jj + 1, k));
+                        const amrex::Real s_rho =
+                            std::max(s_rho_raw, charge_density_floor);
+                        const amrex::Real s_te =
+                            0.5_rt * (te_nodal(ii, jj, k) + te_nodal(ii, jj + 1, k));
+                        return theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta(s_rho, s_te, s_magnitude, time), s_rho_raw,
+                            vacuum_reference_charge_density,
+                            vacuum_division_guard, vacuum_eta_scale);
+                    };
+                    resistivity = warpx::mhd_wall_band::BandEta(
+                        band_row, band_eta_override, resistivity, composed_ez);
+                }
             }
             if (audit_capture) {
                 audit_eta_z(i, j, k, 0) = resistivity;
@@ -15532,10 +15772,35 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     eta_user,
                     rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
-            if (band_override_et != nullptr && i >= band_override_et[j]) {
-                // Wall-band eta override (see the capture comment):
-                // REPLACES the composed eta, dEta/dState = 0.
-                resistivity = band_eta_override;
+            if (band_override_et != nullptr) {
+                // Wall-band eta treatment (see the capture comment): the
+                // override REPLACES the composed eta, dEta/dState = 0; the
+                // neumann source and the transparent ramp are evaluated by
+                // the classifier from the same family table.
+                const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
+                    wall_band_view, band_override_et, band_eta_z_lo_nodal,
+                    band_eta_z_hi_nodal, i, j);
+                if (band_row.kind != 0) {
+                    // the row's composition at another E_theta corner (the
+                    // neumann source), term for term the block above
+                    const auto composed_et = [&] (const int ii, const int jj) {
+                        const amrex::Real s_jt = j_theta(ii, jj, k);
+                        const amrex::Real s_jr =
+                            0.5_rt * (j_r(ii - 1, jj, k) + j_r(ii, jj, k));
+                        const amrex::Real s_jz =
+                            0.5_rt * (j_z(ii, jj - 1, k) + j_z(ii, jj, k));
+                        const amrex::Real s_magnitude =
+                            std::sqrt(s_jr * s_jr + s_jt * s_jt + s_jz * s_jz);
+                        const amrex::Real s_rho =
+                            std::max(rho_q(ii, jj, k), charge_density_floor);
+                        return theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta(s_rho, te_nodal(ii, jj, k), s_magnitude, time),
+                            rho_q(ii, jj, k), vacuum_reference_charge_density,
+                            vacuum_division_guard, vacuum_eta_scale);
+                    };
+                    resistivity = warpx::mhd_wall_band::BandEta(
+                        band_row, band_eta_override, resistivity, composed_et);
+                }
             }
             if (audit_capture) {
                 audit_eta_t(i, j, k, 0) = resistivity;

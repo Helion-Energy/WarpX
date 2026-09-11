@@ -102,11 +102,14 @@ ProbeRegionTable::WallRadiusAt (const std::vector<double>& z_poly,
 void
 ProbeRegionTable::Define (const amrex::Geometry& geom,
                           const std::vector<double>& z_poly,
-                          const std::vector<double>& r_poly)
+                          const std::vector<double>& r_poly,
+                          const int band_cells)
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         z_poly.size() >= 2 && z_poly.size() == r_poly.size(),
         "ProbeRegionTable: the wall polyline needs at least two (z, r) points");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(band_cells >= 1,
+        "ProbeRegionTable: the wall band must be at least one cell wide");
     for (std::size_t p = 1; p < z_poly.size(); ++p) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(z_poly[p] >= z_poly[p - 1],
             "ProbeRegionTable: the wall polyline's z must be non-decreasing");
@@ -121,7 +124,9 @@ ProbeRegionTable::Define (const amrex::Geometry& geom,
     const double plo_z = geom.ProbLo(1);
     m_j_lo = domain.smallEnd(1);
     const int j_hi = domain.bigEnd(1) + 1;   // upper nodal plane
-    m_band_width = 2.0 * geom.CellSize(0);
+    m_band_cells = band_cells;
+    // band_cells = 2 reproduces the original 2.0 * dr bit-exactly
+    m_band_width = static_cast<double>(band_cells) * geom.CellSize(0);
     m_r_wall_host.resize(static_cast<std::size_t>(j_hi - m_j_lo + 1));
     std::vector<double> r_band_host(m_r_wall_host.size());
     for (int j = m_j_lo; j <= j_hi; ++j) {

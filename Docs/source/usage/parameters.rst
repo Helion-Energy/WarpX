@@ -7882,6 +7882,90 @@ Jacobian probes.
     resistivity (masked cells receive no fluid increments anyway).
     Under the conductor contracts the overridden rows are subsequently
     pinned by the projection, making the override redundant there.
+    NOTE: under ``wall_model = dielectric`` the override covers EVERY
+    masked E row INCLUDING the interface node on the wall contour (the
+    contour node's composed eta would otherwise make a dielectric wall
+    a near-superconducting ring wherever plasma abuts it); the
+    band-interior restriction above is the conductor-mode convention.
+
+.. pp:param:: implicit_mhd.wall_band_eta_mode
+    :type: ``str``
+    :default: ``override`` (bit-identical)
+
+    How the field-advance resistivity crosses the shaped-wall contour
+    (requires ``implicit_mhd.wall_model = dielectric`` and a positive
+    :pp:param:`implicit_mhd.wall_band_eta_override`; the residual's Ohm
+    assembly, the preconditioner's edge fills and its cell-centered fill
+    apply the identical rule row by row from the same geometry-static
+    tables, so residual and PC stay exact twins in every mode).
+    ``override``: the hard step from the composed live eta to the
+    override at the first masked row (today's behaviour). Measured on
+    the production formation deck with :math:`10^{19}`-class gas on the
+    cone wall, :math:`\nabla\eta \times \mathbf{J}` at that 800-5000x
+    step pins the accelerator coils' screening current into the last
+    two or three live cells (-285 kA at 15.7 us; the coil flux inside
+    the cone entrance 33 % below the reference code's at 16 us), a
+    numerical image of the insulator-interface current sheet the
+    dielectric mask does not otherwise resolve.
+    ``neumann``: the composed eta of the nearest LIVE E row along the
+    wall normal is continued into the masked band with zero normal
+    gradient over the masked rows within
+    :pp:param:`implicit_mhd.wall_band_eta_neumann_cells` of the contour
+    (the radial depth in the row, or the axial distance to a
+    neighbouring row that is live at that radius -- the z-facing stair
+    faces; ties go radial); masked rows farther out keep the override,
+    so the dielectric bay where the coil sheets are painted stays at the
+    vacuum-class value and never becomes a resistive flux conserver.
+    The extension is state dependent exactly as the live eta is (same
+    frozen step-old density and temperature, same stage current, taken
+    at the source row), so the JFNK probes see a smooth non-local
+    dependence and the PC's frozen-eta fills apply the same rule at zero
+    current. The axial part of the source search is limited to the eta
+    argument fields' axial ghost width minus one (printed in the wall
+    banner), and every box must span the full radial domain (the
+    same-row source lies up to N cells inward; the run aborts
+    otherwise). The screening sheet then leaves the fluid cells and
+    spreads into the band.
+    ``transparent``: the masked rows keep the override and the last
+    :pp:param:`implicit_mhd.wall_band_eta_transparent_cells` LIVE rows
+    before the contour ramp log-linearly from their own composed value to
+    the override at the contour, :math:`\eta_k = \eta_\mathrm{c}(k)\,
+    (\eta_\mathrm{override}/\eta_\mathrm{c}(k))^{(N-k)/N}` with
+    :math:`k = 0` the row next to the contour and :math:`k = N` the
+    first composed row -- no step anywhere. The density-keyed vacuum
+    ramp only reaches the vacuum class where the density hits the floor
+    AT the wall; with dense gas on the wall this spatial ramp is its
+    substitute (the reference code's wall carries floor gas). The wall
+    gas becomes field-transparent and the screening sheet forms at the
+    first unramped live cells. The Joule heating coefficient stays the
+    composed eta at every live cell (the ramp rows are fluid, unlike the
+    masked cells; their deposit is the composed eta times the actual
+    current, which the ramp drives toward zero), and the circuit
+    linkage weight of :pp:param:`circuit.probe_weight` there is the
+    composed eta's share of the ramped value (dropping toward
+    :math:`\eta_\mathrm{phys}/\eta_\mathrm{override}` at the contour).
+    Both alternatives remove the physical insulator-interface current
+    sheet that the override reproduced: potential missing physics,
+    recorded for a later revisit.
+
+.. pp:param:: implicit_mhd.wall_band_eta_neumann_cells
+    :type: ``integer``
+    :default: ``3``
+
+    Band width of ``wall_band_eta_mode = neumann``: masked rows within
+    this many cells of the contour (along the wall normal) take the
+    nearest live row's composed eta; ``-1`` = every masked row takes the
+    same-row live eta (radial extension only; the dielectric bay then has
+    no override rows left). Requires the neumann mode.
+
+.. pp:param:: implicit_mhd.wall_band_eta_transparent_cells
+    :type: ``integer``
+    :default: ``3``
+
+    Ramp width of ``wall_band_eta_mode = transparent``: the last this
+    many live E rows before the contour (radially, or axially under a
+    z-facing stair face) carry the log-linear ramp to the override.
+    Requires the transparent mode.
 
 .. pp:param:: implicit_mhd.wall_field_freeze
     :type: ``bool``
@@ -9420,6 +9504,26 @@ Jacobian probes.
     ``pywarpx.fields.MultiFabWrapper(mf_name="circuit_linkage_weight", level=0)[...]`` (node
     :math:`r` x node :math:`z`). Requires the theta-implicit MHD solver (the register does not
     exist otherwise; the explicit hybrid has no boosted field eta).
+
+.. pp:param:: circuit.probe_exclude_wall_band_cells
+    :type: ``integer``
+    :default: ``0`` (off, bit-identical)
+    :optional:
+
+    Drop the linkage of the nodal :math:`J_\theta` mesh's nodes within this many cells INSIDE the
+    wall contour, :math:`r_\mathrm{wall}(z_j) - N\,\Delta r \le r_i < r_\mathrm{wall}(z_j)`, from
+    every J-based back-EMF (``reciprocity`` and ``loop`` probes; the ``disk`` probe is not a current
+    integral): under :pp:param:`circuit.probe_region` = ``wall_interior`` the coupler then measures
+    the interior :math:`r_i < r_\mathrm{wall} - N\,\Delta r`, under ``domain`` everything but the
+    band. The mask is folded into the batched weight tables like the region mask, so
+    :pp:param:`circuit.probe_crosscheck` validates it. The region report's band
+    (:pp:param:`circuit.probe_region_report`) widens from its default two cells to :math:`N` cells,
+    so its ``lambda_band`` column is exactly the excluded linkage and ``lambda_used`` = the measured
+    remainder. Needs a wall polyline. Rationale: the reference formation model's coil circuits carry
+    a stray reactance that shunts part of the coil current, and its dielectric wall induces no
+    current in the wall gas; flying that circuit, the currents the dense wall gas carries next to the
+    dielectric wall (the coil-ramp screening sheet, see
+    :pp:param:`implicit_mhd.wall_band_eta_mode`) must not couple back into the coils.
 
 .. pp:param:: circuit.eps_lowpass_tau
     :type: ``float``

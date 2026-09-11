@@ -58,6 +58,20 @@ weight_boost (probe_weight = physical_share, outside bump in the vacuum)
     current contributes only its physical share;
   - every row: lambda_used == lambda_weighted (roundoff).
 
+wall_inside_exclude (probe_region = wall_interior,
+                     probe_exclude_wall_band_cells = 3, inside bump)
+  - the report header states N = 3 cells and the exclusion;
+  - lambda_used == lambda_interior (roundoff) on every row: the 3-cell
+    band inside the contour is dropped from the back-EMF;
+  - the FIRST row of step 1: band != 0.0 (the bump's outermost node,
+    r = 3 dr, lies inside the widened band, so the exclusion has teeth)
+    and used != total.
+
+domain_inside_exclude (probe_region = domain,
+                       probe_exclude_wall_band_cells = 3, inside bump)
+  - lambda_used == lambda_interior + lambda_exterior (roundoff) on every
+    row: everything but the band; band != 0.0 at the first row of step 1.
+
 weight_plasma (probe_weight = physical_share, inside bump in the plasma)
   - the FIRST row of step 1: w_plasma == interior and w_boost ==
     exterior (roundoff; the bump is plasma, the open-face sheet sits in
@@ -112,6 +126,9 @@ def close(a, b, scale, rtol=RTOL):
     return abs(a - b) <= rtol * max(abs(scale), 1.0e-300)
 
 
+HEADER_LINES = []
+
+
 def load_report(path):
     rows = []
     table = None
@@ -121,6 +138,7 @@ def load_report(path):
             if not line:
                 continue
             if line.startswith("#"):
+                HEADER_LINES.append(line)
                 if line.startswith("# r_wall_table"):
                     table = line
                 continue
@@ -259,6 +277,25 @@ def main():
             assert share < 0.1, f"{coil}: the open-face sheet links {share:.3e} of the total"
         assert rms_band == 0.0 and rms_int > 0.0
         assert rms_ext < 1.0e-2 * rms_int, f"exterior RMS {rms_ext!r} vs interior {rms_int!r}"
+    elif ARM in ("wall_inside_exclude", "domain_inside_exclude"):
+        header = "\n".join(HEADER_LINES)
+        assert "N = 3 cells" in header, "the report header does not state the 3-cell band"
+        assert "probe_exclude_wall_band_cells = 3: the band's linkage is DROPPED" in header, (
+            "the report header does not state the band exclusion"
+        )
+        for kind, step, t, coil, v in rows:
+            expected = (v["interior"] if ARM == "wall_inside_exclude"
+                        else v["interior"] + v["exterior"])
+            assert close(v["used"], expected, v["total"]), (
+                f"{kind} step {step} {coil}: used {v['used']!r} != the band-excluded "
+                f"value {expected!r} (band {v['band']!r})"
+            )
+        for kind, step, t, coil, v in step1:
+            share = v["band"] / v["total"]
+            print(f"  {coil}: excluded band share of the total {share:.4f}")
+            assert v["band"] != 0.0, f"{coil}: the widened band links nothing: no teeth"
+            assert v["used"] != v["total"], f"{coil}: the exclusion changed nothing"
+        assert rms_band > 0.0 and rms_int > 0.0
     elif ARM in ("weight_boost", "weight_plasma"):
         for kind, step, t, coil, v in rows:
             assert close(v["used"], v["weighted"], v["total"]), (

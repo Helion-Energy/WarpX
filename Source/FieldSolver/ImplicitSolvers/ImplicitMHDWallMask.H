@@ -19,6 +19,7 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_REAL.H>
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -363,7 +364,36 @@
  *   state-independent field-advance eta at band-interior electric-
  *   field locations; see the band-hygiene note above. Aimed at the
  *   dielectric standoff (the conductor modes pin the masked E rows
- *   outright, making the override redundant there).
+ *   outright, making the override redundant there). NOTE: under
+ *   wall_model = dielectric the override covers EVERY masked E row
+ *   including the interface node ON the contour (see
+ *   BandEtaOverrideView); the "band-interior" restriction above is the
+ *   conductor-mode convention.
+ * - wall_band_eta_mode = override (default, bit-identical) | neumann |
+ *   transparent (requires wall_model = dielectric and a positive
+ *   wall_band_eta_override; see WallBandEtaOverrideView): how the
+ *   field-advance eta crosses the contour. `override` is the hard
+ *   step from the composed live eta to the override at the first
+ *   masked row -- measured on the production formation deck with
+ *   1e19-class gas on the cone wall, grad(eta) x J at that 800-5000x
+ *   step pins the accelerator coils' screening current into the last
+ *   two or three live cells (-285 kA at 15.7 us, the coil flux inside
+ *   the cone entrance 33 % below the reference code's), a numerical
+ *   image of the insulator-interface sheet the dielectric mask does
+ *   not otherwise resolve. `neumann` removes the step from the plasma
+ *   side (the live composed eta continued into the band with zero
+ *   normal gradient over wall_band_eta_neumann_cells = N masked rows,
+ *   default 3; -1 = every masked row; the override stays beyond), so
+ *   the sheet leaves the fluid cells and spreads into the band.
+ *   `transparent` removes it from the wall side: the last
+ *   wall_band_eta_transparent_cells = N live rows (default 3) ramp
+ *   log-linearly up to the override at the contour, so the wall gas
+ *   becomes field-transparent and the sheet forms at the first
+ *   unramped live cells -- the reference-code parity candidate (its
+ *   wall carries floor gas, whose density-keyed eta reaches the vacuum
+ *   class smoothly). Both alternatives drop the physical
+ *   insulator-interface current sheet: potential missing physics,
+ *   recorded for a later revisit.
  * - wall_field_freeze = <bool> (default 0 = off, bit-identical):
  *   FIELD-side freeze of the masked band (work item B, v1). When on,
  *   every EVOLVED magnetic-field face whose COMPLETE Faraday update
@@ -435,32 +465,211 @@
  *   pc_mhd_block.resistive_validate_assembly).
  */
 /**
- * \brief Device view of the wall-band resistivity override
- * (implicit_mhd.wall_band_eta_override; see the ImplicitMHDWallMask
- * class comment). A location is BAND-INTERIOR -- and its field-advance
- * eta is REPLACED by the constant eta_override (dEta/dState = 0) -- iff
- * i >= first_band_*[j] for its staggering: every cell-centered cell of
- * its density/temperature interpolation neighborhood is masked, so E
- * locations on the stair interface itself (which bound live cells)
- * keep the composed eta by construction. The pointers are pre-offset
- * like the mask tables (nodal j valid over [-ng, nz+ng], cell j over
+ * \brief Device view of the wall-band resistivity treatment
+ * (implicit_mhd.wall_band_eta_override and wall_band_eta_mode; see the
+ * ImplicitMHDWallMask class comment). Under the default mode
+ * (override) a location is OVERRIDDEN -- its field-advance eta is
+ * REPLACED by the constant eta_override (dEta/dState = 0) -- iff
+ * i >= first_band_*[j] for its staggering. Which rows that covers
+ * depends on the wall model: under wall_model = dielectric the tables
+ * are the plain first-MASKED tables, so EVERY masked E row including
+ * the interface node on the wall contour is overridden (the contour
+ * node's composed eta would otherwise turn a dielectric into a
+ * near-superconducting ring, see BandEtaOverrideView); under the
+ * conductor contracts they are the band-INTERIOR tables (every
+ * cell-centered cell of the location's interpolation neighborhood
+ * masked), the interface rows keeping the composed eta -- the pinned
+ * projection makes the distinction moot there. The pointers are
+ * pre-offset like the mask tables (nodal j valid over [z_lo_nodal,
+ * z_hi_nodal] = [-ng, nz+ng], cell j over [z_lo_cell, z_hi_cell] =
  * [-ng, nz-1+ng]); first_band_cc is the plain masked cell-centered
  * table, consumed by the preconditioner's cell-centered interval-bound
  * fill (max(composed, override) there, so its maximum keeps bounding
- * the overridden edge values). Consumed by the residual's Ohm assembly
- * and by the solver-side PC eta fills only -- the preconditioner
- * itself ingests the overridden MultiFabs, so residual and PC stay
- * exact twins with no extra machinery.
+ * the overridden edge values) and by the Joule quench's cell-centered
+ * eta twin. Consumed by the residual's Ohm assembly and by the
+ * solver-side PC eta fills only -- the preconditioner itself ingests
+ * the overridden MultiFabs, so residual and PC stay exact twins with
+ * no extra machinery.
+ *
+ * The two other modes act on the SAME tables through the classifier
+ * warpx::mhd_wall_band::ClassifyBandEtaRow (below), which every
+ * consumer calls with its own family table so residual, PC edge fill
+ * and cell-centered fill agree row for row:
+ *
+ * - neumann: the composed eta of the nearest LIVE row along the wall
+ *   normal is continued into the masked band with zero normal gradient
+ *   for the masked rows within `cells` of the contour (the radial
+ *   depth i - first + 1 in the row itself, or the axial distance to a
+ *   neighbouring row whose table is live at this radial index -- the
+ *   z-facing stair faces; the radial source wins ties). Masked rows
+ *   farther out keep the override (the dielectric bay beyond the band,
+ *   where the coil sheets are painted, stays at the vacuum-class
+ *   override so it does not become a resistive flux conserver);
+ *   cells = -1 makes every masked row take the same-row live eta
+ *   (radial only). The axial search is limited to axial_reach rows
+ *   (the eta-argument fields' axial ghost width minus one, so a source
+ *   lookup never leaves filled data); the same-row radial source is
+ *   up to `cells` cells inward, which is why the solver requires boxes
+ *   spanning the full radial domain under this mode. The extension is
+ *   state dependent exactly as the live eta is (built from the same
+ *   frozen step-old density and temperature and the same stage current
+ *   as the composed eta of the source row), so the JFNK probes see a
+ *   smooth, if non-local, dependence; the preconditioner's frozen-eta
+ *   fills apply the identical rule at zero current.
+ *
+ * - transparent: the masked rows keep the override and the last
+ *   `cells` LIVE rows before the contour (radial distance first - i, or
+ *   the axial distance to a neighbouring row masked at this radial
+ *   index; the nearer one counts) carry a SMOOTH log-linear ramp from
+ *   their own composed value to the override at the contour:
+ *   eta_k = eta_composed(k) (eta_override / eta_composed(k))^((N - k)/N)
+ *   with k = 0 the row next to the contour, ..., N - 1 the innermost
+ *   ramp row (row N is composed). No step anywhere: the density-keyed
+ *   vacuum ramp only pops the eta up to the vacuum class where the
+ *   density reaches the floor AT the wall, so with dense gas on the
+ *   wall this spatial ramp is its substitute; the screening sheet of a
+ *   coil ramp then forms at the first unramped live cells instead of at
+ *   the eta step. The ramp is applied to the field-advance eta only
+ *   (residual, PC edge and cell-centered fills); the Joule heating
+ *   coefficient stays the composed eta at every live cell (the ramp
+ *   rows are fluid, unlike the masked cells, so the deposit there is
+ *   the composed eta times the actual current, which the ramp drives
+ *   toward zero).
  */
 struct WallBandEtaOverrideView
 {
+    /** implicit_mhd.wall_band_eta_mode (see the struct comment). */
+    enum Mode : int { override_constant = 0, neumann = 1, transparent = 2 };
+
     bool active = false;
+    int mode = override_constant;
     amrex::Real eta_override = 0.0;
+    /** neumann: wall_band_eta_neumann_cells (-1 = every masked row);
+     * transparent: wall_band_eta_transparent_cells. Unused (0) under
+     * override. */
+    int cells = 0;
+    /** neumann only: the axial search radius of the source lookup,
+     * min(cells, eta-argument axial ghost width - 1, table ghost
+     * width); 0 under the other modes. */
+    int axial_reach = 0;
     const int* first_band_er = nullptr; //!< E_r rows: (r-cell, z-node)
     const int* first_band_et = nullptr; //!< E_theta rows: (r-node, z-node)
     const int* first_band_ez = nullptr; //!< E_z rows: (r-node, z-cell)
     const int* first_band_cc = nullptr; //!< cc fill: (r-cell, z-cell)
+    /** Valid axial index ranges of the pre-offset tables; lookups of
+     * neighbouring rows beyond them are clamped (constant continuation,
+     * like the polyline itself). */
+    int z_lo_nodal = 0;
+    int z_hi_nodal = 0;
+    int z_lo_cell = 0;
+    int z_hi_cell = 0;
 };
+
+namespace warpx::mhd_wall_band
+{
+    /** How one electric-field (or cell-centered) location of a family
+     * takes its field-advance eta (see WallBandEtaOverrideView). */
+    struct BandEtaRow
+    {
+        /** 0 = the composed eta of the location itself; 1 = the
+         * override constant; 2 = the composed eta of the neumann source
+         * location (si, sj); 3 = the transparent ramp with the given
+         * override log-weight. */
+        int kind = 0;
+        int si = 0;
+        int sj = 0;
+        amrex::Real weight = 0.0; //!< kind 3: (N - k)/N
+    };
+
+    /** Classify location (i, j) of the family whose pre-offset table is
+     * `table` (valid axial range [z_lo, z_hi]). Pure integer
+     * comparisons on the geometry-static tables: under the override
+     * mode this reproduces `i >= table[j]` exactly, and a null table
+     * (no active treatment) classifies everything as composed. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    BandEtaRow ClassifyBandEtaRow (const WallBandEtaOverrideView& view,
+                                   const int* table, const int z_lo,
+                                   const int z_hi, const int i, const int j)
+    {
+        BandEtaRow row;
+        row.si = i;
+        row.sj = j;
+        if (table == nullptr) { return row; }
+        const int first = table[j];
+        const bool masked = (i >= first);
+        if (view.mode == WallBandEtaOverrideView::override_constant) {
+            if (masked) { row.kind = 1; }
+            return row;
+        }
+        const auto table_at = [&] (const int jj) {
+            const int jc = (jj < z_lo) ? z_lo : ((jj > z_hi) ? z_hi : jj);
+            return table[jc];
+        };
+        if (view.mode == WallBandEtaOverrideView::neumann) {
+            if (!masked) { return row; }
+            if (view.cells < 0) {
+                // every masked row: the same-row live eta (radial only)
+                row.kind = 2;
+                row.si = first - 1;
+                return row;
+            }
+            // nearest live row along the normal: the radial depth in this
+            // row, or a strictly nearer neighbouring row that is live at
+            // this radial index (a z-facing stair face); ties go radial.
+            int best = i - first + 1;
+            int best_j = j;
+            for (int d = 1; d <= view.axial_reach && d < best; ++d) {
+                if (table_at(j - d) > i) { best = d; best_j = j - d; break; }
+                if (table_at(j + d) > i) { best = d; best_j = j + d; break; }
+            }
+            if (best > view.cells) { row.kind = 1; return row; }
+            row.kind = 2;
+            if (best_j == j) { row.si = first - 1; }
+            else { row.si = i; row.sj = best_j; }
+            return row;
+        }
+        // transparent: masked rows keep the override; the live rows within
+        // `cells` of the contour (radially in this row, or axially to a
+        // neighbouring row masked at this radial index) ramp.
+        if (masked) { row.kind = 1; return row; }
+        int best = first - i;   // >= 1; INT_MAX-safe (first - i with i >= 0)
+        for (int d = 1; d <= view.cells && d < best; ++d) {
+            if (table_at(j - d) <= i || table_at(j + d) <= i) {
+                best = d;
+                break;
+            }
+        }
+        const int k = best - 1;
+        if (k >= view.cells) { return row; }
+        row.kind = 3;
+        row.weight = static_cast<amrex::Real>(view.cells - k) /
+                     static_cast<amrex::Real>(view.cells);
+        return row;
+    }
+
+    /** The field-advance eta of a classified location: `composed_here`
+     * is the location's own composed eta (always evaluated by the
+     * caller, so the default path is untouched), `composed(ii, jj)`
+     * evaluates the same composition at another location of the same
+     * family (the neumann source). The ramp is
+     * composed_here (eta_override / composed_here)^weight; a
+     * non-positive composed value (a zero user eta without the vacuum
+     * boost) takes the override outright. */
+    template <class Composed>
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real BandEta (const BandEtaRow& row, const amrex::Real eta_override,
+                         const amrex::Real composed_here, Composed&& composed)
+    {
+        if (row.kind == 1) { return eta_override; }
+        if (row.kind == 2) { return composed(row.si, row.sj); }
+        if (row.kind == 3) {
+            if (!(composed_here > 0.0)) { return eta_override; }
+            return composed_here *
+                   std::pow(eta_override / composed_here, row.weight);
+        }
+        return composed_here;
+    }
+} // namespace warpx::mhd_wall_band
 
 class ImplicitMHDWallMask
 {
@@ -478,8 +687,29 @@ public:
     /** Parse the wall inputs and, when active, build the static
      * first-masked-radial-index tables per electric-field staggering over
      * the ghost-extended axial range. Aborts outside RZ, on periodic z,
-     * on a malformed polyline, or on a polyline that reaches the axis. */
-    void Define (const amrex::Geometry& geom, const amrex::IntVect& ngrow);
+     * on a malformed polyline, or on a polyline that reaches the axis.
+     * eta_argument_axial_ghosts is the smallest axial ghost width of
+     * the fields the composed eta reads (nodal density and temperature,
+     * plasma current, cell-centered density and temperature); it bounds
+     * the neumann source lookup's axial reach (see
+     * WallBandEtaOverrideView::axial_reach). -1 = use ngrow's axial
+     * width. */
+    void Define (const amrex::Geometry& geom, const amrex::IntVect& ngrow,
+                 int eta_argument_axial_ghosts = -1);
+
+    /** Human-readable wall_band_eta_mode for banners: "override",
+     * "neumann" or "transparent". */
+    [[nodiscard]] const char* BandEtaModeName () const;
+
+    /** Whether the neumann band-eta mode is active (its same-row source
+     * lookup reads up to wall_band_eta_neumann_cells cells radially
+     * inward of a masked row, so the solver requires boxes spanning the
+     * full radial domain). */
+    [[nodiscard]] bool BandEtaNeumannActive () const
+    {
+        return m_active && (m_band_eta_override > 0.0) &&
+               m_band_eta_mode == BandEtaMode::neumann;
+    }
 
     /** Read a wall polyline CSV ("z, r" rows; one optional non-numeric
      * header row; blank and '#' lines skipped; the path is resolved
@@ -627,6 +857,19 @@ private:
      * field-advance eta at band-interior electric-field locations
      * (0 = off). */
     amrex::Real m_band_eta_override = 0.0;
+    /** implicit_mhd.wall_band_eta_mode (see WallBandEtaOverrideView). */
+    enum class BandEtaMode { override_constant, neumann, transparent };
+    BandEtaMode m_band_eta_mode = BandEtaMode::override_constant;
+    /** implicit_mhd.wall_band_eta_neumann_cells: masked rows within this
+     * many cells of the contour take the nearest live row's composed
+     * eta (-1 = every masked row). */
+    int m_band_eta_neumann_cells = 3;
+    /** implicit_mhd.wall_band_eta_transparent_cells: the last this many
+     * live rows ramp log-linearly to the override at the contour. */
+    int m_band_eta_transparent_cells = 3;
+    /** neumann: the axial reach of the source lookup (ghost-limited, see
+     * Define). */
+    int m_band_eta_axial_reach = 0;
     /** implicit_mhd.wall_field_freeze: identity rows for every evolved
      * magnetic-field face whose complete Faraday stencil is masked (see
      * the class comment). */

@@ -50,10 +50,18 @@ CircuitCoupler::CircuitCoupler (warpx::circuit::CoilSet const& coils,
         "CircuitCoupler: probe kind / exclusion vectors must match the coil set");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_params.probe_region == ProbeRegion::domain &&
-         m_params.probe_region_report.empty()) ||
+         m_params.probe_region_report.empty() &&
+         m_params.probe_exclude_wall_band_cells == 0) ||
             (m_region != nullptr && m_region->IsDefined()),
-        "CircuitCoupler: circuit.probe_region = wall_interior and "
-        "circuit.probe_region_report need the wall-polyline region table");
+        "CircuitCoupler: circuit.probe_region = wall_interior, "
+        "circuit.probe_region_report and circuit.probe_exclude_wall_band_cells "
+        "need the wall-polyline region table");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_params.probe_exclude_wall_band_cells == 0 ||
+            m_region->BandCells() == m_params.probe_exclude_wall_band_cells,
+        "CircuitCoupler: the region table's band width must equal "
+        "circuit.probe_exclude_wall_band_cells (the report's lambda_band is "
+        "the excluded linkage)");
 }
 
 const amrex::MultiFab*
@@ -88,9 +96,18 @@ warpx::circuit::ProbeNodeFilter
 CircuitCoupler::MeasurementFilter () const
 {
     warpx::circuit::ProbeNodeFilter filter;
+    const bool exclude_band = (m_params.probe_exclude_wall_band_cells > 0);
     if (m_params.probe_region == ProbeRegion::wall_interior) {
         filter.region = m_region;
-        filter.radial = warpx::circuit::RadialRegion::inside_wall;
+        // With the band exclusion the measured set shrinks from the whole
+        // wall interior to the interior beyond the N-cell band (the
+        // report's lambda_interior); without it, today's inside_wall.
+        filter.radial = exclude_band ? warpx::circuit::RadialRegion::interior
+                                     : warpx::circuit::RadialRegion::inside_wall;
+    } else if (exclude_band) {
+        // probe_region = domain with the band dropped: interior + exterior.
+        filter.region = m_region;
+        filter.radial = warpx::circuit::RadialRegion::outside_band;
     }
     return filter;
 }
@@ -528,11 +545,18 @@ CircuitCoupler::InitRegionReport (const bool restarting)
         << "#   lambda_total    = the unmasked, unweighted integral over "
            "the whole domain; = interior + band + exterior = w_plasma + "
            "w_mixed + w_boost to roundoff\n"
-        << "#   interior / band / exterior: nodes with r < r_wall(z) - 2 dr, "
-           "r_wall(z) - 2 dr <= r < r_wall(z), r >= r_wall(z) (node "
+        << "#   interior / band / exterior: nodes with r < r_wall(z) - N dr, "
+           "r_wall(z) - N dr <= r < r_wall(z), r >= r_wall(z), N = "
+        << m_region->BandCells() << " cells (node "
            "(r_i, z_j) inside the wall iff r_i < r_wall(z_j), r_wall = "
            "piecewise-linear, end-clamped interpolation of the wall "
            "polyline; numpy: r_node < np.interp(z_node, z_poly, r_poly))\n"
+        << "#   probe_exclude_wall_band_cells = "
+        << m_params.probe_exclude_wall_band_cells
+        << (m_params.probe_exclude_wall_band_cells > 0
+                ? ": the band's linkage is DROPPED from lambda_used "
+                  "(lambda_band = the excluded part)\n"
+                : " (off: lambda_used includes the band)\n")
         << "#   w_plasma / w_mixed / w_boost: nodes with linkage weight "
            "w = eta_phys/eta_field > 0.9, 0.1 <= w <= 0.9, w < 0.1 (the "
            "register circuit_linkage_weight; without it w == 1: w_plasma = "

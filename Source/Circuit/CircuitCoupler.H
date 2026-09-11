@@ -196,6 +196,22 @@ public:
          * independent of probe_region / probe_weight (works with the
          * defaults too). Needs a wall polyline. */
         std::string probe_region_report;
+        /** circuit.probe_exclude_wall_band_cells (default 0 = off,
+         * bit-identical): drop the linkage of the J_theta nodes within
+         * this many cells INSIDE the wall contour (r_wall(z_j) - N dr <=
+         * r_i < r_wall(z_j), the report's band widened to N cells) from
+         * every J-based back-EMF: under probe_region = wall_interior the
+         * coupler measures the interior r_i < r_wall - N dr, under domain
+         * everything but the band. The report keeps lambda_band, which
+         * is then exactly the excluded linkage. Rationale (2026-09-11):
+         * the reference formation model carries a stray reactance on its
+         * coil circuits that shunts part of the current, and its
+         * dielectric wall induces no current in the wall gas; flying that
+         * circuit, the currents the wall band induces (the coil-ramp
+         * screening sheet of the dense wall gas, a numerical image of
+         * the insulator-interface sheet) must not couple back into the
+         * coils. Needs a wall polyline. */
+        int probe_exclude_wall_band_cells = 0;
     };
 
     /** Name of the nodal (node r, node z) linkage-weight register the
