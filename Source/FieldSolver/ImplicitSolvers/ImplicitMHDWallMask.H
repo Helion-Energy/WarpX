@@ -179,12 +179,55 @@
  *     absorb-image Riemann faces (mass, momentum and enthalpy that
  *     cross are gone, the fluid analog of the run32 wall particle
  *     scraper) with C-inf rectified normal momentum, composed with the
- *     one-sided wall_thermal_bc drain. If a reference-parity no-normal-
- *     flow reflecting wall is ever needed, add it as a future
- *     wall_fluid_bc knob (absorb | reflect) rather than changing this
- *     default. The TANGENTIAL half of the reference code's contract -- u = 0 ON the
- *     contour -- IS available as implicit_mhd.wall_no_slip (below); the
- *     permeability half is still the absorbing scraper.
+ *     one-sided wall_thermal_bc drain. The reference-parity no-normal-
+ *     flow reflecting wall is the wall_fluid_bc = reflect option
+ *     (below); absorb stays the default. The TANGENTIAL half of the
+ *     reference code's contract -- u = 0 ON the contour -- is
+ *     implicit_mhd.wall_no_slip (below), independent of the
+ *     permeability choice.
+ *
+ * - wall_fluid_bc = absorb | reflect (default absorb, bit-identical): the
+ *   PERMEABILITY of the shaped wall to the fluid, i.e. which image of
+ *   the interior state the masked side of a stair interface face
+ *   presents to the advective face flux (requires an active wall_model
+ *   AND an active wall_thermal_bc -- zero_flux is enough -- because the
+ *   image needs the rigid-conductor contract that makes the masked band
+ *   a solid; the same rule as wall_no_slip).
+ *
+ *   absorb: the dielectric scraper described above -- the interior state
+ *   with its normal momentum rectified INTO the wall (C-infinity), so
+ *   incident plasma leaves the domain through the face at its
+ *   signal-limited rate and nothing is ever injected (on retreat the
+ *   image already IS the odd mirror, so the face closes).
+ *
+ *   reflect: the impermeable no-normal-flow wall -- the interior state
+ *   with ODD normal momentum, odd normal ion velocity and odd normal
+ *   electron velocity (density, energies, tangential momenta and the
+ *   wave speeds copied), i.e. the r_max PEC "reflect with odd normal
+ *   momentum" ghost applied per stair face, on approach and on retreat
+ *   alike. The face-centred normal velocities of both species are then
+ *   exactly zero, so BOTH flux choices (hlld and central, the limited
+ *   Rusanov term included) return an exactly zero mass flux, zero U_e,
+ *   E_i and U_i advection, a zero face electron velocity (J . n = 0 at
+ *   an insulating wall: no div(u_e) work through the face) and a normal
+ *   momentum flux that is the face's total pressure plus the solver's
+ *   stagnation correction (central: rho u_n^2 + p_T - B_n^2/mu0 + c
+ *   alpha rho u_n from the Rusanov jump; hlld: the HLL star pressure
+ *   p_T - B_n^2/mu0 + rho u_n (u_n + q), q the smoothed Davis bound):
+ *   mass and enthalpy pile up against the wall instead of leaving. The
+ *   tangential momentum flux keeps the Maxwell tension -B_n B_t/mu0 (the
+ *   field may thread the wall), the tangential viscous condition stays
+ *   wall_no_slip's, and the NORMAL viscous stress now differences the
+ *   odd image (the du_n/dn wall term of a stagnating flow). The
+ *   conduction drain, the thermal reservoir, the exterior clamp, the
+ *   band force mask and the EMF freeze are untouched; the wall ledger
+ *   keeps booking the interface fluxes and therefore books a
+ *   round-off-level crossing mass. EXPECTED and deliberately NOT
+ *   suppressed: a rigid image stagnates a supersonic contact jet against
+ *   the stair corners, converting ram into hot E_i/T_i pockets in the
+ *   last live cells (the reason absorb was chosen for the scraper, see
+ *   above) -- this option exists to fly the other bound of the wall
+ *   function against the reference code, whose wall is impermeable.
  *
  * - wall_no_slip = <bool> (default 0 = off, bit-identical): the
  *   Reference-parity NO-SLIP wall, realized where a no-slip condition
@@ -711,6 +754,13 @@ public:
         dirichlet_limited // the free-streaming-capped two-sided variant
     };
 
+    /** Fluid permeability of the stair-step interface
+     * (implicit_mhd.wall_fluid_bc); see the class comment. */
+    enum class FluidBC {
+        absorb,  // dielectric scraper: into-wall rectified normal momentum
+        reflect  // impermeable wall: odd normal momentum image
+    };
+
     /** Parse the wall inputs and, when active, build the static
      * first-masked-radial-index tables per electric-field staggering over
      * the ghost-extended axial range. Aborts outside RZ, on periodic z,
@@ -776,8 +826,23 @@ public:
      * carries it too. */
     [[nodiscard]] bool NoSlip () const { return m_active && m_no_slip; }
 
+    /** Reference-parity IMPERMEABLE wall (implicit_mhd.wall_fluid_bc =
+     * reflect; see the class comment): the masked side of a stair
+     * interface face presents the odd-normal-momentum image of the
+     * interior state, so no mass, no advected energy and no normal
+     * electron flow cross the contour. false = the absorbing scraper
+     * image (the default). */
+    [[nodiscard]] bool ReflectFluid () const
+    {
+        return m_active && m_fluid_bc == FluidBC::reflect;
+    }
+
     /** Human-readable thermal mode for banners. */
     [[nodiscard]] const char* ThermalBCName () const;
+
+    /** Human-readable fluid permeability ("absorb" | "reflect") for
+     * banners; "absorb" when the wall is inactive. */
+    [[nodiscard]] const char* FluidBCName () const;
 
     /** Wall reservoir temperature [eV] (temperature mode). */
     [[nodiscard]] amrex::Real WallTemperature_eV () const
@@ -912,6 +977,10 @@ private:
      * the contour, u_t = 0 (see the class comment). Independent of the
      * thermal BC. */
     bool m_no_slip = false;
+    /** implicit_mhd.wall_fluid_bc: which image of the interior state the
+     * masked side of a stair interface face presents to the advective
+     * flux -- absorb (the scraper, default) or reflect (impermeable). */
+    FluidBC m_fluid_bc = FluidBC::absorb;
     int m_ng = 0;   //!< axial ghost extension of the index tables
     int m_nz = 0;   //!< axial cells
 

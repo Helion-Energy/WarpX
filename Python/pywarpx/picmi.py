@@ -3878,6 +3878,29 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    wall_fluid_bc: {"absorb", "reflect"}, default="absorb"
+        PERMEABILITY of the shaped wall to the fluid -- which image of
+        the interior state the masked side of a stair interface face
+        presents to the advective face flux (requires an active
+        wall_model and an active wall_thermal_bc, zero_flux is enough,
+        like wall_no_slip; the default is bit-identical). "absorb": the
+        dielectric scraper -- the interior state with its normal
+        momentum rectified INTO the wall, so incident plasma leaves the
+        domain through the face and nothing is ever injected. "reflect":
+        the reference code's IMPERMEABLE no-normal-flow wall -- the
+        interior state with odd normal momentum, odd normal ion velocity
+        and odd normal electron velocity (everything else copied), so
+        both flux choices return an exactly zero mass flux, zero energy
+        advection and a zero face electron velocity (J . n = 0) while the
+        normal momentum flux is the face pressure plus the solver's
+        stagnation correction: mass and enthalpy pile up against the wall
+        instead of leaving. The conduction drain, the reservoir, the
+        exterior clamp, the band force mask and the EMF freeze are
+        unchanged; the wall ledger books a round-off crossing mass. A
+        rigid image stagnates supersonic contact jets against the stair
+        corners (hot E_i/T_i pockets in the last live cells) -- expected,
+        not suppressed; see wall_corner_temperature_pin_rate.
+
     conduction_pc_coefficients: bool, default=True
         Hand the block preconditioner the frozen per-face conduction
         diffusivities the conduction kernel applies (clamps, boosts, the
@@ -4298,6 +4321,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_viscosity_band_value=None,
         wall_viscosity_band_mode=None,
         wall_no_slip=None,
+        wall_fluid_bc=None,
         wall_friction_heating=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
@@ -4482,6 +4506,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_viscosity_band_value = wall_viscosity_band_value
         self.wall_viscosity_band_mode = wall_viscosity_band_mode
         self.wall_no_slip = wall_no_slip
+        self.wall_fluid_bc = wall_fluid_bc
         self.wall_friction_heating = wall_friction_heating
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
@@ -4713,6 +4738,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value
         implicit_mhd.wall_viscosity_band_mode = self.wall_viscosity_band_mode
         implicit_mhd.wall_no_slip = self.wall_no_slip
+        implicit_mhd.wall_fluid_bc = self.wall_fluid_bc
         implicit_mhd.wall_friction_heating = self.wall_friction_heating
         # strings route to the parser signature; numbers keep the
         # bit-identical constant fast path

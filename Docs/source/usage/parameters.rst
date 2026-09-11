@@ -6948,6 +6948,76 @@ Jacobian probes.
     run and its ion energy has the wall sink as its only channel — a
     monotone collapse with nothing to replenish it.
 
+.. pp:param:: implicit_mhd.wall_fluid_bc
+    :type: ``string``
+    :default: ``absorb``
+
+    PERMEABILITY of the shaped wall to the fluid: which image of the
+    interior state the masked side of a stair interface face presents to
+    the advective face flux (requires an active
+    :pp:param:`implicit_mhd.wall_model` AND an active
+    :pp:param:`implicit_mhd.wall_thermal_bc` — ``zero_flux`` is enough —
+    for the same reason as :pp:param:`implicit_mhd.wall_no_slip`: the
+    image needs the rigid-conductor contract that makes the masked band a
+    solid). The default is bit-identical to the pre-knob behaviour.
+
+    ``absorb`` (default): the dielectric SCRAPER. The image is the
+    interior state with its normal momentum rectified INTO the wall
+    (:math:`C^\infty`, exactly zero at stagnation), so incident plasma
+    leaves the domain through the face at its signal-limited rate and
+    nothing is ever injected; on retreat the image already is the odd
+    mirror and the face closes. Mass, momentum-carried enthalpy and
+    electron energy that cross are gone from the fluid and booked by the
+    wall ledger (:pp:param:`implicit_mhd.wall_ledger_file`).
+
+    ``reflect``: the IMPERMEABLE no-normal-flow wall of the reference
+    code. The image is the interior state with ODD normal momentum, odd
+    normal ion velocity and odd normal electron velocity — density,
+    energies, tangential momenta and the wave speeds copied — i.e. the
+    ``r_max`` PEC "reflect with odd normal momentum" ghost applied per
+    stair face, on approach and on retreat alike. With equal states on
+    both sides except :math:`u_n^R = -u_n^L` and
+    :math:`u_{e,n}^R = -u_{e,n}^L`, both flux choices
+    (:pp:param:`implicit_mhd.fluid_flux` ``hlld`` and ``central``, the
+    limited Rusanov term included) return an EXACTLY zero mass flux, zero
+    :math:`U_e`, :math:`E_i` and :math:`U_i` advection and a zero face
+    electron velocity (:math:`J\cdot n = 0` at an insulating wall: no
+    :math:`\nabla\cdot u_e` work through the face); for ``central`` the
+    channels are arithmetic means of equal-and-opposite terms, for
+    ``hlld`` the symmetric Davis bounds give :math:`S_M = 0` exactly and
+    equal star fractions on both sides so the telescoped jumps cancel
+    pairwise. The normal momentum flux is the face's total pressure plus
+    the solver's stagnation correction (``central``:
+    :math:`\rho u_n^2 + p_T - B_n^2/\mu_0 + c\,\alpha\,\rho u_n` from the
+    Rusanov jump :math:`-2\rho u_n`; ``hlld``: the HLL star pressure
+    :math:`p_T - B_n^2/\mu_0 + \rho u_n (u_n + q)` with :math:`q` the
+    smoothed Davis bound), so mass and enthalpy pile up against the wall
+    instead of leaving. The tangential momentum flux keeps the Maxwell
+    tension :math:`-B_n B_t/\mu_0` (the field may thread the wall), the
+    tangential viscous condition stays that of
+    :pp:param:`implicit_mhd.wall_no_slip`, and the normal viscous stress
+    now differences the odd image (the :math:`\partial u_n/\partial n`
+    wall term of a stagnating flow). The conduction drain and the thermal
+    reservoir, the exterior clamp of the masked band, the band force mask
+    and the EMF freeze are untouched; the wall ledger keeps booking the
+    interface fluxes and therefore books a round-off-level crossing mass
+    (its energy column is the conduction drain alone).
+
+    EXPECTED and deliberately NOT suppressed: a rigid image stagnates a
+    supersonic contact jet against the stair corners, converting ram into
+    hot :math:`E_i`/:math:`T_i` pockets in the last live cells (the
+    reason ``absorb`` was chosen for the scraper; see
+    :pp:param:`implicit_mhd.wall_model`). ``reflect`` exists to fly that
+    other bound of the wall function against the reference code, whose
+    shaped wall is impermeable (velocity rows omitted on the contour and
+    its skin, a zero-mass-flux advection condition, a Dirichlet
+    temperature bath); pair it with
+    :pp:param:`implicit_mhd.wall_corner_temperature_pin_rate` to relax the
+    two-walled corner cells toward the wall temperature. The block
+    preconditioner has no advective wall-face term in either mode (the
+    masked band is identity rows there), so the choice changes only the
+    Jacobian the preconditioner approximates, not the preconditioner.
+
 .. pp:param:: implicit_mhd.wall_friction_heating
     :type: ``string``
     :default: ``book``

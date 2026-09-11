@@ -248,6 +248,24 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "implicit_mhd.wall_model (the no-slip condition acts on the "
         "stair-step faces of the masked wall band)");
 
+    // Fluid permeability of the stair-step interface (see the class
+    // comment): absorb = the scraper image (default, bit-identical),
+    // reflect = the impermeable odd-normal-momentum image. Parsed before
+    // the early return so a permeability choice without a wall model is
+    // a loud input error, never a silent no-op.
+    std::string fluid_bc = "absorb";
+    const bool has_fluid_bc = (pp.query("wall_fluid_bc", fluid_bc) != 0);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        fluid_bc == "absorb" || fluid_bc == "reflect",
+        "implicit_mhd.wall_fluid_bc must be 'absorb' (the scraper image, "
+        "default) or 'reflect' (the impermeable no-normal-flow wall)");
+    m_fluid_bc = (fluid_bc == "reflect") ? FluidBC::reflect : FluidBC::absorb;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !has_fluid_bc || wall_model != "none",
+        "implicit_mhd.wall_fluid_bc requires an active "
+        "implicit_mhd.wall_model (the fluid image acts on the stair-step "
+        "faces of the masked wall band)");
+
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
     // without a wall model is a loud input error, never a silent no-op.
@@ -306,6 +324,17 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "face condition needs the rigid-conductor fluid contract that "
         "makes the masked band a SOLID. Without it the band is ordinary "
         "live fluid and u_t = 0 would be imposed between two fluid cells");
+    // The same solid is what the reflecting image needs: without the
+    // rigid-conductor contract there is no interface face at all (the
+    // stair classification rides on wall_thermal_bc != none), so a
+    // reflect request would be a silent no-op -- refused instead.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_fluid_bc == FluidBC::absorb || m_thermal_bc != ThermalBC::none,
+        "implicit_mhd.wall_fluid_bc = reflect requires an active "
+        "implicit_mhd.wall_thermal_bc (zero_flux is enough): the "
+        "impermeable image acts on the stair interface faces, which exist "
+        "only under the rigid-conductor fluid contract that makes the "
+        "masked band a SOLID");
 
     if (wall_model == "none") {
         m_active = false;
@@ -703,6 +732,13 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                           "stair contour, antisymmetric tangential viscous "
                           "image; normal component free)";
     }
+    if (m_fluid_bc == FluidBC::reflect) {
+        amrex::Print() << "; fluid BC reflect (IMPERMEABLE stair faces: odd "
+                          "normal momentum image, zero mass and energy "
+                          "advection through the contour, J . n = 0)";
+    } else {
+        amrex::Print() << "; fluid BC absorb (the dielectric scraper image)";
+    }
     if (m_field_freeze) {
         amrex::Print() << "; field freeze active (exterior evolved-B "
                           "identity rows: "
@@ -730,6 +766,12 @@ const char* ImplicitMHDWallMask::ThermalBCName () const
     }
     return (m_thermal_bc == ThermalBC::outflow_limited) ? "outflow_limited"
                                                         : "zero_flux";
+}
+
+const char* ImplicitMHDWallMask::FluidBCName () const
+{
+    return (m_active && m_fluid_bc == FluidBC::reflect) ? "reflect"
+                                                        : "absorb";
 }
 
 const int* ImplicitMHDWallMask::FirstMaskedCellCentered () const

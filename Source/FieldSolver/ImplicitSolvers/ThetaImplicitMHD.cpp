@@ -4431,6 +4431,14 @@ void ThetaImplicitMHD::PrintParameters () const
                                          "normal component free)")
                            : std::string("off"))
                    << "\n"
+                   << "Wall fluid BC (permeability):  "
+                   << m_wall_mask.FluidBCName()
+                   << (m_wall_mask.ReflectFluid()
+                           ? " (IMPERMEABLE: odd normal momentum image at "
+                             "the stair faces, zero mass/energy crossing)"
+                           : " (dielectric scraper: into-wall rectified "
+                             "normal momentum image)")
+                   << "\n"
                    << "Wall friction heating:         "
                    << m_wall_friction_heating
                    << (m_wall_friction_heating == "drop"
@@ -10911,6 +10919,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // far side, so ImplicitMHDWallMask rejects wall_no_slip without a
     // wall_thermal_bc), hence wall_mechanics is already true here.
     const bool wall_no_slip = m_wall_mask.NoSlip();
+    // Reference-parity IMPERMEABLE wall (implicit_mhd.wall_fluid_bc =
+    // reflect; see ImplicitMHDWallMask): the masked side of a stair
+    // interface face presents the ODD-normal-momentum image of the
+    // interior state instead of the absorbing scraper image (see the
+    // wall_interface block in the kernel). Rides on the same stair
+    // classification and requires the same solid, hence wall_mechanics
+    // is already true here. false = the absorb image, bit-identical.
+    const bool wall_reflect_fluid = m_wall_mask.ReflectFluid();
     // implicit_mhd.wall_friction_heating = drop (see the header): the
     // tangential friction work of the no-slip faces leaves E_i through the
     // face (u_live . Pi_f) and is skipped by the dissipation register, so
@@ -11580,35 +11596,75 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // the incident kinetic energy unadjusted); the thermal
                 // reservoir acts ONLY through the conduction drain
                 // below.
+                //
+                // IMPERMEABLE image (implicit_mhd.wall_fluid_bc = reflect,
+                // the reference code's no-normal-flow wall): the masked
+                // side presents the interior state with ODD normal
+                // momentum, odd normal ion velocity and odd normal
+                // electron velocity -- the r_max PEC "reflect with odd
+                // normal momentum" ghost applied per stair face, on
+                // approach and on retreat alike (the absorb image below
+                // already IS this mirror on retreat). Both flux choices
+                // then see equal densities, energies, pressures and
+                // tangential momenta with u_n^R = -u_n^L and u_e,n^R =
+                // -u_e,n^L: the mass, U_e, E_i and U_i advection and the
+                // face electron velocity are exactly zero (central: the
+                // arithmetic means; hlld: S_M = 0 exactly by the
+                // symmetric Davis bounds, equal star fractions on both
+                // sides and the telescoped jumps cancelling pairwise;
+                // the Rusanov term sees zero jumps in those channels),
+                // and the normal momentum flux is the total pressure
+                // plus the solver's stagnation correction. Nothing is
+                // rectified, so there is no width and no branch: the
+                // image is LINEAR in the interior state. The exterior
+                // clamp, the conduction drain and the reservoir, the
+                // band force mask and the EMF freeze are untouched; the
+                // wall ledger books the (round-off) interface fluxes as
+                // before. Deliberately NOT suppressed: this image
+                // stagnates a supersonic contact jet against the stair
+                // corners (the keV pockets described above) -- that is
+                // the wall function's other bound, flown on purpose.
                 auto& image = wall_right_masked ? right : left;
                 const auto& interior_state =
                     wall_right_masked ? left : right;
                 image = interior_state;
-                const amrex::Real rectifier_width =
-                    parameters.hlld_kappa_signal *
-                    std::sqrt(
-                        parameters.gamma_e *
-                        (parameters.gamma_e - 1.0_rt) *
-                        std::max(interior_state.electron_energy,
-                                 parameters.electron_pressure_floor /
-                                     (parameters.gamma_e - 1.0_rt)) *
-                        interior_state.safe_density);
-                const amrex::Real into_wall_sign =
-                    wall_right_masked ? 1.0_rt : -1.0_rt;
-                // m * smooth_sign(m, w) is the C-infinity |m| with an
-                // exact zero at m = 0 (no spurious O(w) suction on
-                // quiescent faces).
-                const amrex::Real normal_momentum =
-                    into_wall_sign * interior_state.momentum[normal] *
-                    theta_implicit_mhd::smooth_sign(
-                        interior_state.momentum[normal], rectifier_width);
-                image.momentum[normal] = normal_momentum;
-                image.ion_velocity[normal] =
-                    normal_momentum / image.safe_density;
-                image.electron_velocity_normal =
-                    interior_state.electron_velocity_normal +
-                    (image.ion_velocity[normal] -
-                     interior_state.ion_velocity[normal]);
+                if (wall_reflect_fluid) {
+                    image.momentum[normal] = -interior_state.momentum[normal];
+                    image.ion_velocity[normal] =
+                        -interior_state.ion_velocity[normal];
+                    image.electron_velocity_normal =
+                        -interior_state.electron_velocity_normal;
+                } else {
+                    const amrex::Real rectifier_width =
+                        parameters.hlld_kappa_signal *
+                        std::sqrt(
+                            parameters.gamma_e *
+                            (parameters.gamma_e - 1.0_rt) *
+                            std::max(interior_state.electron_energy,
+                                     parameters.electron_pressure_floor /
+                                         (parameters.gamma_e - 1.0_rt)) *
+                            interior_state.safe_density);
+                    const amrex::Real into_wall_sign =
+                        wall_right_masked ? 1.0_rt : -1.0_rt;
+                    // m * smooth_sign(m, w) is the C-infinity |m| with an
+                    // exact zero at m = 0 (no spurious O(w) suction on
+                    // quiescent faces).
+                    const amrex::Real normal_momentum =
+                        into_wall_sign * interior_state.momentum[normal] *
+                        theta_implicit_mhd::smooth_sign(
+                            interior_state.momentum[normal],
+                            rectifier_width);
+                    image.momentum[normal] = normal_momentum;
+                    image.ion_velocity[normal] =
+                        normal_momentum / image.safe_density;
+                    image.electron_velocity_normal =
+                        interior_state.electron_velocity_normal +
+                        (image.ion_velocity[normal] -
+                         interior_state.ion_velocity[normal]);
+                }
+                // Wave speeds of the image, recomputed from its own
+                // normal velocities (both images; for the odd image they
+                // equal the interior's by symmetry).
                 image.wave_speed =
                     std::max(std::abs(image.ion_velocity[normal]) +
                                  image.sound_speed,
