@@ -174,10 +174,13 @@ public:
      *                          current positions of the particles. When different than 0,
      *                          the particle position will be temporarily modified to match
      *                          the time of the deposition.
+     * \param[in] push_type Type of particle push used with the deposition. With
+     *                      PushType::Implicit the time-centered velocities are used.
      */
     void
     DepositCurrent (ablastr::fields::MultiLevelVectorField const& J,
-                    amrex::Real dt, amrex::Real relative_time);
+                    amrex::Real dt, amrex::Real relative_time,
+                    PushType push_type = PushType::Explicit);
 
     /**
      * \brief Deposit temperature to species MFs. This is done for each
@@ -345,17 +348,6 @@ public:
     }
 
     void ScrapeParticlesAtEB (ablastr::fields::MultiLevelScalarField const& distance_to_eb);
-
-    /** Cumulative charge [C] collected at the embedded boundary by the given
-     *  species since the start of the run (insulating EB wall type only;
-     *  summed over MPI ranks each step, not preserved across restart). */
-    [[nodiscard]] amrex::Real GetEBCollectedCharge (const std::string& species_name) const;
-
-    /** Cumulative kinetic energy [J] collected at the embedded boundary by
-     *  the given species since the start of the run (insulating EB wall type
-     *  only; summed over MPI ranks each step, not preserved across restart;
-     *  zero-mass species are not tallied). */
-    [[nodiscard]] amrex::Real GetEBCollectedEnergy (const std::string& species_name) const;
 
     std::string m_B_ext_particle_s = "none";
     std::string m_E_ext_particle_s = "none";
@@ -553,21 +545,6 @@ private:
 
     // physical particles (+ laser)
     amrex::Vector<std::unique_ptr<WarpXParticleContainer>> allcontainers;
-
-    /** Per-species cumulative charge [C] and kinetic energy [J] collected at
-     *  the embedded boundary (insulating EB wall type). Globally summed each
-     *  step; indexed like allcontainers. */
-    amrex::Vector<amrex::Real> m_eb_collected_charge;
-    amrex::Vector<amrex::Real> m_eb_collected_energy;
-
-    /** Accumulate the charge and kinetic energy of the particles that the
-     *  subsequent scrape pass will collect (signed distance to the EB below
-     *  standoff_cells cells) into the per-species EB tallies. Must be called
-     *  BEFORE the scrape invalidates the particles. Collective (global sum).
-     */
-    void TallyParticlesToBeCollectedAtEB (
-        ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-        amrex::Real standoff_cells);
 
     void ReadParameters ();
 

@@ -141,6 +141,7 @@ public:
     // Functions used by implicit solvers
     //
     void SyncMassMatricesPC ();
+    void SyncMassMatrices ();
     void SaveParticlesAtImplicitStepStart ();
     void FinishImplicitParticleUpdate (amrex::Real a_time);
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
@@ -231,29 +232,6 @@ public:
      */
     static inline ParticleBoundaryType eb_particle_boundary = ParticleBoundaryType::Absorbing;
 
-    /** Embedded-boundary wall type (`boundary.eb_type`).
-     *
-     *  Absorbing (default): particles are collected where the signed distance
-     *  to the EB crosses zero -- the historical behavior.
-     *
-     *  Insulating: a collecting wall held off the plasma by a maintained
-     *  density standoff band. Particles are collected `eb_standoff_cells`
-     *  cells before the surface (so no charge is ever deposited against the
-     *  wall), the collected charge and kinetic energy are tallied per
-     *  species, and -- with the hybrid electron energy equation on -- T_e is
-     *  filled with zero normal gradient into the band and the covered region
-     *  each step, so grad P_e drives no spurious E field at the plasma edge.
-     */
-    static inline auto eb_boundary_type = EmbeddedBoundaryType::Absorbing;
-
-    /** Width of the insulating-wall standoff band, in cells
-     *  (`boundary.eb_standoff_cells`): particles are collected where the
-     *  signed distance to the EB falls below this many cells (times the
-     *  largest cell size of the level). Only used with
-     *  `boundary.eb_type = insulating`.
-     */
-    static inline amrex::Real eb_standoff_cells = amrex::Real(2.0);
-
     //! Integers that correspond to the time dependency of J (constant, linear)
     //! and rho (linear, quadratic) for the PSATD algorithm
     static inline auto time_dependency_J = TimeDependencyJ::Default;
@@ -308,6 +286,10 @@ public:
 
     //! Maximum number of allowed grid crossings for particles
     static int particle_max_grid_crossings;
+
+    //! Maximum number of allowed grid crossings for particles when using mass matrices for Jacobian
+    //! The Villasenor deposition requires this value at compile time for arrays used in the routine
+    static constexpr int villasenor_mass_matrices_max_grid_crossings = 3;
 
     //! Order of finite centering of fields (from staggered grid to nodal grid), along x
     static int field_centering_nox;
@@ -462,7 +444,7 @@ public:
      */
     amrex::Real GlobalPlasmaFrequencyMax ();
     amrex::Real GlobalCyclotronFrequencyMax ();
-    void ApplyDtLimiters ();
+    void ApplyDtLimiters (int step);
 
     /** Print main PIC parameters to stdout */
     void PrintMainPICparameters ();
@@ -863,7 +845,7 @@ public:
     [[nodiscard]] amrex::IntVect get_numprocs() const {return numprocs;}
 
     /** Electrostatic solve call */
-    void ComputeSpaceChargeField (bool reset_E_field, bool reset_B_field);
+    void ComputeSpaceChargeField (bool reset_E_field, bool reset_B_field, bool verbose_step);
 
     // Magnetostatic Solver Interface
     MagnetostaticSolver::VectorPoissonBoundaryHandler m_vector_poisson_boundary_handler;
@@ -1020,20 +1002,18 @@ public:
     void ComputeFaceExtensions();
     /**
     * \brief Do the one-way extension. Borrowing decisions are made only by the
-    * owner copy of each face; the area each lender gave away and the intruded
-    * marks recorded toward faces of other fabs are accumulated per direction
-    * for the cross-box reduction in ComputeFaceExtensions.
+    * owner copy of each face; the area each lender gave away is accumulated
+    * per direction in \c lent_area for the cross-box reduction in
+    * ComputeFaceExtensions.
     */
     void ComputeOneWayExtensions (
-        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area,
-        std::array< std::unique_ptr<amrex::iMultiFab>, 3 >& intruded_mark);
+        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area);
     /**
     * \brief Do the eight-ways extension (same cross-box bookkeeping as the
     * one-way pass).
     */
     void ComputeEightWaysExtensions (
-        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area,
-        std::array< std::unique_ptr<amrex::iMultiFab>, 3 >& intruded_mark);
+        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area);
 
 #ifdef WARPX_USE_FFT
     auto&  get_spectral_solver_fp (int lev) {return *spectral_solver_fp[lev];}
@@ -1152,7 +1132,8 @@ private:
     void OneStep (
         amrex::Real a_cur_time,
         amrex::Real a_dt,
-        int a_step
+        int a_step,
+        bool verbose_step
     );
 
     void OneStep_nosub (
@@ -1279,7 +1260,9 @@ private:
     amrex::Vector<amrex::Real> dt;
     // How often to update the timestep when using adaptive timestepping
     ablastr::utils::text::IntervalsParser m_dt_update_interval;
+    ablastr::utils::text::IntervalsParser m_dt_update_write_interval;
     std::string m_dt_update_diagnostic_file;
+    void WriteDtUpdateFileHeader ();
 
     bool m_safe_guard_cells = false;
 
@@ -1333,10 +1316,12 @@ private:
      */
     amrex::Vector<  std::unique_ptr<amrex::iMultiFab> > m_eb_reduce_particle_shape;
 
-    /** EB: for every mesh face flag_info_face contains a:
-     *          * 0 if the face needs to be extended
-     *          * 1 if the face is large enough to lend area to other faces
-     *          * 2 if the face is actually intruded by other face
+    /** EB: for every mesh face flag_info_face contains one of the FaceInfo::Flag values:
+     *          * FaceInfo::extended if the face needs to be extended
+     *          * FaceInfo::available if the face is large enough to lend area to other faces
+     *          * FaceInfo::intruded if the face is actually intruded by other face
+     *          * FaceInfo::bck_stabilized if the face could not be extended and was stabilized
+     *            with the BCK correction instead
      * It is initialized in WarpX::MarkExtensionCells
      * This is only used for the ECT solver.*/
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3 > > m_flag_info_face;
@@ -1359,11 +1344,14 @@ private:
      * each face, so faces on shared nodal planes are decided exactly once and
      * the cross-box consequences can be reduced to the owner afterwards. */
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3 > > m_ect_face_owner_mask;
-    /** EB/ECT: true when any unstable or intruded face sits within one cell of
-     * a fab boundary (or on a shared nodal plane), i.e. when the conformal
-     * B push must synchronize the enlarged-cell accumulator (Venl) across
-     * boxes. False for single-box non-periodic layouts: the legacy
-     * communication-free path is then taken and stays bit-identical. */
+    /** EB/ECT: true when the level has more than one box, or is periodic in
+     * any direction, i.e. whenever a face can be shared between fabs and the
+     * conformal B push must therefore synchronize the enlarged-cell
+     * accumulator (Venl) across boxes. This is a property of the layout, not
+     * of where the cut cells actually fall: it is set for any multi-box or
+     * periodic layout, whether or not a cut cell is near a seam. False only
+     * for single-box non-periodic layouts, which take the legacy
+     * communication-free path and stay bit-identical to it. */
     bool m_ect_needs_seam_sync = false;
 
     //! Whether the conformal (ECT) embedded-boundary field update is active

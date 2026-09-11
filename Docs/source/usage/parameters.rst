@@ -290,6 +290,8 @@ Overall simulation parameters
           - ``implicit_evolve.max_particle_iterations`` (``integer``, default: 21)
           - ``implicit_evolve.particle_tolerance`` (``float``, default: 1.e-10)
           - ``implicit_evolve.particle_suborbits`` (``bool``, default: false)
+          - ``implicit_evolve.suborbit_warning_threshold`` (``int``, default: 5)
+          - ``implicit_evolve.suborbit_statistics_interval`` (``int``, default: 100)
           - ``implicit_evolve.print_unconverged_particle_details`` (``bool``, default: false)
 
         - ``implicit_evolve.use_mass_matrices_jacobian`` (``bool``, default: false).
@@ -366,6 +368,55 @@ Overall simulation parameters
       Note that exact energy convergence is achieved only with one grid block and :pp:param:`psatd.periodic_single_box_fft = 1`. Otherwise,
       the energy conservation is spoiled because of the inconsistency of the periodic assumption of the spectral solver and the
       non-periodic behavior of the individual blocks.
+
+    * ``semi_implicit_darwin``: Use the semi-implicit Darwin field solver.
+
+      This solver advances the electrostatic (longitudinal) field together with the inductive
+      (magnetoinductive Darwin) field, thereby retaining low-frequency magnetic effects while
+      filtering out light waves.
+
+      - **Requirements and restrictions:**
+
+        - This solver requires an electrostatic solver to also be set, i.e.
+          :pp:param:`warpx.do_electrostatic` must be specified (e.g. ``warpx.do_electrostatic = labframe``).
+          Unlike a pure electrostatic run, setting ``algo.evolve_scheme = semi_implicit_darwin`` does
+          **not** disable the electromagnetic solver, since the magnetic field is still evolved.
+        - The electromagnetic solver must be the Yee solver, i.e. :pp:param:`algo.maxwell_solver` = ``yee``
+          (the default). No other Maxwell solver is compatible with the Darwin scheme.
+
+      - **Linear (GMRES) solver options:**
+        The magnetoinductive solve uses the AMReX GMRES linear solver, whose parameters are set with the
+        ``amrex_gmres`` prefix:
+
+        - ``amrex_gmres.verbose_int`` (``int``, default: 2) Level of verbosity of the linear solver output.
+        - ``amrex_gmres.restart_length`` (``int``, default: 30) How often to restart the GMRES iterations.
+        - ``amrex_gmres.max_iterations`` (``int``, default: 1000) Maximum number of iterations.
+        - ``amrex_gmres.relative_tolerance`` (``float``, default: 1.0e-4) Relative tolerance of the convergence.
+        - ``amrex_gmres.absolute_tolerance`` (``float``, default: 0.0) Absolute tolerance of the convergence.
+        - ``amrex_gmres.pc_type`` (``string``, default: ``none``) Preconditioner applied inside the GMRES
+          iterations. The only supported options are ``none`` and ``pc_darwin_mlmg``, described below.
+
+      - **Preconditioner options:**
+        Setting ``amrex_gmres.pc_type = pc_darwin_mlmg`` use the multi-grid algorithm
+        as a preconditioner within the GMRes iteration. Because the Darwin magnetoinductive equation
+        :math:`\nabla^4 Z + \nabla \times ( \chi(x) \nabla\times Z) = ...` is not well-adapted for multi-grid
+        (and because the preconditioner does not need to solve for the exact equation), here the multigrid
+        solver uses the approximate equation :math:`\nabla^2 ( \nabla^2 + \chi ) Z = ...`; this
+        is equivalent to the original magnetostatic equation if :math:`Z` is divergence-free and
+        `\chi` is a slowly varying function of space. In practice, two separate passes of multigrid are
+        used in the preconditioner, in order to invert the operators  :math:`\nabla^2 + \chi` and `\nabla^2`
+        respectively.
+
+        - ``pc_darwin_mlmg.verbose`` (``bool``, default: false)
+        - ``pc_darwin_mlmg.bottom_verbose`` (``bool``, default: false)
+        - ``pc_darwin_mlmg.agglomeration`` (``bool``, default: true)
+        - ``pc_darwin_mlmg.consolidation`` (``bool``, default: true)
+        - ``pc_darwin_mlmg.max_iter`` (``int``, default: 2) Fixed number of V-cycles per multigrid
+          solve. This is deliberately fixed, so that the preconditioner stays a fixed linear operator
+          over a GMRES solve (only true when solver tolerance is set to 0, as by default).
+        - ``pc_darwin_mlmg.max_coarsening_level`` (``int``, default: 30)
+        - ``pc_darwin_mlmg.relative_tolerance`` (``float``, default: 0)
+        - ``pc_darwin_mlmg.absolute_tolerance`` (``float``, default: 0)
 
 .. _param-electrostatic-pic:
 
@@ -1039,51 +1090,6 @@ additionally define the electric potential at the embedded boundary with an anal
       ``boundary.<species_name>.u_th`` (in units of :math:`c`, i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`),
       the same input used by the domain ``thermal`` particle boundary condition. The same standard
       deviation is used to sample all components.
-
-.. pp:param:: boundary.eb_type
-    :type: ``string``
-    :default: ``absorbing``
-    :optional:
-
-    The embedded-boundary wall type. Options are:
-
-    * ``absorbing``: Particles are collected where they reach the embedded boundary surface. This is the default behavior.
-
-    * ``insulating``: A collecting wall held off the plasma by a maintained density standoff band.
-      Particles are collected where the signed distance to the embedded boundary falls below
-      :pp:param:`boundary.eb_standoff_cells` cells, so no charge is ever deposited against the wall,
-      and the collected charge and kinetic energy are tallied per species (accessible from Python
-      through ``warpx.get_eb_collected_charge(species_name)`` and ``warpx.get_eb_collected_energy(species_name)``).
-      With the hybrid-PIC electron energy equation
-      (:pp:param:`hybrid_pic_model.solve_electron_energy_equation`), the electron temperature is
-      additionally filled with zero normal gradient into the standoff band and the covered region
-      each step (so :math:`\nabla P_e` drives no spurious electric field at the plasma edge), and
-      the electron entropy deposited on below-floor nodes by the transport markers is folded back
-      onto the neighboring live-plasma nodes instead of being dropped (which is otherwise a
-      one-way energy drain at every density-floor boundary).
-      Requires ``boundary.particle_eb = absorbing``.
-
-.. pp:param:: boundary.eb_standoff_cells
-    :type: ``float``
-    :default: ``2.``
-    :optional:
-
-    Width of the insulating wall's standoff band, in cells (measured with the largest cell size
-    of the level). Only used with ``boundary.eb_type = insulating``.
-
-.. pp:param:: warpx.eb_ect_balanced_borrow
-    :type: ``integer``
-    :default: ``0``
-
-    Only used with the ECT (enlarged cell technique) Maxwell solver
-    (:pp:param:`algo.maxwell_solver = ect`). When nonzero, the one-way
-    face-extension pass is skipped and every unstable cut face is enlarged with
-    the symmetric, area-proportional eight-way split. The one-way pass borrows
-    the entire area deficit from the first stable cardinal neighbor in a fixed
-    lattice order, which is not wall-normal aware and displaces the enlarged-face
-    area centroid off the wall normal (a :math:`\cos(4\theta)` symmetry-breaking
-    seed on curved walls). The default (``0``) keeps the historical one-way pass
-    and is bit-identical to previous behavior.
 
 .. _param-particle-thermalizer:
 
@@ -2938,6 +2944,26 @@ Details about the collision models can be found in the :ref:`theory section <mul
     - ``background_stopping`` for slowing of ions due to collisions with electrons or ions.
       This implements the approximate formulae as derived in Introduction to Plasma Physics,
       from Goldston and Rutherford, section 14.2.
+    - ``hybrid_resistive_drag`` for the ion side of the electron-ion friction in the
+      hybrid-PIC (Ohm's law) solver (requires :pp:param:`algo.maxwell_solver` = ``hybrid``).
+      Each species' bulk velocity is relaxed toward the electron fluid velocity at the rate
+      :math:`\nu_{s,e} = Z_s e^2 \eta_{s,\mathrm{eff}} n_e / m_s` implied by the Ohm's-law
+      resistivity (global plus the optional per-species overlay,
+      :pp:param:`hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)`),
+      via a velocity-independent bulk-velocity shift
+      :math:`(\boldsymbol{V}_s - \boldsymbol{V}_e)\left(1 - e^{-\nu_{s,e}\Delta t}\right)`
+      gathered at each particle's position, which decelerates the bulk drift while
+      preserving the thermal spread to leading order in field gradients. When this collision
+      is registered the resistive terms of Ohm's law are also included in the E-field that
+      pushes the particles (not only in the Faraday solves), because the drag and the
+      resistive push-field force are the two halves of the friction and only their sum
+      conserves momentum; for a global resistivity the two cancel exactly, recovering the
+      plain-``eta`` behavior. For that reason the collision must be registered on every
+      charged species (non-depositing tracer species are exempt; species with negative
+      charge are not supported and are rejected at initialization).
+      It takes exactly one species and no type-specific parameters,
+      though the generic :pp:param:`<collision_name>.ndt_supercycle` and
+      :pp:param:`<collision_name>.ndt_subcycle` options still apply.
     - ``bremsstrahlung`` for slowing of electrons due to Bremsstrahlung collisions with ions.
       This uses the cross sections as given by `Seltzer and Berger <https://doi.org/10.1016/0092-640X(86)90014-8>`__.
     - ``inverse_bremsstrahlung`` for inverse bremstrahlung absorption of photons from the collisions of electrons and ions.
@@ -2945,8 +2971,9 @@ Details about the collision models can be found in the :ref:`theory section <mul
     - ``linear_breit_wheeler`` for electron-positron pair creation from the annihilation of two photons, according to the linear Breit-Wheeler mechanism
       (see for example `Gould et al. (Phys. Rev. 155, 1404, 1967) <https://doi.org/10.1103/PhysRev.155.1404>`__).
       This implements the generation of electron-positron pairs based on the analytical cross-section, e.g.
-      equation (1) in Gould. The angular distribution of the emitted pairs is isotropic for now
-      (instead of following the correct distribution, see e.g. `Ribeyre et al. (Plasma Phys. Control. Fusion 60 104001, 2018) <https://doi.org/10.1088/1361-6587/aad6da>`__).
+      equation (1) in Gould. In the center-of-momentum frame, the polar angle of the emitted pairs
+      is sampled from the differential cross section, while the azimuthal angle is sampled uniformly
+      (see e.g. `Ribeyre et al. (Plasma Phys. Control. Fusion 60 104001, 2018) <https://doi.org/10.1088/1361-6587/aad6da>`__).
       The implementation follows the same numerical algorithm as that of fusion reactions (see. :cite:t:`param-HigginsonJCP2019`).
     - ``linear_compton`` for linear Compton scattering between a lepton (electron or positron, for now) and a photon, based on the Klein-Nishina cross-section
       (see for example :cite:t:`param-LandauVol4`: equations 86.10 and 86.16 for the differential and total cross sections, respectively).
@@ -2968,7 +2995,8 @@ Details about the collision models can be found in the :ref:`theory section <mul
     If using ``background_mcc`` or ``background_stopping`` type this should be the name of the
     species for which collisions with a background will be included.
     If using ``pulsed_decay`` type this should be the name of the parent species.
-    In these three cases, only one species name should be given.
+    If using ``hybrid_resistive_drag``, this should be the one ion species the drag is applied to.
+    In these four cases, only one species name should be given.
     If using ``linear_breit_wheeler`` these should be two photon species.
     If using ``linear_compton``, these should be two species: first, a photon species, and second, a lepton species, in this exact order.
 
@@ -3083,6 +3111,23 @@ Details about the collision models can be found in the :ref:`theory section <mul
     With ``isotropic``, the scattering angle is drawn from an isotropic distribution.
     With ``forward``, the scattering angle is set to zero, i.e. the products are emitted in the same direction as the reactant (in the center of mass frame).
     With ``backward``, the scattering angle is set to :math:`\pi`, i.e. the products are emitted in the opposite direction of the reactant (in the center of mass frame).
+
+.. pp:param:: <collision_name>.create_products
+    :type: ``bool``
+    :default: ``1``
+    :optional:
+
+    Only for ``nuclearfusion``. When true, the product particles are created, otherwise not.
+
+.. pp:param:: <collision_name>.save_particle_production
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Only for ``nuclearfusion``.
+    When true, the integrated product particle density is saved in a MultiFab with the name ``<collision_name>_particle_production``.
+    The data can be written out by adding that name to the ``<diag_name>.fields_to_plot`` input parameter.
+    The option can be used in conjunction with ``<collision_name>.create_products`` to save only the product density and not create particles.
 
 .. pp:param:: <collision_name>.background_density
     :type: ``float``
@@ -3323,6 +3368,22 @@ Details about the collision models can be found in the :ref:`theory section <mul
     This is only implemented for the explicit evolve scheme and is not available for the implicit evolve schemes, because the implicit
     formulation is intrinsically energy-conserving when combined with MCC collisions, as shown in `Angus et al., J. Comput. Phys. 456, 2022 <https://doi.org/10.1016/j.jcp.2022.111030>`__.
 
+.. pp:param:: collisions.shuffling_method
+    :type: ``bool``
+    :default: 0
+    :optional:
+
+    Specify the shuffling method used for pairwise collisions (which includes ``pairwisecoulomb``, ``nuclearfusion``, ``bremsstrahlung``, ``linear_breit_wheeler``, ``dsmc``, and ``linear_compton``).
+    This can also be set for individual collisions using there collision name as the prefix, .. pp:param:: <collision_name>.shuffling_method.
+    The particles are shuffled within each cell to obtain good statistical properties, so that each particle can collide with each other particle in the cell with equal probability.
+    Several shuffling methods are implemented with have different properties.
+
+    - ``FisherYates`` The default, is the best method numerically with the best randomness characteristics, and should be free of correlation effects. Every particle within a cell is swapped with another random particle within the cell. Note that the shuffle can be slow and take a significant amount of simulation time with large numbers of particles per cell.
+
+    - ``Modulus`` The particles are shuffled algorithmically, using a linear congruential generator where the particle ``i`` is replace by the particle ``(i*step + offset) % n``, where ``n`` is the number of particles, ``step`` is chosen randomly and is coprime with ``n``, and ``offset`` is chosen randomly. To increase randomness, multiple shuffles are done, with the particles in each cell divided randomly into up to five subgroups. The number of shuffles can be specified by the input paralel ``<collision_name>.modulus_rounds``, which defaults to 5. This method would be reasonable when there is some turnover of paticles in the cells. The advantage is that this shuffle is substantially faster (by orders of magnitude on GPU) than the Fisher-Yates and standard methods. In all of the tests performed, including ``pairwisecoulomb`` and ``nuclearfusion``, the collision rates were properly produced with this method. However, use carefully and check the results closely.
+
+    - ``None`` No shuffling is done. This option is here primarily for testing purposes and should not be used in production simulatins. However, this would be reasonable in cases where there is a large flux of particles across the cells, particularly in 2D and 3D, so that the turnover of particles in the cells is significant in the time that it would be expected that a particle would interact with all of the other particles in the cell. Use carefully and check the results closely.
+
 .. _running-cpp-parameters-numerics:
 
 Numerics and algorithms
@@ -3370,6 +3431,13 @@ Time step
     :optional:
 
     When adaptive timestepping is activated, information about the new time step and the simulation conditions are output to the file specified by this parameter.
+
+.. pp:param:: warpx.dt_update_write_interval
+    :type: ``string``
+    :optional:
+
+    When adaptive timestepping is activated and :pp:param:`warpx.dt_update_diagnostic_file` is specified, this specifies the interval when data is written to the diagnostic file.
+    The default is to write every time the time step is updated.
 
 .. pp:param:: warpx.max_omegap_dt
     :type: ``float``
@@ -3827,6 +3895,28 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma hyper-resistivity in :math:`\Omega m^3`.
 
+.. pp:param:: hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)
+    :type: ``float`` or ``str``
+    :default: ``0``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this adds a per-species resistivity overlay in :math:`\Omega m`
+    for the named charged species, on top of :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (see the :ref:`theory section <theory-kinetic-fluid-hybrid-model>`). The expression can depend on the species
+    charge density ``rho_s`` and total charge density ``rho`` (:math:`C/m^3`), the electron temperature ``Te`` (:math:`K`),
+    the current-density magnitudes ``J`` and ``J_s`` (:math:`A/m^2`), the magnetic-field magnitude ``B`` (:math:`T`)
+    and the time ``t`` (:math:`s`). The same effective per-species resistivity enters the Joule-heating source of the
+    electron energy equation when :pp:param:`hybrid_pic_model.include_joule_heating` is on.
+    Species without their own overlay simply use the global
+    :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`, so existing single-resistivity input decks are unchanged.
+    The species-resolved friction back-reaction on the ions is applied by the ``hybrid_resistive_drag``
+    collision (see :pp:param:`\<collision_name\>.type`), which should accompany any per-species overlay.
+    In all geometries, ``rho_s`` and ``J_s`` are expressed in physical SI units.
+    Within the subcycled B-field integration the overlay is applied as a lagged resistivity coefficient
+    multiplying the instantaneous plasma current (plus a frozen ion-drift part), so it damps the
+    substepped field dynamics the same way the global resistivity does; the parser itself is
+    evaluated once per half-step.
+
 .. pp:param:: hybrid_pic_model.solve_electron_energy_equation
     :type: ``bool``
     :default: ``false``
@@ -3836,10 +3926,6 @@ Maxwell solver: kinetic-fluid hybrid
     electron pressure with the electron energy equation, solved with the QDSMC scheme
     (see the :ref:`theory section <theory-hybrid-model-electron-energy-eq>`), instead of evaluating the polytropic
     closure with the constant reference state :math:`(n_0, T_{e0})`.
-    With this on, the electron temperature is evolved state and is written to (and restored from) checkpoints,
-    so a restarted run continues from the evolved electron thermal structure. Restarting from a checkpoint
-    written before this field was checkpointed still works, but re-seeds the temperature from the density
-    adiabat and issues a warning.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
@@ -3870,8 +3956,9 @@ Maxwell solver: kinetic-fluid hybrid
     The electron-ion relaxation rate :math:`\nu_{ei}`, in :math:`s^{-1}`. If
     :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, specifying this rate enables the
     electron-ion thermal-equilibration exchange :math:`Q_{ei} = \sum_s 3 n_s k_B \nu_{ei} (T_e - T_{i,s})`
-    as a sink on the electron fluid, paired with matching (energy-conserving) heating of the ion
-    macro-particles. The required shape-aware ion temperature deposition
+    as a sink on the electron fluid, paired with matching heating of the ion macro-particles about
+    each species' bulk velocity. This exchanges thermal energy without changing the ion bulk momentum.
+    The required shape-aware ion temperature deposition
     (``<species>.do_temperature_deposition``) is enabled automatically on every charged species.
     The expression can depend on the total charge density ``rho`` (:math:`C/m^3`), the electron and ion
     temperatures ``Te`` and ``Ti`` (both in eV) and the time ``t`` (:math:`s`), which permits, e.g., the
@@ -3973,18 +4060,6 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the vacuum region handling of the generalized Ohm's Law to suppress vacuum fluctuations. :cite:t:`param-holmstrom2013handlingvacuumregionshybrid`.
 
-.. pp:param:: hybrid_pic_model.use_conformal_eb
-    :type: ``0`` or ``1``
-    :default: ``0``
-
-    Use the conformal (enlarged-cell technique) embedded-boundary wall for the
-    hybrid-PIC B push instead of the stair-step approximation, with a
-    constitutive perfect-conductor closure: the Ohm's-law E and the Ampere
-    current are zeroed on every covered and cut edge, and cut faces evolve
-    through their fully-open edges. Second-order at curved walls where the
-    stair-step degrades to first order. Requires embedded boundaries, a
-    staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry.
-
 .. pp:param:: hybrid_pic_model.vacuum_seam_switch_mode
     :type: ``edge``, ``node`` or ``cell``
     :default: ``edge``
@@ -4000,6 +4075,18 @@ Maxwell solver: kinetic-fluid hybrid
     adjacent cells of the node-averaged density -- a single
     piecewise-constant-per-cell decision for all three components. Both are
     vacuum-favoring. Only supported in 3D and 2D (XZ) Cartesian geometry.
+
+.. pp:param:: hybrid_pic_model.use_conformal_eb
+    :type: ``0`` or ``1``
+    :default: ``0``
+
+    Use the conformal (enlarged-cell technique) embedded-boundary wall for the
+    hybrid-PIC B push instead of the stair-step approximation, with a
+    constitutive perfect-conductor closure: the Ohm's-law E and the Ampere
+    current are zeroed on every covered and cut edge, and cut faces evolve
+    through their fully-open edges. Second-order at curved walls where the
+    stair-step degrades to first order. Requires embedded boundaries, a
+    staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry.
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
@@ -5833,6 +5920,7 @@ When developing, testing and :ref:`debugging WarpX <debugging_warpx>`, the follo
     If set to true, the information normally printed to the terminal at every time step
     is limited: it prints every step for the first 10 steps, every 10 steps for steps between 10 and 100,
     and once every 100 steps for steps greater than 100.
+    This also limits the output from the field solvers.
 
 .. pp:param:: warpx.always_warn_immediately
     :type: ``0`` or ``1``

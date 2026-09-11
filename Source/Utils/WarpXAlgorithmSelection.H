@@ -34,6 +34,7 @@ AMREX_ENUM(EvolveScheme,
            Theta_Implicit_EM,
            Semi_Implicit_EM,
            Strang_Implicit_Spectral_EM,
+           Semi_Implicit_Darwin,
            Default = Explicit);
 
 /**
@@ -149,17 +150,6 @@ AMREX_ENUM(ParticleBoundaryType,
            None,          //!< For r=0 boundary with RZ simulations
            Default = Absorbing);
 
-/** Embedded-boundary wall type
- */
-AMREX_ENUM(EmbeddedBoundaryType,
-           Absorbing,     //!< particles are collected at the EB surface (default)
-           Insulating,    /**< collecting wall held off the plasma by a density standoff
-                             band: particles are collected `boundary.eb_standoff_cells`
-                             cells before the surface and, with the hybrid electron
-                             energy equation on, T_e/P_e are filled with zero normal
-                             gradient into the band and the covered region */
-           Default = Absorbing);
-
 /** MPI reductions
  */
 AMREX_ENUM(ReductionType,
@@ -193,6 +183,16 @@ AMREX_ENUM(MomentumPushType,
            FirstHalf,
            SecondHalf,
            Default = Full);
+
+/** \brief Particle shuffling method for binary collisions */
+AMREX_ENUM(
+    ParticleShufflingMethod,
+    None,
+    FisherYates,
+    Modulus,
+    Standard,
+    Default = FisherYates
+);
 
 /** \brief For binary collision algorithms, the strategy to determine
  *  the scattering angle in the center of mass frame */
