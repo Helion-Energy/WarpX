@@ -3080,6 +3080,22 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         The maximum background density. When the background_density is an expression, this must also
         be specified.
 
+    deplete_background: bool, optional
+        Carry the background density on the mesh and remove the ionized weight from it on
+        every ionization event, instead of treating the background as an inexhaustible
+        reservoir. Cartesian geometry only. Default is False.
+
+    background_name: string, optional
+        Names the depleting background, so that several collisions can share one gas rather
+        than each consuming a private copy of the same fill. Collisions sharing a name must
+        agree on background_density and background_shape. Only used when deplete_background
+        is True. Defaults to the collision name.
+
+    background_shape: integer, optional
+        The shape order, between 1 and 4, used both to gather the background density and to
+        deposit its depletion. Only used when deplete_background is True. Defaults to
+        algo.particle_shape.
+
     ndt_supercycle: integer, optional
         Run collision once every ndt_supercycle PIC time steps
         (dt_collision = ndt_supercycle * dt_PIC). Must be >= 1.
@@ -3100,6 +3116,9 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         scattering_processes,
         background_mass=None,
         max_background_density=None,
+        deplete_background=None,
+        background_name=None,
+        background_shape=None,
         ndt_supercycle=None,
         ndt_subcycle=None,
         **kw,
@@ -3111,6 +3130,9 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         self.background_mass = background_mass
         self.scattering_processes = scattering_processes
         self.max_background_density = max_background_density
+        self.deplete_background = deplete_background
+        self.background_name = background_name
+        self.background_shape = background_shape
         self.ndt_supercycle = ndt_supercycle
         self.ndt_subcycle = ndt_subcycle
 
@@ -3140,6 +3162,9 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
             collision.background_temperature = self.background_temperature
         collision.background_mass = self.background_mass
         collision.max_background_density = self.max_background_density
+        collision.deplete_background = self.deplete_background
+        collision.background_name = self.background_name
+        collision.background_shape = self.background_shape
         collision.ndt_supercycle = self.ndt_supercycle
         collision.ndt_subcycle = self.ndt_subcycle
 
