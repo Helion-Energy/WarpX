@@ -3913,6 +3913,52 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip_lift_off  # dependency
 )
 
+# Shaped-wall FLUID PERMEABILITY (implicit_mhd.wall_fluid_bc), ABSORB twin
+# (the default = the dielectric scraper, set explicitly on the CLI): a
+# uniform plasma driven into a NOTCHED wall (r-normal stair faces at two
+# radii, z-normal ledges of both orientations) loses a measurable
+# fraction of its mass through the interface and the wall ledger books
+# the loss (its closure contract); the masked band stays rigid.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_reflect_absorb  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_reflect implicit_mhd.wall_fluid_bc=absorb"  # inputs
+    "analysis_mhd_wall_reflect.py diags absorb"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# REFLECT (the impermeable no-normal-flow wall of the reference code):
+# the same drive on the same deck conserves the live fluid mass to
+# solver tolerance (against the absorb twin's loss), the wall ledger
+# books an exactly zero crossing mass, the arriving plasma piles up in
+# the last live cells instead of leaving, and the stair-corner (nook)
+# T_i/T_e/E_i/n pockets are reported.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_reflect  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_reflect  # inputs
+    "analysis_mhd_wall_reflect.py diags reflect ../test_rz_theta_implicit_mhd_wall_reflect_absorb/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_reflect_absorb  # dependency
+)
+
+# REFLECT on the hlld Riemann flux (kernel coverage; central is
+# production): the symmetric Davis bounds give S_M = 0 exactly at the
+# odd image, so the fan's mass and energy fluxes cancel pairwise -- the
+# same conservation and zero-ledger gates.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_reflect_hlld  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_reflect implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true implicit_mhd.central_dissipation=0"  # inputs
+    "analysis_mhd_wall_reflect.py diags reflect"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # wall-seam guard on the Hall/inertia/hyper Ohm terms: a ramped coil
 # blob against the STEP corner of the pec stair wall forces the image
 # current sheet along the seam; the seam band (rows whose non-ideal Ohm
