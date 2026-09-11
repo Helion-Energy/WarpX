@@ -10,12 +10,14 @@
 theta-implicit RZ MHD recast.
 
 See inputs_test_rz_theta_implicit_mhd_wall_reflect: a uniform plasma is
-driven into a NOTCHED cylinder wall (r_w = 0.30 m for |z| > 0.08 m, 0.22 m
-inside) by a radial expansion and by two axial pulses aimed at the notch
-ledges, so the stair-step interface presents r-normal faces at two radii
-and z-normal faces of both orientations. The z ends carry no flow (the
-pulses vanish there) and the r = 0 axis is closed, so the interface is
-the only exit.
+driven into a NOTCHED BOTTLE wall (r_w = 0.30 m, a 0.22 m notch for
+|z| < 0.08 m, end plugs down to a one-cell axis clearance for |z| > 0.30 m)
+by a radial expansion and by two axial pulses aimed at the notch ledges,
+so the stair-step interface presents r-normal faces at three radii and
+z-normal faces of both orientations. The plugs close the domain with the
+wall itself (no z-end fluid boundary of this solver is mass-tight); the
+only non-interface exits are the two axis cells' end faces, whose
+advective flux is integrated per step to close the live-mass budget.
 
 mode = "reflect": the masked side presents the ODD-normal-momentum image
 (the impermeable no-normal-flow wall of the reference code):
@@ -39,9 +41,19 @@ the same deck removes a measurable fraction of the live mass through
 the interface, the ledger's cumulative mass matches the loss (closure),
 and the band stays rigid.
 
+mode = "reflect_pin" (CLI wall_corner_temperature_pin_rate=1e7; the twin
+argument is the UNPINNED reflect run): the reflect gates, plus the four
+two-walled nook cells relax toward the 2 eV wall reservoir in both
+species -- against this drive's ram and ledge conduction they settle at
+36 / 34 eV (T_i / T_e) versus the unpinned twin's 74 / 115 eV, so the
+gate is the ratio to the twin -- while the ledge cells that are not
+nooks are NOT pinned (within a factor two of the twin's): the
+classification is exactly the two-walled set.
+
 Usage:
   analysis_mhd_wall_reflect.py <diag_dir> absorb
   analysis_mhd_wall_reflect.py <diag_dir> reflect [<absorb_diag_dir>]
+  analysis_mhd_wall_reflect.py <diag_dir> reflect_pin <reflect_diag_dir>
 """
 
 import glob
@@ -54,7 +66,10 @@ import yt
 diag_dir = sys.argv[1]
 mode = sys.argv[2]
 twin_dir = sys.argv[3] if len(sys.argv) > 3 else None
-assert mode in ("reflect", "absorb"), f"unknown mode {mode}"
+assert mode in ("reflect", "absorb", "reflect_pin"), f"unknown mode {mode}"
+pin_mode = mode == "reflect_pin"
+if pin_mode:
+    mode = "reflect"  # the reflect gates apply; the twin argument is the UNPINNED reflect run
 
 proton_mass = 1.67262192595e-27  # WarpX parser m_p (ablastr::constant)
 qe = 1.602176634e-19
@@ -266,7 +281,32 @@ else:
     print(f"outer last-live ring mean n/n0 at the end: {ring_ratio:.4f}")
     assert ring_ratio > 1.02, (
         f"no pile-up at the impermeable wall (ring n/n0 {ring_ratio:.4f})")
-    if twin_dir is not None:
+    if twin_dir is not None and pin_mode:
+        # 5. the corner pin: the two-walled nooks relax toward the 2 eV wall
+        # reservoir at 0.5 per step (rate 1e7/s x 50 ns) in BOTH species
+        # against the pulse's ram and the conduction from the 50 eV ledge
+        # neighbours, which hold them well above the target on this drive
+        # (measured 36 / 34 eV vs the unpinned twin's 74 / 115 eV, the
+        # cooled nook 1.6x denser): gate on the RATIO to the unpinned
+        # twin, and require the ledge cells that are not nooks to be left
+        # alone (within a factor two of the twin's).
+        _, twin = load_series(twin_dir)
+        report_series("unpinned reflect twin", twin)
+        t_i_twin, t_e_twin, _ = temperatures_ev(twin[-1])
+        nook_ti, nook_te = t_i[corner].max(), t_e[corner].max()
+        twin_ti, twin_te = t_i_twin[corner].max(), t_e_twin[corner].max()
+        print(f"pinned nooks: max T_i {nook_ti:.2f} eV, max T_e {nook_te:.2f} eV; "
+              f"unpinned twin nooks: max T_i {twin_ti:.1f}, T_e {twin_te:.1f} eV; "
+              f"ratios {nook_ti / twin_ti:.3f}, {nook_te / twin_te:.3f}")
+        assert nook_ti < 0.65 * twin_ti and nook_te < 0.5 * twin_te, (
+            f"corner pin did not cool the nooks against the unpinned twin "
+            f"(T_i {nook_ti:.2f} vs {twin_ti:.1f}, T_e {nook_te:.2f} vs {twin_te:.1f} eV)")
+        not_nook = ledge & ~corner
+        ratio = t_i[not_nook].max() / t_i_twin[not_nook].max()
+        print(f"ledge cells that are not nooks: max T_i pinned/unpinned {ratio:.3f}")
+        assert 0.5 < ratio < 2.0, (
+            f"the corner pin touched cells outside the two-walled set (ratio {ratio:.3f})")
+    elif twin_dir is not None:
         _, twin = load_series(twin_dir)
         report_series("absorb twin", twin)
         report_newton(twin_dir)
@@ -282,4 +322,4 @@ else:
             "the impermeable wall does not hold more gas at the wall than "
             "the scraper")
 
-print(f"wall_fluid_bc = {mode}: all checks passed")
+print(f"wall_fluid_bc = {mode}" + (" + corner pin" if pin_mode else "") + ": all checks passed")

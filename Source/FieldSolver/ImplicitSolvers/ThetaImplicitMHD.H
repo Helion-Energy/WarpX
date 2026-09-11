@@ -3008,6 +3008,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // n kB T_wall, which is a valid heat source under either ion closure
     // (adding an internal-energy source to a total-energy row is still
     // heat) and stays Newton-friendly.
+    //
+    // 2026-09-11 (WP42): the pin had been implemented in the legacy
+    // E-based ComputeFluidRHS only, so under the recast fluxes
+    // (fluid_flux = central | hlld, i.e. every production run) it was
+    // INERT -- measured bit-identical on/off on a stair-nook deck and in
+    // a production twin. Ported to ComputeFluidRHSFromFaceFluxes: the
+    // same corner classification (first_masked[j] - 1 with the index
+    // masked in an adjacent row), the same linear relaxation of the
+    // electron energy and of the ion internal energy (E_i minus the
+    // kinetic part), plus the dual-energy auxiliary U_i mirroring the
+    // E_i drain; booked in the relaxation registers of the energy
+    // audit. Target T_pin = the shaped wall's reservoir temperature
+    // (wall_temperature) when the thermal wall has one, else the z-end
+    // wall temperature (the legacy site's only choice; both 0.5 eV in
+    // production); a pin rate without either is a loud error.
     amrex::Real m_wall_corner_temperature_pin_rate = 0.0;
     // Free-streaming cap on the VISCOUS momentum flux
     // (implicit_mhd.viscous_flux_limit_factor; 0 = off = bit-identical).

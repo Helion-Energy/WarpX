@@ -4439,6 +4439,18 @@ void ThetaImplicitMHD::PrintParameters () const
                            : " (dielectric scraper: into-wall rectified "
                              "normal momentum image)")
                    << "\n"
+                   << "Wall corner temperature pin:   "
+                   << (m_wall_corner_temperature_pin_rate > 0.0_rt
+                           ? std::to_string(m_wall_corner_temperature_pin_rate) +
+                                 " 1/s toward n kB T_pin, T_pin = " +
+                                 std::to_string(
+                                     m_wall_mask.WallTemperature_eV() > 0.0_rt
+                                         ? m_wall_mask.WallTemperature_eV()
+                                         : m_z_wall_temperature) +
+                                 " eV (two-walled stair-nook cells; both "
+                                 "fluid RHS paths)"
+                           : std::string("off"))
+                   << "\n"
                    << "Wall friction heating:         "
                    << m_wall_friction_heating
                    << (m_wall_friction_heating == "drop"
@@ -16438,6 +16450,28 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const int wall_mask_z_lo = -m_wall_mask.GhostCells();
     const int wall_mask_z_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    // Corner temperature pin (implicit_mhd.wall_corner_temperature_pin_rate;
+    // see the header and the kernel block below): the recast twin of the
+    // ComputeFluidRHS constants. Target n kB T_pin = rho (q/m) T_pin[eV]
+    // with T_pin = the shaped wall's reservoir temperature when the thermal
+    // wall has one, else the z-end wall temperature (the legacy site's
+    // only choice; identical in production). Needs the stair table, i.e.
+    // the rigid-conductor contract (wall_thermal_bc != none).
+    const amrex::Real corner_pin_rate = m_wall_corner_temperature_pin_rate;
+    const amrex::Real corner_pin_temperature_ev =
+        (m_wall_mask.WallTemperature_eV() > 0.0_rt)
+            ? m_wall_mask.WallTemperature_eV()
+            : m_z_wall_temperature;
+    const bool corner_pin_active =
+        corner_pin_rate > 0.0_rt && wall_first_masked_cc != nullptr;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !corner_pin_active || corner_pin_temperature_ev > 0.0_rt,
+        "implicit_mhd.wall_corner_temperature_pin_rate needs a wall "
+        "temperature to relax toward: a reservoir implicit_mhd.wall_thermal_bc "
+        "with implicit_mhd.wall_temperature, or implicit_mhd.z_boundary_fluid "
+        "= wall_temperature with implicit_mhd.z_wall_temperature");
+    const amrex::Real corner_pin_pressure_per_density =
+        m_ion_charge_to_mass * corner_pin_temperature_ev;
     // The reference-parity no-slip wall contract (implicit_mhd.wall_no_slip)
     // lives entirely in ComputeDirectionalFaceFluxes: it is a FACE
     // condition on the tangential velocity at the stair contour (the
@@ -18115,6 +18149,79 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         (uperp(i, j, k) - perp_target) *
                         theta_implicit_mhd::floor_outflow_limiter(
                             uperp(i, j, k), perp_target);
+                }
+            }
+
+            // CORNER TEMPERATURE PIN (implicit_mhd.wall_corner_temperature_
+            // pin_rate; see the host constants and the header): the recast
+            // twin of the ComputeFluidRHS site. Until this port the pin
+            // acted only on the legacy E-based RHS and was inert under the
+            // recast fluxes (fluid_flux = central | hlld), i.e. in every
+            // production run. A live cell with a masked radial neighbour
+            // AND a masked axial neighbour -- the last live cell of a row
+            // whose radial index is masked in an adjacent row: every stair
+            // nook of the shaped wall -- relaxes both temperature carriers
+            // linearly toward n kB T_pin, the dual-energy U_i mirroring the
+            // E_i drain as every relaxation here does. Static geometry,
+            // linear in the state, exactly zero when off; booked in the
+            // relaxation registers of the energy audit.
+            if (corner_pin_active) {
+                const int mask_j = std::max(wall_mask_z_lo,
+                                            std::min(wall_mask_z_hi, j));
+                const int first_masked = wall_first_masked_cc[mask_j];
+                if (i == first_masked - 1) {
+                    const int jm = std::max(wall_mask_z_lo, mask_j - 1);
+                    const int jp = std::min(wall_mask_z_hi, mask_j + 1);
+                    if (i >= wall_first_masked_cc[jm] ||
+                        i >= wall_first_masked_cc[jp]) {
+                        const amrex::Real pin_scale =
+                            wall_live * theta_dt * corner_pin_rate;
+                        const amrex::Real wall_pressure =
+                            corner_pin_pressure_per_density * rho(i, j, k);
+                        const amrex::Real pin_electron =
+                            pin_scale *
+                            (energy(i, j, k) -
+                             wall_pressure / gamma_e_minus_one);
+                        energy_increment(i, j, k) -= pin_electron;
+                        if (audit_capture) {
+                            audit_reg(i, j, k, audit_relax_e) +=
+                                pin_electron / theta_dt;
+                        }
+                        if (total_energy_closure) {
+                            const amrex::Real safe_density =
+                                std::max(rho(i, j, k), density_floor);
+                            amrex::Real momentum_square = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                momentum_square += mom(i, j, k, component) *
+                                                   mom(i, j, k, component);
+                            }
+                            const amrex::Real internal_energy =
+                                ion_e(i, j, k) -
+                                0.5_rt * momentum_square / safe_density;
+                            const amrex::Real pin_ion =
+                                pin_scale *
+                                (internal_energy -
+                                 wall_pressure / gamma_i_minus_one);
+                            ion_energy_increment(i, j, k) -= pin_ion;
+                            if (audit_capture) {
+                                audit_reg(i, j, k, audit_relax_ei) +=
+                                    pin_ion / theta_dt;
+                            }
+                            if (dual_energy_closure) {
+                                const amrex::Real pin_internal =
+                                    pin_scale *
+                                    (ion_int(i, j, k) -
+                                     wall_pressure / gamma_i_minus_one);
+                                ion_internal_increment(i, j, k) -=
+                                    pin_internal;
+                                if (audit_capture) {
+                                    audit_reg(i, j, k, audit_relax_ui) +=
+                                        pin_internal / theta_dt;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

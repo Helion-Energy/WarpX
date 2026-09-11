@@ -3945,6 +3945,24 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_reflect_absorb  # dependency
 )
 
+# REFLECT + the corner temperature pin
+# (implicit_mhd.wall_corner_temperature_pin_rate, ported to the recast
+# fluid RHS in this lane; before the port it was inert under central /
+# hlld): the same conservation and zero-ledger gates, and the four
+# two-walled nook cells end within a few eV of the 2 eV wall reservoir
+# (T_i and T_e) instead of the unpinned 60-120 eV, while the ledge cells
+# that are not nooks stay hot -- the classification is exactly the
+# two-walled set.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_reflect_corner_pin  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_reflect implicit_mhd.wall_corner_temperature_pin_rate=1e7"  # inputs
+    "analysis_mhd_wall_reflect.py diags reflect_pin ../test_rz_theta_implicit_mhd_wall_reflect/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_reflect  # dependency
+)
+
 # REFLECT on the hlld Riemann flux (kernel coverage; central is
 # production): the symmetric Davis bounds give S_M = 0 exactly at the
 # odd image, so the fan's mass and energy fluxes cancel pairwise -- the

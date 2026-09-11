@@ -3957,6 +3957,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Relaxation rate [1/s] pinning shaped-wall CORNER cells to the wall
         temperature. 0 disables it and the run is bit-identical.
 
+        Acts on BOTH fluid RHS paths since 2026-09-11: until then the
+        pin was implemented in the legacy E-based RHS only and was inert
+        under the recast fluxes (fluid_flux central/hlld, i.e. every
+        production run). The target temperature is the shaped wall's
+        reservoir temperature (wall_temperature) when the thermal wall
+        has one, else the z-end wall temperature; a pin rate with
+        neither is an input error. Under dual_energy the auxiliary U_i
+        mirrors the E_i relaxation; the drain is booked in the energy
+        audit's relaxation registers.
+
         A corner fluid cell has both a radial and an axial masked
         neighbour, so the two no-slip faces between them pin all three
         velocity components (the r-face pins theta and z, the z-face pins
