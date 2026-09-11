@@ -892,6 +892,18 @@ FullDiagnostics::InitializeFieldFunctors (int lev)
             // Initialize temperature functor to dump temperature per species
             m_all_field_functors[lev][comp] = std::make_unique<TemperatureFunctor>(lev, m_crse_ratio, m_T_per_species_index[i_T_species]);
             i_T_species++;
+        } else if ( m_varnames[comp].rfind("n_background_", 0) == 0 ){
+            // Mesh-resident neutral density of a depleting MCC background,
+            // registered under exactly the name requested here. Check it is
+            // there rather than letting the register lookup fail obscurely:
+            // the field exists only for a background that actually depletes.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                warpx.m_fields.has(m_varnames[comp], lev),
+                "Cannot output '" + m_varnames[comp] + "': no depleting MCC background "
+                "of that name. The field is named n_background_<background_name> and "
+                "exists only where <collision_name>.deplete_background = 1.");
+            m_all_field_functors[lev][comp] = std::make_unique<CellCenterFunctor>(
+                warpx.m_fields.get(m_varnames[comp], lev), lev, m_crse_ratio);
         } else if ( m_varnames[comp] == "F" ){
             m_all_field_functors[lev][comp] = std::make_unique<CellCenterFunctor>(warpx.m_fields.get(FieldType::F_fp, lev), lev, m_crse_ratio);
         } else if ( m_varnames[comp] == "G" ){
