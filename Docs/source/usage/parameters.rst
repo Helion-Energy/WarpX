@@ -5904,9 +5904,13 @@ Jacobian probes.
     the conservative flux form and the split external fields.
     ``physical``: the ``plasma`` force weighted cell by cell by the
     PHYSICAL SHARE of the current, :math:`w = \eta_\text{phys} /
-    \eta_\text{field}` -- the weight the circuit probe applies under
-    ``circuit.probe_weight = physical_share``, composed like the
-    Ohm-current Joule quench at the same kernel site:
+    \eta_\text{field}` -- the same composition the circuit probe uses
+    under ``circuit.probe_weight = physical_share`` (the probe puts
+    exactly 0 in the wall-band override rows where this weight puts
+    :math:`\eta_\text{phys}/\eta_\text{override} \sim 10^{-6}`;
+    inert under a thermal wall, whose override cells carry no live
+    fluid), composed like the Ohm-current Joule quench at the same
+    kernel site:
     :math:`\eta_\text{phys}` the user ``(rho, Te, J, t)`` resistivity at
     the stage state, :math:`\eta_\text{field} = \sqrt{\eta_\text{phys}^2
     + \eta_\text{vac}^2}` with the density-keyed vacuum boost
@@ -5924,7 +5928,12 @@ Jacobian probes.
     like ``res_boost``). :math:`w` is smooth in the stage density and
     electron energy wherever the resistivity expression is, and exactly
     1 where :math:`\eta_\text{field} = \eta_\text{phys}` (no boost, no
-    band). Same requirements as ``plasma``; default off. Measured on the
+    band). TRAP: a ZERO user resistivity with a nonzero vacuum boost gives
+    :math:`w = 0` everywhere -- no magnetic force on the fluid at all,
+    correct by the definition and silent in practice; give the weight a
+    reference through :pp:param:`implicit_mhd.lorentz_force_weight_eta`
+    or a positive user eta. Same requirements as ``plasma``; default off.
+    Measured on the
     production formation deck: the dielectric wall band's stair-corner
     curl-B spikes do +2e9 W (19 us) to +3.4e10 W (27 us) of work on the
     band fluid under ``plasma`` -- the whole domain's booked magnetic
@@ -5949,20 +5958,6 @@ Jacobian probes.
     :math:`5\times10^{-3}`. The Joule booking and the circuit probe keep
     their own weights. Requires ``lorentz_force_current = physical``.
 
-.. pp:param:: implicit_mhd.lorentz_force_band_z_max
-    :type: ``float`` [m]
-    :default: unlimited (the whole shaped wall)
-
-    Axial extent of the band-cells mask: only rows whose cell centre lies
-    at :math:`z \le z_\text{max}` are masked. Measured on the production
-    formation deck: the whole-wall mask from :math:`t = 0` changes the
-    formation itself (trapped flux :math:`-14\,\%` at 12 us, closed volume
-    :math:`+12\,\%`, :math:`T_i` :math:`+21\,\%`) because the formation
-    section's bore-wall band takes part in the reversal and the flux
-    trapping, whereas the heater the mask is for lives in the cone + tube
-    band (:math:`z < 3.5` m); restarted after the tube has filled, the mask
-    leaves every closed-region station within 0.5 %. Static geometry.
-
 .. pp:param:: implicit_mhd.lorentz_force_band_cells
     :type: ``integer``
     :default: ``0`` (off, bit-identical)
@@ -5971,13 +5966,71 @@ Jacobian probes.
     cells at the shaped wall (:pp:param:`implicit_mhd.wall_model`):
     cells with :math:`i \ge \min(i_\text{masked}[j-1], i_\text{masked}[j],
     i_\text{masked}[j+1]) - N`, so the cells radially and axially adjacent
-    to a stair corner count. Static geometry; the withheld work is booked
-    as ``force_withheld``; composes multiplicatively with
+    to a stair corner count. Footprint semantics at a STEP of the
+    contour: the :math:`j \pm 1` rule masks every live cell of the row
+    facing the step's axial face (the cells whose axial face is a wall
+    face) -- a stripe, not a band: 33 cells at the production formation
+    deck's bore step (:math:`z = 3.5` m, :math:`r` 0.49 to 0.725) and 45
+    at its end wall, both outside the recommended ``band_z_max``. Static
+    geometry (one per-row table built at boot, shared by the fluid rows
+    and the induction EMF); the withheld work is booked as
+    ``force_withheld`` (or, with :pp:param:`implicit_mhd.lorentz_force_band_emf`,
+    reported as ``emf_withheld``); composes multiplicatively with
     ``lorentz_force_current = physical``. The blunt alternative to the
     density-keyed weight for the wall band, where that weight is 0.01-0.7
     early in a formation (band densities 3e18-3e19 against a vacuum
     reference of 3.3e19) and near zero only once the band has thinned.
-    Requires the shaped wall and the conservative flux form.
+    Requires the shaped wall and the conservative flux form. Measured on
+    the production formation deck (2026-09-10): the mask removes the
+    stair-corner mock current's heating of the wall band (band ion energy
+    flat at ~100 J against 2.9 kJ at 32 us) and 7/8 of the wall drain
+    while every closed-region station stays within 0.5 %.
+
+.. pp:param:: implicit_mhd.lorentz_force_band_z_max
+    :type: ``float`` [m]
+    :default: unlimited (the whole shaped wall)
+
+    Axial extent of the band-cells mask: only rows whose cell CENTRE lies
+    at :math:`z \le z_\text{max}` are masked (the gate acts on the row,
+    not on the polyline: on the production formation deck's 1024-row grid
+    ``3.5`` excludes the 33-cell stripe facing the bore step, whose row
+    centre is 3.5039 m, while ``3.51`` includes it). Requires
+    ``lorentz_force_band_cells > 0`` (refused otherwise: without the mask
+    it would be silently inert). Measured on the production formation
+    deck: the whole-wall mask from :math:`t = 0` changes the formation
+    itself (trapped flux :math:`-14\,\%` at 12 us, closed volume
+    :math:`+12\,\%`, :math:`T_i` :math:`+21\,\%`) because the formation
+    section's bore-wall band takes part in the reversal and the flux
+    trapping, whereas the heater the mask is for lives in the cone + tube
+    band (:math:`z < 3.5` m); with ``3.5`` every formation station returns
+    to the control's value to three digits through 20 us. Static geometry.
+
+.. pp:param:: implicit_mhd.lorentz_force_band_emf
+    :type: ``integer``
+    :default: ``0`` (off, bit-identical)
+
+    EMF-side completion of the band-cells mask. With the mask alone the
+    band fluid receives no magnetic force but its velocity still advects
+    the field through the induction EMF :math:`-\mathbf{u}\times\mathbf{B}`,
+    so the field does ideal work :math:`\mathbf{u}\cdot(\mathbf{j}\times
+    \mathbf{B})` in the band that the fluid never receives -- a deliberate
+    non-conservation booked as ``force_withheld`` (3-4 % of the circuit
+    power during the tube fill of the production formation deck; a dynamo
+    wherever a force-free fluid carries pressure). With ``1`` the band
+    cells' velocity is FROZEN (zero) in every induction EMF that reads it:
+    the face induction fluxes (both tangential channels of the central
+    flux) and the UCT corner EMF states. The band is then force-free AND
+    EMF-free -- the field there is pure resistive diffusion, what a
+    dielectric band should be -- while the fluid keeps its mass, pressure,
+    viscosity and thermal contact, and the band exchanges no energy with
+    the field in either direction; its withheld force work is reported as
+    ``emf_withheld`` (the exchange that would have happened; part of no
+    identity) instead of ``force_withheld``, so ``ideal_mismatch`` closes
+    without a design term. Static geometry (the mask's own table).
+    Requires ``lorentz_force_band_cells > 0`` and ``fluid_flux = central``
+    (the central induction flux is linear in each side's velocity, so the
+    freeze is the exact removal of the band side's ideal EMF; the hlld
+    fan's induction flux is not weighted).
 
 .. pp:param:: implicit_mhd.vacuum_drag_kinetic_drain
     :type: ``bool``
@@ -7205,6 +7258,56 @@ Jacobian probes.
 
     Physical-convention cap on the Braginskii :math:`\chi_\parallel`;
     see :pp:param:`implicit_mhd.conduction_chi_par_min`.
+
+.. pp:param:: implicit_mhd.conduction_chi_par_max_halo
+    :type: ``float`` (kappa/(n kB) convention)
+    :default: ``-1`` (off, bit-identical)
+
+    Density-keyed LIFT of the Braginskii parallel ceiling in the halo,
+    both species: where the halo factor :math:`d_p\,(\rho_\text{ref}/\rho)^2`
+    of :pp:param:`implicit_mhd.conduction_halo_boost` exceeds 1 the
+    ceiling of :math:`\chi_\parallel` opens from
+    :pp:param:`implicit_mhd.conduction_chi_par_max` toward this value as
+    :math:`\min(\chi_\text{halo}, \chi_\text{max}\, d_p (\rho_\text{ref}/\rho)^2)`
+    (continuous at factor 1, never below the base). WHY: the parallel
+    ceiling, not the perp boost, sets the halo drain rate -- both codes
+    pin :math:`\chi_\parallel` at the clamp in the halo, the reference
+    code's uniform 1e6 gives a 1 m drain time of 1.5 us against 1.5 ms at
+    the production 969.6, and the reference's uniform ceiling is
+    unusable here because before the separatrix closes every line is
+    open and a uniform 1e6 drains the core too; density is the only
+    discriminator in that window. Requires ``thermal_conduction_model =
+    braginskii``, ``conduction_halo_boost > 0`` (the density key) and
+    ``conduction_chi_par_max`` set and not above this value. Evaluated
+    on the frozen coefficient state like every other Braginskii input.
+    Measured on the production formation deck (2026-09-11): from 13 us
+    the lift at 1e6 with the direct conduction block removes the
+    numerically heated MeV channel and wall band, brings the halo
+    pressure and the tenuous-halo electrons to parity with the reference
+    and leaves the closed-region stations within 0.7 % at 1.66x the wall
+    time over 13-33 us (0 non-converged Newton exits).
+
+.. pp:param:: implicit_mhd.conduction_chi_par_max_halo_start_time
+    :type: ``float`` [s]
+    :default: none (the lift is on from step one)
+
+    Simulation time at which the halo lift switches on: a HARD gate on
+    the solve's stage time :math:`t^n + \theta\,\Delta t` (the step end
+    time at :math:`\theta = 1`) -- below it the halo ceiling equals
+    ``conduction_chi_par_max`` everywhere, bit-identical to a run without
+    the lift; from the first solve at or past it the lift is applied
+    (the run log prints one ``halo parallel-chi lift ENGAGED`` line). The
+    lift is a per-solve constant clamp on the frozen coefficient state,
+    so the gate is a per-solve branch that no residual carries, exactly
+    like the density eater's. WHY: applied from :math:`t = 0` on the
+    production formation deck the lift costs 4-8x per step with 1-2 %
+    non-converged Newton exits (the tenuous pre-fill halo being drained
+    while the FRC forms); from ~13 us (the compression tube filled) it
+    costs 2.3-3x per step to 22 us and 1.1-1.3x after with 0
+    non-converged exits -- the gate makes that recipe one run instead
+    of a restart. Re-read at every boot (never checkpointed): a restart
+    past the start time has the lift on from its first step. Requires
+    ``conduction_chi_par_max_halo >= 0``.
 
 .. pp:param:: implicit_mhd.conduction_chi_perp_min
     :type: ``float``

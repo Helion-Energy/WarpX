@@ -1304,6 +1304,44 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The halo lift of the PARALLEL ceiling (conduction_chi_par_max_halo) and
+# its hard start-time gate (conduction_chi_par_max_halo_start_time): the
+# same column with the field along z, density-keyed as a halo, both
+# channels cap-bound so the ripple decays at the ceiling's rate. nolift =
+# the base ceiling throughout; lift = the halo ceiling from step one (~46 %
+# decay per 5 steps); gated = the halo ceiling from 5.2 dt: steps 1-5 the
+# nolift arm byte for byte (the step-5 plotfile), steps 6-10 at the lifted
+# rate (the lift arm's own 5-10 rate within 25 %)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_lift_nolift  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_halo_lift  # inputs
+    "analysis_mhd_conduction_halo_lift.py nolift diags/diag000000 diags/diag000005 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_lift  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_halo_lift implicit_mhd.conduction_chi_par_max_halo=1.0e4"  # inputs
+    "analysis_mhd_conduction_halo_lift.py lift diags/diag000000 diags/diag000005 diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_halo_lift_nolift  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_lift_gated  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_halo_lift implicit_mhd.conduction_chi_par_max_halo=1.0e4 implicit_mhd.conduction_chi_par_max_halo_start_time=5.2*dt"  # inputs
+    "analysis_mhd_conduction_halo_lift.py gated diags/diag000000 diags/diag000005 diags/diag000010 ../test_1d_theta_implicit_mhd_conduction_halo_lift_nolift/diags/diag000005 ../test_1d_theta_implicit_mhd_conduction_halo_lift/diags/diag000005 ../test_1d_theta_implicit_mhd_conduction_halo_lift/diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_halo_lift  # dependency
+)
+
 # conduction-stage L-stability (implicit_mhd.conduction_theta):
 # backward-Euler conduction (theta_c = 1) must obliterate a seeded
 # grid-Nyquist Te ripple at theta dt chi/dx^2 = 1e3 (one-step factor
@@ -5494,6 +5532,73 @@ add_warpx_test(
     "analysis_mhd_twin_bytes.py diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_wall_total/diags/diag000016"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_external_current_wall_total  # dependency
+)
+
+# the mask at a stair CORNER and the cell-centre z_max gate (the stepped
+# polyline wall_step_r065_r080.csv: r 0.065 for z < 0, 0.08 for z > 0;
+# first_masked [10 10 10 10 13 13 13 13]): with N = 2 the corner row j = 4
+# carries 5 band cells (the two inside row 3's contour + the three under the
+# corner facing the axial wall face), the other rows 2; the interior follows
+# the twin and no other cell is masked; with z_max = 0 only the rows whose
+# centre lies below the gate are masked
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_wall_step_total  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_wall implicit_mhd.wall_polyline_file=wall_step_r065_r080.csv"  # inputs
+    "analysis_mhd_force_band_corner.py twin diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_wall_step_band_cells  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_wall implicit_mhd.wall_polyline_file=wall_step_r065_r080.csv implicit_mhd.lorentz_force_band_cells=2"  # inputs
+    "analysis_mhd_force_band_corner.py band diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_wall_step_total/diags/diag000016 2 1.0e30 ${CMAKE_CURRENT_SOURCE_DIR}/wall_step_r065_r080.csv"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_wall_step_total  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_wall_step_band_cells_zmax  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_wall implicit_mhd.wall_polyline_file=wall_step_r065_r080.csv implicit_mhd.lorentz_force_band_cells=2 implicit_mhd.lorentz_force_band_z_max=0.0"  # inputs
+    "analysis_mhd_force_band_corner.py band diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_wall_step_total/diags/diag000016 2 0.0 ${CMAKE_CURRENT_SOURCE_DIR}/wall_step_r065_r080.csv"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_wall_step_band_cells  # dependency
+)
+
+# ============ The EMF side of the band-cells mask ============
+# lorentz_force_band_emf = 1: the band cells' velocity is frozen in the
+# induction EMF. A linear radial flow u_r = u1 r/Lr compresses the uniform
+# B_z (+ the split external field's 4 c r^2) through the corner EMF
+# E_theta = u_r B_z in the external-current wall column; with the mask alone
+# (0) the band cells' B_z changes like the interior's, with the freeze (1)
+# the wall-adjacent band cell (every corner of which reads only band or
+# masked cells) does not move at all while the inner interior stays the live
+# arm's; the audit books force_withheld (0) or reports emf_withheld (1),
+# never both
+add_warpx_test(
+    test_rz_theta_implicit_mhd_band_emf_live  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_band_emf  # inputs
+    "analysis_mhd_force_band_emf.py live diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_band_emf_frozen  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_band_emf implicit_mhd.lorentz_force_band_emf=1"  # inputs
+    "analysis_mhd_force_band_emf.py frozen diags/diag000000 diags/diag000016 ../test_rz_theta_implicit_mhd_band_emf_live/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_band_emf_live  # dependency
 )
 
 # ============ The vacuum dust drag's kinetic drain ============

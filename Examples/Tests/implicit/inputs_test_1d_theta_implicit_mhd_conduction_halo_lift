@@ -1,0 +1,32 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_conduction_halo_boost
+
+# Halo lift of the PARALLEL chi ceiling (implicit_mhd.conduction_chi_par_max_halo)
+# and its HARD start-time gate (implicit_mhd.conduction_chi_par_max_halo_start_time).
+# The same entropy-mode column as the halo-boost arms with the field ALONG z
+# (bhat_n = 1 on every face: pure chi_par along z, the perp channel and its
+# boost inert), density-keyed as a halo (static reference 10 n0 -> factor 100
+# everywhere), both channels CAP-BOUND: the raw Braginskii chi_par is ~8e4
+# (ions, 1 eV) and ~6e8 m^2/s (electrons, 10 eV) against the base ceiling 100
+# and the halo ceiling 1e4 [kappa/(n kB)], so each channel's e_spec ripple decays
+# at k_eff^2 (gamma - 1) chi_ceiling, a state-independent rate, in every arm.
+# The perp cap is set BELOW the base parallel ceiling (10): the ion perp boost
+# (x100 at this density key) would otherwise lift the ion chi_par through the
+# tensor guard chi_par >= chi_perp (measured: 3.9e4 without the cap), and the
+# electron channel carries no boost.
+# Arms (command line): "nolift" (no halo key: both channels at the base ceiling
+# for all 10 steps), "lift" (halo ceiling 1e4 from step one: ~46 % decay per 5
+# steps), "gated" (halo ceiling 1e4 gated at 5.2 dt: steps 1-5 are the nolift
+# arm bit for bit -- the step-5 plotfile is compared byte for byte -- and steps
+# 6-10 decay at the lifted rate). See analysis_mhd_conduction_halo_lift.py.
+my_constants.dt = 3.0e-8
+warpx.B_external_grid = 0.0 0.0 B0
+implicit_mhd.conduction_halo_boost = 1.0
+implicit_mhd.vacuum_reference_base_density = 10.0 * n0 * m_p
+implicit_mhd.conduction_chi_par_min = 1.0e-3
+implicit_mhd.conduction_chi_par_max = 100.0
+implicit_mhd.conduction_chi_perp_min = 1.0e-3
+implicit_mhd.conduction_chi_perp_max = 10.0
+warpx.const_dt = dt
+max_step = 10
+diag1.intervals = 5

@@ -257,8 +257,25 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.lorentz_force_band_cells cannot be negative (0 = off)");
     utils::parser::queryWithParser(pp, "lorentz_force_weight_eta",
                                    m_lorentz_force_weight_eta);
-    utils::parser::queryWithParser(pp, "lorentz_force_band_z_max",
-                                   m_lorentz_force_band_z_max);
+    const bool band_z_max_given =
+        utils::parser::queryWithParser(pp, "lorentz_force_band_z_max",
+                                       m_lorentz_force_band_z_max) != 0;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !band_z_max_given || m_lorentz_force_band_cells > 0,
+        "implicit_mhd.lorentz_force_band_z_max is the axial extent of the "
+        "band-cells force mask and requires implicit_mhd.lorentz_force_band_cells "
+        "> 0 (without the mask it would be silently inert)");
+    // EMF-side completion of the band mask (see m_lorentz_force_band_emf).
+    pp.query("lorentz_force_band_emf", m_lorentz_force_band_emf);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_emf == 0 || m_lorentz_force_band_emf == 1,
+        "implicit_mhd.lorentz_force_band_emf must be 0 (the band fluid's velocity "
+        "still advects the field) or 1 (the band cells' velocity is frozen in the "
+        "induction EMF: a force-free AND EMF-free band)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_emf == 0 || m_lorentz_force_band_cells > 0,
+        "implicit_mhd.lorentz_force_band_emf = 1 completes the band-cells force "
+        "mask and requires implicit_mhd.lorentz_force_band_cells > 0");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_lorentz_force_weight_eta < 0.0_rt || m_physical_share_force,
         "implicit_mhd.lorentz_force_weight_eta requires "
@@ -848,6 +865,18 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.conduction_chi_par_max (to lower the halo "
             "instead, lower conduction_chi_par_max itself)");
     }
+    // HARD time gate on the halo lift (see
+    // m_conduction_chi_par_max_halo_start_time): re-read at every boot,
+    // never checkpointed.
+    const bool halo_start_given =
+        utils::parser::queryWithParser(
+            pp, "conduction_chi_par_max_halo_start_time",
+            m_conduction_chi_par_max_halo_start_time) != 0;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !halo_start_given || m_conduction_chi_par_max_halo >= 0.0_rt,
+        "implicit_mhd.conduction_chi_par_max_halo_start_time gates the halo "
+        "parallel-chi lift and requires implicit_mhd.conduction_chi_par_max_halo "
+        ">= 0 (without the lift there is nothing to gate)");
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (see m_wall_conduction_scale): "perp" (default, the historical
     // behavior) or "parallel" (the reference code's measured wall conductance G,
@@ -2748,6 +2777,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.lorentz_force_band_cells requires the shaped wall "
         "(implicit_mhd.wall_model): the band is the last N live cells inside "
         "the wall contour");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_lorentz_force_band_emf == 0 || m_use_central,
+        "implicit_mhd.lorentz_force_band_emf = 1 requires implicit_mhd.fluid_flux "
+        "= central: the central induction flux is linear in each side's velocity, "
+        "so freezing the band side is the exact removal of its ideal EMF (the "
+        "hlld fan's induction flux is not weighted)");
+    // The mask's per-row table (static geometry; rebuilt with the wall
+    // table on every boot, restart included).
+    BuildLorentzForceBandTable();
 
     if (m_vacuum_mass_density > 0.0_rt) {
         // Holmstrom-style vacuum cell switching for the ion fluid: cells
@@ -4082,6 +4120,13 @@ void ThetaImplicitMHD::PrintParameters () const
                                  std::to_string(m_lorentz_force_band_z_max) +
                                  " m only]"
                            : "")
+                   << (m_lorentz_force_band_cells > 0
+                           ? (m_lorentz_force_band_emf != 0
+                                  ? " [induction EMF: the band velocity is FROZEN "
+                                    "(a force-free and EMF-free band)]"
+                                  : " [induction EMF: the live band velocity (the "
+                                    "withheld work is booked as force_withheld)]")
+                           : "")
                    << "\n"
                    << "Vacuum drag kinetic drain:     "
                    << (m_vacuum_drag_kinetic_drain
@@ -4369,6 +4414,18 @@ void ThetaImplicitMHD::PrintParameters () const
                                  std::to_string(m_conduction_chi_par_max) +
                                  " by the halo density key"
                            : std::string("off (parallel ceiling uniform)"))
+                   << "\n"
+                   << "Halo lift start time [s]:      "
+                   << (m_conduction_chi_par_max_halo >= 0.0_rt
+                           ? (m_conduction_chi_par_max_halo_start_time >
+                                      std::numeric_limits<amrex::Real>::lowest()
+                                  ? std::to_string(
+                                        m_conduction_chi_par_max_halo_start_time) +
+                                        " (hard gate on the solve's stage time; the "
+                                        "halo ceiling is conduction_chi_par_max "
+                                        "before it)"
+                                  : std::string("(from step one)"))
+                           : std::string("(no lift)"))
                    << "\n"
                    << "Wall conduction scale:         "
                    << m_wall_conduction_scale
@@ -10630,8 +10687,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // Density-keyed lift of the PARALLEL ceiling in the halo (see
     // m_conduction_chi_par_max_halo). Converted per species out of the
     // kappa/(n kB) convention exactly like brag_par_hi_{e,i}.
+    // ... gated by the HARD start time on the solve's stage time (see the
+    // member comment): a per-solve constant like every other coefficient
+    // input, so no residual carries a time branch.
     const bool lift_halo_par =
-        add_halo_boost && m_conduction_chi_par_max_halo >= 0.0_rt;
+        add_halo_boost && m_conduction_chi_par_max_halo >= 0.0_rt &&
+        a_time >= m_conduction_chi_par_max_halo_start_time;
+    if (lift_halo_par && !m_conduction_chi_par_max_halo_engaged) {
+        m_conduction_chi_par_max_halo_engaged = true;
+        if (m_conduction_chi_par_max_halo_start_time >
+            std::numeric_limits<amrex::Real>::lowest()) {
+            amrex::Print() << "ThetaImplicitMHD: halo parallel-chi lift ENGAGED at "
+                              "stage time " << a_time << " s (start time "
+                           << m_conduction_chi_par_max_halo_start_time
+                           << " s): the halo ceiling is now "
+                           << m_conduction_chi_par_max_halo
+                           << " [kappa/(n kB)] where the density key says halo\n";
+        }
+    }
     const amrex::Real halo_par_hi_e =
         brag_e_convention * m_conduction_chi_par_max_halo;
     const amrex::Real halo_par_hi_i =
@@ -10766,6 +10839,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const int wall_mask_z_lo = -m_wall_mask.GhostCells();
     const int wall_mask_z_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    // lorentz_force_band_emf: the band cells' velocity is frozen (zero) in
+    // the face induction fluxes (see the member comment and central_flux's
+    // induction_velocity_weight). The per-row table is the mask's own
+    // (BuildLorentzForceBandTable), read with the wall table's clamps.
+    const bool force_band_emf_freeze =
+        (m_lorentz_force_band_emf != 0) && (m_lorentz_force_band_cells > 0) &&
+        m_wall_mask.IsActive();
+    const int* const AMREX_RESTRICT force_band_first_cc =
+        force_band_emf_freeze ? m_lorentz_force_band_first_cc_ptr : nullptr;
     // n kB T_wall = rho (q/m) T_wall[eV] for the quasi-neutral
     // single-ion fluid (see the z wall_temperature ghost fill): the
     // wall-reservoir SPECIFIC internal energies are density-free.
@@ -11252,6 +11334,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     const auto far_right = load_state(irr, jrr, krr);
                     theta_implicit_mhd::reconstruct_face_states(
                         far_left, far_right, normal, parameters, left, right);
+                }
+            }
+
+            // lorentz_force_band_emf: freeze the band cells' velocity in
+            // the induction channels of the flux below (weight 0; every
+            // other channel keeps the live state). Set on the advective
+            // states BEFORE the wall image is formed, so an interface face
+            // whose interior cell is a band cell presents a frozen image
+            // too. Static geometry, like the wall classification below.
+            if (force_band_emf_freeze) {
+                const int jzl = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, jl));
+                const int jzr = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, j));
+                if (il >= force_band_first_cc[jzl]) {
+                    left.induction_velocity_weight = 0.0_rt;
+                }
+                if (i >= force_band_first_cc[jzr]) {
+                    right.induction_velocity_weight = 0.0_rt;
                 }
             }
 
@@ -14905,6 +15006,19 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const int* const band_override_et = wall_band_view.first_band_et;
     const int* const band_override_ez = wall_band_view.first_band_ez;
     const amrex::Real band_eta_override = wall_band_view.eta_override;
+    // lorentz_force_band_emf (see the member comment): the band cells'
+    // velocity is frozen in the corner EMF states below (and in the
+    // audit's plain-mean ideal EMF registers), matching the frozen face
+    // induction fluxes assembled in ComputeDirectionalFaceFluxes. The
+    // per-row table is the mask's own, read with the wall table's clamps.
+    const bool force_band_emf_freeze =
+        (m_lorentz_force_band_emf != 0) && (m_lorentz_force_band_cells > 0) &&
+        m_wall_mask.IsActive();
+    const int* const AMREX_RESTRICT force_band_first_cc =
+        force_band_emf_freeze ? m_lorentz_force_band_first_cc_ptr : nullptr;
+    const int band_z_lo = -m_wall_mask.GhostCells();
+    const int band_z_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
     constexpr int flux_signal_left = FaceFluxComponent::signal_left;
@@ -14973,6 +15087,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 audit_ohm_r(i, j, k, 0) = zface(i, j, k, flux_induction_t2);
                 amrex::Real emf_r = 0.0_rt;
                 for (int jc = j - 1; jc <= j; ++jc) {
+                    if (force_band_emf_freeze) {
+                        // a band cell's velocity is frozen (see above)
+                        const int jz = std::max(band_z_lo,
+                                                std::min(band_z_hi, jc));
+                        if (i >= force_band_first_cc[jz]) { continue; }
+                    }
                     const amrex::Real inverse_density =
                         1.0_rt / std::max(rho(i, jc, k), density_floor);
                     const amrex::Real ut = mom(i, jc, k, 1) * inverse_density;
@@ -15129,8 +15249,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 const amrex::Real face_radius =
                     radial_lower + i * radial_cell_size;
                 amrex::Real emf_z = 0.0_rt;
+                // a band cell's velocity is frozen (see above)
+                const auto band_frozen = [=] (const int ic) {
+                    if (!force_band_emf_freeze) { return false; }
+                    const int jz = std::max(band_z_lo, std::min(band_z_hi, j));
+                    return ic >= force_band_first_cc[jz];
+                };
                 if (i - 1 < domain_lo_r) {
-                    if (face_radius > 0.5_rt * radial_cell_size) {
+                    if (face_radius > 0.5_rt * radial_cell_size &&
+                        !band_frozen(i)) {
                         const amrex::Real inverse_density =
                             1.0_rt / std::max(rho(i, j, k), density_floor);
                         emf_z = (mom(i, j, k, 1) * b_cc(i, j, k, 0) -
@@ -15139,6 +15266,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     }
                 } else {
                     for (int ic = i - 1; ic <= i; ++ic) {
+                        if (band_frozen(ic)) { continue; }
                         const amrex::Real inverse_density =
                             1.0_rt / std::max(rho(ic, j, k), density_floor);
                         emf_z += 0.5_rt *
@@ -15325,6 +15453,13 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
             // Cell-centered ideal EMF states of the four cells around the
             // corner: E_theta = -(u x B)_theta = u_r B_z - u_z B_r.
             const auto emf_state = [=] (const int ic, const int jc) {
+                if (force_band_emf_freeze) {
+                    // lorentz_force_band_emf: a band cell contributes no
+                    // ideal EMF (its velocity is frozen), so the corner
+                    // average sees a static field there.
+                    const int jz = std::max(band_z_lo, std::min(band_z_hi, jc));
+                    if (ic >= force_band_first_cc[jz]) { return 0.0_rt; }
+                }
                 const amrex::Real safe_density =
                     std::max(rho(ic, jc, k), density_floor);
                 const amrex::Real velocity_r =
@@ -15801,12 +15936,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool physical_share_force = m_physical_share_force;
     const int force_band_cells = m_lorentz_force_band_cells;
     const bool force_band_mask = (force_band_cells > 0) && m_wall_mask.IsActive();
-    const int* const AMREX_RESTRICT force_band_masked_cc =
-        force_band_mask ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    // The mask's per-row first band cell (BuildLorentzForceBandTable: the
+    // j+-1 corner rule and the z_max cell-centre gate folded in) -- the
+    // one table the fluid rows, the face induction fluxes and the corner
+    // EMF share.
+    const int* const AMREX_RESTRICT force_band_first_cc =
+        force_band_mask ? m_lorentz_force_band_first_cc_ptr : nullptr;
     const bool force_weighted = physical_share_force || force_band_mask;
-    // Axial extent of the band mask (see the member comment): the mask
-    // acts only in rows whose cell centre lies at z <= z_max.
-    const amrex::Real force_band_z_max = m_lorentz_force_band_z_max;
+    // lorentz_force_band_emf: the band's induction EMF is frozen too, so
+    // its withheld force work is an exchange that happens on neither side
+    // (reported as emf_withheld, booked in no identity) instead of the
+    // field-side non-conservation force_withheld.
+    const bool force_band_emf_frozen =
+        force_band_mask && (m_lorentz_force_band_emf != 0);
     // Constant reference eta of the physical-share weight (-1 = the live
     // user eta; see the member comment).
     const amrex::Real force_weight_eta = m_lorentz_force_weight_eta;
@@ -16049,6 +16191,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int audit_fcs_ui = EnergyAuditRegister::fcs_ui;
     constexpr int audit_lorentz_unweighted = EnergyAuditRegister::lorentz_unweighted;
     constexpr int audit_force_withheld = EnergyAuditRegister::force_withheld;
+    constexpr int audit_emf_withheld = EnergyAuditRegister::emf_withheld;
 
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
@@ -16347,6 +16490,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             // w u . F_mag, and the withheld (1 - w) u . F_mag goes to the
             // audit as force_withheld. Off: no arithmetic touches the rows.
             amrex::Real magnetic_force_withheld[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+            bool force_band_cell = false;
             if (force_weighted) {
                 amrex::Real force_weight = 1.0_rt;
                 if (physical_share_force) {
@@ -16377,28 +16521,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 if (force_band_mask) {
                     // The last N live cells at the shaped wall, radially
                     // (this row) and axially (the two neighbouring rows, so
-                    // the cells under a stair corner count as band cells).
+                    // the cells under a stair corner count as band cells),
+                    // in rows with cell centre z <= band_z_max: the per-row
+                    // table built once from the wall table.
                     const int jz_c = std::max(wall_mask_z_lo,
                                               std::min(wall_mask_z_hi, j));
-                    const int jz_up = std::max(wall_mask_z_lo,
-                                               std::min(wall_mask_z_hi, j + 1));
-                    const int jz_down = std::max(wall_mask_z_lo,
-                                                 std::min(wall_mask_z_hi, j - 1));
-                    const int first_masked = std::min(
-                        force_band_masked_cc[jz_c],
-                        std::min(force_band_masked_cc[jz_up],
-                                 force_band_masked_cc[jz_down]));
-                    if (i >= first_masked - force_band_cells) {
-#if defined(WARPX_DIM_RZ)
-                        const amrex::Real z_cell =
-                            axial_lower + (j + 0.5_rt) * axial_cell_size;
-#else
-                        const amrex::Real z_cell =
-                            axial_lower + (i + 0.5_rt) * axial_cell_size;
-#endif
-                        if (z_cell <= force_band_z_max) {
-                            force_weight = 0.0_rt;
-                        }
+                    if (i >= force_band_first_cc[jz_c]) {
+                        force_weight = 0.0_rt;
+                        force_band_cell = true;
                     }
                 }
                 for (int component = 0; component < 3; ++component) {
@@ -16862,8 +16992,20 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         withheld_work += mom(i, j, k, component) *
                                          magnetic_force_withheld[component];
                     }
+                    // Under the frozen band EMF a band cell's withheld work
+                    // is an exchange that happens on neither side (reported
+                    // as emf_withheld, booked in no identity); everywhere
+                    // else it is the field-side design term force_withheld.
+                    const bool emf_frozen_cell =
+                        force_band_emf_frozen && force_band_cell;
                     audit_reg(i, j, k, audit_force_withheld) =
-                        wall_live * withheld_work / safe_density;
+                        emf_frozen_cell
+                            ? 0.0_rt
+                            : wall_live * withheld_work / safe_density;
+                    audit_reg(i, j, k, audit_emf_withheld) =
+                        emf_frozen_cell
+                            ? wall_live * withheld_work / safe_density
+                            : 0.0_rt;
                 }
                 amrex::Real ion_pressure_work =
                     (pressure_e + pedestal_shift_pressure_e) *
@@ -18767,6 +18909,72 @@ void ThetaImplicitMHD::WriteDualEnergyGuardLedgerRow (const int step,
     ledger.precision(17);
     ledger << step + 1 << " " << guarded_cells << " "
            << m_dual_energy_guard_discarded << "\n";
+}
+
+void ThetaImplicitMHD::BuildLorentzForceBandTable ()
+{
+    m_lorentz_force_band_first_cc_ptr = nullptr;
+    m_lorentz_force_band_first_cc.clear();
+    if (m_lorentz_force_band_cells <= 0 || !m_wall_mask.IsActive()) {
+        return;
+    }
+#if defined(WARPX_DIM_RZ)
+    // The wall table (device memory, pointer pre-offset by ng) -> host.
+    const int ng = m_wall_mask.GhostCells();
+    const int nz = m_wall_mask.AxialCells();
+    const int n_cell = nz + 2 * ng;
+    const int* const wall_table = m_wall_mask.FirstMaskedCellCentered() - ng;
+    amrex::Vector<int> first_masked(n_cell);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, wall_table, wall_table + n_cell,
+                     first_masked.begin());
+    amrex::Gpu::streamSynchronize();
+    const amrex::Real axial_lower = m_WarpX->Geom(0).ProbLo(1);
+    const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(1);
+    constexpr int never = std::numeric_limits<int>::max();
+    amrex::Vector<int> band_first(n_cell, never);
+    long band_rows = 0;
+    long band_cells_total = 0;
+    for (int jj = 0; jj < n_cell; ++jj) {
+        const int j = jj - ng;
+        // Constant continuation past the table's range, exactly like the
+        // wall table's own consumers clamp.
+        const auto table_at = [&] (const int jc) {
+            return first_masked[std::max(0, std::min(n_cell - 1, jc + ng))];
+        };
+        // The row's contour and its two axial neighbours': the cells under
+        // a stair corner (whose axial face is a wall face) are band cells.
+        const int first =
+            std::min({table_at(j), table_at(j + 1), table_at(j - 1)});
+        // The z_max gate on the ROW's cell centre (on the production grid
+        // 3.5 excludes the row facing the bore step, centre 3.5039).
+        const amrex::Real z_cell =
+            axial_lower + (j + 0.5_rt) * axial_cell_size;
+        if (first != never && z_cell <= m_lorentz_force_band_z_max) {
+            band_first[jj] = first - m_lorentz_force_band_cells;
+            if (j >= 0 && j < nz) {
+                ++band_rows;
+                band_cells_total += std::max(0, table_at(j) - band_first[jj]);
+            }
+        }
+    }
+    m_lorentz_force_band_first_cc.resize(n_cell);
+    amrex::Gpu::copy(amrex::Gpu::hostToDevice, band_first.begin(),
+                     band_first.end(), m_lorentz_force_band_first_cc.begin());
+    amrex::Gpu::streamSynchronize();
+    m_lorentz_force_band_first_cc_ptr =
+        m_lorentz_force_band_first_cc.data() + ng;
+    amrex::Print() << "ThetaImplicitMHD: band-cells force mask table: N = "
+                   << m_lorentz_force_band_cells << ", z_max = "
+                   << (m_lorentz_force_band_z_max <
+                               std::numeric_limits<amrex::Real>::max()
+                           ? std::to_string(m_lorentz_force_band_z_max) + " m"
+                           : std::string("unlimited"))
+                   << ": " << band_rows << " of " << nz
+                   << " rows carry band cells (" << band_cells_total
+                   << " live cells); induction EMF in the band: "
+                   << (m_lorentz_force_band_emf != 0 ? "FROZEN" : "live")
+                   << "\n";
+#endif
 }
 
 void ThetaImplicitMHD::UpdateStagedViscosity (const amrex::Real time)

@@ -263,6 +263,12 @@ struct CellState {
     // (constant) low-internal cutoff mask the loader used. Filled by
     // load_cell_state_dual; unread by every other consumer.
     amrex::Real old_ion_internal_energy = 0.0;
+    // --- Band-EMF freeze (implicit_mhd.lorentz_force_band_emf): weight of
+    // this cell's velocity in the face induction fluxes of central_flux
+    // (1 = the live velocity, exactly the unweighted flux; 0 = the cell
+    // advects no field). Set by ComputeDirectionalFaceFluxes on the band
+    // cells of the force mask; every other channel ignores it. ---
+    amrex::Real induction_velocity_weight = 1.0;
 };
 
 struct FaceFlux {
@@ -3143,14 +3149,22 @@ central_flux (const CellState& left, const CellState& right,
     }
     flux.electron_velocity =
         0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);
+    // Each side's ideal EMF enters with its induction_velocity_weight
+    // (1 by default, an exact identity; 0 under the band-EMF freeze,
+    // which removes that side's velocity from the induction channel
+    // alone).
     flux.induction_t1 =
         sqrt_mu0 * 0.5 *
-        ((u_left * bt1_left - left.ion_velocity[tangent1] * bn) +
-         (u_right * bt1_right - right.ion_velocity[tangent1] * bn));
+        (left.induction_velocity_weight *
+             (u_left * bt1_left - left.ion_velocity[tangent1] * bn) +
+         right.induction_velocity_weight *
+             (u_right * bt1_right - right.ion_velocity[tangent1] * bn));
     flux.induction_t2 =
         sqrt_mu0 * 0.5 *
-        ((u_left * bt2_left - left.ion_velocity[tangent2] * bn) +
-         (u_right * bt2_right - right.ion_velocity[tangent2] * bn));
+        (left.induction_velocity_weight *
+             (u_left * bt2_left - left.ion_velocity[tangent2] * bn) +
+         right.induction_velocity_weight *
+             (u_right * bt2_right - right.ion_velocity[tangent2] * bn));
 
     // Centered Maxwell-stress state (physical units: b_i b_j = B_i B_j/mu0).
     flux.momentum_magnetic[normal_direction] =

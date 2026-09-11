@@ -562,6 +562,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
                              // fluid: wall_live x (1 - w) x u . (j_plasma x B)
                              // (ungated, no plasma_weight: the field still
                              // does this ideal work; zero when both are off)
+            emf_withheld,    // under lorentz_force_band_emf = 1: the band
+                             // cells' withheld force work, the field-fluid
+                             // exchange that happens on NEITHER side (the
+                             // frozen EMF does no ideal work there and the
+                             // fluid receives none, so nothing is lost);
+                             // reported, part of no identity; zero when off
             count
         };
     };
@@ -637,6 +643,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
         amrex::Real cum_res_hyper = 0.0;
         amrex::Real cum_lorentz_withheld = 0.0;
         amrex::Real cum_force_withheld = 0.0;
+        amrex::Real cum_emf_withheld = 0.0;
         amrex::Real cum_poynt_in_ext = 0.0;
         amrex::Real cum_theta_diss_ext = 0.0;
         amrex::Real cum_ideal_mismatch = 0.0;
@@ -754,6 +761,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * before density_eater_start_time (the reference code's eaten_type card
      * flip). */
     void ApplyDensityEater (amrex::Real time, int step);
+    /** Build the per-row first-band-cell table of the band-cells force
+     * mask (implicit_mhd.lorentz_force_band_cells / band_z_max) from the
+     * wall mask's cell-centered table; see m_lorentz_force_band_first_cc.
+     * Called from Define after the wall mask exists (static geometry,
+     * rebuilt on restart like the wall table itself). */
+    void BuildLorentzForceBandTable ();
     /** Refresh the time-staged viscous coefficients for one step (the
      * The reference code's glob_mod card: their d_nur / nu_op_mul are constants WITHIN
      * a segment and change only at a restart boundary).
@@ -1555,6 +1568,41 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // mask leaves every closed-region station within 0.5 %. Static
     // geometry like the mask itself.
     amrex::Real m_lorentz_force_band_z_max = std::numeric_limits<amrex::Real>::max();
+    // implicit_mhd.lorentz_force_band_emf (default 0 = off, bit-identical):
+    // the EMF-side completion of the band-cells mask. With the mask alone
+    // the band fluid receives no magnetic force but its velocity still
+    // advects the field through the induction EMF -(u x B), so the field
+    // does ideal work u . (j x B) in the band that the fluid never
+    // receives -- a deliberate non-conservation booked as force_withheld
+    // (3-4 % of the circuit power during the tube fill of the production
+    // formation deck, 2026-09-10; destructive wherever a force-free fluid
+    // carries pressure: the density-weight twin's dynamo). With 1 the
+    // band cells' velocity is FROZEN (zero) in every induction EMF that
+    // reads it -- the face induction fluxes (central_flux, both
+    // tangential channels, through CellState::induction_velocity_weight)
+    // and the UCT corner EMF states -- so the band is force-free AND
+    // EMF-free: the field there is pure resistive diffusion (what a
+    // dielectric band should be), the fluid keeps its mass, pressure,
+    // viscosity and thermal contact, and the band exchanges no energy
+    // with the field in either direction. The band cells' withheld force
+    // work is then reported as emf_withheld (the exchange that WOULD have
+    // happened; part of no identity) instead of force_withheld. Static
+    // geometry (the mask's own per-row table). Requires
+    // lorentz_force_band_cells > 0 and fluid_flux = central: the central
+    // induction flux is linear in each side's velocity, so the freeze is
+    // the exact removal of the band side's ideal EMF (the hlld fan's
+    // induction flux is not weighted).
+    int m_lorentz_force_band_emf = 0;
+    // Per-row first band cell (r index) of the mask, cell-centered like
+    // the wall table and pre-offset the same way (the pointer is valid
+    // over z cells [-ng, nz - 1 + ng]; consumers clamp like the wall
+    // table): min(first_masked_cc[j-1], [j], [j+1]) - N in rows whose
+    // cell centre lies at z <= band_z_max, INT_MAX (never) elsewhere.
+    // Built once in Define from the wall table (BuildLorentzForceBandTable)
+    // so the fluid rows, the face induction fluxes and the corner EMF
+    // share ONE decision. Null when the mask is off.
+    amrex::Gpu::DeviceVector<int> m_lorentz_force_band_first_cc;
+    const int* m_lorentz_force_band_first_cc_ptr = nullptr;
     // ---- Offset-density (pedestal) halo formulation (0 disables). ----
     //
     // Fraction f of the instantaneous density peak defining the dynamic
@@ -2897,6 +2945,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // density key), and must not sit below conduction_chi_par_max --
     // this is a lift, never a reduction.
     amrex::Real m_conduction_chi_par_max_halo = -1.0;
+    // implicit_mhd.conduction_chi_par_max_halo_start_time [s] (default
+    // lowest() = the lift is on from step one, bit-identical): a HARD
+    // time gate on the halo lift above, like the density eater's. Below
+    // the start time the halo ceiling equals conduction_chi_par_max
+    // everywhere (the lift is simply not applied); from the first solve
+    // whose stage time t^n + theta dt is at or past it, the lift is on.
+    // The lift is a per-solve constant clamp on the frozen coefficient
+    // state, so the branch is per-solve (never inside a residual) and
+    // every Newton iteration of a step sees the same ceiling. WHY a gate:
+    // applied from t = 0 on the production formation deck the lift costs
+    // 4-8x per step with 1-2 % non-converged Newton exits (the tenuous
+    // pre-fill halo being drained while the FRC forms), while from ~13 us
+    // (the compression tube filled, the wall band and the cone channel
+    // about to heat) it costs 2.3-3x per step to 22 us and 1.1-1.3x after
+    // with 0 non-converged exits over 3789 steps (2026-09-11, a 13.12 us
+    // restart); the gate makes that recipe a single run. Re-read at every
+    // boot (never checkpointed), so a restart past the start time has the
+    // lift on from its first step.
+    amrex::Real m_conduction_chi_par_max_halo_start_time =
+        std::numeric_limits<amrex::Real>::lowest();
+    // One-time run-log marker of the gate opening (the first solve with
+    // the lift applied), for boot checks and readouts.
+    bool m_conduction_chi_par_max_halo_engaged = false;
     // Taper the JOULE HEATING source with the same pedestal envelope the
     // other fluid sources already carry (implicit_mhd.joule_halo_taper,
     // default false = bit-identical).

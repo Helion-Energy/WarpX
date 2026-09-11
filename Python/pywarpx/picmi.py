@@ -3642,6 +3642,18 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         density-keyed weight is 0.01-0.7 early in a formation. 0 = off
         (bit-identical). Requires wall_model and fluid_flux hlld/central.
 
+    lorentz_force_band_emf: int, default=0
+        EMF-side completion of the band-cells mask
+        (implicit_mhd.lorentz_force_band_emf): with 1 the band cells'
+        velocity is frozen (zero) in every induction EMF that reads it
+        (the central face induction fluxes and the UCT corner EMF), so
+        the band is force-free AND EMF-free -- the field there is pure
+        resistive diffusion and the band exchanges no energy with the
+        field in either direction (its withheld force work is reported
+        as emf_withheld instead of the design term force_withheld). 0 =
+        today's behaviour (the band fluid still advects the field).
+        Requires lorentz_force_band_cells > 0 and fluid_flux = central.
+
     vacuum_drag_kinetic_drain: bool, default=False
         Pair the vacuum dust drag (vacuum_drag_rate) with the ion
         total-energy channel the way the pedestal-band drag already is:
@@ -3957,6 +3969,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the (rho, Te, J, t) parser expression rather than being captured
         pre-floor.
 
+    conduction_chi_par_max_halo_start_time: float, optional
+        Simulation time [s] at which the halo parallel-chi lift
+        (conduction_chi_par_max_halo) switches on: a hard gate on the
+        solve's stage time (the step end time at theta = 1) -- below it
+        the halo ceiling equals conduction_chi_par_max everywhere,
+        bit-identical to a run without the lift
+        (implicit_mhd.conduction_chi_par_max_halo_start_time). Unset =
+        the lift is on from step one. Re-read at every boot, so a
+        restart past the start time has the lift on from its first step.
+
     conduction_chi_par_max_halo: float, optional
         Density-keyed lift of the Braginskii PARALLEL chi ceiling in the
         halo, in the kappa/(n k_B) convention like the other
@@ -4224,6 +4246,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         lorentz_force_current=None,
         lorentz_force_band_cells=None,
         lorentz_force_band_z_max=None,
+        lorentz_force_band_emf=None,
         lorentz_force_weight_eta=None,
         vacuum_drag_kinetic_drain=None,
         floor_consistency_rate=None,
@@ -4288,6 +4311,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_qs_reference_temperature=None,
         conduction_halo_boost=None,
         conduction_chi_par_max_halo=None,
+        conduction_chi_par_max_halo_start_time=None,
         joule_halo_taper=None,
         wall_corner_temperature_pin_rate=None,
         viscous_flux_limit_factor=None,
@@ -4398,6 +4422,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.lorentz_force_current = lorentz_force_current
         self.lorentz_force_band_cells = lorentz_force_band_cells
         self.lorentz_force_band_z_max = lorentz_force_band_z_max
+        self.lorentz_force_band_emf = lorentz_force_band_emf
         self.lorentz_force_weight_eta = lorentz_force_weight_eta
         self.vacuum_drag_kinetic_drain = vacuum_drag_kinetic_drain
         self.floor_consistency_rate = floor_consistency_rate
@@ -4466,6 +4491,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_qs_reference_temperature = conduction_qs_reference_temperature
         self.conduction_halo_boost = conduction_halo_boost
         self.conduction_chi_par_max_halo = conduction_chi_par_max_halo
+        self.conduction_chi_par_max_halo_start_time = (
+            conduction_chi_par_max_halo_start_time
+        )
         self.joule_halo_taper = joule_halo_taper
         self.wall_corner_temperature_pin_rate = wall_corner_temperature_pin_rate
         self.viscous_flux_limit_factor = viscous_flux_limit_factor
@@ -4588,6 +4616,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.lorentz_force_current = self.lorentz_force_current
         implicit_mhd.lorentz_force_band_cells = self.lorentz_force_band_cells
         implicit_mhd.lorentz_force_band_z_max = self.lorentz_force_band_z_max
+        implicit_mhd.lorentz_force_band_emf = self.lorentz_force_band_emf
         implicit_mhd.lorentz_force_weight_eta = self.lorentz_force_weight_eta
         implicit_mhd.vacuum_drag_kinetic_drain = self.vacuum_drag_kinetic_drain
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
@@ -4704,6 +4733,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_halo_boost = self.conduction_halo_boost
         implicit_mhd.conduction_chi_par_max_halo = (
             self.conduction_chi_par_max_halo
+        )
+        implicit_mhd.conduction_chi_par_max_halo_start_time = (
+            self.conduction_chi_par_max_halo_start_time
         )
         implicit_mhd.joule_halo_taper = self.joule_halo_taper
         implicit_mhd.wall_corner_temperature_pin_rate = (

@@ -1248,6 +1248,9 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     // lorentz_force_band_cells); exactly zero when both are off, so every
     // expression below that subtracts it is bit-identical then.
     const amrex::Real force_withheld = a.src[R::force_withheld];
+    // Under lorentz_force_band_emf = 1 the band cells' withheld force work
+    // is an exchange that happens on neither side (reported only).
+    const amrex::Real emf_withheld = a.src[R::emf_withheld];
     const amrex::Real res_boost = a.res_field - a.res_user;
     // The Ohm's-law component split of the exchange remainder (see the
     // header): exchange_rest2 = ideal_mismatch + hall_work + inertia_work +
@@ -1295,6 +1298,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
     a.cum_res_hyper += a.res_hyper;
     a.cum_lorentz_withheld += lorentz_withheld;
     a.cum_force_withheld += force_withheld;
+    a.cum_emf_withheld += emf_withheld;
     a.cum_poynt_in_ext += -poynt_out_ext_total;
     a.cum_theta_diss_ext += a.theta_diss_ext;
     a.cum_ext_defect += ext_defect;
@@ -1421,6 +1425,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"lorentz_unweighted", a.src[R::lorentz_unweighted]},
         {"lorentz_withheld", lorentz_withheld},
         {"force_withheld", force_withheld},
+        {"emf_withheld", emf_withheld},
         {"exchange_rest2", exchange_rest2},
         // the Ohm's-law component split of exchange_rest2
         {"ideal_edge_work", a.ind_work},
@@ -1494,6 +1499,7 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
         {"res_hyper_cum", a.cum_res_hyper},
         {"lorentz_withheld_cum", a.cum_lorentz_withheld},
         {"force_withheld_cum", a.cum_force_withheld},
+        {"emf_withheld_cum", a.cum_emf_withheld},
         {"poynt_in_ext_cum", a.cum_poynt_in_ext},
         {"theta_diss_ext_cum", a.cum_theta_diss_ext},
         {"ext_defect_cum", a.cum_ext_defect},
@@ -1576,6 +1582,9 @@ void ThetaImplicitMHD::EnergyAuditWriteRow (const amrex::Real end_time, const in
                     "withholds, force_withheld = the magnetic-force work the physical-share weight "
                     "(lorentz_force_current = physical) / band-cells mask (lorentz_force_band_cells) withholds "
                     "from the fluid rows (wall_live x (1 - w) x u . (j_plasma x B), ungated; zero when off), "
+                    "emf_withheld = under lorentz_force_band_emf = 1 the band cells' withheld force work, the "
+                    "field-fluid exchange that happens on NEITHER side (the band's induction EMF is frozen and the "
+                    "fluid receives no force: nothing is lost; reported, part of no identity; zero when off), "
                     "exchange_rest2 = exchange_rest - res_hyper - lorentz_withheld - force_withheld the "
                     "remainder, decomposed by the Ohm's-law components: exchange_rest2 = ideal_mismatch + "
                     "hall_work + inertia_work + ohm_rest EXACTLY, where ideal_edge_work = dt sum E_ind . J^theta "
