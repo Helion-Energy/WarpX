@@ -7,6 +7,7 @@
 #include "BackgroundMCCCollision.H"
 
 #include "ImpactIonization.H"
+#include "MCCBackgroundDensity.H"
 #include "Particles/Algorithms/KineticEnergy.H"
 #include "Particles/ParticleCreation/FilterCopyTransform.H"
 #include "Particles/ParticleCreation/SmartCopy.H"
@@ -334,8 +335,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     // get particle count
     const long np = pti.numParticles();
 
-    // get parsers for the background density and temperature
-    auto n_a_func = m_background_density_func;
+    // background density accessor, and the temperature parser
+    const auto get_n_a = MCCBackgroundDensity(m_background_density_func, t);
     auto T_a_func = m_background_temperature_func;
 
     // get collision parameters
@@ -371,7 +372,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               amrex::ParticleReal x, y, z;
                               GetPosition.AsStored(ip, x, y, z);
 
-                              const amrex::ParticleReal n_a = n_a_func(x, y, z, t);
+                              const amrex::ParticleReal n_a = get_n_a(x, y, z);
                               const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
 
                               amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
@@ -485,10 +486,12 @@ void BackgroundMCCCollision::doBackgroundIonization
     const auto CopyElec = copy_factory_elec.getSmartCopy();
     const auto CopyIon = copy_factory_ion.getSmartCopy();
 
+    const auto get_n_a = MCCBackgroundDensity(m_background_density_func, t);
+
     const auto Filter = ImpactIonizationFilterFunc(
                                                    m_ionization_processes[0],
                                                    m_mass1, m_total_collision_prob_ioniz,
-                                                   m_nu_max_ioniz, m_background_density_func, t
+                                                   m_nu_max_ioniz, get_n_a
                                                    );
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);

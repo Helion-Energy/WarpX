@@ -7,6 +7,7 @@
 #ifndef WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_
 #define WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_
 
+#include "MCCBackgroundDensity.H"
 #include "Particles/Collision/ScatteringProcess.H"
 
 #include "Particles/Algorithms/KineticEnergy.H"
@@ -44,20 +45,18 @@ public:
     * @param[in] mass colliding particle's mass (could also assume electron)
     * @param[in] total_collision_prob total probability for a collision to occur
     * @param[in] nu_max maximum collision frequency
-    * @param[in] n_a_func ParserExecutor<4> function to get the background
-                 density in m^-3 as a function of space and time
-    * @param[in] t the current simulation time
+    * @param[in] n_a accessor for the background density in m^-3 at a
+                 particle position
     */
     ImpactIonizationFilterFunc(
         ScatteringProcess const& mcc_process,
         double const mass,
         amrex::ParticleReal const total_collision_prob,
         amrex::ParticleReal const nu_max,
-        amrex::ParserExecutor<4> const& n_a_func,
-        amrex::Real t
+        MCCBackgroundDensity const& n_a
     ) : m_mcc_process(mcc_process.executor()), m_mass(mass),
         m_total_collision_prob(total_collision_prob),
-        m_nu_max(nu_max), m_n_a_func(n_a_func), m_t(t) { }
+        m_nu_max(nu_max), m_n_a(n_a) { }
 
     /**
     * \brief Functor call. This method determines if a given (electron) particle
@@ -87,7 +86,7 @@ public:
         get_particle_position(p, x, y, z);
 
         // calculate neutral density at particle location
-        const ParticleReal n_a = m_n_a_func(x, y, z, m_t);
+        const ParticleReal n_a = m_n_a(x, y, z);
 
         // get the particle velocity
         const ParticleReal ux = ptd.m_rdata[PIdx::ux][i];
@@ -114,8 +113,7 @@ private:
     double m_mass;
     amrex::ParticleReal m_total_collision_prob = 0;
     amrex::ParticleReal m_nu_max;
-    amrex::ParserExecutor<4> m_n_a_func;
-    amrex::Real m_t;
+    MCCBackgroundDensity m_n_a;
 };
 
 
