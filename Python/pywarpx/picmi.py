@@ -3261,6 +3261,20 @@ class MCCCollisions(CollisionBase):
         default=None,
         description="The maximum background density. When the background_density is an expression, this must also be specified.",
     )
+    deplete_background: bool | None = Field(
+        default=None,
+        description="Carry the background density on the mesh and remove the ionized weight from it on every ionization event, instead of treating the background as an inexhaustible reservoir. Cartesian geometry only. Default is False.",
+    )
+    background_name: str | None = Field(
+        default=None,
+        description="Names the depleting background, so that several collisions can share one gas rather than each consuming a private copy of the same fill. Collisions sharing a name must agree on background_density and background_shape. Only used when deplete_background is True. Defaults to the collision name.",
+    )
+    background_shape: int | None = Field(
+        default=None,
+        ge=1,
+        le=4,
+        description="The shape order, between 1 and 4, used both to gather the background density and to deposit its depletion. Only used when deplete_background is True. Defaults to algo.particle_shape.",
+    )
     ndt_supercycle: int | None = Field(
         default=None,
         ge=1,
@@ -3295,6 +3309,9 @@ class MCCCollisions(CollisionBase):
             collision.background_temperature = self.background_temperature
         collision.background_mass = self.background_mass
         collision.max_background_density = self.max_background_density
+        collision.deplete_background = self.deplete_background
+        collision.background_name = self.background_name
+        collision.background_shape = self.background_shape
         collision.ndt_supercycle = self.ndt_supercycle
         collision.ndt_subcycle = self.ndt_subcycle
         collision.start_step = self.start_step
