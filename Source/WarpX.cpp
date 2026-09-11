@@ -39,6 +39,7 @@
 #include "Initialization/ExternalField.H"
 #include "Initialization/WarpXInit.H"
 #include "Particles/ParticleBoundaries.H"
+#include "Particles/Collision/BackgroundMCC/MCCBackgroundField.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Fluids/MultiFluidContainer.H"
 #include "Fluids/WarpXFluidContainer.H"
@@ -2700,6 +2701,15 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
             lev, amrex::convert(ba, rho_nodal_flag), dm,
             rho_ncomps, ngRho, 0.0_rt);
     }
+
+    // Mesh-resident neutral density for any MCC background set to deplete.
+    // This sits on the level-allocation path, which a fresh start and a restart
+    // both take, so that the field exists before a checkpoint read can fill it;
+    // the parser fill done here is also the fallback for restarting from a
+    // checkpoint written before the field existed.
+    MCCBackgroundField::allocInit(
+        m_fields, mypc->getDepletableBackgrounds(), lev, ba, dm,
+        rho_nodal_flag, ngRho, geom[lev]);
 
     if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame ||
         electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic ||

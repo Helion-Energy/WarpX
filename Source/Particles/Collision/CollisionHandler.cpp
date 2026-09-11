@@ -21,6 +21,8 @@
 #include "Particles/Collision/BinaryCollision/ParticleCreationFunc.H"
 #include "Utils/TextMsg.H"
 
+#include <algorithm>
+
 #include "Particles/ParticleCreation/SmartCopy.H"
 #ifdef WARPX_QED
 #include "Particles/Collision/BinaryCollision/VirtualPhotonCreation.H"
@@ -114,6 +116,45 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
  * @param mypc MultiParticleContainer calling this method
  *
  */
+amrex::Vector<DepletableBackgroundSpec>
+CollisionHandler::getDepletableBackgrounds () const
+{
+    amrex::Vector<DepletableBackgroundSpec> unique_backgrounds;
+
+    for (auto const& collision : allcollisions)
+    {
+        for (auto const& background : collision->getDepletableBackgrounds())
+        {
+            auto const match = std::find_if(
+                unique_backgrounds.begin(), unique_backgrounds.end(),
+                [&](DepletableBackgroundSpec const& known){
+                    return known.m_background_name == background.m_background_name;
+                });
+
+            if (match == unique_backgrounds.end()) {
+                unique_backgrounds.push_back(background);
+                continue;
+            }
+
+            // Collisions sharing a background share one field, so their
+            // declarations have to agree; otherwise which one seeded the field
+            // would come down to the order the collisions happen to be built.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                match->m_density_expression == background.m_density_expression,
+                "Collisions sharing the background '" + background.m_background_name
+                + "' give different background_density inputs. Make them agree, or "
+                  "give the collisions different background_name values.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                match->m_shape == background.m_shape,
+                "Collisions sharing the background '" + background.m_background_name
+                + "' give different background_shape values. Make them agree, or "
+                  "give the collisions different background_name values.");
+        }
+    }
+
+    return unique_backgrounds;
+}
+
 void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc)
 {
 

@@ -43,6 +43,15 @@ public:
      */
     void doCollisions (amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc) override;
 
+    /** \brief This collision's background, when it is set to deplete.
+     *
+     * Returns a single entry when `deplete_background` is on, and nothing
+     * otherwise, in which case the background stays the analytic function it
+     * has always been and no mesh field is allocated for it.
+     */
+    [[nodiscard]] amrex::Vector<DepletableBackgroundSpec>
+    getDepletableBackgrounds () const override;
+
     /** Perform particle conserving MCC collisions within a tile
      *
      * @param pti particle iterator
@@ -92,6 +101,22 @@ private:
 
     amrex::ParserExecutor<4> m_background_density_func;
     amrex::ParserExecutor<4> m_background_temperature_func;
+
+    /** Whether ionization removes from the background rather than leaving it
+     *  as an inexhaustible reservoir. Off by default, which reproduces the
+     *  historical behaviour exactly. */
+    bool m_deplete_background = false;
+
+    /** Key naming the background. Collisions sharing it share one field. */
+    std::string m_background_name;
+
+    /** The raw `background_density` input, kept for consistency checking
+     *  against other collisions that declare the same background. */
+    std::string m_background_density_expression;
+
+    /** Shape order for gathering the background and depositing its
+     *  depletion. Defaults to `algo.particle_shape`. */
+    int m_background_shape = 1;
 };
 
 #endif // WARPX_PARTICLES_COLLISION_BACKGROUNDMCCCOLLISION_H_

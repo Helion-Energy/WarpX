@@ -207,6 +207,10 @@ public:
 
     void doCollisions (int step, amrex::Real cur_time, amrex::Real dt);
 
+    /** \brief The distinct depletable backgrounds the collisions declare. */
+    [[nodiscard]] amrex::Vector<DepletableBackgroundSpec>
+    getDepletableBackgrounds () const;
+
     /**
     * \brief This function loops over all species and performs resampling if appropriate.
     *

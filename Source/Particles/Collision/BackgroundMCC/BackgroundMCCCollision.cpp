@@ -36,15 +36,16 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             (background_density > 0),
             "The background density must be greater than 0.");
+        m_background_density_expression = std::to_string(background_density);
         m_background_density_parser =
             utils::parser::makeParser(
-                std::to_string(background_density), {"x", "y", "z", "t"});
+                m_background_density_expression, {"x", "y", "z", "t"});
     }
     else {
-        std::string background_density_str;
-        utils::parser::Store_parserString(pp_collision_name, "background_density(x,y,z,t)", background_density_str);
+        utils::parser::Store_parserString(pp_collision_name, "background_density(x,y,z,t)",
+                                          m_background_density_expression);
         m_background_density_parser =
-            utils::parser::makeParser(background_density_str, {"x", "y", "z", "t"});
+            utils::parser::makeParser(m_background_density_expression, {"x", "y", "z", "t"});
     }
 
     amrex::ParticleReal background_temperature;
@@ -78,6 +79,38 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
         (m_max_background_density > 0),
         "The maximum background density must be greater than 0."
     );
+
+    // Optionally carry the background on the mesh so that ionization can
+    // deplete it, rather than treating it as an inexhaustible reservoir.
+    // Note that the null-collision majorant stays valid either way: it is
+    // built from max_background_density once, and depletion only ever
+    // decreases the density below it.
+    pp_collision_name.query("deplete_background", m_deplete_background);
+    if (m_deplete_background)
+    {
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ) && !defined(WARPX_DIM_1D_Z)
+        WARPX_ABORT_WITH_MESSAGE(
+            collision_name + ".deplete_background is supported in Cartesian geometry "
+            "only. The cylindrical and spherical geometries need the radial volume "
+            "scaling that is applied to rho, which is not implemented for the "
+            "background density.");
+#else
+        // Collisions acting on one physical gas must name it identically in
+        // order to share a single field, so that the gas is not consumed once
+        // per collision. The default leaves each collision independent.
+        m_background_name = collision_name;
+        pp_collision_name.query("background_name", m_background_name);
+
+        // The same order is used to gather the density and to deposit its
+        // depletion; matching them is what makes the pair conserve.
+        m_background_shape = WarpX::nox;
+        utils::parser::queryWithParser(
+            pp_collision_name, "background_shape", m_background_shape);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (m_background_shape >= 1) && (m_background_shape <= 4),
+            "background_shape must be between 1 and 4.");
+#endif
+    }
 
     // if the neutral mass is specified use it, but if ionization is
     // included the mass of the secondary species of that interaction
@@ -166,6 +199,20 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
         m_ionization_processes_exe.push_back(p.executor());
     }
 #endif
+}
+
+amrex::Vector<DepletableBackgroundSpec>
+BackgroundMCCCollision::getDepletableBackgrounds () const
+{
+    if (!m_deplete_background) { return {}; }
+
+    DepletableBackgroundSpec background;
+    background.m_background_name = m_background_name;
+    background.m_density_expression = m_background_density_expression;
+    background.m_density_func = m_background_density_func;
+    background.m_shape = m_background_shape;
+
+    return {background};
 }
 
 /** Calculate the maximum collision frequency using a fixed energy grid that

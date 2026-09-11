@@ -7,6 +7,8 @@
 #ifndef WARPX_PARTICLES_COLLISION_COLLISIONBASE_H_
 #define WARPX_PARTICLES_COLLISION_COLLISIONBASE_H_
 
+#include "DepletableBackgroundSpec.H"
+
 #include "Particles/MultiParticleContainer_fwd.H"
 
 #include <AMReX_REAL.H>
@@ -39,6 +41,15 @@ public:
         { return m_collision_stepping_mode; }
 
     [[nodiscard]] bool use_global_debye_length() const {return m_use_global_debye_length;}
+
+    /**
+     * \brief Neutral backgrounds this collision depletes, one entry each.
+     *
+     * Empty unless the collision carries a mesh-resident background that
+     * ionization removes from, which is the default.
+     */
+    [[nodiscard]] virtual amrex::Vector<DepletableBackgroundSpec>
+    getDepletableBackgrounds () const { return {}; }
 
 protected:
 

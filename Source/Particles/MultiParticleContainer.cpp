@@ -1165,6 +1165,13 @@ MultiParticleContainer::doFieldIonization (int lev,
     }
 }
 
+amrex::Vector<DepletableBackgroundSpec>
+MultiParticleContainer::getDepletableBackgrounds () const
+{
+    return collisionhandler->getDepletableBackgrounds();
+}
+
+
 void
 MultiParticleContainer::doCollisions ( int step, Real cur_time, amrex::Real dt )
 {

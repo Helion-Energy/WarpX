@@ -28,6 +28,15 @@ public:
     /* Perform all of the collisions */
     void doCollisions (int step, amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc);
 
+    /**
+     * \brief The distinct depletable backgrounds declared by all collisions.
+     *
+     * Collisions declaring the same background name are collapsed to one
+     * entry, so that they end up sharing a single mesh field; conflicting
+     * declarations of one background are rejected.
+     */
+    [[nodiscard]] amrex::Vector<DepletableBackgroundSpec> getDepletableBackgrounds () const;
+
 private:
 
     amrex::Vector<std::string> collision_names;
