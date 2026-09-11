@@ -20,6 +20,7 @@
 #include <ablastr/utils/Communication.H>
 
 #include <AMReX_GpuContainers.H>
+#include <AMReX_Reduce.H>
 #include <AMReX_MLEBNodeFDLaplacian.H>
 #include <AMReX_MLMG.H>
 #include <AMReX_MLNodeTensorLaplacian.H>
@@ -264,6 +265,21 @@ void HybridPICModel::ReadParameters ()
 
     m_n_floor_given =
         utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
+
+    // [divB] Yee-divergence diagnostic cadence (member doc); output only.
+    utils::parser::queryWithParser(pp_hybrid, "divb_diag_interval",
+                                   m_divb_diag_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_divb_diag_interval >= 0,
+        "hybrid_pic_model.divb_diag_interval must be >= 0 (0 = off)");
+
+    // Green's cap ghost divergence consistency (member doc). The operative
+    // reader is GreensFunctionOpenBC::Define, which is lazy (first B boundary
+    // application, after the unused-inputs check); reading it here too marks
+    // the key used at init and validates the mode range early.
+    pp_hybrid.query("greens_cap_divfree", m_greens_cap_divfree);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_greens_cap_divfree >= 0 && m_greens_cap_divfree <= 2,
+        "hybrid_pic_model.greens_cap_divfree must be 0 (off), 1 or 2");
 
     // Embedded-boundary ion-current mask (see ApplyEBIonCurrentMask):
     // negative (default) = off, bit-identical.
@@ -1579,6 +1595,17 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
                           "the EB; particles/QDSMC EB fill unchanged)\n";
     }
 
+    if (m_greens_cap_divfree != 0) {
+        amrex::Print() << "[hybrid] Green's cap ghost divergence: FORCED div-free "
+                          "after every open-face fill, mode " << m_greens_cap_divfree
+                       << (m_greens_cap_divfree == 1
+                           ? " (face-normal ghost component recomputed cell by cell "
+                             "on every open face; face-row J unchanged)"
+                           : " (z_hi first ghost row of B_r from the axis-outward "
+                             "flux integral against the evolved face-row B_z)")
+                       << " -- applied by GreensFunctionOpenBC (see its banner)\n";
+    }
+
     if (m_density_pedestal) {
         // Density pedestal (change of variables): compile the profile, fill
         // every level, and print the inventory so the ledger has the
@@ -2665,8 +2692,101 @@ void HybridPICModel::HybridPICSolveE (
     if (!solve_for_Faraday && m_inertia_elliptic) {
         m_inertia_elliptic->ReportAndResetStats(m_substeps);
     }
+    // Same once-per-step point for the [divB] constraint readout: B is the
+    // step's final field, its physical-boundary ghosts as the last
+    // ApplyBfieldBoundary left them. WarpX::Evolve advances istep before
+    // the hybrid field evolve of the same step, so istep IS the step being
+    // completed (matches "STEP n ends" and the deck's per-step ledger).
+    // Gated by the interval alone (the production decks run warpx.verbose = 0).
+    if (!solve_for_Faraday && m_divb_diag_interval > 0) {
+        const int step = warpx.getistep(0);
+        if (step % m_divb_diag_interval == 0) {
+            for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+                ReportDivB(Bfield[lev], lev, step);
+            }
+        }
+    }
     // Allow execution of Python callback after E-field push
     ExecutePythonCallback("afterEpush");
+}
+
+void HybridPICModel::ReportDivB (ablastr::fields::VectorField const& Bfield,
+                                 const int lev, const int step) const
+{
+#if defined(WARPX_DIM_RZ)
+    using namespace amrex;
+    auto& warpx = WarpX::GetInstance();
+    const Geometry& geom = warpx.Geom(lev);
+    const Box domain = geom.Domain();              // cell-centred index space
+    const int ilo = domain.smallEnd(0), ihi = domain.bigEnd(0);
+    const int jlo = domain.smallEnd(1), jhi = domain.bigEnd(1);
+    const Real dr = geom.CellSize(0), dz = geom.CellSize(1);
+    const Real rmin = geom.ProbLo(0);
+    const Real inv_dr = 1.0_rt / dr, inv_dz = 1.0_rt / dz;
+    int ng = std::numeric_limits<int>::max();
+    for (int d = 0; d < 3; ++d) {
+        ng = std::min(ng, Bfield[d]->nGrowVect().min());
+    }
+    const bool have_ghost = (ng >= 1);
+    // Region boxes in the cell-centred index space (the corner cell
+    // (ihi+1, jhi+1) belongs to neither split).
+    const Box z_int  (IntVect(ilo, jlo),     IntVect(ihi, jhi - 2));
+    const Box z_face (IntVect(ilo, jhi - 1), IntVect(ihi, jhi));
+    const Box z_ghost(IntVect(ilo, jhi + 1), IntVect(ihi, jhi + 1));
+    const Box r_int  (IntVect(ilo, jlo),     IntVect(ihi - 2, jhi));
+    const Box r_face (IntVect(ihi - 1, jlo), IntVect(ihi, jhi));
+    const Box r_ghost(IntVect(ihi + 1, jlo), IntVect(ihi + 1, jhi));
+
+    ReduceOps<ReduceOpMax, ReduceOpMax, ReduceOpMax,
+              ReduceOpMax, ReduceOpMax, ReduceOpMax> reduce_op;
+    ReduceData<Real, Real, Real, Real, Real, Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    for (MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+        Box bx = enclosedCells(mfi.validbox());
+        if (have_ghost && bx.bigEnd(1) == jhi) { bx.growHi(1, 1); }
+        if (have_ghost && bx.bigEnd(0) == ihi) { bx.growHi(0, 1); }
+        Array4<Real const> const& Br = Bfield[0]->const_array(mfi);
+        Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+        reduce_op.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                const Real r_lo = rmin + i * dr;
+                const Real r_hi = rmin + (i + 1) * dr;
+                const Real rc = rmin + (i + 0.5_rt) * dr;
+                const Real div = (r_hi * Br(i + 1, j, k) - r_lo * Br(i, j, k)) * inv_dr / rc
+                               + (Bz(i, j + 1, k) - Bz(i, j, k)) * inv_dz;
+                const Real a = std::abs(div);
+                const IntVect iv(i, j);
+                return {z_int.contains(iv) ? a : 0.0_rt,
+                        z_face.contains(iv) ? a : 0.0_rt,
+                        z_ghost.contains(iv) ? a : 0.0_rt,
+                        r_int.contains(iv) ? a : 0.0_rt,
+                        r_face.contains(iv) ? a : 0.0_rt,
+                        r_ghost.contains(iv) ? a : 0.0_rt};
+            });
+    }
+    ReduceTuple hv = reduce_data.value(reduce_op);
+    Real v[6] = {amrex::get<0>(hv), amrex::get<1>(hv), amrex::get<2>(hv),
+                 amrex::get<3>(hv), amrex::get<4>(hv), amrex::get<5>(hv)};
+    ParallelDescriptor::ReduceRealMax(v, 6);
+    Real bmax = 0.0_rt;
+    for (int d = 0; d < 3; ++d) {
+        bmax = std::max(bmax, Bfield[d]->norm0(0, 0, true));
+    }
+    ParallelDescriptor::ReduceRealMax(bmax);
+    const Real scale = (bmax > 0.0_rt) ? dz / bmax : 0.0_rt;
+    amrex::Print() << "[divB] step " << step
+                   << " max|divB| dz / max|B| (Yee, cell centres):"
+                   << " z_hi interior " << v[0] * scale
+                   << " face " << v[1] * scale
+                   << " ghost " << (have_ghost ? v[2] * scale : -1.0_rt)
+                   << " | r_hi interior " << v[3] * scale
+                   << " face " << v[4] * scale
+                   << " ghost " << (have_ghost ? v[5] * scale : -1.0_rt)
+                   << " | max|B| " << bmax << " T\n";
+#else
+    amrex::ignore_unused(Bfield, lev, step);
+#endif
 }
 
 void HybridPICModel::HybridPICSolveE (

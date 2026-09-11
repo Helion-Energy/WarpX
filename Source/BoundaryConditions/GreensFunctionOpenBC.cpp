@@ -184,6 +184,15 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
         "cannot be disabled while z is periodic)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_image_sum_rtol > 0.0_rt,
         "boundary.open_bc_image_sum_rtol must be > 0");
+    {
+        const amrex::ParmParse pp_hybrid("hybrid_pic_model");
+        pp_hybrid.query("greens_cap_divfree", m_cap_divfree);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cap_divfree >= 0 && m_cap_divfree <= 2,
+            "hybrid_pic_model.greens_cap_divfree must be 0 (off), 1 (face-normal "
+            "ghost component from the ghost-cell divergence constraint) or 2 "
+            "(z_hi ghost B_r from the axis-outward flux integral)");
+    }
 
     // Validate the supported configuration
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -205,6 +214,14 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !(geom.isPeriodic(1) && (m_z_lo_open || m_z_hi_open)),
         "The Green's-function open boundary on a z face requires non-periodic z.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cap_divfree != 2 || m_z_hi_open,
+        "hybrid_pic_model.greens_cap_divfree = 2 acts on the z_hi cap ghosts and "
+        "requires boundary.field_hi[1] = open");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cap_divfree != 1 || m_z_hi_open || m_r_open,
+        "hybrid_pic_model.greens_cap_divfree = 1 acts on the z_hi and r_hi ghosts "
+        "and requires an open z_hi or r_hi face");
 
     // Externally applied fields initialized directly into the evolved B
     // (warpx.B_ext_grid_init_style) are curl-free inside the domain, so the
@@ -541,6 +558,21 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                    << (include_top ? "INCLUDED in" : "excluded from")
                    << " the source, boundary.open_bc_include_top_plane = "
                    << (m_include_top_plane ? 1 : 0) << ")\n";
+    amrex::Print() << "GreensFunctionOpenBC: ghost divergence consistency "
+                      "(hybrid_pic_model.greens_cap_divfree = " << m_cap_divfree
+                   << "): "
+                   << (m_cap_divfree == 0
+                       ? "OFF (ghost fill as computed; the first ghost cell row "
+                         "carries the face-row mismatch B^psi - B^Faraday)"
+                       : m_cap_divfree == 1
+                       ? "mode 1, face-normal ghost component recomputed from the "
+                         "ghost-cell Yee divergence constraint on every open face "
+                         "(B_z at z_hi, B_r at r_hi; all ghost layers; face-row J "
+                         "unchanged)"
+                       : "mode 2, z_hi first ghost row of B_r from the axis-outward "
+                         "flux integral of the constraint against the evolved "
+                         "face-row B_z (the component the face-row J_theta reads)")
+                   << "\n";
 
     m_defined = true;
 }
@@ -974,6 +1006,122 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
         }
     }
     BL_PROFILE_VAR_STOP(blp_fill);
+
+    if (m_cap_divfree != 0) { EnforceGhostDivergence(Bfield); }
+}
+
+void GreensFunctionOpenBC::EnforceGhostDivergence (ablastr::fields::VectorField const& Bfield)
+{
+    BL_PROFILE("GreensFunctionOpenBC::EnforceGhostDivergence()");
+    const int nr = m_nr;
+    const int nz = m_nz;
+    const int ngr = m_ngr;
+    const int ngz = m_ngz;
+    const amrex::Real dr = m_dr;
+    const amrex::Real dz = m_dz;
+    const amrex::Real inv_dr = 1.0_rt / dr;
+    const amrex::Real inv_dz = 1.0_rt / dz;
+    const bool z_hi_open = m_z_hi_open;
+    const bool r_open = m_r_open;
+
+    if (m_cap_divfree == 1) {
+        // Local: one equation per ghost cell, marching outward through the
+        // ghost layers so every layer is divergence-free given the one
+        // below it (the innermost reads the evolved face row).
+        for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+            const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
+            amrex::Array4<amrex::Real> const& Br = Bfield[0]->array(mfi);
+            amrex::Array4<amrex::Real> const& Bz = Bfield[2]->array(mfi);
+            const int ilo_cc = vbx_cc.smallEnd(0);
+            const int ihi_cc = vbx_cc.bigEnd(0);
+            const int jlo_cc = vbx_cc.smallEnd(1);
+            const int jhi_cc = vbx_cc.bigEnd(1);
+            if (z_hi_open && jhi_cc == nz - 1) {
+                // B_z(i, j+1) on the nodal ghost rows j+1 in [nz+1, nz+ngz]
+                // from the cc ghost cell rows j in [nz, nz+ngz-1]; radial
+                // range = this box's valid cells (the r ghosts belong to the
+                // corner, left to the Green's fill).
+                const amrex::Box cols(amrex::IntVect(ilo_cc, 0), amrex::IntVect(ihi_cc, 0));
+                amrex::ParallelFor(cols,
+                    [=] AMREX_GPU_DEVICE (int i, int /*j*/, int /*k*/) {
+                        const amrex::Real r_lo = i * dr;
+                        const amrex::Real r_hi = (i + 1) * dr;
+                        const amrex::Real rc = (i + 0.5_rt) * dr;
+                        for (int j = nz; j < nz + ngz; ++j) {
+                            const amrex::Real div_r =
+                                (r_hi * Br(i + 1, j, 0) - r_lo * Br(i, j, 0)) * inv_dr / rc;
+                            Bz(i, j + 1, 0) = Bz(i, j, 0) - dz * div_r;
+                        }
+                    });
+            }
+            if (r_open && ihi_cc == nr - 1) {
+                // r_{i+1} B_r(i+1, j) on the nodal ghost columns i+1 in
+                // [nr+1, nr+ngr] from the cc ghost cell columns i in
+                // [nr, nr+ngr-1]; axial range = this box's valid cells.
+                const amrex::Box rows(amrex::IntVect(0, jlo_cc), amrex::IntVect(0, jhi_cc));
+                amrex::ParallelFor(rows,
+                    [=] AMREX_GPU_DEVICE (int /*i*/, int j, int /*k*/) {
+                        for (int i = nr; i < nr + ngr; ++i) {
+                            const amrex::Real r_lo = i * dr;
+                            const amrex::Real r_hi = (i + 1) * dr;
+                            const amrex::Real rc = (i + 0.5_rt) * dr;
+                            const amrex::Real div_z = (Bz(i, j + 1, 0) - Bz(i, j, 0)) * inv_dz;
+                            Br(i + 1, j, 0) = (r_lo * Br(i, j, 0) - rc * dr * div_z) / r_hi;
+                        }
+                    });
+            }
+        }
+        return;
+    }
+
+    // Mode 2, z_hi only: (r B_r)(i+1, nz) = (r B_r)(i, nz) - s(i), with
+    // s(i) = r_c dr (B_z(i, nz+1) - B_z(i, nz)) / dz the net axial flux
+    // imbalance of ghost cell (i, nz), and (r B_r)(0, nz) = 0 on the axis
+    // (Define asserts prob_lo[0] == 0). The prefix sum runs over the whole
+    // radius, so gather s over the boxes that touch the cap (each cell is
+    // owned by exactly one box: a sum is a gather), reduce, integrate on
+    // the host, and write the nodes back.
+    if (!z_hi_open) { return; }
+    amrex::Gpu::DeviceVector<amrex::Real> s_dev(nr, 0.0_rt);
+    amrex::Real* const AMREX_RESTRICT s_ptr = s_dev.data();
+    for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+        const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
+        if (vbx_cc.bigEnd(1) != nz - 1) { continue; }
+        amrex::Array4<amrex::Real const> const& Bz = Bfield[2]->const_array(mfi);
+        const amrex::Box cols(amrex::IntVect(vbx_cc.smallEnd(0), 0),
+                              amrex::IntVect(vbx_cc.bigEnd(0), 0));
+        amrex::ParallelFor(cols,
+            [=] AMREX_GPU_DEVICE (int i, int /*j*/, int /*k*/) {
+                const amrex::Real rc = (i + 0.5_rt) * dr;
+                s_ptr[i] = rc * dr * (Bz(i, nz + 1, 0) - Bz(i, nz, 0)) * inv_dz;
+            });
+    }
+    amrex::Vector<amrex::Real> s_host(nr, 0.0_rt);
+    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, s_dev.begin(), s_dev.end(), s_host.begin());
+    amrex::Gpu::streamSynchronize();
+    amrex::ParallelDescriptor::ReduceRealSum(s_host.data(), nr);
+    amrex::Vector<amrex::Real> rbr_host(nr + 1, 0.0_rt);
+    for (int i = 0; i < nr; ++i) { rbr_host[i + 1] = rbr_host[i] - s_host[i]; }
+    amrex::Gpu::DeviceVector<amrex::Real> rbr_dev(nr + 1);
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, rbr_host.begin(), rbr_host.end(), rbr_dev.begin());
+    amrex::Gpu::streamSynchronize();
+    const amrex::Real* const AMREX_RESTRICT rbr_ptr = rbr_dev.data();
+    for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+        const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
+        if (vbx_cc.bigEnd(1) != nz - 1) { continue; }
+        amrex::Array4<amrex::Real> const& Br = Bfield[0]->array(mfi);
+        // nodes i in [max(ilo, 1), ihi + 1]: the axis node keeps B_r = 0
+        // (the fill's m = 0 regularity); the shared seam node ihi + 1 is
+        // written identically by both neighbours; node nr (the r_hi face
+        // node in the ghost row) is included, the r ghosts i > nr are not.
+        const amrex::Box nodes(amrex::IntVect(std::max(vbx_cc.smallEnd(0), 1), 0),
+                               amrex::IntVect(vbx_cc.bigEnd(0) + 1, 0));
+        amrex::ParallelFor(nodes,
+            [=] AMREX_GPU_DEVICE (int i, int /*j*/, int /*k*/) {
+                Br(i, nz, 0) = rbr_ptr[i] / (i * dr);
+            });
+    }
+    amrex::Gpu::streamSynchronize();
 }
 
 #else  // not WARPX_DIM_RZ
@@ -991,6 +1139,12 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& /*Bfield*
 
 void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& /*Bfield*/,
                                           amrex::Geometry const& /*geom*/, int /*lev*/)
+{
+    WARPX_ABORT_WITH_MESSAGE(
+        "The Green's-function open field boundary is only available in RZ geometry.");
+}
+
+void GreensFunctionOpenBC::EnforceGhostDivergence (ablastr::fields::VectorField const& /*Bfield*/)
 {
     WARPX_ABORT_WITH_MESSAGE(
         "The Green's-function open field boundary is only available in RZ geometry.");

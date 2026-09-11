@@ -863,7 +863,9 @@ Domain Boundary Conditions
       at least 1), ``boundary.open_bc_include_top_plane`` (default ``0``; with ``1`` and non-periodic z the top
       boundary-plane node ``j = nz`` joins the ring-current source support with the same treatment as the bottom plane
       node ``j = 0`` -- its curl straddles the z_hi plane and reads the cap ghost row -- so a real z_hi boundary-plane
-      current is seen by the fill instead of being invisible to it; off, the source support ends at ``j = nz - 1``).
+      current is seen by the fill instead of being invisible to it; off, the source support ends at ``j = nz - 1``),
+      and :pp:param:`hybrid_pic_model.greens_cap_divfree` (divergence-consistency correction of the ghost
+      fill against the evolved face row, default ``0`` = off).
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:
@@ -4314,6 +4316,38 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)`: a parser image is a fixed spatial profile that
     carries no floor to follow, and the combination is refused at startup rather than silently ignored. Prints
     ``[hybrid] density pedestal track_floor:`` at startup. Off (the default) is bit-identical.
+
+.. pp:param:: hybrid_pic_model.greens_cap_divfree
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    Divergence-consistency correction of the Green's-function open-boundary ghost fill (RZ, m = 0, with ``open`` on
+    the z_hi and/or r_hi face). The psi-differenced ghost field is discretely divergence-free among the ghost values,
+    but the fill never rewrites the valid face row, which Faraday evolves from the face-row Ohm E; the Yee divergence
+    of the first ghost cell row is therefore exactly the mismatch between the free-space continuation of the interior
+    currents and the evolved face-row normal field, and the face-row curl (hence the Hall E) mixes the two.
+    ``0``: off (bit-identical legacy). ``1``: after every fill, recompute the face-normal ghost component
+    (:math:`B_z` at z_hi, :math:`B_r` at r_hi) from the ghost-cell divergence constraint, one equation per cell,
+    marching outward through the ghost layers; every ghost cell becomes divergence-free, the face-row current is
+    unchanged (the corrected component is read only by ghost-node currents). ``2``: z_hi only; keep the Green's ghost
+    :math:`B_z`, :math:`B_\theta` and set the first ghost row of :math:`B_r` from the constraint integrated outward
+    from the axis, :math:`(r B_r)_{i+1} = (r B_r)_i - r_c \Delta r (B_z^{nz+1} - B_z^{nz}) / \Delta z` with
+    :math:`(r B_r)_0 = 0`, i.e. the ghost component the face-row :math:`J_\theta` reads is made consistent with the
+    evolved face-row :math:`B_z`. Requires an open z_hi face. No valid cell is modified by either mode; corner ghosts
+    are left to the fill. Reported by the ``[divB]`` line (:pp:param:`hybrid_pic_model.divb_diag_interval`).
+
+.. pp:param:: hybrid_pic_model.divb_diag_interval
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Cadence in steps of the ``[divB]`` diagnostic line (RZ only; ``0`` = off; not gated by ``warpx.verbose``):
+    the Yee (staggered) discrete divergence :math:`(1/r_c)\,\partial_r (r B_r) + \partial_z B_z` at cell centres,
+    reported as :math:`\max|\nabla\cdot B|\,\Delta z / \max|B|` over the interior, the last two valid cell rows
+    and the first ghost cell row at z_hi, and the same three split for r_hi. The ghost rows read the physical-boundary
+    ghost values as the last B boundary application left them (on an open face, the Green's cap fill). Output only;
+    it never changes the state.
 
 .. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
     :type: ``float``

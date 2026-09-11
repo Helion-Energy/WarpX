@@ -160,6 +160,27 @@ public:
     ) const;
 
     /**
+     * \brief Print the `[divB]` line: the Yee (staggered) discrete divergence
+     * of B at cell centres, (1/r_c) d(r B_r)/dr + dB_z/dz in RZ (m = 0), as
+     * max |div B| dz / max |B| over six regions -- the interior, the last two
+     * valid cell rows and the first ghost cell row at z_hi, and the same
+     * three split for r_hi (interior = all but the last two valid columns).
+     * The ghost regions read the physical-boundary ghost values as they
+     * stand after the last ApplyBfieldBoundary (the Green's cap fill, or
+     * whatever the face BC wrote), so on an open face the ghost-row number
+     * is the constraint the cap fill does or does not satisfy against the
+     * evolved face row; the valid-row numbers are the Faraday-preserved
+     * constraint (roundoff unless something writes B non-solenoidally).
+     * Diagnostic only: reads B, writes nothing, prints on the I/O rank.
+     * No-op outside RZ. Public for the CUDA extended-lambda access rule.
+     *
+     * \param[in] Bfield  (B_r, B_theta, B_z) at level lev
+     * \param[in] lev     refinement level
+     * \param[in] step    step number to print
+     */
+    void ReportDivB (ablastr::fields::VectorField const& Bfield, int lev, int step) const;
+
+    /**
      * \brief
      * Function to update the E-field using Ohm's law (hybrid-PIC model).
      */
@@ -1022,6 +1043,21 @@ public:
      *  stale. 1 = every step (bit-identical legacy path). Input:
      *  temperature_deposition_interval. */
     int m_t_deposit_interval = 1;
+    /** Cadence (in steps) of the `[divB]` Yee-divergence diagnostic line
+     *  (see ReportDivB), printed once per step at the final E solve;
+     *  0 = off. Default 1 = every step, matching the per-step
+     *  elliptic-inertia report and the formation deck's smoke ledger
+     *  cadence. Not gated by warpx.verbose (the production decks set it
+     *  to 0). Output only, never state.
+     *  Input: divb_diag_interval. */
+    int m_divb_diag_interval = 1;
+    /** Mirror of hybrid_pic_model.greens_cap_divfree (the Green's open-BC
+     *  cap ghost divergence-consistency mode, 0 = off). The operative
+     *  reader and applier is GreensFunctionOpenBC (lazy Define at the
+     *  first B boundary application, i.e. after the unused-inputs check
+     *  at init); this early read marks the key used, validates the range
+     *  and drives the InitData banner. Input: greens_cap_divfree. */
+    int m_greens_cap_divfree = 0;
     /** First-deposit latch of the interval gate above (set by the
      *  HybridPICDepositRhoAndJ call site). */
     bool m_t_deposited_once = false;

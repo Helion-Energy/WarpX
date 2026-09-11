@@ -136,6 +136,52 @@ public:
     static void FillGhostsZeroGradientRhi (amrex::MultiFab& a_mf,
                                            amrex::Geometry const& a_geom);
 
+    /** \brief Divergence-consistency correction of the open-face ghost
+     * field (input `hybrid_pic_model.greens_cap_divfree`, default 0 = off,
+     * bit-identical). Called at the end of ApplyToBfield, after the Green's
+     * fill of every open face.
+     *
+     * The psi-differenced ghost field is discretely divergence-free among
+     * the GHOST values, but the cap fill never rewrites the VALID face row
+     * (B_z(i, nz) at z_hi, B_r(nr, j) at r_hi), which Faraday evolves from
+     * the face-row Ohm E. The Yee divergence of the first ghost cell row is
+     * therefore exactly (B_z^psi(i, nz) - B_z^Faraday(i, nz)) / dz: the
+     * mismatch between the free-space continuation of the interior
+     * currents and the evolved face-row field. The face-row curl mixes the
+     * two (J_theta(i, nz) = (B_r^ghost - B_r^valid) / dz - dB_z^valid / dr),
+     * which is the path a non-solenoidal cap ghost feeds the face-row Hall
+     * E and hence Faraday on the valid rows.
+     *
+     * Mode 1: keep the Green's ghost B_r (z_hi) / B_z (r_hi) and B_theta;
+     * recompute the FACE-NORMAL ghost component from the ghost-cell
+     * divergence constraint, one equation per cell, marching outward
+     * through the ghost layers: at z_hi
+     *   B_z(i, j+1) = B_z(i, j) - dz (r_{i+1} B_r(i+1, j) - r_i B_r(i, j)) / (r_c dr)
+     * for ghost cell rows j in [nz, nz+ng-1]; at r_hi (mechanical mirror)
+     *   r_{i+1} B_r(i+1, j) = r_i B_r(i, j) - r_c dr (B_z(i, j+1) - B_z(i, j)) / dz
+     * for ghost cell columns i in [nr, nr+ng-1]. Every ghost cell of both
+     * faces becomes divergence-free; the face-row J is NOT changed (the
+     * face-normal ghost component is read only by the ghost-node J that
+     * the hyper-resistive Laplacian stencil touches). Local, no
+     * communication.
+     *
+     * Mode 2 (z_hi only): keep the Green's ghost B_z / B_theta and set the
+     * first ghost row of B_r from the constraint integrated outward from
+     * the axis,
+     *   (r B_r)(i+1, nz) = (r B_r)(i, nz) - r_c dr (B_z(i, nz+1) - B_z(i, nz)) / dz,
+     *   (r B_r)(0, nz) = 0 (axis regularity),
+     * i.e. the ghost B_r the face-row J_theta reads is made consistent
+     * with the evolved face-row B_z. The deeper ghost rows keep the
+     * Green's values (they are divergence-free among themselves). Global
+     * in r (a prefix sum across the boxes that touch the cap: one small
+     * ReduceRealSum), so it is collective like ApplyToBfield itself.
+     *
+     * Neither mode touches a valid cell. Corner ghost cells (i >= nr and
+     * j >= nz) are left to the Green's fill. Public for the CUDA
+     * extended-lambda access rule.
+     */
+    void EnforceGhostDivergence (ablastr::fields::VectorField const& Bfield);
+
 private:
     /** Read input parameters, validate the configuration and assemble the
      * coarse-grained Green's-function kernel. Called once, lazily, on the
@@ -162,6 +208,12 @@ private:
      * ring current is invisible to the fill -- see the deposit in
      * ApplyToBfield. */
     bool m_include_top_plane = false;
+    /** Divergence-consistency correction of the ghost fill (input:
+     * `hybrid_pic_model.greens_cap_divfree`; 0 = off (default, bit-identical),
+     * 1 = face-normal ghost component recomputed on every open face,
+     * 2 = z_hi first-ghost-row B_r from the axis-outward flux integral).
+     * See EnforceGhostDivergence. */
+    int m_cap_divfree = 0;
 
     // Cached grid parameters (single level, RZ)
     int m_nr = 0;              //!< number of cells in r
