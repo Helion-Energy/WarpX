@@ -20,6 +20,12 @@ MCCBackgroundField::fieldName (std::string const& background_name)
     return "n_background_" + background_name;
 }
 
+std::string
+MCCBackgroundField::deltaFieldName (std::string const& background_name)
+{
+    return "dn_background_" + background_name;
+}
+
 void
 MCCBackgroundField::allocInit (
     ablastr::fields::MultiFabRegister& fields,
@@ -50,6 +56,12 @@ MCCBackgroundField::allocInit (
 
         auto * const mf = fields.alloc_init(
             MCCBackgroundField::fieldName(background.m_background_name),
+            lev, amrex::convert(ba, nodal_flag), dm,
+            /*ncomp=*/1, ngrow, 0.0_rt);
+
+        // Per-step depletion accumulator, scratch and never checkpointed.
+        fields.alloc_init(
+            MCCBackgroundField::deltaFieldName(background.m_background_name),
             lev, amrex::convert(ba, nodal_flag), dm,
             /*ncomp=*/1, ngrow, 0.0_rt);
 

@@ -2965,6 +2965,46 @@ Details about the collision models can be found in the :ref:`theory section <mul
     is used for the background density, the input parameter ``<collision_name>.max_background_density``
     must also be provided to calculate the maximum collision probability.
 
+.. pp:param:: <collision_name>.deplete_background
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Only for ``background_mcc``, and only in Cartesian geometry. When enabled, the background
+    density is carried on the mesh and each ionization event removes the ionized weight from it,
+    instead of the background acting as an inexhaustible reservoir. The field is initialized from
+    ``<collision_name>.background_density`` and is gathered onto particles with the same shape
+    factor that deposits the depletion, so that the neutrals removed from the mesh equal the ion
+    weight created.
+
+    The null-collision majorant is unaffected: it is built once from
+    ``<collision_name>.max_background_density``, and depletion only ever lowers the density
+    below it. A cell is held at zero once its gas is exhausted.
+
+    Note that with an embedded boundary the depletion that falls inside the boundary is lost
+    rather than reflected back, so cut cells deplete less than they should, and partial cell
+    volumes are not accounted for. Both match how ``rho`` is deposited.
+
+.. pp:param:: <collision_name>.background_name
+    :type: ``string``
+    :default: the collision name
+    :optional:
+
+    Only for ``background_mcc`` with ``deplete_background`` enabled. Names the background so
+    that several collisions can share one depleting gas: collisions given the same name read and
+    write a single field, rather than each consuming a private copy of the same physical fill.
+    Collisions sharing a name must agree on ``background_density`` and ``background_shape``.
+
+.. pp:param:: <collision_name>.background_shape
+    :type: ``integer``
+    :default: ``algo.particle_shape``
+    :optional:
+
+    Only for ``background_mcc`` with ``deplete_background`` enabled. The shape order, between 1
+    and 4, used both to gather the background density and to deposit its depletion. A higher
+    order spreads each event over more cells, which smooths the depletion when there are few
+    macroparticles per cell. It may not exceed what the ``rho`` guard cells can hold.
+
 .. pp:param:: <collision_name>.background_temperature
     :type: ``float``
 

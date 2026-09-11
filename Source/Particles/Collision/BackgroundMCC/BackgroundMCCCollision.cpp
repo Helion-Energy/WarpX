@@ -8,6 +8,7 @@
 
 #include "ImpactIonization.H"
 #include "MCCBackgroundDensity.H"
+#include "MCCBackgroundField.H"
 #include "Particles/Algorithms/KineticEnergy.H"
 #include "Particles/ParticleCreation/FilterCopyTransform.H"
 #include "Particles/ParticleCreation/SmartCopy.H"
@@ -16,7 +17,13 @@
 #include "Utils/ParticleUtils.H"
 #include "WarpX.H"
 
+#include <ablastr/particles/DepositCharge.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
+#include <ablastr/utils/Communication.H>
+#include <AMReX_Box.H>
+#include <AMReX_FArrayBox.H>
+#include <AMReX_MFIter.H>
+#include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
 #include <AMReX_REAL.H>
 #include <AMReX_Vector.H>
@@ -341,6 +348,14 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
 
         auto *cost = WarpX::getCosts(lev);
 
+        // This step's depletion is accumulated separately and applied once
+        // every tile has deposited into it; see applyDepletion.
+        if (m_deplete_background && ionization_flag) {
+            WarpX::GetInstance().m_fields.get(
+                MCCBackgroundField::deltaFieldName(m_background_name), lev
+            )->setVal(0.0_prt);
+        }
+
         // firstly loop over particles box by box and do all particle conserving
         // scattering
 #ifdef _OPENMP
@@ -353,7 +368,8 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
             }
             auto wt = static_cast<amrex::Real>(amrex::second());
 
-            doBackgroundCollisionsWithinTile(pti, cur_time);
+            doBackgroundCollisionsWithinTile(
+                pti, getBackgroundDensity(pti, lev, cur_time), cur_time);
 
             if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
             {
@@ -366,13 +382,15 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
         // secondly perform ionization through the SmartCopyFactory if needed
         if (ionization_flag) {
             doBackgroundIonization(lev, cost, species1, species2, cur_time);
+
+            if (m_deplete_background) { applyDepletion(lev); }
         }
     }
 }
 
 
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
-( WarpXParIter& pti, amrex::Real t )
+( WarpXParIter& pti, MCCBackgroundDensity const& get_n_a, amrex::Real t )
 {
     using namespace amrex::literals;
 
@@ -382,8 +400,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     // get particle count
     const long np = pti.numParticles();
 
-    // background density accessor, and the temperature parser
-    const auto get_n_a = MCCBackgroundDensity(m_background_density_func, t);
+    // the temperature stays an analytic function of space and time
     auto T_a_func = m_background_temperature_func;
 
     // get collision parameters
@@ -527,19 +544,12 @@ void BackgroundMCCCollision::doBackgroundIonization
   WarpXParticleContainer& species1, WarpXParticleContainer& species2, amrex::Real t)
 {
     ABLASTR_PROFILE("BackgroundMCCCollision::doBackgroundIonization()");
+    using namespace amrex::literals;
 
     const SmartCopyFactory copy_factory_elec(species1, species1);
     const SmartCopyFactory copy_factory_ion(species1, species2);
     const auto CopyElec = copy_factory_elec.getSmartCopy();
     const auto CopyIon = copy_factory_ion.getSmartCopy();
-
-    const auto get_n_a = MCCBackgroundDensity(m_background_density_func, t);
-
-    const auto Filter = ImpactIonizationFilterFunc(
-                                                   m_ionization_processes[0],
-                                                   m_mass1, m_total_collision_prob_ioniz,
-                                                   m_nu_max_ioniz, get_n_a
-                                                   );
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
 
@@ -560,6 +570,15 @@ void BackgroundMCCCollision::doBackgroundIonization
         const auto np_elec = elec_tile.numParticles();
         const auto np_ion = ion_tile.numParticles();
 
+        // The density accessor, and so the filter that uses it, is per-tile
+        // once the background lives on the mesh.
+        const auto Filter = ImpactIonizationFilterFunc(
+                                                       m_ionization_processes[0],
+                                                       m_mass1, m_total_collision_prob_ioniz,
+                                                       m_nu_max_ioniz,
+                                                       getBackgroundDensity(pti, lev, t)
+                                                       );
+
         auto Transform = ImpactIonizationTransformFunc(
                                                        m_ionization_processes[0].getEnergyPenalty(),
                                                        m_mass1, sqrt_kb_m, m_background_temperature_func, t
@@ -573,11 +592,105 @@ void BackgroundMCCCollision::doBackgroundIonization
         setNewParticleIDs(elec_tile, np_elec, num_added);
         setNewParticleIDs(ion_tile, np_ion, num_added);
 
+        if (m_deplete_background)
+        {
+            auto& warpx = WarpX::GetInstance();
+            auto * const dn_mf = warpx.m_fields.get(
+                MCCBackgroundField::deltaFieldName(m_background_name), lev);
+
+            amrex::Box tilebox = pti.tilebox();
+            tilebox.grow(warpx.get_ng_depos_rho());
+
+            // Each ionization event appends one electron and one ion at the
+            // source electron's position, so the new electrons -- which land in
+            // this same tile, the one pti indexes -- carry exactly the weight
+            // of neutrals consumed. Depositing them with unit negative charge
+            // gives the number-density decrement, -w/dV, in m^-3, using the
+            // same shape factor the density is gathered with.
+            amrex::FArrayBox local_dn;
+            ablastr::particles::deposit_charge<WarpXParticleContainer>(
+                pti, pti.GetAttribs(PIdx::w), /*charge=*/-1.0_prt,
+                /*ion_lev=*/nullptr, dn_mf, local_dn, m_background_shape,
+                WarpX::InvCellSize(lev),
+                WarpX::LowerCorner(tilebox, lev, 0._rt),
+                /*n_rz_azimuthal_modes=*/0,
+                warpx.get_ng_depos_rho(), lev, amrex::IntVect(1),
+                /*offset=*/np_elec, /*np_to_deposit=*/num_added);
+        }
+
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
         {
             amrex::Gpu::synchronize();
             wt = static_cast<amrex::Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[pti.index()], wt);
         }
+    }
+}
+
+
+MCCBackgroundDensity
+BackgroundMCCCollision::getBackgroundDensity (
+    WarpXParIter& pti, int const lev, amrex::Real const t) const
+{
+    using namespace amrex::literals;
+
+    if (!m_deplete_background) {
+        return MCCBackgroundDensity(m_background_density_func, t);
+    }
+
+    auto& warpx = WarpX::GetInstance();
+    auto const * const n_mf = warpx.m_fields.get(
+        MCCBackgroundField::fieldName(m_background_name), lev);
+
+    // Use the box the depletion deposit uses, so that a gather and a deposit at
+    // the same position touch the same cells with the same weights.
+    amrex::Box tilebox = pti.tilebox();
+    tilebox.grow(warpx.get_ng_depos_rho());
+
+    return MCCBackgroundDensity(
+        n_mf->const_array(pti), n_mf->ixType().toIntVect(),
+        WarpX::InvCellSize(lev),
+        WarpX::LowerCorner(tilebox, lev, 0._rt),
+        amrex::lbound(tilebox), m_background_shape);
+}
+
+
+void BackgroundMCCCollision::applyDepletion (int const lev)
+{
+    ABLASTR_PROFILE("BackgroundMCCCollision::applyDepletion()");
+    using namespace amrex::literals;
+
+    auto& warpx = WarpX::GetInstance();
+    auto * const n_mf = warpx.m_fields.get(
+        MCCBackgroundField::fieldName(m_background_name), lev);
+    auto * const dn_mf = warpx.m_fields.get(
+        MCCBackgroundField::deltaFieldName(m_background_name), lev);
+
+    // Fold the deposit's guard-cell contributions back into the valid region,
+    // across tiles and across processes, exactly as rho is treated.
+    ablastr::utils::communication::SumBoundary(
+        *dn_mf, 0, dn_mf->nComp(), dn_mf->nGrowVect(), dn_mf->nGrowVect(),
+        WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+
+    // Reflect back in the part of the stencil that fell outside a domain
+    // boundary. Without this the depletion is systematically under-counted in
+    // the boundary layer, and more so at higher shape order.
+    warpx.ApplyRhofieldBoundary(lev, dn_mf, PatchType::fine);
+
+    // Only now is the decrement complete, so only now may it be applied. The
+    // clamp has to come after the fold as well: clamping partial per-tile
+    // contributions would destroy the conservation the deposit provides.
+    for (amrex::MFIter mfi(*n_mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const& n_arr = n_mf->array(mfi);
+        auto const& dn_arr = dn_mf->const_array(mfi);
+        const amrex::Box& bx = mfi.growntilebox();
+
+        amrex::ParallelFor(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                // dn is negative; the gas cannot go below empty.
+                n_arr(i,j,k) = amrex::max(n_arr(i,j,k) + dn_arr(i,j,k), 0.0_rt);
+            });
     }
 }

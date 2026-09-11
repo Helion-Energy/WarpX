@@ -7,6 +7,8 @@
 #ifndef WARPX_PARTICLES_COLLISION_BACKGROUNDMCCCOLLISION_H_
 #define WARPX_PARTICLES_COLLISION_BACKGROUNDMCCCOLLISION_H_
 
+#include "MCCBackgroundDensity.H"
+
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/Collision/CollisionBase.H"
 #include "Particles/Collision/ScatteringProcess.H"
@@ -55,10 +57,37 @@ public:
     /** Perform particle conserving MCC collisions within a tile
      *
      * @param pti particle iterator
+     * @param get_n_a accessor for the background density over this tile
      * @param t current time
      *
      */
-    void doBackgroundCollisionsWithinTile ( WarpXParIter& pti, amrex::Real t);
+    void doBackgroundCollisionsWithinTile (
+        WarpXParIter& pti, MCCBackgroundDensity const& get_n_a, amrex::Real t);
+
+    /** Build the background density accessor for one tile
+     *
+     * Returns an accessor reading the analytic parser, or, when
+     * `deplete_background` is set, one gathering the mesh density field over
+     * the same box the depletion deposit writes to.
+     *
+     * @param[in] pti particle iterator
+     * @param[in] lev the mesh-refinement level
+     * @param[in] t current time
+     */
+    [[nodiscard]] MCCBackgroundDensity getBackgroundDensity (
+        WarpXParIter& pti, int lev, amrex::Real t) const;
+
+    /** Apply one step's accumulated depletion to the background density
+     *
+     * Sums the per-step accumulator across tile and process boundaries and
+     * reflects it at domain boundaries exactly as rho is treated, then
+     * subtracts it from the density, holding the result at or above zero.
+     * Must run after every tile of the level has deposited, and never before
+     * the accumulator is complete, since the fold is not idempotent.
+     *
+     * @param[in] lev the mesh-refinement level
+     */
+    void applyDepletion (int lev);
 
     /** Perform MCC ionization interactions
      *

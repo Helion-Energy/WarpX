@@ -30,6 +30,20 @@ namespace MCCBackgroundField
     std::string fieldName (std::string const& background_name);
 
     /**
+     * \brief Name the per-step depletion accumulator is registered under.
+     *
+     * This is scratch: it is zeroed at the start of every depletion pass and
+     * must not be checkpointed. It exists because the density field is
+     * accumulated across steps, so the depletion of one step cannot be summed
+     * across guard cells in place -- doing so would re-sum the density already
+     * there. The step's decrement is gathered here instead, made consistent
+     * across tiles and boundaries, and only then applied.
+     *
+     * \param[in] background_name the user-facing background name
+     */
+    std::string deltaFieldName (std::string const& background_name);
+
+    /**
      * \brief Allocate and fill the density field of each given background.
      *
      * Must be called from the level-allocation path, which both a fresh start
