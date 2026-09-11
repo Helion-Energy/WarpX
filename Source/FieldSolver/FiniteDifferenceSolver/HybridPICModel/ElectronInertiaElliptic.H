@@ -157,6 +157,18 @@ public:
      *  recovered from a step wall time without it. */
     void ReportAndResetStats (int substeps);
 
+    /** Abort path only: called by Solve when the right-hand-side norm or the
+     *  E0 norm is non-finite (every comparison in the solve is false for
+     *  NaN, so without this the failure surfaces as a BiCGStab "breakdown"
+     *  that names no cell). Prints, per rank, the step, the location and
+     *  value of the largest finite |E0| and of the first non-finite entry
+     *  per component, and the floored-density range the coefficients were
+     *  built from (recovered from d_e^2), then aborts. Host copies and host
+     *  loops; never reached on the normal path. */
+    void ReportNonFiniteRHS (ablastr::fields::VectorField const& Efield,
+                             amrex::Real bnorm, amrex::Real e0norm,
+                             int lev) const;
+
     // ---- runtime knobs (see HybridPICModel::ReadParameters) ----
     amrex::Real m_rtol = 1.e-8;
     int m_max_iter = 200;
@@ -218,6 +230,9 @@ private:
 
     /** d_e^2 = m_e / (mu0 e rho_floored), at the E-field staggering. */
     EVec m_de2;
+    /** The density floor (C/m^3) the coefficients were last built with;
+     *  read only by ReportNonFiniteRHS. */
+    amrex::Real m_rho_floor_last = 0.0;
     /** Reciprocal of the operator diagonal, the Jacobi preconditioner. */
     EVec m_jac;
     /** Working vectors: the previous correction (warm start), and the

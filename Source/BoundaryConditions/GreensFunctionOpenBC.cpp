@@ -128,6 +128,19 @@ namespace
     }
 }
 
+GreensFunctionOpenBC::GreensFunctionOpenBC ()
+{
+    // Read at construction rather than in Define: WarpX::InitData constructs
+    // the object as soon as the BC is selected, so these keys are queried
+    // before warpx_used_inputs is written and before abort_on_unused_inputs
+    // can see them. Define (first ApplyToBfield) validates them.
+    const amrex::ParmParse pp_boundary("boundary");
+    pp_boundary.query("open_bc_coarsening", m_coarsening);
+    pp_boundary.query("open_bc_image_sum_rtol", m_image_sum_rtol);
+    pp_boundary.query("open_bc_max_images", m_max_images);
+    pp_boundary.query("open_bc_include_top_plane", m_include_top_plane);
+}
+
 bool GreensFunctionOpenBC::IsActive ()
 {
     return (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC)
@@ -162,10 +175,8 @@ void GreensFunctionOpenBC::FillGhostsZeroGradientRhi (amrex::MultiFab& a_mf,
 void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                                    amrex::Geometry const& geom)
 {
-    const amrex::ParmParse pp_boundary("boundary");
-    pp_boundary.query("open_bc_coarsening", m_coarsening);
-    pp_boundary.query("open_bc_image_sum_rtol", m_image_sum_rtol);
-    pp_boundary.query("open_bc_max_images", m_max_images);
+    // The boundary.open_bc_* inputs were read by the constructor (at init,
+    // so they are in warpx_used_inputs); they are validated here.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coarsening >= 1,
         "boundary.open_bc_coarsening must be >= 1");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_max_images >= 1,
@@ -277,10 +288,14 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     const int nrows = nrows_r + m_ncaprows_lo + m_ncaprows_hi;
 
     // ---- Graded source bins ------------------------------------------------
-    // Source nodes are i in [1, m_nr-1], j in [0, m_nz-1]. (The r = 0 axis
-    // nodes carry no ring current; the face node i = m_nr and, for
-    // non-periodic z, the top node j = m_nz are excluded from the source
-    // support -- see the deposition below.)
+    // Source nodes are i in [1, m_nr-1], j in [0, jmax_src]. (The r = 0 axis
+    // nodes carry no ring current and the face node i = m_nr is excluded
+    // from the source support -- see the deposition below. For non-periodic
+    // z the top plane node j = m_nz is excluded by default and included with
+    // boundary.open_bc_include_top_plane = 1, mirroring the bottom plane
+    // node j = 0; for periodic z the j = m_nz node IS the j = 0 node.)
+    const bool include_top = m_include_top_plane && !m_periodic_z;
+    const int jmax_src = include_top ? m_nz : m_nz - 1;
     //
     // Uniform coarsening violates the multipole acceptance criterion for
     // bins adjacent to the open face (in-bin offset ~ evaluation distance),
@@ -308,7 +323,7 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
             const int wz = amrex::Clamp(
                 static_cast<int>(d_face / (mac_inv_theta * m_dz)), 1, m_coarsening);
             const int ilo = std::max(1, ihi - wr + 1);
-            const int nzb = (m_nz - 1) / wz + 1;
+            const int nzb = jmax_src / wz + 1;
             const auto b = static_cast<int>(bin_rc_h.size());
             for (int i = ilo; i <= ihi; ++i) { rbin_of_i_h[i] = b; }
             bin_rc_h.push_back(0.5_rt * (ilo + ihi) * m_dr);
@@ -522,7 +537,10 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                    << static_cast<double>(cap_kernel_size * sizeof(amrex::Real))
                       / (1024.0 * 1024.0) << " MB),"
                    << " interior coarsening " << m_coarsening << ", "
-                   << (m_periodic_z ? "periodic" : "isolated") << " z)\n";
+                   << (m_periodic_z ? "periodic" : "isolated") << " z, top plane node "
+                   << (include_top ? "INCLUDED in" : "excluded from")
+                   << " the source, boundary.open_bc_include_top_plane = "
+                   << (m_include_top_plane ? 1 : 0) << ")\n";
 
     m_defined = true;
 }
@@ -566,6 +584,7 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     const int* const AMREX_RESTRICT bin_nzb = m_bin_nzb.data();
     const int* const AMREX_RESTRICT bin_col0 = m_bin_col0.data();
     const amrex::Long* const AMREX_RESTRICT bin_koff = m_bin_koff.data();
+    const bool include_top_plane = m_include_top_plane && !m_periodic_z;
 
     for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
         const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
@@ -588,7 +607,22 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
         // mirror-plugged equilibrium hold). Restarts are safe: checkpoints store the ghost
         // cells (VisMF), so the first post-restart deposit reads exactly
         // the pre-checkpoint fill values.
-        amrex::ParallelFor(vbx_cc,
+        //
+        // The top plane node (j = m_nz) is the same kind of node -- its curl
+        // straddles the z_hi plane and reads the z_hi cap ghost row -- but
+        // the cell-centered ownership box ends at j = m_nz - 1, so by
+        // default it is NOT in the support and a real z_hi boundary-plane
+        // current is invisible to the fill: the same feedback channel, on
+        // the top face. boundary.open_bc_include_top_plane = 1 adds it with
+        // the bottom plane's treatment: the box that owns the last cell row
+        // also deposits the j = m_nz node (exactly once), into the z bin
+        // the graded binning reserves for it (Define sizes the bins over
+        // j in [0, m_nz] when the knob is on). Default off: src_bx == vbx_cc.
+        amrex::Box src_bx = vbx_cc;
+        if (include_top_plane && vbx_cc.bigEnd(1) == m_nz - 1) {
+            src_bx.growHi(1, 1);
+        }
+        amrex::ParallelFor(src_bx,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
                 if (i < 1 || i > nr - 1) { return; }  // axis and face nodes
                 // total azimuthal current at the psi node:
@@ -943,6 +977,8 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
 }
 
 #else  // not WARPX_DIM_RZ
+
+GreensFunctionOpenBC::GreensFunctionOpenBC () = default;
 
 bool GreensFunctionOpenBC::IsActive () { return false; }
 

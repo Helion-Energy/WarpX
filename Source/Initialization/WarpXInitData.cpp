@@ -10,6 +10,7 @@
  */
 #include "WarpX.H"
 
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PML.H"
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
 #   include "BoundaryConditions/PML_RZ.H"
@@ -884,6 +885,15 @@ WarpX::InitData ()
     PrintMainPICparameters();
     if (m_implicit_solver) {
         m_implicit_solver->PrintParameters();
+    }
+    // Construct the Green's-function open BC now when it is selected, so its
+    // boundary.open_bc_* inputs are queried before warpx_used_inputs is
+    // written and before abort_on_unused_inputs can see them (the object is
+    // otherwise created lazily at the first B-field boundary application,
+    // after this point). Its geometry-dependent tables are still built
+    // lazily by Define.
+    if (GreensFunctionOpenBC::IsActive() && !m_open_bc_greens) {
+        m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
     }
     ::WriteUsedInputsFile();
 

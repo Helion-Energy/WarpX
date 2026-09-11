@@ -860,7 +860,10 @@ Domain Boundary Conditions
       default ``4``; bins near the open face are automatically graded down to single nodes under a multipole acceptance
       criterion), ``boundary.open_bc_image_sum_rtol`` (relative tolerance of the periodic-z image sum at kernel assembly,
       default ``1e-6``, must be positive), ``boundary.open_bc_max_images`` (cap on image pairs, default ``200``, must be
-      at least 1).
+      at least 1), ``boundary.open_bc_include_top_plane`` (default ``0``; with ``1`` and non-periodic z the top
+      boundary-plane node ``j = nz`` joins the ring-current source support with the same treatment as the bottom plane
+      node ``j = 0`` -- its curl straddles the z_hi plane and reads the cap ghost row -- so a real z_hi boundary-plane
+      current is seen by the fill instead of being invisible to it; off, the source support ends at ``j = nz - 1``).
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:

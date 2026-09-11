@@ -30,6 +30,7 @@
 
 #include <AMReX_Array4.H>
 #include <AMReX_Box.H>
+#include <AMReX_FabArrayUtility.H>
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_MFIter.H>
 #include <AMReX_ParallelDescriptor.H>
@@ -38,6 +39,8 @@
 #include <AMReX_Utility.H>
 
 #include <cmath>
+#include <limits>
+#include <sstream>
 
 using namespace amrex;
 using warpx::fields::FieldType;
@@ -441,6 +444,8 @@ ElectronInertiaElliptic::PrepareCoefficients (
     amrex::MultiFab const& rhofield, amrex::Real rho_floor, int lev)
 {
     ABLASTR_PROFILE("ElectronInertiaElliptic::PrepareCoefficients()");
+    m_rho_floor_last = rho_floor;   // for ReportNonFiniteRHS only
+
 
     // The coefficients are rebuilt unconditionally, every solve.
     //
@@ -890,6 +895,14 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
     NormInfPair3({&m_b[0], &m_b[1], &m_b[2]},
                  {Efield[0], Efield[1], Efield[2]}, bnorm, e0norm);
 
+    // A non-finite norm means a NaN/Inf entered through the inertialess E0
+    // (or the coefficients). Every comparison below is false for NaN, so it
+    // would flow straight to the BiCGStab breakdown assert without naming
+    // the cell; name it here instead. Abort path only, no numerical change.
+    if (!std::isfinite(bnorm) || !std::isfinite(e0norm)) {
+        ReportNonFiniteRHS(Efield, bnorm, e0norm, lev);
+    }
+
     // Nothing to correct: the inertia term is below the tolerance relative
     // to E itself. Chasing it further would only iterate on round-off.
     if (bnorm <= m_rtol * e0norm || bnorm == 0._rt) {
@@ -1037,4 +1050,109 @@ ElectronInertiaElliptic::ReportAndResetStats (int substeps)
     m_n_solves = 0; m_n_iters = 0; m_max_iters_seen = 0;
     m_n_setups = 0; m_setup_time = 0.0; m_solve_time = 0.0;
     m_n_cold_solves = 0; m_n_cold_iters = 0;
+}
+
+void
+ElectronInertiaElliptic::ReportNonFiniteRHS (
+    ablastr::fields::VectorField const& Efield, Real bnorm, Real e0norm,
+    int lev) const
+{
+    // Abort path only: host copies and host loops, and every rank reports
+    // its own worst cells (the abort follows, so the cost is irrelevant).
+    const int step = WarpX::GetInstance().getistep(lev);
+    const int myproc = amrex::ParallelDescriptor::MyProc();
+    std::ostringstream ss;
+    ss << "[inertia-elliptic] NON-FINITE RHS at step " << step
+       << " (|b|_inf = " << bnorm << ", |E0|_inf = " << e0norm
+       << ", rank " << myproc << ")\n";
+
+    auto host_copy = [] (MultiFab const& mf) {
+        MultiFab h(mf.boxArray(), mf.DistributionMap(), mf.nComp(), 0,
+                   amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        amrex::dtoh_memcpy(h, mf, 0, 0, mf.nComp());
+        amrex::Gpu::streamSynchronize();
+        return h;
+    };
+
+    for (int d = 0; d < 3; ++d) {
+        MultiFab const h = host_copy(*Efield[d]);
+        Real emax = -1._rt;
+        amrex::IntVect emax_iv = amrex::IntVect::TheZeroVector();
+        long n_bad = 0;
+        bool have_bad = false;
+        amrex::IntVect bad_iv = amrex::IntVect::TheZeroVector();
+        Real bad_val = 0._rt;
+        for (amrex::MFIter mfi(h); mfi.isValid(); ++mfi) {
+            auto const& a = h.const_array(mfi);
+            const amrex::Box& bx = mfi.validbox();
+            const auto lo = amrex::lbound(bx);
+            const auto hi = amrex::ubound(bx);
+            for (int k = lo.z; k <= hi.z; ++k) {
+            for (int j = lo.y; j <= hi.y; ++j) {
+            for (int i = lo.x; i <= hi.x; ++i) {
+                const Real v = a(i, j, k);
+                if (!std::isfinite(v)) {
+                    if (!have_bad) {
+                        have_bad = true;
+                        bad_iv = amrex::IntVect(AMREX_D_DECL(i, j, k));
+                        bad_val = v;
+                    }
+                    ++n_bad;
+                } else if (std::abs(v) > emax) {
+                    emax = std::abs(v);
+                    emax_iv = amrex::IntVect(AMREX_D_DECL(i, j, k));
+                }
+            }}}
+        }
+        ss << "  E0[" << d << "]: max finite |E0| = " << emax << " V/m at "
+           << emax_iv << "; non-finite entries = " << n_bad;
+        if (have_bad) {
+            ss << ", first at " << bad_iv << " (value " << bad_val << ")";
+        }
+        ss << "\n";
+    }
+
+    // The floored density the operator saw, recovered from
+    // d_e^2 = m_e / (mu0 e rho_floored): min d_e^2 <-> max rho, max <-> min.
+    const Real de2_to_rho =
+        PhysConst::m_e / (PhysConst::mu0 * PhysConst::q_e);
+    for (int d = 0; d < 3; ++d) {
+        MultiFab const h = host_copy(m_de2[d]);
+        Real de2_min = std::numeric_limits<Real>::max();
+        Real de2_max = -1._rt;
+        long n_bad = 0;
+        for (amrex::MFIter mfi(h); mfi.isValid(); ++mfi) {
+            auto const& a = h.const_array(mfi);
+            const amrex::Box& bx = mfi.validbox();
+            const auto lo = amrex::lbound(bx);
+            const auto hi = amrex::ubound(bx);
+            for (int k = lo.z; k <= hi.z; ++k) {
+            for (int j = lo.y; j <= hi.y; ++j) {
+            for (int i = lo.x; i <= hi.x; ++i) {
+                const Real v = a(i, j, k);
+                if (!std::isfinite(v)) { ++n_bad; continue; }
+                de2_min = std::min(de2_min, v);
+                de2_max = std::max(de2_max, v);
+            }}}
+        }
+        ss << "  d_e^2[" << d << "] in [" << de2_min << ", " << de2_max
+           << "] m^2";
+        if (de2_min > 0._rt && de2_max > 0._rt) {
+            ss << " -> floored rho in [" << de2_to_rho / de2_max << ", "
+               << de2_to_rho / de2_min << "] C/m^3 (n in ["
+               << de2_to_rho / de2_max / PhysConst::q_e << ", "
+               << de2_to_rho / de2_min / PhysConst::q_e << "] m^-3)";
+        }
+        ss << "; non-finite coefficients = " << n_bad << "\n";
+    }
+    ss << "  rho_floor passed to PrepareCoefficients = " << m_rho_floor_last
+       << " C/m^3 (n_floor = " << m_rho_floor_last / PhysConst::q_e
+       << " m^-3)";
+    amrex::AllPrint() << ss.str() << "\n";
+    WARPX_ABORT_WITH_MESSAGE(
+        "The elliptic electron-inertia right-hand side is non-finite: a "
+        "NaN/Inf entered through the inertialess Ohm's-law E0 or the "
+        "coefficients before the BiCGStab iteration started. See the "
+        "[inertia-elliptic] NON-FINITE RHS lines above for the step, the "
+        "cell and the floored-density range.");
 }

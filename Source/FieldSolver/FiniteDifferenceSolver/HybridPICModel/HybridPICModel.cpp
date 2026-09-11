@@ -429,6 +429,15 @@ void HybridPICModel::ReadParameters ()
             m_electron_inertia_rtol > 0.0 && m_electron_inertia_max_iters > 0,
             "hybrid_pic_model.electron_inertia_relative_tolerance must be "
             "positive and electron_inertia_max_iterations must be >= 1.");
+        // The operator coefficient d_e^2 = m_e / (mu0 e max(rho, q_e n_floor))
+        // is bounded only by the floor: with n_floor = 0 it is unbounded
+        // wherever the density vanishes and the solve cannot stay finite.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_n_floor > 0.0_rt,
+            "hybrid_pic_model.include_electron_inertia_elliptic = 1 requires "
+            "a positive hybrid_pic_model.n_floor: the inertia coefficient "
+            "d_e^2 = m_e/(mu0 e max(rho, q_e n_floor)) is unbounded where the "
+            "density vanishes otherwise.");
     }
 
     // Darwin (magnetoinductive) field split, consumed by the theta-implicit

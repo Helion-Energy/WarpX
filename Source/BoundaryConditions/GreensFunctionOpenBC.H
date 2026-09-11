@@ -97,7 +97,12 @@
 class GreensFunctionOpenBC
 {
 public:
-    GreensFunctionOpenBC () = default;
+    /** Reads the `boundary.open_bc_*` inputs. WarpX::InitData constructs the
+     *  object as soon as the BC is selected, so the inputs are queried before
+     *  warpx_used_inputs is written (and before abort_on_unused_inputs could
+     *  flag them); the geometry-dependent tables are still built lazily by
+     *  Define, which also validates the values. */
+    GreensFunctionOpenBC ();
 
     /** \brief Whether the Green's-function open BC is selected: RZ geometry,
      * hybrid-PIC field solver, and `open` on the r_hi face and/or either z
@@ -150,6 +155,13 @@ private:
     /** Cap on the number of periodic-z image pairs summed per kernel entry
      * (input: `boundary.open_bc_max_images`; must be >= 1). */
     int m_max_images = 200;
+    /** Include the top boundary-plane node j = m_nz in the psi source
+     * support, mirroring the bottom plane node j = 0 (input:
+     * `boundary.open_bc_include_top_plane`, default 0; ignored for periodic
+     * z, where the j = m_nz node IS the j = 0 node). Off, the top node's
+     * ring current is invisible to the fill -- see the deposit in
+     * ApplyToBfield. */
+    bool m_include_top_plane = false;
 
     // Cached grid parameters (single level, RZ)
     int m_nr = 0;              //!< number of cells in r

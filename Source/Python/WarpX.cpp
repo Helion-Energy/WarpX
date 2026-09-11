@@ -332,6 +332,13 @@ void init_WarpX (py::module& m)
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
                 auto * const model = wx.get_pointer_HybridPICModel();
+                // The elliptic electron-inertia coefficient is bounded only
+                // by this floor (see HybridPICModel::ReadParameters).
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    !model->m_include_electron_inertia_elliptic || n_floor > 0.0,
+                    "set_hybrid_pic_density_floor: the elliptic electron-inertia "
+                    "solve requires a positive density floor (d_e^2 = "
+                    "m_e/(mu0 e max(rho, q_e n_floor)) is unbounded otherwise).");
                 model->m_n_floor = n_floor;
                 // hybrid_pic_model.density_pedestal_track_floor: keep the
                 // density pedestal on the floor the deck just set. Marking
