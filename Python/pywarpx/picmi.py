@@ -4144,6 +4144,9 @@ class FieldDiagnostic(picmistandard.PICMI_FieldDiagnostic, WarpXDiagnosticBase):
                     fields_to_plot.add(dataname)
                 elif any([dataname.startswith(tstr) for tstr in T_fields_list]):
                     fields_to_plot.add(dataname)
+                elif dataname.startswith("n_background_"):
+                    # Adds the neutral density of a depleting MCC background
+                    fields_to_plot.add(dataname)
                 elif dataname == "dive":
                     fields_to_plot.add("divE")
                 elif dataname == "divb":
