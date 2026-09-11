@@ -1,0 +1,109 @@
+# Conservation test for the depleting MCC background.
+#
+# Electrons above the ionization threshold ionize a mesh-resident neutral
+# background that depletes. Every event removes one neutral and creates one
+# ion, so the neutrals missing from the background must equal the ions
+# present. Fields are not evolved and the domain is periodic, so nothing
+# else can move either population and the identity is exact.
+#
+# The cross section is synthetic: zero below threshold, constant over a
+# window, and zero again above it. The upper cutoff matters, because
+# get_nu_max scans out to 5000 eV whatever the tabulated range and reuses the
+# last value above it, so a cross section left flat at the end of its grid
+# inflates the collision majorant and trips the dt accuracy warning.
+# Parameters are chosen so that a
+# clearly measurable fraction of the fill is consumed while no cell runs out
+# of gas, since the clamp at zero is a legitimate non-conservation that would
+# invalidate the check.
+
+my_constants.n_gas = 1.0e18     # m^-3, neutral fill
+my_constants.n_elec = 5.0e16    # m^-3, initial electrons
+my_constants.T_gas = 300.0      # K
+my_constants.E_elec = 100.0     # eV, initial electron energy
+my_constants.v_elec = sqrt(2.0*E_elec*q_e/m_e)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+max_step = 50
+amr.n_cell = 32 32
+amr.max_level = 0
+amr.blocking_factor = 8
+amr.max_grid_size = 16
+
+geometry.dims = 2
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = 0.1 0.1
+
+#################################
+###### Boundary Condition #######
+#################################
+boundary.field_lo = periodic periodic
+boundary.field_hi = periodic periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 1
+warpx.const_dt = 8.0e-11
+warpx.use_filter = 0
+
+# Do not evolve the E and B fields: this isolates the collision bookkeeping
+algo.maxwell_solver = none
+
+# Third order, to exercise a multi-cell stencil for both the density gather
+# and the depletion deposit, including the guard cells they reach into
+algo.particle_shape = 3
+
+#################################
+############ PLASMA #############
+#################################
+particles.species_names = electrons ions
+
+electrons.species_type = electron
+electrons.injection_style = nuniformpercell
+electrons.num_particles_per_cell_each_dim = 2 2
+electrons.profile = constant
+electrons.density = n_elec
+electrons.momentum_distribution_type = gaussian
+electrons.uz_m = v_elec/clight
+electrons.ux_th = 0.01*v_elec/clight
+electrons.uy_th = 0.01*v_elec/clight
+electrons.uz_th = 0.01*v_elec/clight
+
+# Ionization product; starts empty so that every ion present was created by
+# an ionization event and can be compared against the neutrals removed.
+# Mass and charge are given directly rather than via species_type, which
+# would warn about the charge being overridden.
+ions.mass = m_p
+ions.charge = q_e
+ions.injection_style = none
+
+#################################
+############ COLLISION ##########
+#################################
+collisions.collision_names = coll_elec
+coll_elec.type = background_mcc
+coll_elec.species = electrons
+coll_elec.background_density = n_gas
+coll_elec.background_temperature = T_gas
+coll_elec.scattering_processes = ionization
+coll_elec.ionization_energy = 20.0
+coll_elec.ionization_cross_section = ../../../Examples/Tests/mcc_background_depletion/ionization_constant.dat
+coll_elec.ionization_species = ions
+
+# Carry the background on the mesh and remove the ionized weight from it
+coll_elec.deplete_background = 1
+coll_elec.background_name = gas
+coll_elec.background_shape = 3
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+diagnostics.diags_names = diag2
+
+diag2.intervals = 50
+diag2.diag_type = Full
+diag2.format = openpmd
+diag2.fields_to_plot = rho_ions n_background_gas
