@@ -7,6 +7,7 @@
 #include "Diagnostics/ParticleDiag/ParticleDiag.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
+#include "Particles/Collision/BackgroundMCC/MCCBackgroundField.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
@@ -169,6 +170,20 @@ FlushFormatCheckpoint::WriteToFile (
                 VisMF::Write(*warpx.m_fields.get(FieldType::current_cp, Direction{2}, lev),
                              amrex::MultiFabFileFullPrefix(lev, checkpointname, default_level_prefix, "jz_cp"));
             }
+        }
+
+        // Mesh-resident neutral density of every depleting MCC background.
+        // Once a background depletes this is simulation state, not a derived
+        // quantity: omitting it would let a restarted run silently resume with
+        // a full gas fill. The per-step depletion accumulator is scratch and
+        // is deliberately not written.
+        for (auto const& background : warpx.GetPartContainer().getDepletableBackgrounds())
+        {
+            const std::string field_name =
+                MCCBackgroundField::fieldName(background.m_background_name);
+            VisMF::Write(*warpx.m_fields.get(field_name, lev),
+                         amrex::MultiFabFileFullPrefix(lev, checkpointname,
+                                                       default_level_prefix, field_name));
         }
 
         if (warpx.DoPML()) {
