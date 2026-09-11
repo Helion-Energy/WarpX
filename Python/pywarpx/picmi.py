@@ -3625,6 +3625,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         dense plasma whose Spitzer eta merely happens to be smaller than
         the boost (implicit_mhd.lorentz_force_weight_eta).
 
+    lorentz_force_band_z_max: float, default=+inf
+        Axial extent of the band-cells mask: rows with cell centre z <=
+        z_max only (implicit_mhd.lorentz_force_band_z_max). On the
+        production formation deck the whole-wall mask changes the
+        formation (trapped flux -14 %) through the formation section's
+        bore-wall band; 3.5 m keeps it to the cone + tube band where the
+        heater lives.
+
     lorentz_force_band_cells: int, default=0
         Switch the magnetic force off entirely in the last N live fluid
         cells at the shaped wall (wall_model), radially and under the
@@ -4215,6 +4223,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_relaxation_ledger_file=None,
         lorentz_force_current=None,
         lorentz_force_band_cells=None,
+        lorentz_force_band_z_max=None,
         lorentz_force_weight_eta=None,
         vacuum_drag_kinetic_drain=None,
         floor_consistency_rate=None,
@@ -4388,6 +4397,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_relaxation_ledger_file = halo_relaxation_ledger_file
         self.lorentz_force_current = lorentz_force_current
         self.lorentz_force_band_cells = lorentz_force_band_cells
+        self.lorentz_force_band_z_max = lorentz_force_band_z_max
         self.lorentz_force_weight_eta = lorentz_force_weight_eta
         self.vacuum_drag_kinetic_drain = vacuum_drag_kinetic_drain
         self.floor_consistency_rate = floor_consistency_rate
@@ -4577,6 +4587,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_relaxation_ledger_file = self.halo_relaxation_ledger_file
         implicit_mhd.lorentz_force_current = self.lorentz_force_current
         implicit_mhd.lorentz_force_band_cells = self.lorentz_force_band_cells
+        implicit_mhd.lorentz_force_band_z_max = self.lorentz_force_band_z_max
         implicit_mhd.lorentz_force_weight_eta = self.lorentz_force_weight_eta
         implicit_mhd.vacuum_drag_kinetic_drain = self.vacuum_drag_kinetic_drain
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate

@@ -5483,6 +5483,19 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_external_current_wall_total  # dependency
 )
 
+# the mask's axial gate: with lorentz_force_band_z_max below the domain no
+# row is masked, so the band_cells = 2 run must be the plain wall run bit
+# for bit (plotfile fields and newton.txt)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_external_current_band_cells_zmax_inert  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_external_current_wall implicit_mhd.lorentz_force_band_cells=2 implicit_mhd.lorentz_force_band_z_max=-1.0"  # inputs
+    "analysis_mhd_twin_bytes.py diags/diag000016 ../test_rz_theta_implicit_mhd_external_current_wall_total/diags/diag000016"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_external_current_wall_total  # dependency
+)
+
 # ============ The vacuum dust drag's kinetic drain ============
 # Uniform dust sliding under the vacuum drag: without the drain the lost
 # kinetic energy is ion heat (the "off" run measures it), with

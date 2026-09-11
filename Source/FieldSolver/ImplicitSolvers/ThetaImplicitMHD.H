@@ -1543,6 +1543,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // is at 0.9998, the band at n 6e18 at 0.15 and at 1e18 at 5e-3). The
     // Joule booking and the circuit probe keep their own weights.
     amrex::Real m_lorentz_force_weight_eta = -1.0;
+    // implicit_mhd.lorentz_force_band_z_max [m] (default +inf = the whole
+    // wall): the band-cells mask acts only in rows whose cell centre lies
+    // at z <= z_max. Measured on the production formation deck
+    // (2026-09-10): the mask applied along the whole wall from t = 0
+    // changes the formation itself (trapped flux -14 % at 12 us, closed
+    // volume +12 %, Ti_closed +21 %) because the formation section's
+    // bore-wall band (r 0.725, z 3.5-6.6) takes part in the reversal and
+    // the flux trapping, while the heater the mask is for lives in the
+    // cone + tube band (z < 3.5); restarted after the tube has filled the
+    // mask leaves every closed-region station within 0.5 %. Static
+    // geometry like the mask itself.
+    amrex::Real m_lorentz_force_band_z_max = std::numeric_limits<amrex::Real>::max();
     // ---- Offset-density (pedestal) halo formulation (0 disables). ----
     //
     // Fraction f of the instantaneous density peak defining the dynamic

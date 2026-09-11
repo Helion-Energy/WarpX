@@ -5949,6 +5949,20 @@ Jacobian probes.
     :math:`5\times10^{-3}`. The Joule booking and the circuit probe keep
     their own weights. Requires ``lorentz_force_current = physical``.
 
+.. pp:param:: implicit_mhd.lorentz_force_band_z_max
+    :type: ``float`` [m]
+    :default: unlimited (the whole shaped wall)
+
+    Axial extent of the band-cells mask: only rows whose cell centre lies
+    at :math:`z \le z_\text{max}` are masked. Measured on the production
+    formation deck: the whole-wall mask from :math:`t = 0` changes the
+    formation itself (trapped flux :math:`-14\,\%` at 12 us, closed volume
+    :math:`+12\,\%`, :math:`T_i` :math:`+21\,\%`) because the formation
+    section's bore-wall band takes part in the reversal and the flux
+    trapping, whereas the heater the mask is for lives in the cone + tube
+    band (:math:`z < 3.5` m); restarted after the tube has filled, the mask
+    leaves every closed-region station within 0.5 %. Static geometry.
+
 .. pp:param:: implicit_mhd.lorentz_force_band_cells
     :type: ``integer``
     :default: ``0`` (off, bit-identical)

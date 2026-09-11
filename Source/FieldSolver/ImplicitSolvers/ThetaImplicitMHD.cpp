@@ -257,6 +257,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.lorentz_force_band_cells cannot be negative (0 = off)");
     utils::parser::queryWithParser(pp, "lorentz_force_weight_eta",
                                    m_lorentz_force_weight_eta);
+    utils::parser::queryWithParser(pp, "lorentz_force_band_z_max",
+                                   m_lorentz_force_band_z_max);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_lorentz_force_weight_eta < 0.0_rt || m_physical_share_force,
         "implicit_mhd.lorentz_force_weight_eta requires "
@@ -4073,6 +4075,13 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? " (the magnetic force is off in the last N live cells "
                              "at the shaped wall)"
                            : " (off)")
+                   << (m_lorentz_force_band_cells > 0 &&
+                               m_lorentz_force_band_z_max <
+                                   std::numeric_limits<amrex::Real>::max()
+                           ? " [rows with z <= " +
+                                 std::to_string(m_lorentz_force_band_z_max) +
+                                 " m only]"
+                           : "")
                    << "\n"
                    << "Vacuum drag kinetic drain:     "
                    << (m_vacuum_drag_kinetic_drain
@@ -15795,6 +15804,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const int* const AMREX_RESTRICT force_band_masked_cc =
         force_band_mask ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
     const bool force_weighted = physical_share_force || force_band_mask;
+    // Axial extent of the band mask (see the member comment): the mask
+    // acts only in rows whose cell centre lies at z <= z_max.
+    const amrex::Real force_band_z_max = m_lorentz_force_band_z_max;
     // Constant reference eta of the physical-share weight (-1 = the live
     // user eta; see the member comment).
     const amrex::Real force_weight_eta = m_lorentz_force_weight_eta;
@@ -15972,6 +15984,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // Also read by the electron-ion equilibration's live ion pressure,
     // so hoisted out of the RZ block below.
     const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
+    // Axial coordinate of a cell centre (the band mask's z_max gate): the
+    // last dimension is z in both 1D and RZ.
+    const amrex::Real axial_lower = m_WarpX->Geom(0).ProbLo(AMREX_SPACEDIM - 1);
+    const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(AMREX_SPACEDIM - 1);
 #if defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr = inverse_cell_size[0];
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -16373,7 +16389,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         std::min(force_band_masked_cc[jz_up],
                                  force_band_masked_cc[jz_down]));
                     if (i >= first_masked - force_band_cells) {
-                        force_weight = 0.0_rt;
+#if defined(WARPX_DIM_RZ)
+                        const amrex::Real z_cell =
+                            axial_lower + (j + 0.5_rt) * axial_cell_size;
+#else
+                        const amrex::Real z_cell =
+                            axial_lower + (i + 0.5_rt) * axial_cell_size;
+#endif
+                        if (z_cell <= force_band_z_max) {
+                            force_weight = 0.0_rt;
+                        }
                     }
                 }
                 for (int component = 0; component < 3; ++component) {
