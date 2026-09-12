@@ -545,18 +545,27 @@ CircuitCoupler::InitRegionReport (const bool restarting)
         << "#   lambda_total    = the unmasked, unweighted integral over "
            "the whole domain; = interior + band + exterior = w_plasma + "
            "w_mixed + w_boost to roundoff\n"
-        << "#   interior / band / exterior: nodes with r < r_wall(z) - N dr, "
-           "r_wall(z) - N dr <= r < r_wall(z), r >= r_wall(z), N = "
-        << m_region->BandCells() << " cells (node "
-           "(r_i, z_j) inside the wall iff r_i < r_wall(z_j), r_wall = "
-           "piecewise-linear, end-clamped interpolation of the wall "
-           "polyline; numpy: r_node < np.interp(z_node, z_poly, r_poly))\n"
-        << "#   probe_exclude_wall_band_cells = "
-        << m_params.probe_exclude_wall_band_cells
+        // The band sentence is verbatim the pre-exclusion text when the
+        // exclusion is off (the report stays byte-identical there); with
+        // the exclusion on it states the widened band and the dropped part.
         << (m_params.probe_exclude_wall_band_cells > 0
-                ? ": the band's linkage is DROPPED from lambda_used "
+                ? "#   interior / band / exterior: nodes with r < r_wall(z) - "
+                  "N dr, r_wall(z) - N dr <= r < r_wall(z), r >= r_wall(z), "
+                  "N = " + std::to_string(m_region->BandCells()) +
+                  " cells (node (r_i, z_j) inside the wall iff r_i < "
+                  "r_wall(z_j), r_wall = piecewise-linear, end-clamped "
+                  "interpolation of the wall polyline; numpy: r_node < "
+                  "np.interp(z_node, z_poly, r_poly))\n"
+                  "#   probe_exclude_wall_band_cells = " +
+                  std::to_string(m_params.probe_exclude_wall_band_cells) +
+                  ": the band's linkage is DROPPED from lambda_used "
                   "(lambda_band = the excluded part)\n"
-                : " (off: lambda_used includes the band)\n")
+                : std::string(
+                  "#   interior / band / exterior: nodes with r < r_wall(z) - 2 dr, "
+                  "r_wall(z) - 2 dr <= r < r_wall(z), r >= r_wall(z) (node "
+                  "(r_i, z_j) inside the wall iff r_i < r_wall(z_j), r_wall = "
+                  "piecewise-linear, end-clamped interpolation of the wall "
+                  "polyline; numpy: r_node < np.interp(z_node, z_poly, r_poly))\n"))
         << "#   w_plasma / w_mixed / w_boost: nodes with linkage weight "
            "w = eta_phys/eta_field > 0.9, 0.1 <= w <= 0.9, w < 0.1 (the "
            "register circuit_linkage_weight; without it w == 1: w_plasma = "
