@@ -724,6 +724,22 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
             } else {
                 amrex::Print() << "; NO axial gate (every wall row treated)";
             }
+            // The row count Eric asked for with the ungated arms: how many
+            // of the contour's nodal rows (rows with a masked E_theta corner
+            // in the valid domain) the neumann / transparent treatment
+            // reaches under the gate.
+            long rows_total = 0;
+            long rows_treated = 0;
+            for (int jj = m_ng; jj <= m_ng + m_nz; ++jj) {
+                if (et_h[jj] <= nr) {
+                    ++rows_total;
+                    if (jj - m_ng <= m_band_eta_j_max_nodal) { ++rows_treated; }
+                }
+            }
+            amrex::Print() << "; contour rows treated " << rows_treated
+                           << " of " << rows_total
+                           << " (nodal rows with a masked E_theta corner in "
+                              "the valid domain)";
         }
         amrex::Print() << ")";
     }
