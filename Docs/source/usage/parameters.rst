@@ -7242,6 +7242,105 @@ Jacobian probes.
     side of a cell (the fluid registers carry two guard cells and every
     ghost fill covers both).
 
+.. pp:param:: implicit_mhd.conduction_operator
+    :type: ``string``
+    :default: ``sharma_hammett``
+
+    Face-flux ASSEMBLY of both species' conductive fluxes
+    (``thermal_conduction_model = braginskii`` or the scalar
+    diffusivities). ``sharma_hammett`` (default) keeps the face-evaluated
+    tensor flux described under
+    :pp:param:`implicit_mhd.thermal_conduction_model` bit-identically:
+    unit field from the staggered :math:`B_n` and the two cells' mean
+    tangential :math:`B`, 2-point normal difference, tangential corner
+    stencil limited by :pp:param:`implicit_mhd.braginskii_tangential_limiter`.
+
+    ``chacon_fd`` selects the grid finite-difference anisotropic
+    conduction operator of Chacon, Hamilton & Krasheninnikova, Comput.
+    Phys. Commun. 313 (2025) 109646, with the cross-derivative fluxes
+    recast as advective fluxes after du Toit et al., Comput. Phys.
+    Commun. 228 (2018) 61 -- the hybrid model's
+    ``hybrid_pic_model.qdsmc_conduction_operator = fd`` ported from its
+    nodal temperature grid to the MHD's cell-centred grid (node
+    :math:`\to` cell centre, node-to-node edge :math:`\to` cell face,
+    the nodal metric :math:`J = r` folded into the cell products and
+    divided out by the face radius that the r-weighted divergence applies
+    again; the hybrid's axis rule has no counterpart because the
+    :math:`r = 0` face has zero area). The flux through the face between
+    the left cell :math:`L` and the right cell :math:`R` is
+
+    .. math::
+
+        q_n = -\rho_f \left[\langle J\,\Xi_{nn}\rangle_f
+        \frac{e_R - e_L}{h_n} + v^* e_{\rm face}\right],\qquad
+        v^* = \frac{\langle J\,\Xi_{nt}\, D_t e\rangle_f}{(e_L + e_R)/2},
+
+    with the CELL tensors :math:`\Xi(c) = \chi_\perp I + (\chi_\parallel -
+    \chi_\perp)\, \hat b(c)\hat b(c)` (:math:`\hat b(c)` the unit field of
+    the cell-centred total :math:`B`, :math:`|B|^2` floored smoothly at
+    :math:`\mu_0 (p_{e,\rm floor} + p_{i,\rm floor})`), :math:`\chi_\parallel,
+    \chi_\perp` the FACE Braginskii coefficients of the existing pipeline
+    (clamps, halo boost, ceiling lift, the :math:`(\gamma - 1)` convention
+    and :pp:param:`implicit_mhd.conduction_coefficient_state` untouched),
+    :math:`\langle\cdot\rangle_f` the radius-weighted mean of the two
+    cells' products over the face radius (the compact star), :math:`D_t e`
+    the centered transverse difference at each cell (one-sided against a
+    masked cell), and :math:`e_{\rm face}` the SMART face value of the
+    specific internal energy along the normal from the upwind side of
+    :math:`v^*`: the cross flux is differenced like an upwinded advective
+    flux of :math:`e`, so it cannot demand a face state outside its upwind
+    stencil hull. Every state-dependent construct is C-infinity (the SMART
+    diagram and the upwind switch use the lane's smooth min/max/sign at
+    the width :pp:param:`implicit_mhd.conduction_fd_limiter_width`); the
+    order decision and the masked-neighbour clamps are static geometry.
+    The free-streaming cap of the TOTAL face flux, the shaped-wall drain,
+    the z-end exchange, the masked-cell rules, the energy-audit registers
+    and the dual-energy twin booking are those of the default assembly.
+    The block preconditioner receives the compact-star coefficient
+    :math:`\langle J\,\Xi_{nn}\rangle_f / r_f` (the same coefficients, a
+    2-point stencil) for both orders; the cross-advective part is
+    residual-only. Requires a conduction channel.
+
+.. pp:param:: implicit_mhd.conduction_fd_order
+    :type: ``int``
+    :default: ``2``
+
+    Stencil order of ``conduction_operator = chacon_fd``. ``2`` is the
+    compact star above. ``4`` replaces both face means by the
+    :math:`c_0 = (-1, 7, 7, -1)/12` composite over the cells :math:`L-1,
+    L, R, R+1` of the six-point derivative rows on the window :math:`L-2
+    \ldots R+2` (co-part) and of the five-point transverse derivative
+    (cross part) -- the conservative factorization of the fourth-order
+    five-point divergence, not a face interpolant -- INTERIOR ONLY: a face
+    whose six-cell normal window leaves a non-periodic domain, whose
+    :math:`\pm 2` transverse window does, or whose windows touch a masked
+    cell takes the compact second-order form (the hybrid's degrade rule
+    with masked cells treated as walls). The order-4 window reads three
+    cells beyond a face, so the fluid registers are allocated with a third
+    guard layer when it is selected (every ghost fill is depth-generic).
+    The preconditioner keeps the 2-point coefficient at either order.
+
+.. pp:param:: implicit_mhd.conduction_fd_limiter_width
+    :type: ``float``
+    :default: ``0.01``
+
+    Relative C-infinity width of the ``chacon_fd`` limiter: the SMART
+    face value uses the lane's smooth min/max/sign at the absolute width
+    ``conduction_fd_limiter_width`` :math:`\times (e_L + e_R)/2`, and the
+    upwind switch of :math:`v^*` is the smooth sign at the velocity a
+    transverse contrast of ``conduction_fd_limiter_width`` per cell would
+    give (a per-solve constant under the frozen coefficient state). Must
+    be positive; the hard SMART diagram is its limit.
+
+.. pp:param:: implicit_mhd.conduction_fd_cross
+    :type: ``string``
+    :default: ``smart``
+
+    Cross-derivative treatment of ``chacon_fd``: ``smart`` (default) is the
+    advective recast above; ``centered`` books the plain centered cross
+    flux :math:`\langle J\,\Xi_{nt}\, D_t e\rangle_f` -- the unlimited,
+    non-monotone control the tests measure against.
+
 .. pp:param:: implicit_mhd.conduction_coulomb_log
     :type: ``float``
     :default: ``10``

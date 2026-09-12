@@ -1,0 +1,192 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Anisotropic conduction on CIRCULAR field lines (RZ): the perpendicular
+# numerical diffusivity of the conduction operators
+# (implicit_mhd.conduction_operator = sharma_hammett | chacon_fd, with the
+# tangential limiter and the stencil order per arm).
+#
+# A poloidal field whose lines are exact circles around (r0, z0): the flux
+# function psi = r A_theta = B0 ((r - r0)^2 + z^2)/2 gives
+#   B_r = -(1/r) dpsi/dz = -B0 z/r,   B_z = (1/r) dpsi/dr = B0 (r - r0)/r,
+# divergence-free by construction and tangent to every circle
+# (r - r0)^2 + z^2 = const. A hot Gaussian electron patch (half-width
+# 3 cells, 2x temperature contrast) sits on the ring of radius R0 = 12
+# cells at the 45-degree point, where the field is oblique to BOTH face
+# families -- the cross terms of the tensor flux carry an O(1) share of the
+# parallel flux through every face around the patch, and the field
+# direction rotates by a full turn along the ring. Exact anisotropic
+# conduction spreads the patch ALONG the ring (arc-length diffusion at
+# chi_par) and across it only at chi_perp; every additional growth of the
+# variance perpendicular to the ring is the operator's numerical
+# perpendicular diffusivity chi_perp,num -- the number the arms are
+# compared on (analysis_mhd_conduction_circle.py). Exact anisotropic
+# diffusion also obeys the maximum principle (no new extrema).
+#
+# The Braginskii coefficients are PINNED by the per-component clamps
+# (max = min (1 + 1e-4); the parser refuses max = min): chi_par = 3e4 and
+# chi_perp = 3 m^2/s in the physical kappa/(n kB) convention (the solver's
+# (gamma - 1) convention makes the operator diffusivities 2e4 and 2), so
+# the operator acts on a constant tensor and the measurement is not
+# confounded by chi(T). The raw parallel value lies far ABOVE the clamp
+# (the soft cap returns its maximum exactly), the raw perpendicular value
+# far BELOW it (the smooth floor/cap pair returns 0.9996 of the maximum);
+# the analysis carries both. Frozen ions,
+# quiescent electromagnetics (u = 0, eta = 0, no Hall, no electron-pressure
+# Ohm term), theta = 1 (backward-Euler conduction), the production block
+# preconditioner with its conduction block. Face conduction number
+# D = chi_par dt/h^2 = 5 (stiff, implicit); 10 steps: the arc spread
+# sigma^2 grows by 2 chi_par t = 6e-3 m^2 (sigma 3 -> 10 cells along the
+# ring) while the physical perpendicular growth is 2 chi_perp t = 6e-7 m^2
+# (0.1 percent of sigma0^2) -- a numerical chi_perp,num of 1 percent of
+# chi_par would add 11 percent, so the test resolves the leak to well below
+# a percent of chi_par. The ring keeps 20 cells (> 6 perpendicular widths)
+# from the axis, r_max and both z ends: the domain faces carry a cross
+# flux wherever b_n != 0 there (both assemblies), and the energy ledger
+# gate needs the patch's tail below 1e-10 at every boundary; |B| is also
+# tapered to zero (cos^2) over the last 13 cells before r_max and the last
+# 9 before each z end, so the staggered B_n of every domain face vanishes
+# exactly and no assembly can conduct through a domain face.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 10.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.05
+my_constants.nr = 64
+my_constants.nz = 64
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.h = Lr / nr
+# ring centre (r0, 0), ring radius R0 = 12 h, patch at the 45-degree point
+my_constants.r0 = 0.25
+my_constants.R0 = 12.0 * h
+# |B| taper starts (cos^2 to zero at r = Lr and at |z| = Lz/2)
+my_constants.ra = 0.40
+my_constants.za = 0.18
+my_constants.rc = r0 + R0 * 0.70710678118654752
+my_constants.zc = R0 * 0.70710678118654752
+my_constants.w = 3.0 * h
+my_constants.dTe = 1.0
+# pinned Braginskii coefficients (physical convention, see above)
+my_constants.chi_par_phys = 3.0e4
+my_constants.chi_perp_phys = 3.0
+# D = (gamma - 1) chi_par_phys dt / h^2 = 5
+my_constants.dt = 5.0 * h * h / ((gamma - 1.0) * chi_par_phys)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nr nz
+amr.max_grid_size = 64
+amr.blocking_factor = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 40
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+gmres.restart_length = 100
+
+# The production block preconditioner with its conduction Helmholtz block
+# (the same settings as the oblique-field Braginskii test).
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.field_iterations = 2
+pc_mhd_block.fluid_iterations = 2
+pc_mhd_block.conduction_block = 1
+pc_mhd_block.conduction_threshold = 1.0
+pc_mhd_block.agglomeration = true
+pc_mhd_block.consolidation = true
+pc_mhd_block.max_coarsening_level = 30
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# The circular poloidal field enters as an external vector potential
+# (A_theta = psi / r; the grid external-field parser supports only Bz in
+# RZ). The 1/r is regularized as 1/sqrt(r^2 + h^2) so the axis evaluation
+# stays finite: at the ring (r >= 20 h) this moves the flux contours by
+# 1e-3 of psi (0.1 cell in rho), far inside the measurement's resolution.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = ring
+external_vector_potential.ring.Ay_external_grid_function(x,y,z) = \
+    "0.5*B0*((x - r0)*(x - r0) + z*z)/sqrt(x*x + h*h)*((x < ra) + (x >= ra)*cos(0.5*pi*(x - ra)/(Lr - ra))^2)*((abs(z) < za) + (abs(z) >= za)*cos(0.5*pi*(abs(z) - za)/(0.5*Lz - za))^2)"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# required by the central flux; inert here (u = 0, frozen ions)
+implicit_mhd.viscosity = 0.5
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+implicit_mhd.conduction_chi_par_min = chi_par_phys
+implicit_mhd.conduction_chi_par_max = chi_par_phys * 1.0001
+implicit_mhd.conduction_chi_perp_min = chi_perp_phys
+implicit_mhd.conduction_chi_perp_max = chi_perp_phys * 1.0001
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = \
+    "Pe0*(1.0 + dTe*exp(-((x-rc)*(x-rc) + (z-zc)*(z-zc))/(w*w)))"
+# implicit_mhd.conduction_operator / conduction_fd_order / conduction_fd_cross
+# and implicit_mhd.braginskii_tangential_limiter are set per arm from the
+# command line.
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

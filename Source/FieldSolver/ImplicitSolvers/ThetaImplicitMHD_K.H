@@ -3428,6 +3428,51 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
     }
     return flux;
 }
+
+// ---------------------------------------------------------------------
+// chacon_fd conduction operator (implicit_mhd.conduction_operator =
+// chacon_fd; Chacon, Hamilton & Krasheninnikova, Comput. Phys. Commun.
+// 313 (2025) 109646, cross-derivative fluxes recast as advective fluxes
+// after du Toit et al., Comput. Phys. Commun. 228 (2018) 61). The face
+// value below is the limiter of that recast; the operator itself lives
+// beside the face kernel (chacon_fd_face_flux in ThetaImplicitMHD.cpp).
+
+// C-infinity SMART face value along a line of three cell samples --
+// upwind-upwind e_uu, upwind e_u, downwind e_d -- for the advective
+// recast of the cross-derivative conduction flux. The SMART normalized-
+// variable diagram of Gaskell & Lau (1988),
+//     phf(ph) = max(ph, min(3 ph, 3/8 + 3/4 ph, 1)),
+//     ph = (e_u - e_uu)/(e_d - e_uu),  e_face = e_uu + phf (e_d - e_uu),
+// (the QUICK value where the triple is smooth, the downwind value on the
+// 5/6 < ph < 1 leg, three times the upwind excess below ph = 1/6, and
+// the plain upwind value wherever the triple is not monotone) is written
+// WITHOUT the division as the correction of the upwind value,
+//     e_face = e_u + s max(0, min(2 s d_u, s (d_u + 3 d_d)/8, s d_d)),
+//     d_u = e_u - e_uu,  d_d = e_d - e_u,  s = sign(d_u + d_d),
+// which is algebraically the SMART value for every triple (both forms
+// give e_u when d_u + d_d = 0), and every max/min/sign is then the
+// lane's C-infinity smooth_max/smooth_min/smooth_sign of one absolute
+// width w (in the units of e). For w > 0 the value is C-infinity in the
+// three samples; as w -> 0 it is the hard SMART diagram (kinks at
+// ph = 0, 1/6, 5/6, 1); each smoothing changes the value by at most w/2.
+// Exact for linear and quadratic profiles up to that smoothing (the
+// QUICK leg). Bounded by the hull of the three samples plus O(w).
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smart_face_value_smooth (const amrex::Real e_uu, const amrex::Real e_u,
+                         const amrex::Real e_d,
+                         const amrex::Real width) noexcept
+{
+    const amrex::Real d_u = e_u - e_uu;
+    const amrex::Real d_d = e_d - e_u;
+    const amrex::Real s = smooth_sign(d_u + d_d, width);
+    const amrex::Real a = 2.0 * s * d_u;
+    const amrex::Real b = 0.125 * s * (d_u + 3.0 * d_d);
+    const amrex::Real c = s * d_d;
+    const amrex::Real correction = smooth_max(
+        0.0, smooth_min(smooth_min(a, b, width), c, width), width);
+    return e_u + s * correction;
+}
+
 } // namespace theta_implicit_mhd
 
 #endif

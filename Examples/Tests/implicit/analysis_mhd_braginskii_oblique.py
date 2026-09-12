@@ -43,7 +43,12 @@ Gates (on the arm it is run for):
  4. the spot spread more along z than along r (the field is mostly
     axial): a flipped projection or an isotropic tensor fails this.
 
-Usage: analysis_mhd_braginskii_oblique.py <initial> <final> <limiter>
+Usage: analysis_mhd_braginskii_oblique.py <initial> <final> <arm>
+       arm = the tangential limiter (none | minmod | smart | smart_upwind;
+       the maximum-principle gate applies to the three limited ones) or a
+       conduction_operator = chacon_fd arm (chacon_fd, chacon_fd4: gates 1,
+       2 and 4 plus the perpendicular readout; their maximum principle is
+       gated on the circle test, analysis_mhd_conduction_circle.py).
 """
 
 import sys
@@ -148,7 +153,7 @@ print(
     f"  new extrema: overshoot {overshoot:.3e}, undershoot {undershoot:.3e} "
     f"of the initial contrast (limited-arm ceiling {LIMITED_CEILING:.1e})"
 )
-if limiter != "none":
+if limiter in ("minmod", "smart", "smart_upwind"):
     assert max(overshoot, undershoot) < LIMITED_CEILING, (
         limiter,
         overshoot,
@@ -177,5 +182,46 @@ growth_z = final_z2 - initial_z2
 print(f"  sigma_r^2 growth {growth_r:.4e} m^2, sigma_z^2 growth {growth_z:.4e} m^2")
 assert growth_z > 0.0
 assert growth_z > 2.0 * abs(growth_r), (growth_r, growth_z)
+
+# 5. Perpendicular pollution (reported, not gated): the second moments in
+# the frame of the field at the spot centre, b = (sin tilt, cos tilt) with
+# tan(tilt) = 0.4663 (25 degrees; the field rotates over the spot, so
+# this is the leading-order readout). The growth of the perpendicular
+# variance, divided by 2 t, is the effective perpendicular diffusivity in
+# the operator's (gamma - 1) convention; the parallel growth is printed
+# beside it (the exact solution has chi_perp/chi_par ~ 1.6e-8: every
+# perpendicular growth is numerical).
+tilt = np.arctan(0.4663)
+b_r, b_z = np.sin(tilt), np.cos(tilt)
+spot_r, spot_z = 0.35, 0.0
+
+
+def aligned_moments(specific):
+    perturbation = np.maximum(specific - background, 0.0)
+    weight = perturbation * r_grid
+    total = np.sum(weight)
+    xi = (r_grid - spot_r) * b_r + (z_grid - spot_z) * b_z
+    eta = (r_grid - spot_r) * b_z - (z_grid - spot_z) * b_r
+    xi_mean = np.sum(weight * xi) / total
+    eta_mean = np.sum(weight * eta) / total
+    return (
+        np.sum(weight * (xi - xi_mean) ** 2) / total,
+        np.sum(weight * (eta - eta_mean) ** 2) / total,
+    )
+
+
+initial_par2, initial_perp2 = aligned_moments(initial_specific)
+final_par2, final_perp2 = aligned_moments(final_specific)
+chi_par_eff = (final_par2 - initial_par2) / (2.0 * elapsed_time)
+chi_perp_eff = (final_perp2 - initial_perp2) / (2.0 * elapsed_time)
+print(
+    f"  field-aligned moments: sigma_par^2 growth {final_par2 - initial_par2:.4e} m^2 "
+    f"(chi_par,eff {chi_par_eff:.4e} m^2/s), sigma_perp^2 growth "
+    f"{final_perp2 - initial_perp2:.4e} m^2 (chi_perp,eff {chi_perp_eff:.4e} m^2/s)"
+)
+print(
+    f"  PERP_POLLUTION {limiter}: chi_perp,eff / chi_par,eff = "
+    f"{chi_perp_eff / chi_par_eff if chi_par_eff > 0.0 else float('nan'):.3e}"
+)
 
 print("PASS")

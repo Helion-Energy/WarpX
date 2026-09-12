@@ -2806,6 +2806,94 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // measured wall-ledger runaway (3.3e11 J -> 3.5e4 J under minmod in
     // the E4 A/B). "none" remains selectable for the centered reference.
     std::string m_braginskii_tangential_limiter = "minmod";
+    // Face-flux ASSEMBLY of both species' conductive fluxes
+    // (implicit_mhd.conduction_operator; default "sharma_hammett" = the
+    // path above, bit-identical: no chacon_fd arithmetic exists in the
+    // kernel unless the knob selects it).
+    //
+    //   sharma_hammett: the face-evaluated tensor flux -- unit field from
+    //     the staggered B_n and the two cells' mean tangential B, 2-point
+    //     normal difference, tangential corner stencil limited by
+    //     braginskii_tangential_limiter (Sharma & Hammett, JCP 227 (2007)
+    //     123 for the minmod default).
+    //   chacon_fd: the grid finite-difference anisotropic operator of
+    //     Chacon, Hamilton & Krasheninnikova, Comput. Phys. Commun. 313
+    //     (2025) 109646, with the cross-derivative fluxes recast as
+    //     advective fluxes after du Toit et al., Comput. Phys. Commun.
+    //     228 (2018) 61 -- the hybrid model's grid conduction operator
+    //     (hybrid_pic_model.qdsmc_conduction_operator = fd) ported to the
+    //     MHD's cell-centred grid. The face flux through the face between
+    //     the left cell L and the right cell R is
+    //       q_n = -rho_f [ F_co + F_cross ],
+    //       F_co    = <J Xi_nn>_face (e_R - e_L)/h_n            (compact star)
+    //       F_cross = v* e_face,   v* = <J Xi_nt D_t e>_face / e_f,
+    //     with the CELL tensors Xi(c) = chi_perp I + (chi_par - chi_perp)
+    //     b(c) b(c) (b(c) the unit field of the cell-centred total B,
+    //     |B|^2 floored smoothly by mu0 (p_e,floor + p_i,floor); chi_par
+    //     and chi_perp the FACE Braginskii coefficients of the pipeline
+    //     above -- clamps, halo boost, ceiling lift, (gamma - 1)
+    //     convention and coefficient state untouched), <.>_face the
+    //     radius-weighted mean of the two cells' products divided by the
+    //     face radius (J = r_cell on r-faces, 1 on z-faces; the divergence
+    //     multiplies by r_face again, so the conservative r-weighted form
+    //     of the source is reproduced exactly), D_t e the transverse
+    //     difference at each cell (centered; one-sided against a masked
+    //     neighbour), e_f = (e_L + e_R)/2 and e_face the SMART face value
+    //     of e along the normal from the upwind side of v* -- so the cross
+    //     flux is differenced like an upwinded advective flux of e and
+    //     cannot demand a face state outside its upwind stencil hull.
+    //     conduction_fd_order = 4 replaces both means by the c0 = (-1, 7,
+    //     7, -1)/12 composite over the cells L-1 .. R+1 of the six-point
+    //     A6 derivative rows (co-part) and the five-point d0 transverse
+    //     derivative (cross part) -- the conservative factorization of the
+    //     fourth-order divergence, NOT a face interpolant -- interior-only:
+    //     a face whose six-cell normal window or +-2 transverse window
+    //     leaves a non-periodic domain or touches a masked cell takes the
+    //     compact second-order form (the hybrid's rule, with masked cells
+    //     added as walls). The order-4 window reads three cells beyond a
+    //     face, so the fluid registers carry a third guard layer only
+    //     when it is selected (AllocateLevelMFs).
+    //
+    //   Grid mapping (the hybrid operator lives on the NODAL temperature
+    //   grid): node -> cell centre, node-to-node edge -> cell face, the
+    //   node's dual cell -> the cell, J = r_node folded into the node
+    //   products -> r_cell folded into the cell products and divided out
+    //   by r_face (the register consumers apply r_face), the nodal axis
+    //   rule (Vr = dr^2/8) -> nothing (the r = 0 face has zero area and is
+    //   zeroed), closed/EB nodes -> masked cells (an interface face is the
+    //   wall drain's business; the operator never straddles it),
+    //   n_harm mean(kappa/n) -> the face density rho_f of the pipeline.
+    //
+    //   Smoothness (JFNK): every state-dependent construct of chacon_fd is
+    //   C-infinity -- the SMART face value is smart_face_value_smooth (the
+    //   lane's smooth min/max/sign at width conduction_fd_limiter_width x
+    //   e_f), the upwind switch of v* is the smooth sign of v* at width
+    //   conduction_fd_limiter_width x |Xi_nt|/h_t (per-solve constant under
+    //   coefficient_state = step_old), e_f is bounded away from zero by
+    //   the sampler floors, and the order decision and the masked-neighbour
+    //   clamps are static geometry. The free-streaming cap of the TOTAL
+    //   face flux, the shaped-wall drain, the z-end exchange, the masked
+    //   cell rules, the energy-audit registers and the dual-energy twin
+    //   booking are exactly those of the sharma_hammett path.
+    //
+    //   Preconditioner: the block receives the compact-star coefficient
+    //   <J Xi_nn>_face / r_face (the same coefficients, the 2-point
+    //   stencil) for both orders; the cross-advective part (and the
+    //   order-4 widening) is residual-only -- a documented PC/residual
+    //   mismatch measured as GMRES per Newton, not gated.
+    std::string m_conduction_operator = "sharma_hammett";
+    bool m_conduction_operator_chacon = false;
+    // Stencil order of chacon_fd (implicit_mhd.conduction_fd_order, 2 | 4).
+    int m_conduction_fd_order = 2;
+    // Relative C-infinity width of the chacon_fd limiter and upwind switch
+    // (implicit_mhd.conduction_fd_limiter_width; > 0; the hard SMART
+    // diagram as it tends to 0).
+    amrex::Real m_conduction_fd_limiter_width = 0.01;
+    // Cross-derivative treatment of chacon_fd (implicit_mhd.
+    // conduction_fd_cross): "smart" = the advective recast above
+    // (default); "centered" = the plain centered cross flux <J Xi_nt D_t
+    // e>_face (the unlimited control of the tests, non-monotone).
+    std::string m_conduction_fd_cross = "smart";
     // DIAGNOSTIC scale of the Braginskii cross term (implicit_mhd.
     // braginskii_cross_term_scale, [0, 1], default 1 = bit-identical):
     // multiplies the tangential-gradient part of the tensor flux,

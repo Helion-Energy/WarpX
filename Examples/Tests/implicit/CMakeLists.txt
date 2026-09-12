@@ -2456,6 +2456,80 @@ add_warpx_test(
     OFF  # checksum
     test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
 )
+# The chacon_fd conduction operator (implicit_mhd.conduction_operator;
+# Chacon, Hamilton & Krasheninnikova, CPC 313 (2025)) on the same stiff
+# oblique-field deck, orders 2 and 4: Newton/GMRES work against the
+# tangential-limiter arms (the JFNK claim, reported by the analysis) and
+# the perpendicular-pollution readout; the maximum principle of these arms
+# is gated on the circle test below.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_chacon_fd  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.conduction_operator=chacon_fd newton.max_iterations=40"  # inputs
+    "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 chacon_fd"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_oblique_chacon_fd4  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_braginskii_oblique implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_order=4 newton.max_iterations=40"  # inputs
+    "analysis_mhd_braginskii_oblique.py diags/diag000000 diags/diag000010 chacon_fd4"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_braginskii_oblique_minmod  # dependency
+)
+
+# Anisotropic conduction on CIRCULAR field lines (RZ): the perpendicular
+# numerical diffusivity chi_perp,num of each conduction assembly (the
+# parallel channel's leak across an oblique, rotating field) and the
+# maximum principle. Arms: the default assembly with its minmod and smart
+# tangential limiters, chacon_fd at orders 2 and 4, and the centered
+# cross-flux control (unlimited, printed only). See
+# analysis_mhd_conduction_circle.py.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_circle_sharma_minmod  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_conduction_circle  # inputs
+    "analysis_mhd_conduction_circle.py diags/diag000000 diags/diag000010 sharma_minmod"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# (The smart tangential-limiter arm of this deck is NOT registered: with
+# newton.require_convergence = true its Newton line search finds no
+# residual-decreasing admissible step within the first steps at these
+# tolerances -- the C0 pair's kinks stall the JFNK here where minmod
+# converges in 20-22 iterations; run it by hand with
+# implicit_mhd.braginskii_tangential_limiter=smart to reproduce.)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_circle_chacon_fd2  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_circle implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_order=2"  # inputs
+    "analysis_mhd_conduction_circle.py diags/diag000000 diags/diag000010 chacon_fd2"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_circle_sharma_minmod  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_circle_chacon_fd4  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_circle implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_order=4"  # inputs
+    "analysis_mhd_conduction_circle.py diags/diag000000 diags/diag000010 chacon_fd4"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_circle_sharma_minmod  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_circle_chacon_fd2_centered  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_circle implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_cross=centered"  # inputs
+    "analysis_mhd_conduction_circle.py diags/diag000000 diags/diag000010 chacon_fd2_centered"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_circle_sharma_minmod  # dependency
+)
 
 # Wall-corner conduction stiffness of the production formation deck: an
 # electron column's axial edge (tenfold density step per cell, 10 -> 0.5 eV
@@ -3316,6 +3390,30 @@ add_warpx_test(
     RZ  # dims
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=dirichlet implicit_mhd.wall_temperature=4.0"  # inputs
+    "analysis_mhd_wall_thermal.py diags dirichlet"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# The chacon_fd conduction operator at order 4 on the shaped-wall thermal
+# deck (isotropic channel): the composite normal flux degrades to the
+# compact form within the window of the masked stair-step cells and the
+# non-periodic z ends; the interface drain, the rigid masked band and the
+# ledger closure are gated exactly as for the default assembly, in the
+# zero-flux and the Dirichlet modes.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_zero_flux_chacon_fd4  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_order=4"  # inputs
+    "analysis_mhd_wall_thermal.py diags zero_flux"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_dirichlet_chacon_fd4  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=dirichlet implicit_mhd.wall_temperature=4.0 implicit_mhd.conduction_operator=chacon_fd implicit_mhd.conduction_fd_order=4"  # inputs
     "analysis_mhd_wall_thermal.py diags dirichlet"  # analysis
     OFF  # checksum
     OFF  # dependency

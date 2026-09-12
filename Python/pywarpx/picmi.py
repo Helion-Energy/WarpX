@@ -4092,6 +4092,36 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         copies; with circuit_hook_scope="residual" this restores
         EXACT circuit-in-residual coupling at native cost.
 
+    conduction_operator: {"sharma_hammett", "chacon_fd"}, optional
+        Face-flux assembly of both species' conductive fluxes
+        (implicit_mhd.conduction_operator). The default "sharma_hammett"
+        keeps the face-evaluated tensor flux with the tangential corner
+        stencil bit-identically. "chacon_fd" selects the grid
+        finite-difference anisotropic operator of Chacon, Hamilton and
+        Krasheninnikova, Comput. Phys. Commun. 313 (2025) 109646, on the
+        cell-centred grid: cell tensors from each cell's unit field with
+        the face Braginskii coefficients of the pipeline, compact-star
+        co-derivative fluxes, and the cross-derivative fluxes recast as
+        SMART-limited advective fluxes (C-infinity smoothed); the
+        free-streaming cap, the wall drain, the mask rules and the
+        preconditioner hand-over (the compact-star coefficient) are the
+        same. Refused without a conduction channel.
+
+    conduction_fd_order: {2, 4}, default=2
+        Stencil order of the chacon_fd operator: 2 = the compact star, 4 =
+        the interior-only c0/A6/d0 composite that degrades to 2 within the
+        window of a non-periodic boundary or a masked cell (the fluid
+        registers carry a third guard layer with it).
+
+    conduction_fd_limiter_width: float, default=0.01
+        Relative C-infinity width of the chacon_fd SMART face value and of
+        its upwind switch (the hard SMART diagram as it tends to 0).
+
+    conduction_fd_cross: {"smart", "centered"}, default="smart"
+        Cross-derivative treatment of chacon_fd: the SMART advective recast
+        (default) or the plain centered cross flux (the unlimited,
+        non-monotone control of the tests).
+
     braginskii_tangential_limiter: {"minmod", "none", "smart", "smart_upwind"}, optional
         Slope treatment of the Braginskii cross-term tangential gradient
         (thermal_conduction_model="braginskii" only). The default
@@ -4301,6 +4331,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         joule_ion_fraction=None,
         electron_ion_equilibration=None,
         braginskii_tangential_limiter=None,
+        conduction_operator=None,
+        conduction_fd_order=None,
+        conduction_fd_limiter_width=None,
+        conduction_fd_cross=None,
         conduction_chi_par_min=None,
         conduction_chi_par_max=None,
         conduction_chi_perp_min=None,
@@ -4484,6 +4518,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.joule_ion_fraction = joule_ion_fraction
         self.electron_ion_equilibration = electron_ion_equilibration
         self.braginskii_tangential_limiter = braginskii_tangential_limiter
+        self.conduction_operator = conduction_operator
+        self.conduction_fd_order = conduction_fd_order
+        self.conduction_fd_limiter_width = conduction_fd_limiter_width
+        self.conduction_fd_cross = conduction_fd_cross
         self.conduction_chi_par_min = conduction_chi_par_min
         self.conduction_chi_par_max = conduction_chi_par_max
         self.conduction_chi_perp_min = conduction_chi_perp_min
@@ -4695,6 +4733,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.joule_ion_fraction = self.joule_ion_fraction
         implicit_mhd.electron_ion_equilibration = self.electron_ion_equilibration
         implicit_mhd.braginskii_tangential_limiter = self.braginskii_tangential_limiter
+        implicit_mhd.conduction_operator = self.conduction_operator
+        implicit_mhd.conduction_fd_order = self.conduction_fd_order
+        implicit_mhd.conduction_fd_limiter_width = self.conduction_fd_limiter_width
+        implicit_mhd.conduction_fd_cross = self.conduction_fd_cross
         implicit_mhd.conduction_chi_par_min = self.conduction_chi_par_min
         implicit_mhd.conduction_chi_par_max = self.conduction_chi_par_max
         implicit_mhd.conduction_chi_perp_min = self.conduction_chi_perp_min
