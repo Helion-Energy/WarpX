@@ -20,6 +20,7 @@
 #include <AMReX_REAL.H>
 
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -394,6 +395,16 @@
  *   class smoothly). Both alternatives drop the physical
  *   insulator-interface current sheet: potential missing physics,
  *   recorded for a later revisit.
+ * - wall_band_eta_z_max = <m> (default: lorentz_force_band_z_max when
+ *   that key is set, else no gate): the neumann / transparent treatment
+ *   acts on rows with z <= z_max only (nodal rows by their node z, cell
+ *   rows by their centre z, like the force band's cell-centre rule);
+ *   rows beyond keep the plain override. The gate exists because the
+ *   formation bore (r 0.725 m, z > 3.5 m on the production deck) must
+ *   not be touched: the fill sits against it at t = 0 in both codes and
+ *   the theta-pinch implosion sheet forms in exactly its last cells
+ *   (measured 2026-09-11 on ungated twins: trapped flux at 6.3 us -9 %
+ *   ramp, -43 % neumann, -16 % probe exclusion alone).
  * - wall_field_freeze = <bool> (default 0 = off, bit-identical):
  *   FIELD-side freeze of the masked band (work item B, v1). When on,
  *   every EVOLVED magnetic-field face whose COMPLETE Faraday update
@@ -563,6 +574,18 @@ struct WallBandEtaOverrideView
     int z_hi_nodal = 0;
     int z_lo_cell = 0;
     int z_hi_cell = 0;
+    /** Axial gate of the neumann / transparent treatment
+     * (implicit_mhd.wall_band_eta_z_max, default = the force band's
+     * lorentz_force_band_z_max when that is set): the last nodal row and
+     * the last cell row whose location z is <= z_max. Rows beyond keep
+     * the plain override rule -- the treatment acts on the tube and cone
+     * walls only, never on the formation bore, where the fill sits at
+     * t = 0 and the implosion sheet forms in exactly those cells (measured
+     * 2026-09-11: an ungated ramp / extension / probe exclusion changed
+     * the trapped flux of the formation phase by -9 / -43 / -16 %). No gate:
+     * INT_MAX. */
+    int j_max_nodal = 2147483647;
+    int j_max_cell = 2147483647;
 };
 
 namespace warpx::mhd_wall_band
@@ -582,14 +605,17 @@ namespace warpx::mhd_wall_band
     };
 
     /** Classify location (i, j) of the family whose pre-offset table is
-     * `table` (valid axial range [z_lo, z_hi]). Pure integer
-     * comparisons on the geometry-static tables: under the override
-     * mode this reproduces `i >= table[j]` exactly, and a null table
-     * (no active treatment) classifies everything as composed. */
+     * `table` (valid axial range [z_lo, z_hi]; j_max = the family's last
+     * row inside the axial gate, see WallBandEtaOverrideView::j_max_*).
+     * Pure integer comparisons on the geometry-static tables: under the
+     * override mode -- and beyond the gate in every mode -- this
+     * reproduces `i >= table[j]` exactly, and a null table (no active
+     * treatment) classifies everything as composed. */
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     BandEtaRow ClassifyBandEtaRow (const WallBandEtaOverrideView& view,
                                    const int* table, const int z_lo,
-                                   const int z_hi, const int i, const int j)
+                                   const int z_hi, const int j_max,
+                                   const int i, const int j)
     {
         BandEtaRow row;
         row.si = i;
@@ -597,7 +623,8 @@ namespace warpx::mhd_wall_band
         if (table == nullptr) { return row; }
         const int first = table[j];
         const bool masked = (i >= first);
-        if (view.mode == WallBandEtaOverrideView::override_constant) {
+        if (view.mode == WallBandEtaOverrideView::override_constant ||
+            j > j_max) {
             if (masked) { row.kind = 1; }
             return row;
         }
@@ -870,6 +897,13 @@ private:
     /** neumann: the axial reach of the source lookup (ghost-limited, see
      * Define). */
     int m_band_eta_axial_reach = 0;
+    /** implicit_mhd.wall_band_eta_z_max [m]: the neumann / transparent
+     * treatment acts on rows with z <= z_max only (default = the force
+     * band's lorentz_force_band_z_max when set, else no gate); the
+     * derived last treated nodal / cell row indices. */
+    amrex::Real m_band_eta_z_max = std::numeric_limits<amrex::Real>::max();
+    int m_band_eta_j_max_nodal = std::numeric_limits<int>::max();
+    int m_band_eta_j_max_cell = std::numeric_limits<int>::max();
     /** implicit_mhd.wall_field_freeze: identity rows for every evolved
      * magnetic-field face whose complete Faraday stencil is masked (see
      * the class comment). */

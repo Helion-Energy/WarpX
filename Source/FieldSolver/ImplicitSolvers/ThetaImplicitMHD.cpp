@@ -3230,6 +3230,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
     const amrex::Real band_eta_override = wall_band_view.eta_override;
     const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
     const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
+    const int band_eta_j_max_cell = wall_band_view.j_max_cell;
     for (amrex::MFIter mfi(resistivity); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto eta_field = resistivity.array(mfi);
@@ -3248,7 +3249,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
             if (band_override_cc != nullptr) {
                 const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
                     wall_band_view, band_override_cc, band_eta_z_lo_cell,
-                    band_eta_z_hi_cell, i, j);
+                    band_eta_z_hi_cell, band_eta_j_max_cell, i, j);
                 if (band_row.kind == 1) {
                     value = std::max(value, band_eta_override);
                 } else if (band_row.kind != 0) {
@@ -3357,8 +3358,10 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
     // ramp -- the residual/PC twin-ness of the override extends to both.
     const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
     const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
+    const int band_eta_j_max_nodal = wall_band_view.j_max_nodal;
     const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
     const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
+    const int band_eta_j_max_cell = wall_band_view.j_max_cell;
     for (amrex::MFIter mfi(azimuthal_resistivity); mfi.isValid(); ++mfi) {
         const auto eta_radial = radial_resistivity.array(mfi);
         const auto eta_azimuthal = azimuthal_resistivity.array(mfi);
@@ -3391,7 +3394,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     const auto band_row =
                         warpx::mhd_wall_band::ClassifyBandEtaRow(
                             wall_band_view, band_override_et,
-                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, i, j);
+                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, band_eta_j_max_nodal, i, j);
                     if (band_row.kind != 0) {
                         const auto composed_et = [&] (const int ii, const int jj) {
                             const amrex::Real s_rho_raw =
@@ -3437,7 +3440,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     const auto band_row =
                         warpx::mhd_wall_band::ClassifyBandEtaRow(
                             wall_band_view, band_override_er,
-                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, i, j);
+                            band_eta_z_lo_nodal, band_eta_z_hi_nodal, band_eta_j_max_nodal, i, j);
                     if (band_row.kind != 0) {
                         const auto composed_er = [&] (const int ii, const int jj) {
                             const amrex::Real s_rho_raw =
@@ -3487,7 +3490,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     const auto band_row =
                         warpx::mhd_wall_band::ClassifyBandEtaRow(
                             wall_band_view, band_override_ez,
-                            band_eta_z_lo_cell, band_eta_z_hi_cell, i, j);
+                            band_eta_z_lo_cell, band_eta_z_hi_cell, band_eta_j_max_cell, i, j);
                     if (band_row.kind != 0) {
                         const auto composed_ez = [&] (const int ii, const int jj) {
                             const amrex::Real s_rho_raw =
@@ -5519,6 +5522,7 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
     const amrex::Real band_eta_override = wall_band_view.eta_override;
     const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
     const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
+    const int band_eta_j_max_nodal = wall_band_view.j_max_nodal;
     for (amrex::MFIter mfi(weight); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto w = weight.array(mfi);
@@ -5552,7 +5556,7 @@ void ThetaImplicitMHD::FillCircuitLinkageWeight (const amrex::Real time)
             amrex::Real eta_field = corner_etas(i, j, eta_phys);
             const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
                 wall_band_view, band_override_et, band_eta_z_lo_nodal,
-                band_eta_z_hi_nodal, i, j);
+                band_eta_z_hi_nodal, band_eta_j_max_nodal, i, j);
             if (band_row.kind == 2) {
                 // wall_band_eta_mode = neumann: the Ohm row's eta is the
                 // nearest live row's composed eta and the current that
@@ -15183,8 +15187,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     // reproduces the hard replacement exactly.
     const int band_eta_z_lo_nodal = wall_band_view.z_lo_nodal;
     const int band_eta_z_hi_nodal = wall_band_view.z_hi_nodal;
+    const int band_eta_j_max_nodal = wall_band_view.j_max_nodal;
     const int band_eta_z_lo_cell = wall_band_view.z_lo_cell;
     const int band_eta_z_hi_cell = wall_band_view.z_hi_cell;
+    const int band_eta_j_max_cell = wall_band_view.j_max_cell;
     // lorentz_force_band_emf (see the member comment): the band cells'
     // velocity is frozen in the corner EMF states below (and in the
     // audit's plain-mean ideal EMF registers), matching the frozen face
@@ -15259,7 +15265,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 // the classifier from the same family table.
                 const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
                     wall_band_view, band_override_er, band_eta_z_lo_nodal,
-                    band_eta_z_hi_nodal, i, j);
+                    band_eta_z_hi_nodal, band_eta_j_max_nodal, i, j);
                 if (band_row.kind != 0) {
                     // the row's composition at another E_r location (the
                     // neumann source), term for term the block above
@@ -15448,7 +15454,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 // the classifier from the same family table.
                 const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
                     wall_band_view, band_override_ez, band_eta_z_lo_cell,
-                    band_eta_z_hi_cell, i, j);
+                    band_eta_z_hi_cell, band_eta_j_max_cell, i, j);
                 if (band_row.kind != 0) {
                     // the row's composition at another E_z location (the
                     // neumann source), term for term the block above
@@ -15779,7 +15785,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 // the classifier from the same family table.
                 const auto band_row = warpx::mhd_wall_band::ClassifyBandEtaRow(
                     wall_band_view, band_override_et, band_eta_z_lo_nodal,
-                    band_eta_z_hi_nodal, i, j);
+                    band_eta_z_hi_nodal, band_eta_j_max_nodal, i, j);
                 if (band_row.kind != 0) {
                     // the row's composition at another E_theta corner (the
                     // neumann source), term for term the block above

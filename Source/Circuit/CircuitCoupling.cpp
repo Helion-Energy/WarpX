@@ -19,6 +19,8 @@
 #include "WarpX.H"
 
 #include <AMReX_ParmParse.H>
+
+#include <limits>
 #include <AMReX_Print.H>
 
 #include <algorithm>
@@ -183,6 +185,27 @@ CircuitCoupling::CircuitCoupling ()
             m_coupler_params.probe_exclude_wall_band_cells >= 0,
             "circuit.probe_exclude_wall_band_cells must be >= 0 (cells inside "
             "the wall contour whose linkage the back-EMF probes drop)");
+        // Axial gate of the exclusion: the key itself, else the force
+        // band's lorentz_force_band_z_max (the same rows the theta-implicit
+        // MHD force mask treats), else none. Queried unconditionally so
+        // the keys never go unread.
+        {
+            amrex::Real force_band_z_max = 0.0;
+            const amrex::ParmParse pp_mhd("implicit_mhd");
+            const bool has_force = utils::parser::queryWithParser(
+                pp_mhd, "lorentz_force_band_z_max", force_band_z_max);
+            const bool has_gate = utils::parser::queryWithParser(
+                pp_circuit, "probe_exclude_wall_band_z_max",
+                m_coupler_params.probe_exclude_wall_band_z_max);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_gate || m_coupler_params.probe_exclude_wall_band_cells > 0,
+                "circuit.probe_exclude_wall_band_z_max requires a positive "
+                "circuit.probe_exclude_wall_band_cells");
+            if (!has_gate && has_force &&
+                m_coupler_params.probe_exclude_wall_band_cells > 0) {
+                m_coupler_params.probe_exclude_wall_band_z_max = force_band_z_max;
+            }
+        }
         // The polyline: the coupling's own key, else the theta-implicit
         // MHD wall's polyline (queried here so a deck that relies on the
         // fallback never trips the unused-input check on either key).
@@ -441,7 +464,11 @@ CircuitCoupling::InitData ()
             // The band is the report's two-cell split unless the exclusion
             // widens it to N cells (then lambda_band = the excluded part).
             const int band_cells = (exclude_cells > 0) ? exclude_cells : 2;
-            m_probe_region.Define(warpx.Geom(0), z_poly, r_poly, band_cells);
+            const double band_z_max = (exclude_cells > 0)
+                ? static_cast<double>(m_coupler_params.probe_exclude_wall_band_z_max)
+                : std::numeric_limits<double>::max();
+            m_probe_region.Define(warpx.Geom(0), z_poly, r_poly, band_cells,
+                                  band_z_max);
             amrex::Print() << "Circuit probe region: polyline '"
                            << m_probe_region_polyline_file << "' ("
                            << z_poly.size() << " points); rule: J_theta node "
@@ -459,6 +486,14 @@ CircuitCoupling::InitData ()
                                << (wall_interior ? "interior r_i < r_wall - N dr"
                                                  : "interior + exterior")
                                << ")";
+                if (band_z_max < std::numeric_limits<double>::max()) {
+                    amrex::Print() << "; band rows: node z <= " << band_z_max
+                                   << " m only (probe_exclude_wall_band_z_max; "
+                                      "the rows beyond keep their full inside_wall "
+                                      "linkage)";
+                } else {
+                    amrex::Print() << "; NO axial gate on the exclusion";
+                }
             }
             amrex::Print() << "\n";
         }

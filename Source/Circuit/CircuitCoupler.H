@@ -15,6 +15,8 @@
 
 #include <AMReX_REAL.H>
 
+#include <limits>
+
 #include <map>
 #include <memory>
 #include <string>
@@ -212,6 +214,17 @@ public:
          * the insulator-interface sheet) must not couple back into the
          * coils. Needs a wall polyline. */
         int probe_exclude_wall_band_cells = 0;
+        /** circuit.probe_exclude_wall_band_z_max [m] (default: the
+         * theta-implicit MHD force band's lorentz_force_band_z_max when
+         * that key is set, else no gate): the exclusion's band exists on
+         * rows with node z <= z_max only -- the tube and cone walls; the
+         * formation bore keeps its full inside_wall linkage (measured
+         * 2026-09-11: excluding its last three cells removed the
+         * implosion current from the coil coupling and changed the
+         * formation-phase trapped flux by -16 %). Recorded here for the
+         * report header; applied through the region table. */
+        amrex::Real probe_exclude_wall_band_z_max =
+            std::numeric_limits<amrex::Real>::max();
     };
 
     /** Name of the nodal (node r, node z) linkage-weight register the

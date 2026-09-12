@@ -12,6 +12,8 @@
 #include "CoilSet.H"
 
 #include <AMReX_Array4.H>
+
+#include <limits>
 #include <AMReX_Box.H>
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuContainers.H>
@@ -87,11 +89,16 @@ namespace warpx::circuit
         /** Tabulate r_wall and r_wall - band_cells dr at every z node of
          * the level-0 domain (nodal j in [j_lo, j_hi]). z_poly must be
          * non-decreasing with at least two points; band_cells >= 1 (the
-         * default 2 is the report's original two-cell band). */
+         * default 2 is the report's original two-cell band). Rows whose
+         * node z exceeds z_max carry NO band (r_band = r_wall there): the
+         * band exclusion of circuit.probe_exclude_wall_band_cells then
+         * acts on the tube and cone rows only, never on the formation
+         * bore (circuit.probe_exclude_wall_band_z_max). */
         void Define (const amrex::Geometry& geom,
                      const std::vector<double>& z_poly,
                      const std::vector<double>& r_poly,
-                     int band_cells = 2);
+                     int band_cells = 2,
+                     double z_max = std::numeric_limits<double>::max());
 
         [[nodiscard]] bool IsDefined () const { return m_defined; }
 
@@ -110,12 +117,14 @@ namespace warpx::circuit
         [[nodiscard]] const std::vector<double>& WallRadiusHost () const { return m_r_wall_host; }
         [[nodiscard]] double BandWidth () const { return m_band_width; }
         [[nodiscard]] int BandCells () const { return m_band_cells; }
+        [[nodiscard]] double BandZMax () const { return m_z_max; }
 
     private:
         bool m_defined = false;
         int m_j_lo = 0;
         int m_band_cells = 2;        //!< band width in cells
         double m_band_width = 0.0;   //!< band_cells * dr
+        double m_z_max = std::numeric_limits<double>::max(); //!< band rows: node z <= z_max
         std::vector<double> m_r_wall_host;
         amrex::Gpu::DeviceVector<double> m_r_wall;
         amrex::Gpu::DeviceVector<double> m_r_band;

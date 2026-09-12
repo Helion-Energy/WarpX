@@ -277,15 +277,21 @@ def main():
             assert share < 0.1, f"{coil}: the open-face sheet links {share:.3e} of the total"
         assert rms_band == 0.0 and rms_int > 0.0
         assert rms_ext < 1.0e-2 * rms_int, f"exterior RMS {rms_ext!r} vs interior {rms_int!r}"
-    elif ARM in ("wall_inside_exclude", "domain_inside_exclude"):
+    elif ARM in ("wall_inside_exclude", "domain_inside_exclude", "wall_inside_exclude_zgate"):
         header = "\n".join(HEADER_LINES)
         assert "N = 3 cells" in header, "the report header does not state the 3-cell band"
         assert "probe_exclude_wall_band_cells = 3: the band's linkage is DROPPED" in header, (
             "the report header does not state the band exclusion"
         )
+        if ARM == "wall_inside_exclude_zgate":
+            assert "band rows: node z <= 0.000000 m only" in header, (
+                "the report header does not state the axial gate"
+            )
+        else:
+            assert "no axial gate" in header, "an unexpected axial gate in the header"
         for kind, step, t, coil, v in rows:
-            expected = (v["interior"] if ARM == "wall_inside_exclude"
-                        else v["interior"] + v["exterior"])
+            expected = (v["interior"] + v["exterior"] if ARM == "domain_inside_exclude"
+                        else v["interior"])
             assert close(v["used"], expected, v["total"]), (
                 f"{kind} step {step} {coil}: used {v['used']!r} != the band-excluded "
                 f"value {expected!r} (band {v['band']!r})"
@@ -296,6 +302,19 @@ def main():
             assert v["band"] != 0.0, f"{coil}: the widened band links nothing: no teeth"
             assert v["used"] != v["total"], f"{coil}: the exclusion changed nothing"
         assert rms_band > 0.0 and rms_int > 0.0
+        if ARM == "wall_inside_exclude_zgate":
+            # the gate at z = 0 keeps the band on half the rows only: the
+            # excluded linkage is a strict, non-zero part of the ungated
+            # arm's (its report is the 3rd argument), every coil
+            ungated, _ = load_report(sys.argv[3])
+            ug1 = {r[3]: r[4] for r in ungated if r[0] == "first" and r[2] == t_first}
+            for kind, step, t, coil, v in step1:
+                frac = v["band"] / ug1[coil]["band"]
+                print(f"  {coil}: gated / ungated excluded band {frac:.4f}")
+                assert 0.0 < frac < 1.0, (
+                    f"{coil}: the gated band {v['band']!r} is not a strict part of the "
+                    f"ungated {ug1[coil]['band']!r}"
+                )
     elif ARM in ("weight_boost", "weight_plasma"):
         for kind, step, t, coil, v in rows:
             assert close(v["used"], v["weighted"], v["total"]), (

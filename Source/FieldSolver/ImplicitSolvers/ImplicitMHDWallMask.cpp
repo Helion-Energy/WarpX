@@ -190,6 +190,23 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
             m_band_eta_transparent_cells >= 1,
             "implicit_mhd.wall_band_eta_transparent_cells must be >= 1 (the "
             "last this many live rows ramp to the override)");
+        // Axial gate: explicit wall_band_eta_z_max, else the force band's
+        // lorentz_force_band_z_max (the same rows the force mask treats),
+        // else none. Queried in every mode so the keys never go unread.
+        amrex::Real force_band_z_max = 0.0;
+        const bool has_force_band_z_max = utils::parser::queryWithParser(
+            pp, "lorentz_force_band_z_max", force_band_z_max);
+        const bool has_band_eta_z_max = utils::parser::queryWithParser(
+            pp, "wall_band_eta_z_max", m_band_eta_z_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_band_eta_z_max ||
+                m_band_eta_mode != BandEtaMode::override_constant,
+            "implicit_mhd.wall_band_eta_z_max requires "
+            "implicit_mhd.wall_band_eta_mode = neumann or transparent");
+        if (!has_band_eta_z_max && has_force_band_z_max &&
+            m_band_eta_mode != BandEtaMode::override_constant) {
+            m_band_eta_z_max = force_band_z_max;
+        }
     }
 
     // Field-side freeze of the masked band (work item B, see the class
@@ -610,6 +627,16 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                 : std::min(m_band_eta_neumann_cells, reach_bound);
     }
 
+    // Axial gate of the band-eta treatment (see the class comment): the
+    // last nodal row (node z = plo_z + j dz) and the last cell row (centre
+    // z = plo_z + (j + 1/2) dz) at or below z_max. No gate: INT_MAX.
+    if (m_band_eta_mode != BandEtaMode::override_constant &&
+        m_band_eta_z_max < std::numeric_limits<amrex::Real>::max()) {
+        const double zmax = static_cast<double>(m_band_eta_z_max);
+        m_band_eta_j_max_nodal = static_cast<int>(std::floor((zmax - plo_z) / dz + 1.0e-9));
+        m_band_eta_j_max_cell = static_cast<int>(std::floor((zmax - plo_z) / dz - 0.5 + 1.0e-9));
+    }
+
     // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
     // m_active, so printing first reports "thermal BC none" for an
     // engaged mode (caught by the RR12 boot-banner gate).
@@ -658,6 +685,16 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
             amrex::Print() << ": the last " << m_band_eta_transparent_cells
                            << " live rows ramp log-linearly from their "
                               "composed eta to the override at the contour";
+        }
+        if (m_band_eta_mode != BandEtaMode::override_constant) {
+            if (m_band_eta_z_max < std::numeric_limits<amrex::Real>::max()) {
+                amrex::Print() << "; axial gate z <= " << m_band_eta_z_max
+                               << " m (nodal rows j <= " << m_band_eta_j_max_nodal
+                               << ", cell rows j <= " << m_band_eta_j_max_cell
+                               << "; the override beyond)";
+            } else {
+                amrex::Print() << "; NO axial gate (every wall row treated)";
+            }
         }
         amrex::Print() << ")";
     }
@@ -752,6 +789,8 @@ WallBandEtaOverrideView ImplicitMHDWallMask::BandEtaOverrideView () const
         view.z_hi_nodal = m_nz + m_ng;
         view.z_lo_cell = -m_ng;
         view.z_hi_cell = m_nz - 1 + m_ng;
+        view.j_max_nodal = m_band_eta_j_max_nodal;
+        view.j_max_cell = m_band_eta_j_max_cell;
         if (m_dielectric) {
             // Dielectric standoff: the override covers ALL masked E
             // rows INCLUDING the interface node on the contour. The

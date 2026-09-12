@@ -4343,6 +4343,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_band_eta_mode=None,
         wall_band_eta_neumann_cells=None,
         wall_band_eta_transparent_cells=None,
+        wall_band_eta_z_max=None,
         wall_field_freeze=None,
         conduction_coefficient_state=None,
         absorb_ledger_interval=None,
@@ -4530,6 +4531,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_band_eta_mode = wall_band_eta_mode
         self.wall_band_eta_neumann_cells = wall_band_eta_neumann_cells
         self.wall_band_eta_transparent_cells = wall_band_eta_transparent_cells
+        # axial gate of the treatment (default in the solver: the force
+        # band's lorentz_force_band_z_max)
+        self.wall_band_eta_z_max = wall_band_eta_z_max
         self.wall_field_freeze = wall_field_freeze
         self.conduction_coefficient_state = conduction_coefficient_state
         self.absorb_ledger_interval = absorb_ledger_interval
@@ -4786,6 +4790,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_band_eta_transparent_cells = (
             self.wall_band_eta_transparent_cells
         )
+        implicit_mhd.wall_band_eta_z_max = self.wall_band_eta_z_max
         implicit_mhd.wall_field_freeze = self.wall_field_freeze
         implicit_mhd.conduction_coefficient_state = self.conduction_coefficient_state
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
@@ -5000,6 +5005,13 @@ class CircuitCoupling(object):
         polyline. The currents a dense wall gas carries next to a
         dielectric wall (the coil-ramp screening sheet) then do not
         couple back into the coil circuits.
+
+    probe_exclude_wall_band_z_max: float, optional
+        Axial gate of the exclusion [m]: the band exists on rows with
+        node z <= z_max only (the tube and cone walls); rows beyond keep
+        their full inside-wall linkage. Default in the solver: the
+        theta-implicit MHD force band's lorentz_force_band_z_max when
+        set, else no gate.
     """
 
     def __init__(
@@ -5021,6 +5033,7 @@ class CircuitCoupling(object):
         probe_region_report=None,
         probe_weight=None,
         probe_exclude_wall_band_cells=None,
+        probe_exclude_wall_band_z_max=None,
     ):
         self.coils = coils
         self.engine = engine
@@ -5039,6 +5052,7 @@ class CircuitCoupling(object):
         self.probe_region_report = probe_region_report
         self.probe_weight = probe_weight
         self.probe_exclude_wall_band_cells = probe_exclude_wall_band_cells
+        self.probe_exclude_wall_band_z_max = probe_exclude_wall_band_z_max
 
     def coupling_initialize_inputs(self):
         pywarpx.circuit.coils = [coil.name for coil in self.coils]
@@ -5090,6 +5104,10 @@ class CircuitCoupling(object):
         if self.probe_exclude_wall_band_cells is not None:
             pywarpx.circuit.probe_exclude_wall_band_cells = (
                 self.probe_exclude_wall_band_cells
+            )
+        if self.probe_exclude_wall_band_z_max is not None:
+            pywarpx.circuit.probe_exclude_wall_band_z_max = (
+                self.probe_exclude_wall_band_z_max
             )
 
 

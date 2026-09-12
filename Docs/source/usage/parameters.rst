@@ -7967,6 +7967,22 @@ Jacobian probes.
     z-facing stair face) carry the log-linear ramp to the override.
     Requires the transparent mode.
 
+.. pp:param:: implicit_mhd.wall_band_eta_z_max
+    :type: ``float`` (m)
+    :default: :pp:param:`implicit_mhd.lorentz_force_band_z_max` when that is set, else no gate
+
+    Axial gate of ``wall_band_eta_mode = neumann | transparent``: the
+    treatment acts on rows with z <= z_max only (nodal E rows by their
+    node z, cell rows by their centre z -- the force band's cell-centre
+    rule); rows beyond keep the plain override. The formation bore must
+    not be touched: the fill sits against it at t = 0 in both codes and
+    the theta-pinch implosion sheet forms in exactly its last cells
+    (measured 2026-09-11 on ungated twins of the production formation
+    deck: the trapped flux at 6.3 us -9 % with the ramp, -43 % with the
+    Neumann extension, -16 % with the probe exclusion alone). With the
+    production force band's 3.5 m the gate covers the tube and cone
+    walls, as the force mask does. Requires a non-override mode.
+
 .. pp:param:: implicit_mhd.wall_field_freeze
     :type: ``bool``
     :default: ``0`` (off, bit-identical)
@@ -9524,6 +9540,18 @@ Jacobian probes.
     current in the wall gas; flying that circuit, the currents the dense wall gas carries next to the
     dielectric wall (the coil-ramp screening sheet, see
     :pp:param:`implicit_mhd.wall_band_eta_mode`) must not couple back into the coils.
+
+.. pp:param:: circuit.probe_exclude_wall_band_z_max
+    :type: ``float`` (m)
+    :default: :pp:param:`implicit_mhd.lorentz_force_band_z_max` when that is set, else no gate
+    :optional:
+
+    Axial gate of :pp:param:`circuit.probe_exclude_wall_band_cells`: the excluded band exists on the
+    rows with node :math:`z_j \le z_\mathrm{max}` only (the tube and cone walls); beyond it the
+    band radius equals the wall radius, so those rows keep their full inside-wall linkage and
+    contribute nothing to ``lambda_band``. The formation bore's last cells carry the theta-pinch
+    implosion current, which must stay in the coil coupling (measured 2026-09-11: excluding them
+    changed the formation-phase trapped flux by -16 %). Requires a positive exclusion.
 
 .. pp:param:: circuit.eps_lowpass_tau
     :type: ``float``

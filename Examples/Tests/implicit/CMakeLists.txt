@@ -4110,6 +4110,21 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_eta_mode_override  # dependency
 )
 
+# the axial gate (implicit_mhd.wall_band_eta_z_max = 0.0): the transparent
+# ramp acts on the z < 0 wall section only; the z > 0 section (beyond the
+# gate) must equal the override twin BITWISE in its eta table and its
+# sheet -- the gate that keeps the formation bore untouched on the
+# production deck (the ungated modes altered the formation phase)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_eta_mode_transparent_zgate  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_eta_mode implicit_mhd.wall_band_eta_mode=transparent implicit_mhd.wall_band_eta_z_max=0.0"  # inputs
+    "analysis_mhd_wall_eta_mode.py diags/diag000006 transparent ../test_rz_theta_implicit_mhd_wall_eta_mode_override/diags/diag000006 gated"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_eta_mode_override  # dependency
+)
+
 # shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze, work item
 # B), the headline T-B1: the conductive contrast deck (band-eta
 # override OFF -- band |j_theta| ~3.2e4 dominating the interior) with
@@ -5259,6 +5274,19 @@ add_warpx_test(
     "analysis_mhd_circuit_probe_region.py domain_inside_exclude ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+# the exclusion's axial gate (circuit.probe_exclude_wall_band_z_max = 0.0):
+# the band exists on the rows with node z <= 0 only, so the excluded
+# linkage is a strict non-zero part of the ungated arm's, lambda_used ==
+# lambda_interior still holds row by row and the header states the gate
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_probe_exclude_band_zgate  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_probe_region circuit.probe_region=wall_interior circuit.probe_exclude_wall_band_cells=3 circuit.probe_exclude_wall_band_z_max=0.0 my_constants.rc=0.02 my_constants.wb=0.015"  # inputs
+    "analysis_mhd_circuit_probe_region.py wall_inside_exclude_zgate ${CMAKE_CURRENT_SOURCE_DIR}/wall_probe_region_slope.csv ../test_rz_theta_implicit_mhd_circuit_probe_exclude_band_wall/diags/circuit_probe_region.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_probe_exclude_band_wall  # dependency
 )
 # fixture power (rev31 review F3): an irrational-slope polyline (slopes
 # -0.5723 and 0.2493, no node of the sloped section on a grid node) drives

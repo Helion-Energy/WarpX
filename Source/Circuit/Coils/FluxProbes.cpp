@@ -103,7 +103,7 @@ void
 ProbeRegionTable::Define (const amrex::Geometry& geom,
                           const std::vector<double>& z_poly,
                           const std::vector<double>& r_poly,
-                          const int band_cells)
+                          const int band_cells, const double z_max)
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         z_poly.size() >= 2 && z_poly.size() == r_poly.size(),
@@ -115,7 +115,7 @@ ProbeRegionTable::Define (const amrex::Geometry& geom,
             "ProbeRegionTable: the wall polyline's z must be non-decreasing");
     }
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(geom);
+    amrex::ignore_unused(geom, z_max);
     WARPX_ABORT_WITH_MESSAGE(
         "ProbeRegionTable is an RZ (m = 0) classification");
 #else
@@ -125,6 +125,7 @@ ProbeRegionTable::Define (const amrex::Geometry& geom,
     m_j_lo = domain.smallEnd(1);
     const int j_hi = domain.bigEnd(1) + 1;   // upper nodal plane
     m_band_cells = band_cells;
+    m_z_max = z_max;
     // band_cells = 2 reproduces the original 2.0 * dr bit-exactly
     m_band_width = static_cast<double>(band_cells) * geom.CellSize(0);
     m_r_wall_host.resize(static_cast<std::size_t>(j_hi - m_j_lo + 1));
@@ -134,7 +135,9 @@ ProbeRegionTable::Define (const amrex::Geometry& geom,
         const double z = plo_z + j * dz;
         const double r_wall = WallRadiusAt(z_poly, r_poly, z);
         m_r_wall_host[static_cast<std::size_t>(j - m_j_lo)] = r_wall;
-        r_band_host[static_cast<std::size_t>(j - m_j_lo)] = r_wall - m_band_width;
+        // rows beyond the axial gate carry no band (the interior reaches the wall)
+        r_band_host[static_cast<std::size_t>(j - m_j_lo)] =
+            (z <= z_max) ? r_wall - m_band_width : r_wall;
     }
     m_r_wall.resize(m_r_wall_host.size());
     m_r_band.resize(r_band_host.size());

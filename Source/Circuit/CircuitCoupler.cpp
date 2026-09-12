@@ -15,6 +15,8 @@
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+
+#include <limits>
 #include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_ParallelDescriptor.H>
@@ -559,7 +561,13 @@ CircuitCoupler::InitRegionReport (const bool restarting)
                   "#   probe_exclude_wall_band_cells = " +
                   std::to_string(m_params.probe_exclude_wall_band_cells) +
                   ": the band's linkage is DROPPED from lambda_used "
-                  "(lambda_band = the excluded part)\n"
+                  "(lambda_band = the excluded part)" +
+                  (m_region->BandZMax() < std::numeric_limits<double>::max()
+                       ? "; band rows: node z <= " +
+                             std::to_string(m_region->BandZMax()) +
+                             " m only (probe_exclude_wall_band_z_max), the "
+                             "rows beyond carry no band\n"
+                       : "; no axial gate\n")
                 : std::string(
                   "#   interior / band / exterior: nodes with r < r_wall(z) - 2 dr, "
                   "r_wall(z) - 2 dr <= r < r_wall(z), r >= r_wall(z) (node "

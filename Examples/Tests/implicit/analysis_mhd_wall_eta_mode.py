@@ -37,14 +37,20 @@ mode = "transparent": the last N = 3 live corner rows carry
 eta_k = eta_c^(k/N) override^((N-k)/N) (k = 0 next to the contour); the
 sheet leaves the ramp cells for the first composed cells inward.
 
+Optional 4th argument "gated": the run set implicit_mhd.wall_band_eta_z_max
+= 0.0, so the z < 0 wall section (rows at or below z = 0) carries the mode
+and the z > 0 section is beyond the gate and must be EXACTLY the override
+twin's (table and sheet alike) -- the axial gate that keeps the formation
+bore untouched on the production deck.
+
 Every mode: the eta table is monotone from the plasma to the override
 along r in EVERY cell row (stair step included), and the run's own
 pc_mhd_block.resistive_validate_assembly asserts the residual/PC twin.
 
 Usage:
   analysis_mhd_wall_eta_mode.py <diag_end> override
-  analysis_mhd_wall_eta_mode.py <diag_end> neumann <override_diag_end>
-  analysis_mhd_wall_eta_mode.py <diag_end> transparent <override_diag_end>
+  analysis_mhd_wall_eta_mode.py <diag_end> neumann <override_diag_end> [gated]
+  analysis_mhd_wall_eta_mode.py <diag_end> transparent <override_diag_end> [gated]
 """
 
 import sys
@@ -74,6 +80,12 @@ def load(plotfile):
 ds, state = load(sys.argv[1])
 mode = sys.argv[2]
 assert mode in ("override", "neumann", "transparent"), f"unknown mode {mode}"
+gated = len(sys.argv) > 4 and sys.argv[4] == "gated"
+assert not (gated and mode == "override"), "the gate twin needs a non-override mode"
+# the mode acting in each flat wall section: the gate (z_max = 0) leaves the
+# z > 0 section at the override
+mode_lo = mode
+mode_hi = "override" if gated else mode
 
 nr, nz = int(ds.domain_dimensions[0]), int(ds.domain_dimensions[1])
 r_lo = float(ds.domain_left_edge[0])
@@ -123,7 +135,8 @@ eta_plot = state["implicit_mhd_field_resistivity_e1"]
 first_lo = first_masked_node(R_WALL_LO)
 first_hi = first_masked_node(R_WALL_HI)
 print(f"first masked corner row: {first_lo} (z < 0), {first_hi} (z > 0); "
-      f"eta_c {ETA_C:.6e}, override {ETA_OVERRIDE:.6e}")
+      f"eta_c {ETA_C:.6e}, override {ETA_OVERRIDE:.6e}; modes by section: z<0 {mode_lo}, z>0 {mode_hi}"
+      f"{' (gated at z = 0)' if gated else ''}")
 
 # (a) the analytic table, bit-tight, in cell rows at least N + 1 rows away
 # from the stair step at z = 0 (so only the radial rule acts there): the
@@ -132,20 +145,20 @@ j_step = nz // 2
 flat_rows_lo = [0, 1]
 flat_rows_hi = [nz - 2, nz - 1]
 assert j_step - (flat_rows_lo[-1] + 1) > N_CELLS and flat_rows_hi[0] - j_step > N_CELLS
+sections = ((first_lo, flat_rows_lo, mode_lo, "z<0"), (first_hi, flat_rows_hi, mode_hi, "z>0"))
 worst = 0.0
-for rows, first in ((flat_rows_lo, first_lo), (flat_rows_hi, first_hi)):
-    expected = cell_table(mode, first)
+for first, rows, mode_, tag in sections:
+    expected = cell_table(mode_, first)
     for j in rows:
         got = eta_plot[:, j]
         rel = np.abs(got - expected) / expected
         worst = max(worst, float(rel.max()))
         assert rel.max() < 1.0e-12, (
-            f"{mode}: plotted eta in cell row {j} differs from the analytic table "
+            f"{mode_} ({tag}): plotted eta in cell row {j} differs from the analytic table "
             f"(worst rel {rel.max():.3e} at cell {int(rel.argmax())}: "
             f"{got[rel.argmax()]:.16e} vs {expected[rel.argmax()]:.16e})"
         )
-print(f"eta table in the flat sections matches the {mode} analytic values "
-      f"(worst rel {worst:.2e})")
+print(f"eta table in the flat sections matches the analytic values (worst rel {worst:.2e})")
 
 # (a') monotone from the plasma to the override along r in EVERY row (the
 # stair step included: the axial rule may ramp / extend there, but never
@@ -160,30 +173,27 @@ for j in range(nz):
     )
 # the largest cell-to-cell log jump in the window around the contour
 # (cells first-3 .. first+1; the diagnostic's corner averaging spreads a
-# corner step over the two cells sharing that corner) in the flat
-# sections: the override's hard step (log 250 between cells first-2 and
-# first-1) against the two continuous modes -- neumann pushes the step
-# out of the window (to cells first+2 -> first+3), the transparent ramp
-# divides it into N equal log steps (exactly log(500)/N per cell pair,
-# the cell averaging preserving the geometric ratio).
-jumps = []
-for rows, first in ((flat_rows_lo, first_lo), (flat_rows_hi, first_hi)):
-    for j in rows:
-        window = log_eta[first - 3:first + 2, j]
-        jumps.append(float(np.diff(window).max()))
-contour_jump = max(jumps)
+# corner step over the two cells sharing that corner) per flat section:
+# the override's hard step (log 250 between cells first-2 and first-1)
+# against the two continuous modes -- neumann pushes the step out of the
+# window (to cells first+2 -> first+3), the transparent ramp divides it
+# into N equal log steps (exactly log(500)/N per cell pair, the cell
+# averaging preserving the geometric ratio).
 hard_step = np.log(ETA_OVERRIDE / ETA_C)
-print(f"largest log-eta jump around the contour (flat sections): {contour_jump:.3f} "
-      f"(hard step {hard_step:.3f})")
-if mode == "override":
-    assert contour_jump > np.log(100.0), "the override twin has no hard step at the contour"
-elif mode == "neumann":
-    assert contour_jump < 1.0e-9, f"neumann left a step at the contour ({contour_jump:.3e})"
-else:
-    assert contour_jump <= hard_step / N_CELLS + 1.0e-9, (
-        f"transparent: the largest step {contour_jump:.3f} exceeds the ramp's "
-        f"{hard_step / N_CELLS:.3f}"
-    )
+for first, rows, mode_, tag in sections:
+    jumps = [float(np.diff(log_eta[first - 3:first + 2, j]).max()) for j in rows]
+    contour_jump = max(jumps)
+    print(f"{tag} ({mode_}): largest log-eta jump around the contour {contour_jump:.3f} "
+          f"(hard step {hard_step:.3f})")
+    if mode_ == "override":
+        assert contour_jump > np.log(100.0), f"{tag}: no hard step at the contour"
+    elif mode_ == "neumann":
+        assert contour_jump < 1.0e-9, f"{tag}: neumann left a step at the contour ({contour_jump:.3e})"
+    else:
+        assert contour_jump <= hard_step / N_CELLS + 1.0e-9, (
+            f"{tag}: transparent's largest step {contour_jump:.3f} exceeds the ramp's "
+            f"{hard_step / N_CELLS:.3f}"
+        )
 
 
 def j_theta(fields):
@@ -199,9 +209,9 @@ class SheetMetrics:
     """Where the screening sheet sits in one flat wall section: the
     row-mean radial j_theta profile over the section's cell rows, the
     mean |j_theta| of the last two live cells and of the N masked band
-    cells, the |j_theta|-weighted centroid (in cells) over the live and
-    band cells, the peak cell of the live region and the signed sums.
-    `first` is the first masked CELL of the section."""
+    cells (and of the band beyond the contour cell), the |j_theta|-weighted
+    centroid (in cells) over the live and band cells, the peak cell of the
+    live region and the signed sums. `first` is the first masked CELL."""
 
     def __init__(self, jt, first, rows):
         self.first = first
@@ -209,9 +219,8 @@ class SheetMetrics:
         p = np.abs(self.profile)
         self.last_live = float(p[first - 2:first].mean())
         self.band = float(p[first:first + N_CELLS].mean())
-        # the band beyond the contour cell (the contour cell shares its
-        # inner corner with the last live corner row, so it carries part
-        # of a sheet that sits against the contour)
+        # the contour cell shares its inner corner with the last live
+        # corner row, so it carries part of a sheet sitting against the contour
         self.band_deep = float(p[first + 1:first + N_CELLS + 1].mean())
         w = p[:first + N_CELLS]
         self.centroid = float((w * np.arange(w.size)).sum() / w.sum())
@@ -230,84 +239,114 @@ class SheetMetrics:
               f"band {self.band_sum:.1f} all {self.total:.1f}")
 
 
+def check_override_sheet(m, tag):
+    """The sheet sits against the eta step: it peaks in the last two live
+    cells (the outermost live cell shares its outer corner with the
+    overridden contour node, which can move the peak one cell in) and the
+    overridden band beyond the contour cell carries next to nothing."""
+    assert m.peak >= m.first - 2, (
+        f"{tag}: the sheet peaks in cell {m.peak}, not in the last live cells "
+        f"{m.first - 2}, {m.first - 1}"
+    )
+    assert m.last_live > 20.0 * m.band_deep, (
+        f"{tag}: band current beyond the contour cell {m.band_deep:.3e} not far below "
+        f"the live sheet {m.last_live:.3e}"
+    )
+
+
+def check_vs_reference(m, r, mode_, tag):
+    """The mode's sheet against the override twin's in the same section."""
+    # the total (live + band) screening current is set by the drive and the
+    # plasma eta, not by where the eta steps: comparable (measured 0.89
+    # transparent, 1.25 neumann on this deck)
+    ratio_total = (m.live_sum + m.band_sum) / (r.live_sum + r.band_sum)
+    print(f"{tag} ({mode_}): total (live + band) screening current ratio vs the override "
+          f"twin {ratio_total:.4f}; centroid shift {m.centroid - r.centroid:+.2f} cells; "
+          f"peak shift {m.peak - r.peak:+d} cells; last-live ratio {m.last_live / r.last_live:.3f}")
+    if mode_ == "override":
+        # the section beyond the axial gate: the override twin's sheet class
+        # (the eta table there is bitwise the override's, checked above; the
+        # sheet itself is the same to the few-percent coupling of the two
+        # halves through the global solve -- measured total 1.046x,
+        # centroid +0.01 cells, peak +0, last live cells 1.04x)
+        check_override_sheet(m, tag)
+        assert abs(ratio_total - 1.0) < 0.1, (
+            f"{tag}: total screening current beyond the gate {ratio_total:.3f}x the twin's"
+        )
+        assert abs(m.centroid - r.centroid) < 0.3 and m.peak == r.peak, (
+            f"{tag}: the sheet beyond the gate moved (centroid {m.centroid - r.centroid:+.2f} "
+            f"cells, peak {m.peak - r.peak:+d})"
+        )
+        assert 0.8 < m.last_live / r.last_live < 1.25, (
+            f"{tag}: the last live cells beyond the gate carry {m.last_live / r.last_live:.3f}x "
+            "the twin's"
+        )
+        return
+    assert 0.5 < ratio_total < 2.0, (
+        f"{tag}: total screening current not comparable to the override twin's ({ratio_total:.3f})"
+    )
+    if mode_ == "neumann":
+        # the sheet leaves the fluid cells for the eta-continuous band
+        # (measured: centroid +2.4 / +2.8 cells, band 2.2x the live sum,
+        # last live cells at 0.5x)
+        assert m.centroid > r.centroid + 1.5, (
+            f"{tag}: the sheet's centroid moved only {m.centroid - r.centroid:+.2f} cells"
+        )
+        assert abs(m.band_sum) > abs(m.live_sum), (
+            f"{tag}: the band ({m.band_sum:.1f}) does not carry the majority of the sheet "
+            f"(live {m.live_sum:.1f})"
+        )
+        assert m.last_live < 0.7 * r.last_live, (
+            f"{tag}: the last live cells still carry {m.last_live / r.last_live:.3f} of the "
+            "override twin's sheet"
+        )
+    else:
+        # the sheet leaves the ramp cells inward, to the first composed
+        # cells (measured: peak -3 cells, centroid -2.7 / -2.8 cells, last
+        # live cells at 0.02x, band next to nothing)
+        assert m.peak <= r.peak - 2, f"{tag}: the sheet's peak moved only {m.peak - r.peak:+d} cells"
+        assert m.centroid < r.centroid - 1.5, (
+            f"{tag}: the sheet's centroid moved only {m.centroid - r.centroid:+.2f} cells"
+        )
+        assert m.last_live < 0.3 * r.last_live, (
+            f"{tag}: the ramp cells still carry {m.last_live / r.last_live:.3f} of the "
+            "override twin's sheet"
+        )
+        assert m.band_deep < 0.02 * r.last_live, (
+            f"{tag}: the overridden band carries {m.band_deep / r.last_live:.3e} of the "
+            "override twin's sheet (expected next to nothing)"
+        )
+
+
 jt = j_theta(state)
 cell_lo = first_masked_cell(R_WALL_LO)
 cell_hi = first_masked_cell(R_WALL_HI)
 print(f"first masked cell: {cell_lo} (z < 0), {cell_hi} (z > 0)")
-sections = ((cell_lo, flat_rows_lo), (cell_hi, flat_rows_hi))
-mine = [SheetMetrics(jt, first, rows) for first, rows in sections]
-for m, tag in zip(mine, ("z<0", "z>0")):
-    m.describe(f"{mode} {tag}")
+cell_sections = ((cell_lo, flat_rows_lo, mode_lo, "z<0"), (cell_hi, flat_rows_hi, mode_hi, "z>0"))
+mine = [SheetMetrics(jt, first, rows) for first, rows, _, _ in cell_sections]
+for m, (_, _, mode_, tag) in zip(mine, cell_sections):
+    m.describe(f"{mode_} {tag}")
 assert all(m.last_live + m.band > 0.0 for m in mine), "no response current: the drive is dead"
 
 if mode == "override":
-    # the sheet sits against the eta step: it peaks in the last two live
-    # cells (the outermost live cell shares its outer corner with the
-    # overridden contour node, which can move the peak one cell in) and
-    # the overridden band carries next to nothing
-    for m in mine:
-        assert m.peak >= m.first - 2, (
-            f"override: the sheet peaks in cell {m.peak}, not in the last live cells "
-            f"{m.first - 2}, {m.first - 1}"
-        )
-        assert m.last_live > 20.0 * m.band_deep, (
-            f"override: band current beyond the contour cell {m.band_deep:.3e} not far below "
-            f"the live sheet {m.last_live:.3e}"
-        )
+    for m, (_, _, _, tag) in zip(mine, cell_sections):
+        check_override_sheet(m, f"override {tag}")
 else:
     _, ref_state = load(sys.argv[3])
     jt_ref = j_theta(ref_state)
-    ref = [SheetMetrics(jt_ref, first, rows) for first, rows in sections]
-    for m, tag in zip(ref, ("z<0", "z>0")):
+    ref = [SheetMetrics(jt_ref, first, rows) for first, rows, _, _ in cell_sections]
+    for m, (_, _, _, tag) in zip(ref, cell_sections):
         m.describe(f"override twin {tag}")
-    for m, r, tag in zip(mine, ref, ("z<0", "z>0")):
-        # the total (live + band) screening current is set by the drive
-        # and the plasma eta, not by where the eta steps: comparable
-        # (measured 0.86 transparent, 1.25 neumann on this deck)
-        ratio_total = (m.live_sum + m.band_sum) / (r.live_sum + r.band_sum)
-        print(f"{mode} {tag}: total (live + band) screening current ratio vs the override "
-              f"twin {ratio_total:.4f}; centroid shift {m.centroid - r.centroid:+.2f} cells; "
-              f"peak shift {m.peak - r.peak:+d} cells; last-live ratio "
-              f"{m.last_live / r.last_live:.3f}")
-        assert 0.5 < ratio_total < 2.0, (
-            f"{mode} {tag}: total screening current not comparable to the override twin's "
-            f"({ratio_total:.3f})"
-        )
-        if mode == "neumann":
-            # the sheet leaves the fluid cells for the eta-continuous band
-            # (measured: centroid +2.4 / +2.8 cells, band 2.2x the live sum,
-            # last live cells at 0.5x)
-            assert m.centroid > r.centroid + 1.5, (
-                f"neumann {tag}: the sheet's centroid moved only {m.centroid - r.centroid:+.2f} cells"
+    for m, r, (_, _, mode_, tag) in zip(mine, ref, cell_sections):
+        check_vs_reference(m, r, mode_, tag)
+    if gated:
+        # the gated section's eta table equals the override twin's bitwise
+        eta_ref = ref_state["implicit_mhd_field_resistivity_e1"]
+        for j in flat_rows_hi:
+            assert np.array_equal(eta_plot[:, j], eta_ref[:, j]), (
+                f"gated z>0 row {j}: eta differs from the override twin"
             )
-            assert abs(m.band_sum) > abs(m.live_sum), (
-                f"neumann {tag}: the band ({m.band_sum:.1f}) does not carry the majority of "
-                f"the sheet (live {m.live_sum:.1f})"
-            )
-            assert m.last_live < 0.7 * r.last_live, (
-                f"neumann {tag}: the last live cells still carry "
-                f"{m.last_live / r.last_live:.3f} of the override twin's sheet"
-            )
-        else:
-            # the sheet leaves the ramp cells inward, to the first composed
-            # cells (measured: peak -3 cells, centroid -2.7 / -2.8 cells,
-            # last live cells at 0.07x, band unchanged)
-            assert m.peak <= r.peak - 2, (
-                f"transparent {tag}: the sheet's peak moved only {m.peak - r.peak:+d} cells"
-            )
-            assert m.centroid < r.centroid - 1.5, (
-                f"transparent {tag}: the sheet's centroid moved only "
-                f"{m.centroid - r.centroid:+.2f} cells"
-            )
-            assert m.last_live < 0.3 * r.last_live, (
-                f"transparent {tag}: the ramp cells still carry "
-                f"{m.last_live / r.last_live:.3f} of the override twin's sheet"
-            )
-            assert m.band_deep < 0.02 * r.last_live, (
-                f"transparent {tag}: the overridden band carries "
-                f"{m.band_deep / r.last_live:.3e} of the override twin's sheet (expected "
-                "next to nothing)"
-            )
+        print("gated z>0 section: eta table and sheet bitwise equal to the override twin")
 
 # Newton health over the driven window (a frozen or grinding solve would
 # show here); newton.txt APPENDS across reruns: the last six rows are the
@@ -317,9 +356,9 @@ assert len(newton_rows) >= 6, "run did not complete all steps"
 newton_rows = newton_rows[-6:]
 assert newton_rows[0, 0] == 1, "the last six rows are not one complete run"
 newton_iters = newton_rows[:, 2]
-print(f"{mode} newton iters/step: {newton_iters.astype(int).tolist()}")
+print(f"{mode}{' gated' if gated else ''} newton iters/step: {newton_iters.astype(int).tolist()}")
 assert np.max(newton_iters) <= 6, (
     f"drive-era Newton grind ({int(np.max(newton_iters))} iters in a step)"
 )
 
-print(f"wall-band eta mode test ({mode}) PASSED")
+print(f"wall-band eta mode test ({mode}{', gated' if gated else ''}) PASSED")
