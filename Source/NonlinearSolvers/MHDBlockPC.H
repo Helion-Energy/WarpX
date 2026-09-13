@@ -378,6 +378,29 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_signal_diffusion_scale = 0.0;
         RT m_signal_cfl_floor = 1.0;
         RT m_wave_cfl_threshold = 1.0;
+        // Fluid upwind rows (pc_mhd_block.fluid_upwind = residual | rusanov
+        // | upwind; see UpdateSignalDiffusion). residual (default): the
+        // block carries no fluid advection dissipation of its own (the
+        // opt-in signal diffusion above aside). rusanov: every
+        // cell-centered fluid row takes the first-order Rusanov diffusion
+        // h alpha dx/2 with the solver's per-face fast bound alpha =
+        // |u_n| + c_f (ImplicitSolver::GetMHDFluidUpwindSpeedsForPC),
+        // whatever the residual's own central_dissipation -- the Chacon /
+        // Knoll layout: no artificial dissipation in the residual,
+        // first-order upwinding inside the preconditioner only. upwind:
+        // the same with the entropy rows (every non-momentum row) at the
+        // smoothed flow speed, the momentum rows at the fast bound -- the
+        // diagonal blocks of the residual's flow-upwinded penalty. The
+        // diffusion rides the shared signal-diffusion Helmholtz (per
+        // stacked component, on top of the conduction block's coefficient
+        // on the energy rows), so that path is active whenever this is.
+        std::string m_fluid_upwind = "residual";
+        int m_fluid_upwind_mode = 0;
+        bool m_fluid_upwind_active = false;
+        amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> m_fluid_upwind_faces = {};
+        static constexpr int FluidUpwindResidual = 0;
+        static constexpr int FluidUpwindRusanov = 1;
+        static constexpr int FluidUpwindUpwind = 2;
         // Bulk conduction Helmholtz block (pc_mhd_block.conduction_block,
         // default on): the energy components of the stacked cell-centered
         // Helmholtz take the solver's frozen per-face conduction
@@ -851,6 +874,14 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
     utils::parser::queryWithParser(pp, "wave_relaxation", m_wave_relaxation);
     utils::parser::queryWithParser(pp, "signal_diffusion_scale", m_signal_diffusion_scale);
+    pp.query("fluid_upwind", m_fluid_upwind);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_fluid_upwind == "residual" || m_fluid_upwind == "rusanov" ||
+            m_fluid_upwind == "upwind",
+        "pc_mhd_block.fluid_upwind must be residual, rusanov or upwind");
+    m_fluid_upwind_mode = (m_fluid_upwind == "rusanov")  ? FluidUpwindRusanov
+                          : (m_fluid_upwind == "upwind") ? FluidUpwindUpwind
+                                                         : FluidUpwindResidual;
     utils::parser::queryWithParser(pp, "signal_cfl_floor", m_signal_cfl_floor);
     utils::parser::queryWithParser(pp, "wave_cfl_threshold", m_wave_cfl_threshold);
     pp.query("conduction_block", m_conduction_block);
@@ -2269,6 +2300,25 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         m_signal_diffusion_active =
             m_signal_diffusion_active || m_signal_diffusion[direction] > 0.0;
     }
+    // Fluid upwind rows (see the members): the solver's face penalty
+    // speeds become the first-order diffusion of every cell-centered fluid
+    // row in the assembly below. They ride the shared signal-diffusion
+    // path (the fixed-cycle Helmholtz on every stacked component), which
+    // is therefore active whenever they are.
+    m_fluid_upwind_active = false;
+    if (m_fluid_upwind_mode != FluidUpwindResidual)
+    {
+        m_fluid_upwind_faces = m_ops->GetMHDFluidUpwindSpeedsForPC();
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_fluid_upwind_faces[direction] != nullptr,
+                "pc_mhd_block.fluid_upwind = rusanov | upwind requires the solver's face "
+                "penalty speed registers (implicit_mhd.fluid_flux = central emits them)");
+        }
+        m_fluid_upwind_active = true;
+        m_signal_diffusion_active = true;
+    }
 
     m_evolve_ion_fluid = m_ops->GetMHDEvolveIonFluidForPC();
 
@@ -2478,6 +2528,17 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     const RT conduction_h = m_h;
     const amrex::GpuArray<int, 3> energy_component = m_wall_conduction_component;
     const int number_of_components = m_signal_components;
+    // Fluid upwind rows (see the members): per face and stacked component,
+    // h alpha dx/2 with alpha the fast bound (every row under rusanov; the
+    // momentum rows under upwind) or the flow speed (the non-momentum rows
+    // under upwind), added to the shared diffusion of that face, so it
+    // takes the same metric and z-end rules below.
+    const bool fluid_upwind = m_fluid_upwind_active;
+    const bool fluid_upwind_flow_rows = (m_fluid_upwind_mode == FluidUpwindUpwind);
+    const int momentum_component = m_momentum_component;
+    const int upwind_fast = Ops::MHDFluidUpwindPCFastComponent;
+    const int upwind_flow = Ops::MHDFluidUpwindPCFlowComponent;
+    const RT upwind_h_half = m_h * RT(0.5);
 
 
     m_signal_operator->setScalars(1.0, 1.0);
@@ -2503,11 +2564,17 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     const RT radial_cell_size = cell_size[0];
     const RT radial_diffusion = m_signal_diffusion[0];
     const RT axial_diffusion = m_signal_diffusion[1];
+    const RT upwind_radial_scale = upwind_h_half * cell_size[0];
+    const RT upwind_axial_scale = upwind_h_half * cell_size[1];
     for (amrex::MFIter mfi(*m_signal_acoef); mfi.isValid(); ++mfi)
     {
         const auto acoef = m_signal_acoef->array(mfi);
         const auto bcoef_r = m_signal_bcoef[0]->array(mfi);
         const auto bcoef_z = m_signal_bcoef[1]->array(mfi);
+        const auto upwind_r = fluid_upwind ? m_fluid_upwind_faces[0]->const_array(mfi)
+                                           : amrex::Array4<const amrex::Real>{};
+        const auto upwind_z = fluid_upwind ? m_fluid_upwind_faces[1]->const_array(mfi)
+                                           : amrex::Array4<const amrex::Real>{};
         const auto conduction_r = add_conduction
                                       ? conduction_faces[0]->const_array(mfi)
                                       : amrex::Array4<const amrex::Real>{};
@@ -2535,6 +2602,14 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             {
                 amrex::ignore_unused(j, k);
                 RT diffusion = radial_diffusion;
+                if (fluid_upwind)
+                {
+                    const bool momentum_row =
+                        (n >= momentum_component && n < momentum_component + 3);
+                    const int speed =
+                        (fluid_upwind_flow_rows && !momentum_row) ? upwind_flow : upwind_fast;
+                    diffusion += upwind_radial_scale * static_cast<RT>(upwind_r(i, j, k, speed));
+                }
                 if (add_conduction)
                 {
                     for (int channel = 0; channel < 3; ++channel)
@@ -2562,6 +2637,14 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             {
                 amrex::ignore_unused(k);
                 RT diffusion = axial_diffusion;
+                if (fluid_upwind)
+                {
+                    const bool momentum_row =
+                        (n >= momentum_component && n < momentum_component + 3);
+                    const int speed =
+                        (fluid_upwind_flow_rows && !momentum_row) ? upwind_flow : upwind_fast;
+                    diffusion += upwind_axial_scale * static_cast<RT>(upwind_z(i, j, k, speed));
+                }
                 RT conduction = RT(0.0);
                 bool energy_row = false;
                 for (int channel = 0; channel < 3; ++channel)
@@ -2605,18 +2688,31 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
     {
         const RT signal_diffusion = m_signal_diffusion[direction];
+        const RT upwind_scale = upwind_h_half * cell_size[direction];
         for (amrex::MFIter mfi(*m_signal_bcoef[direction]); mfi.isValid(); ++mfi)
         {
             const auto bcoef = m_signal_bcoef[direction]->array(mfi);
             const auto conduction =
                 add_conduction ? conduction_faces[direction]->const_array(mfi)
                                : amrex::Array4<const amrex::Real>{};
+            const auto upwind = fluid_upwind
+                                    ? m_fluid_upwind_faces[direction]->const_array(mfi)
+                                    : amrex::Array4<const amrex::Real>{};
             const bool axial = (direction == axial_direction);
             amrex::ParallelFor(
                 mfi.validbox(), number_of_components,
                 [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
                 {
                     RT diffusion = signal_diffusion;
+                    if (fluid_upwind)
+                    {
+                        const bool momentum_row =
+                            (n >= momentum_component && n < momentum_component + 3);
+                        const int speed = (fluid_upwind_flow_rows && !momentum_row)
+                                              ? upwind_flow
+                                              : upwind_fast;
+                        diffusion += upwind_scale * static_cast<RT>(upwind(i, j, k, speed));
+                    }
                     RT conduction_value = RT(0.0);
                     bool energy_row = false;
                     for (int channel = 0; channel < 3; ++channel)
@@ -2678,6 +2774,8 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             amrex::Print() << m_signal_diffusion[direction]
                            << (direction + 1 < AMREX_SPACEDIM ? ", " : ")");
         }
+        amrex::Print() << ", fluid upwind = " << m_fluid_upwind
+                       << (m_fluid_upwind_active ? " (active)" : " (inactive)");
         amrex::Print() << ", conduction block = "
                        << (m_conduction_block_active ? "active" : "inactive")
                        << " (N_chi = " << m_conduction_number_max
@@ -4682,6 +4780,7 @@ MHDBlockPC<T, Ops>::printParameters () const
                    << (m_include_hall_mhd_coupling ? "true" : "false") << "\n";
     amrex::Print() << name << " field iterations:     " << m_field_iterations << "\n";
     amrex::Print() << name << " fluid iterations:     " << m_fluid_iterations << "\n";
+    amrex::Print() << name << " fluid upwind rows:    " << m_fluid_upwind << "\n";
     amrex::Print() << name << " resistive iterations: " << m_resistive_iterations << "\n";
     amrex::Print() << name << " resistive threshold:  " << m_resistive_threshold << "\n";
     amrex::Print() << name << " resistive solver:     " << m_resistive_solver << "\n";

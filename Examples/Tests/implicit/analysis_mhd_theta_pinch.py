@@ -41,13 +41,29 @@ def load(path):
 
 initial = load(sys.argv[1])
 final = load(sys.argv[2])
+# Optional mode: "exact" (default; every field machine-preserved) or
+# "diffuse" (calibration: the central flux's fast-speed Rusanov penalty
+# acts on the electron-energy profile that carries the pressure balance,
+# so it must measurably drift -- proving the exact gate discriminates).
+mode = sys.argv[3] if len(sys.argv) > 3 else "exact"
+assert mode in ("exact", "diffuse")
 
 rho_drift = np.max(np.abs(final["implicit_mhd_mass_density"] -
                           initial["implicit_mhd_mass_density"])) / RHO0
-print(f"relative rho drift {rho_drift:.3e}")
+print(f"mode = {mode}: relative rho drift {rho_drift:.3e}")
+electron_energy_drift = np.max(
+    np.abs(final["implicit_mhd_electron_energy"] -
+           initial["implicit_mhd_electron_energy"])
+) / np.max(np.abs(initial["implicit_mhd_electron_energy"]))
+print(f"relative electron-energy drift {electron_energy_drift:.3e}")
 for f in FIELDS:
     drift = float(np.max(np.abs(final[f] - initial[f])))
     print(f"  {f:35s} max drift = {drift:.3e}")
-    assert drift == 0.0, f"{f} drifted by {drift:.3e}"
+    if mode == "exact":
+        assert drift == 0.0, f"{f} drifted by {drift:.3e}"
+if mode == "diffuse":
+    assert electron_energy_drift > 1.0e-3, (
+        f"fast-speed calibration did not diffuse: {electron_energy_drift:.3e}"
+    )
 
-print("PASS")
+print(f"mode = {mode}: PASS")

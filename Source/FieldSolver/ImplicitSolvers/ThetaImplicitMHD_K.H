@@ -214,6 +214,44 @@ struct FluxParameters {
     // fluid_reconstruction active the limiter -- not the knob -- sets
     // the dissipation, and central becomes MUSCL-Rusanov.
     amrex::Real central_dissipation = 0.0;
+    // Per-channel form of the same penalty (see the PER-CHANNEL PENALTY
+    // SPEED block in central_flux). The two coefficients default to
+    // central_dissipation (ThetaImplicitMHD sets them so; with every
+    // knob absent the arithmetic is the legacy scalar term bit for bit):
+    // central_dissipation_momentum scales the momentum penalty and the
+    // kinetic part of the ion total-energy penalty,
+    // central_dissipation_entropy the density, electron-energy, ion
+    // internal-energy and entropy part of the ion total-energy penalty.
+    amrex::Real central_dissipation_momentum = 0.0;
+    amrex::Real central_dissipation_entropy = 0.0;
+    // implicit_mhd.central_dissipation_entropy_speed = flow: the entropy
+    // channels are penalised at the smoothed normal FLOW speed (the
+    // flow-upwind flux across the reconstructed face states) instead of
+    // the fast bound alpha.
+    bool central_dissipation_entropy_flow = false;
+    // Split the ion total-energy penalty into its kinetic (momentum
+    // coefficient and speed) and entropy (entropy coefficient and speed)
+    // parts; a per-solve constant, true whenever the two parts differ
+    // (flow speed, or unequal coefficients). False = the legacy single
+    // jump term.
+    bool central_dissipation_split_ion_energy = false;
+    // Width fraction of the C-infinity flow-speed rounding
+    // (implicit_mhd.central_dissipation_flow_kappa): the smooth_abs width
+    // is this fraction of the two cells' fast speeds.
+    amrex::Real central_dissipation_flow_kappa = 0.01;
+    // Total-pressure-jump gate of the flow speed
+    // (implicit_mhd.central_dissipation_entropy_gate, 0 = off): with
+    // kappa_p > 0 the entropy speed is blended from the flow speed back to
+    // the fast bound by phi = dp^2 / (dp^2 + (kappa_p p_tot)^2), dp the
+    // face jump of the total pressure: pressure-balanced faces (contacts,
+    // tangential discontinuities, a held separatrix) keep the flow speed
+    // exactly, a shock or an acoustic front whose total-pressure jump
+    // exceeds kappa_p of the mean takes the fast bound.
+    amrex::Real central_dissipation_entropy_gate = 0.0;
+    // Write the face penalty speeds into FaceFlux::dissipation_speed_fast
+    // / _flow for the block preconditioner's fluid upwind rows
+    // (pc_mhd_block.fluid_upwind), also when every coefficient is zero.
+    bool emit_dissipation_speeds = false;
 };
 
 // C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
@@ -328,6 +366,13 @@ struct FaceFlux {
     // them at the fast-speed scale.
     amrex::Real signal_alfven_left = 0.0;
     amrex::Real signal_alfven_right = 0.0;
+    // Face penalty speeds of central_flux's Rusanov term, written only
+    // when FluxParameters::emit_dissipation_speeds is set (for the block
+    // preconditioner's fluid upwind rows, pc_mhd_block.fluid_upwind):
+    // the fast bound alpha (|u_n| + c_f, Davis-smoothed, maxed with the
+    // per-cell wave speed) and the smoothed normal flow speed.
+    amrex::Real dissipation_speed_fast = 0.0;
+    amrex::Real dissipation_speed_flow = 0.0;
 };
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
@@ -3245,29 +3290,159 @@ central_flux (const CellState& left, const CellState& right,
     // the per-cell wave_speed so the ELECTRON channel stays covered when
     // the Hall term makes |u_e| exceed the ion fast speed (central is
     // the Hall-capable recast flux; the U_e channel advects with u_e).
-    if (parameters.central_dissipation > 0.0) {
+    //
+    // PER-CHANNEL PENALTY SPEED (implicit_mhd.central_dissipation_
+    // entropy_speed, central_dissipation_momentum,
+    // central_dissipation_entropy). The scalar alpha above diffuses the
+    // ENTROPY wave -- density and temperature jumps at constant total
+    // pressure and velocity, the separatrix of a held equilibrium -- at
+    // |u_n| + c_f in every direction although that wave moves at u_n
+    // alone; wherever the reconstruction clips (extrema, a density cliff
+    // a few cells wide, the forced-donor band at a wall) this is a
+    // B-blind Fickian diffusion D = c alpha dx / 2 of mass and internal
+    // energy across the field. With entropy_speed = flow the channels
+    // that ride the entropy wave (rho, U_e, the dual-energy U_i and the
+    // entropy part of E_i) take
+    //
+    //     alpha_s = (|u_L|_w + |u_R|_w) / 2,   |u|_w = u^2 / sqrt(u^2 + w^2),
+    //
+    // the mean of the two sides' smoothed normal speeds (the electron
+    // channel with the electron normal velocities), which turns the
+    // penalty into the flow-upwind flux across the reconstructed face
+    // states: for a common u the identity (u q_L + u q_R)/2 -
+    // (|u|/2)(q_R - q_L) = u q_upwind holds exactly, and the reference
+    // code's flux-form median-limited advection is exactly that flux.
+    // smooth_abs is exactly zero at u = 0 for any width (a static
+    // contact is preserved to roundoff, as the old contact-resolving
+    // flux did) and C-infinity for w > 0; w is
+    // central_dissipation_flow_kappa times the two cells' fast speeds,
+    // so every term of the penalty stays C-infinity in the state.
+    // Momentum keeps the fast alpha (the acoustic and Alfven families
+    // are dissipated through the velocity), with its own coefficient so
+    // the momentum penalty can be taken to zero on its own (the physical
+    // viscosity then being the only momentum dissipation).
+    //
+    // ION TOTAL ENERGY. E_i = U_i + |m|^2/(2 rho) rides both families,
+    // so its penalty is split by the linearised chain rule
+    // dE = dU + u.dm - (|u|^2/2) drho: the kinetic part
+    // u_f.(m_R - m_L) - (|u_f|^2/2)(rho_R - rho_L), u_f = (u_L + u_R)/2,
+    // takes the momentum coefficient and speed; the remainder
+    // (E_R - E_L) minus that kinetic part -- the internal-energy jump up
+    // to a third-order term (Delta u)^2 Delta rho / 8 -- takes the
+    // entropy coefficient and speed. In the modified equation the
+    // internal energy then receives D_s d2U (entropy-speed diffusion of
+    // U_i, the same speed the auxiliary U_i channel and the density get)
+    // plus D_f rho (du)^2 (the heating of the fast-speed momentum
+    // penalty, booked consistently), and nothing else: the same speed
+    // acts on rho and on the internal energies, which is the consistency
+    // the hold-era HLLC-mass / LLF-energy lock lacked. With equal
+    // coefficients and speeds the split collapses to the single jump
+    // term (bit for bit: the split branch is not entered).
+    //
+    // TOTAL-PRESSURE GATE (central_dissipation_entropy_gate = kappa_p > 0).
+    // Flow-upwinding alone leaves the pressure work u (p_i + p_e) of the
+    // central flux without acoustic damping in the entropy channels: on
+    // an electron-pressure-dominated shock the ion energy is driven onto
+    // its floor within a few steps and the Newton line search locks
+    // (measured on the pe-dominated shock tube). The entropy wave and
+    // the acoustic / fast families are told apart by the face jump of
+    // the TOTAL pressure, which vanishes across a contact, a tangential
+    // discontinuity and a held separatrix and is O(1) across a shock:
+    //     alpha_s <- alpha_s + (alpha - alpha_s) phi,
+    //     phi = dp^2 / (dp^2 + (kappa_p p_tot)^2),
+    // one C-infinity blend shared by every entropy channel (the same
+    // speed keeps acting on rho and on the internal energies). phi is
+    // exactly 0 wherever dp is exactly 0, so pressure-balanced statics
+    // stay machine-preserved.
+    const bool momentum_penalty = parameters.central_dissipation_momentum > 0.0;
+    const bool entropy_penalty = parameters.central_dissipation_entropy > 0.0;
+    if (momentum_penalty || entropy_penalty ||
+        parameters.emit_dissipation_speeds) {
         const amrex::Real dissipation_speed = smooth_max(
             smooth_max(-flux.signal_left, flux.signal_right, signal_width),
             smooth_max(left.wave_speed, right.wave_speed, signal_width),
             signal_width);
-        const amrex::Real coefficient =
-            0.5 * parameters.central_dissipation * dissipation_speed;
-        flux.mass -= coefficient * (right.density - left.density);
-        for (int component = 0; component < 3; ++component) {
-            flux.momentum[component] -=
-                coefficient *
-                (right.momentum[component] - left.momentum[component]);
+        amrex::Real entropy_speed = dissipation_speed;
+        amrex::Real electron_entropy_speed = dissipation_speed;
+        if (parameters.central_dissipation_entropy_flow ||
+            parameters.emit_dissipation_speeds) {
+            const amrex::Real flow_width =
+                parameters.central_dissipation_flow_kappa *
+                (left.fast_speed + right.fast_speed);
+            amrex::Real flow_speed =
+                0.5 * (smooth_abs(u_left, flow_width) +
+                       smooth_abs(u_right, flow_width));
+            amrex::Real electron_flow_speed =
+                0.5 * (smooth_abs(left.electron_velocity_normal, flow_width) +
+                       smooth_abs(right.electron_velocity_normal,
+                                  flow_width));
+            if (parameters.central_dissipation_entropy_gate > 0.0) {
+                const amrex::Real pressure_jump = p_total_right - p_total_left;
+                const amrex::Real gate_width =
+                    parameters.central_dissipation_entropy_gate * 0.5 *
+                    (p_total_left + p_total_right);
+                const amrex::Real phi =
+                    pressure_jump * pressure_jump /
+                    (pressure_jump * pressure_jump + gate_width * gate_width);
+                flow_speed += (dissipation_speed - flow_speed) * phi;
+                electron_flow_speed +=
+                    (dissipation_speed - electron_flow_speed) * phi;
+            }
+            if (parameters.central_dissipation_entropy_flow) {
+                entropy_speed = flow_speed;
+                electron_entropy_speed = electron_flow_speed;
+            }
+            flux.dissipation_speed_flow = flow_speed;
         }
-        flux.electron_energy -=
-            coefficient * (right.electron_energy - left.electron_energy);
-        if (parameters.total_energy_closure) {
-            flux.ion_energy -=
-                coefficient * (right.ion_energy - left.ion_energy);
-        }
-        if (parameters.dual_energy_closure) {
-            flux.ion_internal_energy -=
-                coefficient *
-                (right.ion_internal_energy - left.ion_internal_energy);
+        flux.dissipation_speed_fast = dissipation_speed;
+        if (momentum_penalty || entropy_penalty) {
+            const amrex::Real coefficient_momentum =
+                0.5 * parameters.central_dissipation_momentum *
+                dissipation_speed;
+            const amrex::Real coefficient_entropy =
+                0.5 * parameters.central_dissipation_entropy * entropy_speed;
+            const amrex::Real coefficient_electron =
+                0.5 * parameters.central_dissipation_entropy *
+                electron_entropy_speed;
+            flux.mass -= coefficient_entropy * (right.density - left.density);
+            for (int component = 0; component < 3; ++component) {
+                flux.momentum[component] -=
+                    coefficient_momentum *
+                    (right.momentum[component] - left.momentum[component]);
+            }
+            flux.electron_energy -=
+                coefficient_electron *
+                (right.electron_energy - left.electron_energy);
+            if (parameters.total_energy_closure) {
+                if (parameters.central_dissipation_split_ion_energy) {
+                    amrex::Real kinetic_jump = 0.0;
+                    amrex::Real face_speed_squared = 0.0;
+                    for (int component = 0; component < 3; ++component) {
+                        const amrex::Real face_velocity =
+                            0.5 * (left.ion_velocity[component] +
+                                   right.ion_velocity[component]);
+                        kinetic_jump +=
+                            face_velocity * (right.momentum[component] -
+                                             left.momentum[component]);
+                        face_speed_squared += face_velocity * face_velocity;
+                    }
+                    kinetic_jump -= 0.5 * face_speed_squared *
+                                    (right.density - left.density);
+                    const amrex::Real entropy_jump =
+                        (right.ion_energy - left.ion_energy) - kinetic_jump;
+                    flux.ion_energy -= coefficient_momentum * kinetic_jump +
+                                       coefficient_entropy * entropy_jump;
+                } else {
+                    flux.ion_energy -=
+                        coefficient_momentum *
+                        (right.ion_energy - left.ion_energy);
+                }
+            }
+            if (parameters.dual_energy_closure) {
+                flux.ion_internal_energy -=
+                    coefficient_entropy *
+                    (right.ion_internal_energy - left.ion_internal_energy);
+            }
         }
     }
     return flux;

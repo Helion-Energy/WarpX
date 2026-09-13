@@ -927,6 +927,31 @@ public:
     }
 
     /**
+     * \brief Face penalty speeds of the theta-implicit MHD central flux's
+     * Rusanov term for the block preconditioner's fluid upwind rows
+     * (pc_mhd_block.fluid_upwind): component
+     * MHDFluidUpwindPCFastComponent holds the fast bound alpha =
+     * |u_n| + c_f (Davis-smoothed, maxed with the per-cell wave speed),
+     * component MHDFluidUpwindPCFlowComponent the smoothed normal flow
+     * speed, both on every bulk face (zero on wall interface, interior-
+     * metal and unwritten faces), frozen at the last residual evaluation
+     * like the conduction registers. nullptr when the solver does not
+     * emit them (the default pc_mhd_block.fluid_upwind = residual).
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>
+    GetMHDFluidUpwindSpeedsForPC () const
+    {
+        amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> none;
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            none[direction] = nullptr;
+        }
+        return none;
+    }
+    static constexpr int MHDFluidUpwindPCFastComponent = 0;
+    static constexpr int MHDFluidUpwindPCFlowComponent = 1;
+
+    /**
      * \brief Whether the z_lo (index 0) and z_hi (index 1) domain end faces
      * carry the theta-implicit MHD conductive z-end exchange
      * (implicit_mhd.z_wall_conduction): a half-cell Dirichlet exchange of

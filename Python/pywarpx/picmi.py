@@ -1966,6 +1966,16 @@ class MHDBlockPreconditioner(PreconditionerBase):
         cuDSS ("direct", CUDA builds with cuDSS) or by the portable
         block-banded LU along z ("banded", single rank)
 
+    fluid_upwind: {"residual", "rusanov", "upwind"}, optional
+        Fluid upwind rows of the block (default "residual": the block
+        carries no fluid advection dissipation of its own). "rusanov":
+        every cell-centered fluid row takes the first-order Rusanov
+        diffusion theta dt alpha dx/2 with the solver's per-face fast
+        bound alpha = |u_n| + c_f, whatever the residual's own
+        central_dissipation -- first-order upwinding inside the
+        preconditioner only. "upwind": the same with the non-momentum
+        rows at the smoothed flow speed. Requires fluid_flux="central".
+
     conduction_validate_assembly: bool, optional
         Check the assembled conduction rows against the MLMG operator's
         own application to roundoff at every preconditioner update
@@ -2041,6 +2051,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         conduction_cross_terms=None,
         conduction_solver=None,
         conduction_validate_assembly=None,
+        fluid_upwind=None,
         residual_block_norms=None,
         residual_block_norms_min_iters=None,
         residual_block_norms_interval=None,
@@ -2071,6 +2082,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.conduction_cross_terms = conduction_cross_terms
         self.conduction_solver = conduction_solver
         self.conduction_validate_assembly = conduction_validate_assembly
+        self.fluid_upwind = fluid_upwind
         self.residual_block_norms = residual_block_norms
         self.residual_block_norms_min_iters = residual_block_norms_min_iters
         self.residual_block_norms_interval = residual_block_norms_interval
@@ -2108,6 +2120,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.conduction_cross_terms = self.conduction_cross_terms
         pc_mhd_block.conduction_solver = self.conduction_solver
         pc_mhd_block.conduction_validate_assembly = self.conduction_validate_assembly
+        pc_mhd_block.fluid_upwind = self.fluid_upwind
         pc_mhd_block.residual_block_norms = self.residual_block_norms
         pc_mhd_block.residual_block_norms_min_iters = self.residual_block_norms_min_iters
         pc_mhd_block.residual_block_norms_interval = self.residual_block_norms_interval
@@ -2743,6 +2756,49 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         characteristic), which makes it monotone and
         positivity-friendly; the induction channels and Maxwell stress
         are deliberately untouched so no numerical resistivity is added.
+
+    central_dissipation_entropy_speed: {"fast", "flow"}, default="fast"
+        Penalty speed of the ENTROPY channels of the central flux's
+        Rusanov term (density, electron energy, the dual-energy internal
+        energy and the entropy part of the ion energy). "fast" is the
+        legacy scalar bound |u_n| + c_f on every channel (bit-identical
+        default). "flow" penalises those channels at the smoothed normal
+        flow speed, (|u_L|_w + |u_R|_w)/2 with |u|_w = u^2/sqrt(u^2 + w^2),
+        which makes their penalty exactly the flow-upwind flux across
+        the reconstructed face states (the reference code's flux-form
+        median-limited advection; zero dissipation of a static contact,
+        no cross-field diffusion of mass and internal energy at the fast
+        speed); momentum and the kinetic part of the ion energy keep the
+        fast bound. The ion total-energy penalty is then split by the
+        linearised chain rule so the same speed acts on the density and
+        on the internal energies (see the solver documentation).
+
+    central_dissipation_momentum: float, default=central_dissipation
+        Coefficient in [0, 1] of the momentum penalty and of the kinetic
+        part of the ion-energy penalty (the fast-speed part). Lets the
+        momentum penalty go to zero on its own, the physical viscosity
+        then being the only momentum dissipation.
+
+    central_dissipation_entropy: float, default=central_dissipation
+        Coefficient in [0, 1] of the entropy channels' penalty (density,
+        electron energy, dual-energy internal energy, entropy part of the
+        ion energy).
+
+    central_dissipation_flow_kappa: float, default=0.01
+        Width fraction of the C-infinity rounding of the flow speed,
+        w = kappa (c_f,L + c_f,R): the rounded |u| is exactly zero at
+        u = 0 for any kappa and within O(w) of |u| elsewhere.
+
+    central_dissipation_entropy_gate: float, default=0 (off)
+        Total-pressure-jump gate of the flow speed, kappa_p: the entropy
+        speed is blended from the flow speed back to the fast bound by
+        phi = dp^2/(dp^2 + (kappa_p p_tot)^2), dp the face jump of the
+        total pressure. Pressure-balanced faces (contacts, tangential
+        discontinuities, a held separatrix) keep the flow speed exactly;
+        a shock or an acoustic front whose total-pressure jump exceeds
+        kappa_p of the mean takes the fast bound (pure flow-upwinding
+        drives the ion energy onto its floor on an electron-pressure-
+        dominated shock and locks the Newton line search).
 
     viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
@@ -4355,6 +4411,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         fluid_reconstruction=None,
         reconstruction_kappa=None,
         central_dissipation=None,
+        central_dissipation_entropy_speed=None,
+        central_dissipation_momentum=None,
+        central_dissipation_entropy=None,
+        central_dissipation_flow_kappa=None,
+        central_dissipation_entropy_gate=None,
         viscosity=None,
         viscosity_open_multiplier=None,
         viscosity_open_psi=None,
@@ -4544,6 +4605,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.fluid_reconstruction = fluid_reconstruction
         self.reconstruction_kappa = reconstruction_kappa
         self.central_dissipation = central_dissipation
+        self.central_dissipation_entropy_speed = central_dissipation_entropy_speed
+        self.central_dissipation_momentum = central_dissipation_momentum
+        self.central_dissipation_entropy = central_dissipation_entropy
+        self.central_dissipation_flow_kappa = central_dissipation_flow_kappa
+        self.central_dissipation_entropy_gate = central_dissipation_entropy_gate
         self.viscosity = viscosity
         self.viscosity_open_multiplier = viscosity_open_multiplier
         self.viscosity_open_psi = viscosity_open_psi
@@ -4785,6 +4851,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.fluid_reconstruction = self.fluid_reconstruction
         implicit_mhd.reconstruction_kappa = self.reconstruction_kappa
         implicit_mhd.central_dissipation = self.central_dissipation
+        implicit_mhd.central_dissipation_entropy_speed = (
+            self.central_dissipation_entropy_speed
+        )
+        implicit_mhd.central_dissipation_momentum = self.central_dissipation_momentum
+        implicit_mhd.central_dissipation_entropy = self.central_dissipation_entropy
+        implicit_mhd.central_dissipation_flow_kappa = (
+            self.central_dissipation_flow_kappa
+        )
+        implicit_mhd.central_dissipation_entropy_gate = (
+            self.central_dissipation_entropy_gate
+        )
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value

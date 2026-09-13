@@ -937,6 +937,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_conduction_pc_active && m_conduction_pc_cross_terms;
     }
 
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>
+    GetMHDFluidUpwindSpeedsForPC () const override
+    {
+        amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> faces;
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            faces[direction] = m_fluid_upwind_pc_active
+                                   ? m_fluid_upwind_pc_speed[direction].get()
+                                   : nullptr;
+        }
+        return faces;
+    }
+
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
@@ -2396,6 +2409,30 @@ class ThetaImplicitMHD final : public ImplicitSolver
                   ImplicitSolver::MHDConductionPCFaceDensityComponent);
     static_assert(ConductionPCCrossElectron ==
                   ImplicitSolver::MHDConductionPCCrossComponent);
+    // ---- Fluid upwind rows of the block preconditioner
+    // (pc_mhd_block.fluid_upwind = residual | rusanov | upwind; the
+    // solver reads the same key to know whether to emit). With a mode
+    // other than residual, central_flux writes the face penalty speeds
+    // of its Rusanov term -- the fast bound alpha and the smoothed flow
+    // speed -- into these face registers on every bulk face (wall
+    // interface and interior-metal faces keep zero, so the block never
+    // couples a live row to a masked one), also when the residual's own
+    // penalty coefficients are zero; the block turns them into the
+    // first-order Rusanov / flow-upwind diffusion h alpha dx/2 of its
+    // cell-centered fluid rows (the Chacon / Knoll layout: no artificial
+    // dissipation in the residual, first-order upwinding inside the
+    // preconditioner only). Requires fluid_flux = central.
+    std::string m_pc_fluid_upwind = "residual";
+    bool m_fluid_upwind_pc_active = false;
+    amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM>
+        m_fluid_upwind_pc_speed;
+    static constexpr int FluidUpwindPCFast = 0;
+    static constexpr int FluidUpwindPCFlow = 1;
+    static constexpr int FluidUpwindPCComponents = 2;
+    static_assert(FluidUpwindPCFast ==
+                  ImplicitSolver::MHDFluidUpwindPCFastComponent);
+    static_assert(FluidUpwindPCFlow ==
+                  ImplicitSolver::MHDFluidUpwindPCFlowComponent);
     // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
     // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
     // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the
@@ -2585,6 +2622,31 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // flow, monotone at a discontinuity, no wave fan. See the contract
     // block above the term in ThetaImplicitMHD_K.H.
     amrex::Real m_central_dissipation = 0.0;
+    // ---- Per-channel form of the central penalty (see the PER-CHANNEL
+    // PENALTY SPEED block of central_flux in ThetaImplicitMHD_K.H).
+    // implicit_mhd.central_dissipation_entropy_speed = fast (default: the
+    // legacy scalar alpha = |u_n| + c_f on every channel, bit-identical)
+    // | flow (rho, U_e, the dual-energy U_i and the entropy part of E_i
+    // penalised at the smoothed normal flow speed = the flow-upwind flux
+    // across the reconstructed face states; momentum and the kinetic
+    // part of E_i keep the fast alpha).
+    std::string m_central_dissipation_entropy_speed = "fast";
+    // implicit_mhd.central_dissipation_momentum / _entropy: the two
+    // coefficients in [0, 1], each defaulting to central_dissipation, so
+    // the momentum penalty (and the kinetic part of the E_i penalty) can
+    // be scaled independently of the entropy channels' penalty.
+    amrex::Real m_central_dissipation_momentum = 0.0;
+    amrex::Real m_central_dissipation_entropy = 0.0;
+    // implicit_mhd.central_dissipation_flow_kappa: width fraction of the
+    // C-infinity rounding of the flow speed, |u|_w = u^2/sqrt(u^2 + w^2)
+    // with w = kappa (c_f,L + c_f,R); exactly 0 at u = 0 for any kappa.
+    amrex::Real m_central_dissipation_flow_kappa = 0.01;
+    // implicit_mhd.central_dissipation_entropy_gate: total-pressure-jump
+    // gate of the flow speed, kappa_p (0 = off): faces whose total
+    // pressure jumps by more than kappa_p of the mean take the fast bound
+    // back (shocks, acoustic fronts); pressure-balanced faces keep the
+    // flow speed exactly. See the kernel's TOTAL-PRESSURE GATE block.
+    amrex::Real m_central_dissipation_entropy_gate = 0.0;
     // Explicit ion kinematic viscosity nu_i [m^2/s] of the recast face
     // fluxes (0 = off; required positive for fluid_flux = central). The
     // normal-gradient viscous stress and its velocity-weighted work enter

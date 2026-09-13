@@ -1787,6 +1787,77 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.fluid_flux = central only: the other recast flux "
         "(hlld) already carries its own wave-fan dissipation, and the "
         "legacy fluxes are not wired into the recast face registers");
+    // Per-channel form of the penalty (see the PER-CHANNEL PENALTY SPEED
+    // block of central_flux): the entropy channels' speed and the two
+    // coefficients, each defaulting to central_dissipation so the knobs'
+    // absence is the legacy scalar term bit for bit.
+    pp.query("central_dissipation_entropy_speed",
+             m_central_dissipation_entropy_speed);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_entropy_speed == "fast" ||
+            m_central_dissipation_entropy_speed == "flow",
+        "implicit_mhd.central_dissipation_entropy_speed must be fast (the "
+        "scalar |u_n| + c_f bound on every channel) or flow (density, "
+        "electron energy, dual-energy internal energy and the entropy "
+        "part of the ion energy penalised at the smoothed normal flow "
+        "speed: the flow-upwind flux across the reconstructed face states)");
+    m_central_dissipation_momentum = m_central_dissipation;
+    m_central_dissipation_entropy = m_central_dissipation;
+    utils::parser::queryWithParser(pp, "central_dissipation_momentum",
+                                   m_central_dissipation_momentum);
+    utils::parser::queryWithParser(pp, "central_dissipation_entropy",
+                                   m_central_dissipation_entropy);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_momentum >= 0.0_rt &&
+            m_central_dissipation_momentum <= 1.0_rt &&
+            m_central_dissipation_entropy >= 0.0_rt &&
+            m_central_dissipation_entropy <= 1.0_rt,
+        "implicit_mhd.central_dissipation_momentum and "
+        "central_dissipation_entropy must be in [0, 1] (they scale the "
+        "momentum / kinetic and the entropy parts of the Rusanov jump "
+        "penalty; see central_dissipation)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        (m_central_dissipation_momentum == 0.0_rt &&
+         m_central_dissipation_entropy == 0.0_rt &&
+         m_central_dissipation_entropy_speed == "fast") ||
+            m_use_central,
+        "implicit_mhd.central_dissipation_momentum / _entropy / "
+        "_entropy_speed apply to implicit_mhd.fluid_flux = central only");
+    utils::parser::queryWithParser(pp, "central_dissipation_flow_kappa",
+                                   m_central_dissipation_flow_kappa);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_flow_kappa >= 0.0_rt,
+        "implicit_mhd.central_dissipation_flow_kappa cannot be negative "
+        "(0 is the hard |u_n|, with its kink at u_n = 0)");
+    utils::parser::queryWithParser(pp, "central_dissipation_entropy_gate",
+                                   m_central_dissipation_entropy_gate);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_entropy_gate >= 0.0_rt,
+        "implicit_mhd.central_dissipation_entropy_gate cannot be negative "
+        "(0 = off: the pure flow speed on every entropy face)");
+    {
+        // The block preconditioner's fluid upwind rows
+        // (pc_mhd_block.fluid_upwind) need the face penalty speeds from
+        // the residual's central flux (see m_fluid_upwind_pc_active): the
+        // solver reads the block's key to know whether to emit them.
+        const amrex::ParmParse pp_pc("pc_mhd_block");
+        pp_pc.query("fluid_upwind", m_pc_fluid_upwind);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_pc_fluid_upwind == "residual" || m_pc_fluid_upwind == "rusanov" ||
+                m_pc_fluid_upwind == "upwind",
+            "pc_mhd_block.fluid_upwind must be residual (the block carries "
+            "no fluid advection dissipation of its own, the default), "
+            "rusanov (first-order Rusanov diffusion at the fast bound on "
+            "every cell-centered fluid row, whatever the residual's "
+            "central_dissipation) or upwind (the same with the entropy "
+            "rows at the flow speed)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_pc_fluid_upwind == "residual" || m_use_central,
+            "pc_mhd_block.fluid_upwind = rusanov | upwind requires "
+            "implicit_mhd.fluid_flux = central (the central flux emits the "
+            "face penalty speeds the block's fluid rows are built from)");
+        m_fluid_upwind_pc_active = (m_pc_fluid_upwind != "residual");
+    }
     if (reconstruction_active) {
         // The limiters' monotonicity statement holds for an advective
         // CFL <= 1 (a reconstructed face state must not be overtaken
@@ -3413,6 +3484,12 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "central: the E-based block preconditioner has no cylindrical "
         "metric terms");
 #endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_fluid_upwind_pc_active ||
+            preconditioner_type == PreconditionerType::pc_mhd_block,
+        "pc_mhd_block.fluid_upwind = rusanov | upwind configures the block "
+        "preconditioner's fluid rows and requires jacobian.pc_type = "
+        "pc_mhd_block (a knob that does nothing is not accepted silently)");
     if (preconditioner_type == PreconditionerType::pc_mhd_block &&
         !m_use_recast) {
         // The E-based operators do not apply to the conservative-form
@@ -4684,6 +4761,33 @@ void ThetaImplicitMHD::PrintParameters () const
                                m_fluid_reconstruction_mode ==
                                    theta_implicit_mhd::reconstruction_none
                            ? " (WITHOUT reconstruction: first order)"
+                           : std::string{})
+                   << "\n"
+                   << "Central penalty per channel:   momentum c = "
+                   << m_central_dissipation_momentum
+                   << " (fast |u_n| + c_f), entropy c = "
+                   << m_central_dissipation_entropy << " ("
+                   << m_central_dissipation_entropy_speed
+                   << (m_central_dissipation_entropy_speed == "flow"
+                           ? " speed |u_n|, kappa = " +
+                                 std::to_string(
+                                     m_central_dissipation_flow_kappa) +
+                                 (m_central_dissipation_entropy_gate > 0.0_rt
+                                      ? ", total-pressure gate kappa_p = " +
+                                            std::to_string(
+                                                m_central_dissipation_entropy_gate)
+                                      : std::string{", no pressure gate"})
+                           : std::string{})
+                   << "), ion energy "
+                   << ((m_central_dissipation_entropy_speed == "flow" ||
+                        m_central_dissipation_momentum !=
+                            m_central_dissipation_entropy)
+                           ? "SPLIT kinetic / entropy"
+                           : "single jump term (legacy)")
+                   << "\n"
+                   << "PC fluid upwind rows:          " << m_pc_fluid_upwind
+                   << (m_fluid_upwind_pc_active
+                           ? " (face penalty speeds emitted for pc_mhd_block)"
                            : std::string{})
                    << "\n"
                    << "Shaped conducting-wall mask:   "
@@ -9867,6 +9971,23 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     flux_parameters.fluid_reconstruction = m_fluid_reconstruction_mode;
     flux_parameters.reconstruction_kappa = m_reconstruction_kappa;
     flux_parameters.central_dissipation = m_central_dissipation;
+    // Per-channel penalty (both coefficients equal central_dissipation and
+    // the speed is fast unless the knobs say otherwise, so the kernel's
+    // legacy branch is the one entered by default).
+    flux_parameters.central_dissipation_momentum =
+        m_central_dissipation_momentum;
+    flux_parameters.central_dissipation_entropy =
+        m_central_dissipation_entropy;
+    flux_parameters.central_dissipation_entropy_flow =
+        (m_central_dissipation_entropy_speed == "flow");
+    flux_parameters.central_dissipation_split_ion_energy =
+        flux_parameters.central_dissipation_entropy_flow ||
+        (m_central_dissipation_momentum != m_central_dissipation_entropy);
+    flux_parameters.central_dissipation_flow_kappa =
+        m_central_dissipation_flow_kappa;
+    flux_parameters.central_dissipation_entropy_gate =
+        m_central_dissipation_entropy_gate;
+    flux_parameters.emit_dissipation_speeds = m_fluid_upwind_pc_active;
     // Per-step frozen pedestal state (0 while the pedestal is off):
     // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
@@ -10783,6 +10904,24 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
         if (m_ion_closure == "dual_energy" && m_conduction_pc_blend == nullptr) {
             m_conduction_pc_blend = std::make_unique<amrex::MultiFab>(
                 density.boxArray(), density.DistributionMap(), 1, 0);
+        }
+    }
+    if (m_fluid_upwind_pc_active) {
+        // Face penalty speeds for the block's fluid upwind rows (see the
+        // member): zeroed here, written by the face kernels on bulk faces.
+        const amrex::MultiFab& density =
+            *m_WarpX->m_fields.get(MassDensityName, 0);
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
+            if (m_fluid_upwind_pc_speed[direction] == nullptr) {
+                m_fluid_upwind_pc_speed[direction] =
+                    std::make_unique<amrex::MultiFab>(
+                        amrex::convert(
+                            density.boxArray(),
+                            amrex::IntVect::TheDimensionVector(direction)),
+                        density.DistributionMap(), FluidUpwindPCComponents,
+                        0);
+            }
+            zero_register(*m_fluid_upwind_pc_speed[direction]);
         }
     }
     if (m_wall_conduction_rows_active) {
@@ -11757,6 +11896,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool emit_conduction_pc =
         m_conduction_pc_active &&
         m_conduction_pc_coefficient[conduction_pc_dim] != nullptr;
+    // Face penalty speeds for the block preconditioner's fluid upwind
+    // rows (pc_mhd_block.fluid_upwind; see m_fluid_upwind_pc_active):
+    // bulk faces only, like the conduction registers.
+    const bool emit_fluid_upwind_pc =
+        m_fluid_upwind_pc_active &&
+        m_fluid_upwind_pc_speed[conduction_pc_dim] != nullptr;
+    const int fluid_upwind_pc_fast = FluidUpwindPCFast;
+    const int fluid_upwind_pc_flow = FluidUpwindPCFlow;
     const amrex::Real conduction_pc_stage_weight =
         conduction_stage ? stage_new_weight : 1.0_rt;
     const int conduction_pc_electron = ConductionPCElectron;
@@ -11824,6 +11971,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         const auto conduction_pc =
             emit_conduction_pc
                 ? m_conduction_pc_coefficient[conduction_pc_dim]->array(mfi)
+                : amrex::Array4<amrex::Real>{};
+        const auto fluid_upwind_pc =
+            emit_fluid_upwind_pc
+                ? m_fluid_upwind_pc_speed[conduction_pc_dim]->array(mfi)
                 : amrex::Array4<amrex::Real>{};
         const auto rho = density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
@@ -12122,6 +12273,19 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                        normal, parameters)
                     : theta_implicit_mhd::hlld_flux(left, right, bn_face,
                                                     normal, parameters);
+            if (emit_fluid_upwind_pc && !wall_interface &&
+                !(wall_left_masked && wall_right_masked) &&
+                fluid_upwind_pc.contains(i, j, k)) {
+                // The block preconditioner's fluid upwind rows read the
+                // penalty speeds of this face (central_flux writes them
+                // whenever emit_dissipation_speeds is set, also at zero
+                // coefficients); wall interface and interior-metal faces
+                // keep zero so no live row is coupled to a masked one.
+                fluid_upwind_pc(i, j, k, fluid_upwind_pc_fast) =
+                    flux.dissipation_speed_fast;
+                fluid_upwind_pc(i, j, k, fluid_upwind_pc_flow) =
+                    flux.dissipation_speed_flow;
+            }
 
             // Donor-gated positivity guards on the advected mass and
             // energy channels, gating on the theta-extrapolated

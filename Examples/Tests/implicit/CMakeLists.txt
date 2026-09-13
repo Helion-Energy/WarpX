@@ -210,6 +210,133 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Per-channel penalty speed of the production central flux
+# (implicit_mhd.central_dissipation_entropy_speed): with the entropy
+# channels penalised at the smoothed normal FLOW speed -- exactly zero at
+# u = 0 -- the limited Rusanov penalty is the flow-upwind flux and the
+# static contact is preserved to solver roundoff, as the contact-resolving
+# hllc flux preserves it; the calibration twin at the default fast speed
+# diffuses the same steps at the acoustic speed, proving the gate
+# discriminates. The reconstruction is van Albada: the smoothed median
+# is NOT stationary on a pressure-uniform density step (its C-infinity
+# smoothing width reconstructs O(kappa) face slopes at the step, a
+# spurious pressure force of O(kappa) that moves the contact at any
+# penalty speed and with any flux -- measured 1.5e-4 of rho per step at
+# kappa 0.01, a hundredfold less at kappa 1e-4, exactly zero under
+# vanalbada), so a median twin of these gates cannot be machine-exact.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_entropy_flow  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow"  # inputs
+    "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 entropy_flow"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_central_fast  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 central_fast"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The same speed split on the shock tube: the exact-Riemann plateau gates
+# of the hllc sod test, on the production MUSCL-Rusanov stack at the
+# fast speed (the c = 1 twin) and with the entropy channels at the flow
+# speed (the ion total-energy penalty then split into its kinetic and
+# entropy parts)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_fast  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# pure flow-upwinding (no pressure gate): the ion-gas shock tube keeps its
+# plateaus
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_flow  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# the flown form: flow speed with the total-pressure gate (kappa_p 0.1)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_flow_gated  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# electron-pressure-dominated twin (the FRC-halo regime): pure
+# flow-upwinding leaves the pressure work u (p_i + p_e) of the central flux
+# without acoustic damping in the entropy channels and drives the ion
+# energy onto its floor within four steps (Newton line-search lock at step
+# 5, measured); the total-pressure gate restores the fast speed on the
+# shock faces and the tube runs -- the gate is therefore part of the flow
+# contract on shocked problems
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_pe_dominated_central_fast  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod_pe_dominated implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_sod_pe_dominated.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_pe_dominated_central_flow_gated  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod_pe_dominated implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_sod_pe_dominated.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# the split penalty is a face flux: sum(E_i) + sum(U_e), mass and
+# momentum stay conserved to roundoff with the entropy channels at the
+# flow speed (the viscous stress / stress-work pair is conservative too)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_conservation_central_flow  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_energy_conservation.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Block-preconditioner fluid upwind rows (pc_mhd_block.fluid_upwind =
+# rusanov: first-order Rusanov diffusion of every cell-centered fluid row
+# at the residual's face fast bound, inside the preconditioner only) on
+# the central shock tube: identical plateaus to the pc-off twin above
+# and a bounded cumulative GMRES count
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_pc_upwind  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0 jacobian.pc_type=pc_mhd_block pc_mhd_block.fluid_upwind=rusanov"  # inputs
+    "analysis_mhd_central_preconditioner.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_sod  # name
     1  # dims
@@ -1743,6 +1870,25 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_mirror_full  # dependency
 )
 
+# Block-preconditioner fluid upwind rows on the full-domain mirror deck
+# (the production central flux at its zero-dissipation default, viscosity
+# only, i.e. the "no artificial dissipation in the residual" layout, with
+# pc_mhd_block.fluid_upwind = rusanov putting first-order Rusanov diffusion
+# at the face fast bound into the preconditioner's fluid rows only): the
+# same mirror-parity gate -- the rows are built from face speeds that are
+# themselves mirror-symmetric, so every field must keep its parity to
+# solver roundoff -- plus the RZ metric of the added coefficient (r-weighted
+# faces, inert axis face) exercised on a two-direction deck
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_full_pc_upwind  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_full jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.fluid_upwind=rusanov"  # inputs
+    "analysis_mhd_mirror_full.py diags/diag000000 diags/diag000032 1.0e-10"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_full  # dependency
+)
+
 # RZ coverage of the TVD reconstruction (implicit_mhd.fluid_reconstruction)
 # on the PRODUCTION flux (central + viscosity): the same mirror-parity
 # reference, which asserts that the discrete operator commutes with the
@@ -3012,6 +3158,33 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# the production central stack (van Albada + limited Rusanov penalty; the
+# smoothed median is not stationary on a density step, see the 1D static
+# contact gates) on the static RZ annulus: with the entropy channels at
+# the FLOW speed (central_dissipation_entropy_speed = flow, the total-
+# pressure gate inert at zero pressure jump) every field is machine-
+# preserved like hlld's, the cylindrical metric included; at the default
+# fast speed the same penalty diffuses the annulus radially (calibration)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_radial_contact_central_flow  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_radial_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 central_flow"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_radial_contact_central_fast  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_radial_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 central_fast"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # stiff RZ vacuum-resistive diffusion (grid diffusion number 150 at the
 # halo eta maximum): corner-EMF structural invariants (exactly zero
 # B_theta, conserved r-weighted axial flux, per-radius vanishing axial Br
@@ -3203,6 +3376,96 @@ add_warpx_test(
     1  # nprocs
     inputs_test_rz_theta_implicit_mhd_theta_pinch  # inputs
     "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# the same pressure-balanced column on the production central stack: the
+# electron-energy profile that carries the balance is an entropy-channel
+# contact at u = 0, so the fast-speed Rusanov penalty diffuses it (and
+# with it the equilibrium) within the run -- the FRC-halo hold failure
+# the per-channel speed removes: at the flow speed every field is
+# machine-preserved
+add_warpx_test(
+    test_rz_theta_implicit_mhd_theta_pinch_central_flow  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100 exact"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_theta_pinch_central_fast  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100 diffuse"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Reversed-field column hold (the infinite-length FRC analogue: Bz through a
+# null, pe-carried pressure balance, a density step riding the null) on the
+# production central stack -- the closed-flux-mass gate of the per-channel
+# penalty speed. Static hold: the flow-speed penalty preserves every field
+# to machine zero, the fast-speed penalty leaks closed-flux mass through
+# the density step (calibration). Pulsed hold (a radial z-modulated
+# velocity pulse, u_pert = 0.05 v0): the fast, flow and zero-dissipation +
+# preconditioner-upwind arms all complete within the Newton budget with
+# their Newton / GMRES work recorded, and the flow arm's closed-flux mass
+# loss must be below half the fast arm's.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_hold_flow  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 exact"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_hold_fast  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 diffuse"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_pulse_fast  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column my_constants.u_pert=0.05*v0 implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 pulse"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_pulse_flow  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column my_constants.u_pert=0.05*v0 implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 pulse ../test_rz_theta_implicit_mhd_reversed_column_pulse_fast/diags/diag000100"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_reversed_column_pulse_fast  # dependency
+)
+
+# the zero-dissipation residual (central_dissipation 0, viscosity only)
+# with the preconditioner's upwind rows: the Chacon / Knoll layout on the
+# pulsed hold, graded on completion, the Newton budget and a bounded
+# cumulative GMRES count (single rank: the banded resistive block)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_pulse_cd0_pc_upwind  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column my_constants.u_pert=0.05*v0 jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.fluid_upwind=rusanov"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 pulse_pc"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -6298,4 +6561,29 @@ add_warpx_test(
     "analysis_mhd_energy_audit_central.py diags/energy_audit.txt ../test_rz_theta_implicit_mhd_energy_audit_central_fine/diags/energy_audit.txt"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_energy_audit_central_fine  # dependency
+)
+
+# The same magnetized flowing column with the entropy channels of the
+# Rusanov penalty at the FLOW speed (implicit_mhd.central_dissipation_
+# entropy_speed = flow; the ion-energy penalty split kinetic / entropy):
+# the split penalty is still a face flux, so the audit must close and the
+# RZ pairing defect must converge exactly as on the fast-speed pair above
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_central_flow_fine  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_energy_audit_central my_constants.nr=32 my_constants.nz=64 implicit_mhd.central_dissipation_entropy_speed=flow"  # inputs
+    "analysis_mhd_energy_audit_central.py diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_energy_audit_central_flow  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_energy_audit_central implicit_mhd.central_dissipation_entropy_speed=flow"  # inputs
+    "analysis_mhd_energy_audit_central.py diags/energy_audit.txt ../test_rz_theta_implicit_mhd_energy_audit_central_flow_fine/diags/energy_audit.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_energy_audit_central_flow_fine  # dependency
 )

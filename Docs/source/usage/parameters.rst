@@ -1051,6 +1051,30 @@ Overall simulation parameters
               hlld only; resolved cells per implicit interval subtracted
               from the per-direction reference signal speed before the
               diffusion coefficient is formed.
+            - ``pc_mhd_block.fluid_upwind`` (``string``, default:
+              ``residual``): fluid upwind rows of the block on the
+              ``central`` recast path. ``residual``: the block carries no
+              fluid advection dissipation of its own (the opt-in signal
+              diffusion aside). ``rusanov``: every cell-centered fluid
+              row takes the first-order Rusanov diffusion
+              :math:`\theta \Delta t\, \alpha\, \Delta x / 2` with the
+              solver's per-face fast bound :math:`\alpha = |u_n| + c_f`
+              (the same face speeds the residual's
+              :pp:param:`implicit_mhd.central_dissipation` term is built
+              from, frozen at the last residual evaluation like the
+              conduction registers), *whatever* the residual's own
+              coefficient -- the Chacon / Knoll layout: no artificial
+              dissipation in the residual, first-order upwinding inside
+              the preconditioner only. ``upwind``: the same with the
+              non-momentum rows at the smoothed flow speed (the diagonal
+              blocks of the flow-upwinded penalty,
+              :pp:param:`implicit_mhd.central_dissipation_entropy_speed`
+              ``= flow``). The diffusion rides the shared signal-diffusion
+              Helmholtz (per stacked component, on top of the conduction
+              block's coefficient on the energy rows, into the exact
+              conduction inverse when that is selected); wall interface
+              and interior-metal faces carry no coefficient. Requires
+              ``implicit_mhd.fluid_flux = central``.
             - ``pc_mhd_block.conduction_block`` (``bool``, default: true):
               recast path only; fold the solver's frozen per-face
               conduction diffusivities
@@ -6657,6 +6681,112 @@ Jacobian probes.
     would fight the explicit :math:`\eta` / :math:`\eta_H`, and in RZ it
     would break the choice that ``central`` leaves the fan's rotational
     speeds at zero so a held equilibrium suffers no corner diffusion.
+
+.. pp:param:: implicit_mhd.central_dissipation_entropy_speed
+    :type: ``string``
+    :default: ``fast``
+
+    Penalty speed of the *entropy* channels of the ``central`` flux's
+    Rusanov term: the density, the electron energy, the dual-energy
+    internal energy and the entropy part of the ion total energy.
+    ``fast`` is the legacy scalar bound :math:`\alpha = |u_n| + c_f` on
+    every channel (bit-identical default). ``flow`` penalises those
+    channels at the smoothed normal flow speed
+
+    .. math::
+
+        \alpha_s = \tfrac{1}{2}\left(|u_L|_w + |u_R|_w\right), \qquad
+        |u|_w = \frac{u^2}{\sqrt{u^2 + w^2}},
+
+    :math:`w = \kappa\,(c_{f,L} + c_{f,R})` with
+    :math:`\kappa` = :pp:param:`implicit_mhd.central_dissipation_flow_kappa`,
+    which turns their penalty into the flow-upwind flux across the
+    reconstructed face states: for a common :math:`u` the identity
+    :math:`(u q_L + u q_R)/2 - (|u|/2)(q_R - q_L) = u\,q_\mathrm{upwind}`
+    holds exactly, and the reference code's flux-form median-limited
+    advection is exactly that flux. The scalar fast bound diffuses the
+    entropy wave -- density and temperature jumps at constant total
+    pressure and velocity, the separatrix of a held equilibrium -- at
+    :math:`|u_n| + c_f` in every direction although that wave moves at
+    :math:`u_n` alone; wherever the reconstruction clips this is a
+    field-blind Fickian diffusion :math:`D = c\,\alpha\,\Delta x/2` of
+    mass and internal energy across the field. :math:`|u|_w` is exactly
+    zero at :math:`u = 0` for any width (a static contact is preserved
+    to roundoff) and :math:`C^\infty` for :math:`w > 0`; every term of
+    the penalty stays :math:`C^\infty` in the state. Momentum keeps the
+    fast bound (the acoustic and Alfven families are dissipated through
+    the velocity).
+
+    The ion total energy rides both families, so under ``flow`` (and
+    whenever the two coefficients below differ) its penalty is split by
+    the linearised chain rule :math:`dE = dU + u\cdot dm - (|u|^2/2)\,d\rho`:
+    the kinetic part :math:`u_f\cdot(m_R - m_L) - (|u_f|^2/2)(\rho_R -
+    \rho_L)`, :math:`u_f = (u_L + u_R)/2`, takes the momentum coefficient
+    and the fast speed; the remainder (the internal-energy jump up to a
+    third-order term) takes the entropy coefficient and speed. In the
+    modified equation the internal energy then receives the entropy-speed
+    diffusion of :math:`U_i` -- the same speed the auxiliary :math:`U_i`
+    channel and the density get -- plus the heating of the fast-speed
+    momentum penalty, booked consistently. With equal coefficients and
+    speeds the split collapses to the single legacy jump term.
+
+.. pp:param:: implicit_mhd.central_dissipation_momentum
+    :type: ``float``
+    :default: :pp:param:`implicit_mhd.central_dissipation`
+
+    Coefficient in :math:`[0, 1]` of the momentum penalty and of the
+    kinetic part of the ion-energy penalty. Lets the momentum penalty go
+    to zero on its own, the physical :pp:param:`implicit_mhd.viscosity`
+    then being the only momentum dissipation.
+
+.. pp:param:: implicit_mhd.central_dissipation_entropy
+    :type: ``float``
+    :default: :pp:param:`implicit_mhd.central_dissipation`
+
+    Coefficient in :math:`[0, 1]` of the entropy channels' penalty
+    (density, electron energy, dual-energy internal energy, entropy part
+    of the ion energy).
+
+.. pp:param:: implicit_mhd.central_dissipation_flow_kappa
+    :type: ``float``
+    :default: ``0.01``
+
+    Width fraction of the :math:`C^\infty` rounding of the flow speed
+    (see :pp:param:`implicit_mhd.central_dissipation_entropy_speed`):
+    the rounded :math:`|u|` is exactly zero at :math:`u = 0` for any
+    value and within :math:`O(w)` of :math:`|u|` elsewhere; ``0`` is the
+    hard :math:`|u_n|` with its kink at :math:`u_n = 0`.
+
+.. pp:param:: implicit_mhd.central_dissipation_entropy_gate
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Total-pressure-jump gate of the flow speed, :math:`\kappa_p`. With
+    ``central_dissipation_entropy_speed = flow`` the entropy speed of a
+    face is blended from the flow speed back to the fast bound by
+
+    .. math::
+
+        \alpha_s \leftarrow \alpha_s + (\alpha - \alpha_s)\,\phi, \qquad
+        \phi = \frac{\Delta p_\mathrm{tot}^2}{\Delta p_\mathrm{tot}^2 +
+        (\kappa_p\, \bar p_\mathrm{tot})^2},
+
+    :math:`\Delta p_\mathrm{tot}` the face jump of the total pressure
+    :math:`p_i + p_e + |B|^2/2\mu_0` across the reconstructed face
+    states. Pressure-balanced faces -- a contact, a tangential
+    discontinuity, a held separatrix -- have :math:`\Delta p_\mathrm{tot}
+    = 0` and keep the flow speed exactly (statics stay machine-
+    preserved); a shock or an acoustic front whose total-pressure jump
+    exceeds :math:`\kappa_p` of the mean takes the fast bound. One
+    :math:`C^\infty` blend is shared by every entropy channel, so the
+    same speed keeps acting on the density and on the internal energies.
+    Pure flow-upwinding (:math:`\kappa_p = 0`) leaves the pressure work
+    :math:`u\,(p_i + p_e)` of the central flux without acoustic damping
+    in the entropy channels: on the electron-pressure-dominated shock
+    tube the ion energy is driven onto its floor within a few steps and
+    the Newton line search locks; :math:`\kappa_p = 0.1` restores the
+    fast-speed behaviour at the shock while leaving pressure-balanced
+    structures flow-upwinded.
 
 .. pp:param:: implicit_mhd.reconstruction_kappa
     :type: ``float``
