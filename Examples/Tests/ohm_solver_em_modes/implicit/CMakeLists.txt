@@ -115,10 +115,11 @@ add_warpx_test(
 label_warpx_test(test_rz_ohm_solver_em_modes_implicit_picmi slow)
 
 # Block-banded direct preconditioner (pc_block_banded) arm of the RZ deck
-# (declared after its dependency, which must already be registered). Two
-# ranks split the BoxArray, which routes the preconditioner through the
-# replicated-global solve with the duplicate-DOF pass-through in the
-# write-back. The solver-internal verification gates (extraction self-check
+# (declared after its dependency, which must already be registered). In test
+# mode, max_grid_size=128 covers the 64x128 domain in one BoxArray box. Two
+# ranks therefore exercise auto-global resolution to the local path while
+# leaving one rank with no local box. The solver-internal verification gates
+# (extraction self-check
 # against the frozen apply, LU and Apply round-trips, FD Jacobian-vector
 # product comparison against the true residual) run at every rebuild via
 # precond.bb_verify and abort on failure, and newton.require_convergence

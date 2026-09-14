@@ -1415,7 +1415,7 @@ void BlockBandedPC<T,Ops>::GatherCoefficients (const T& a_U)
     auto& u_mfarrvec = a_U.getArrayVec();
     const MultiFab& Ermf = *(u_mfarrvec[0][0]);
 
-    if (m_global) {
+    if (m_global_on) {
         // replicated global system: gather each coefficient field onto a
         // domain-spanning host buffer on every rank
         HostFab hBr, hBt, hBz, hRho, hJir, hJit, hJiz, hRhoPol;

@@ -206,10 +206,15 @@ class CylindricalNormalModes(object):
         # path used in production, and it keeps the rebuild cost (probe +
         # factor, ~2 s/rebuild at this scale on a full host) inside the CI
         # budget on a 2-core runner while still running the verification
-        # gates at five distinct states across the run.
+        # gates at five distinct states across the run. In test mode the
+        # 64x128 domain with max_grid_size=128 is one BoxArray box. The
+        # two-rank CTest therefore leaves one rank with no local box and
+        # explicitly exercises auto-global resolution to local mode.
         pc = None
         if self.pc_bb:
-            pc = picmi.BlockBandedPreconditioner(verify=True, update_interval=10)
+            pc = picmi.BlockBandedPreconditioner(
+                verify=True, update_interval=10, global_solve=-1
+            )
         if self.dt_mult > 1.0:
             # whistler-stiff arm: the line search rescues the large-dt Newton
             # basin (without it the unpreconditioned dt x4/x8 solves can
