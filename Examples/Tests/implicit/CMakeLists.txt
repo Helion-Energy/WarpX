@@ -3380,17 +3380,23 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# the same pressure-balanced column on the production central stack: the
+# the same pressure-balanced column on the production central flux: the
 # electron-energy profile that carries the balance is an entropy-channel
 # contact at u = 0, so the fast-speed Rusanov penalty diffuses it (and
 # with it the equilibrium) within the run -- the FRC-halo hold failure
-# the per-channel speed removes: at the flow speed every field is
-# machine-preserved
+# the per-channel speed removes: at the flow speed (the total-pressure
+# gate inert at zero pressure jump) every field is machine-preserved.
+# Donor-cell face states: a second-order reconstruction of a SMOOTH
+# profile shifts the discrete equilibrium by O(dx^2) whatever the penalty
+# (van Albada moves this column by 5e-4 of rho in 10 steps even at zero
+# dissipation, the smoothed median by more), so only the unreconstructed
+# flux has this column as its exact fixed point; the step-profile annulus
+# above is exact under van Albada because its slopes vanish
 add_warpx_test(
     test_rz_theta_implicit_mhd_theta_pinch_central_flow  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
     "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100 exact"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -3400,7 +3406,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_theta_pinch_central_fast  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_theta_pinch implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.central_dissipation=1.0"  # inputs
     "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100 diffuse"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -3408,19 +3414,21 @@ add_warpx_test(
 
 # Reversed-field column hold (the infinite-length FRC analogue: Bz through a
 # null, pe-carried pressure balance, a density step riding the null) on the
-# production central stack -- the closed-flux-mass gate of the per-channel
-# penalty speed. Static hold: the flow-speed penalty preserves every field
-# to machine zero, the fast-speed penalty leaks closed-flux mass through
-# the density step (calibration). Pulsed hold (a radial z-modulated
-# velocity pulse, u_pert = 0.05 v0): the fast, flow and zero-dissipation +
-# preconditioner-upwind arms all complete within the Newton budget with
-# their Newton / GMRES work recorded, and the flow arm's closed-flux mass
-# loss must be below half the fast arm's.
+# production central flux -- the closed-flux-mass gate of the per-channel
+# penalty speed. Static hold (donor-cell face states, the exact fixed point
+# of the unreconstructed flux -- see the theta-pinch gates): the flow-speed
+# penalty preserves every field to machine zero, the fast-speed penalty
+# leaks closed-flux mass through the density step (calibration). Pulsed
+# hold on the production stack (median reconstruction; a radial
+# z-modulated velocity pulse, u_pert = 0.05 v0): the fast, flow and
+# zero-dissipation + preconditioner-upwind arms all complete within the
+# Newton budget with their Newton / GMRES work recorded, and the flow arm's
+# closed-flux mass loss must be below half the fast arm's.
 add_warpx_test(
     test_rz_theta_implicit_mhd_reversed_column_hold_flow  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0 implicit_mhd.central_dissipation_entropy_speed=flow implicit_mhd.central_dissipation_entropy_gate=0.1"  # inputs
     "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 exact"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -3430,7 +3438,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_reversed_column_hold_fast  # name
     RZ  # dims
     1  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=1.0"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
     "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 diffuse"  # analysis
     OFF  # checksum
     OFF  # dependency
