@@ -444,6 +444,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * residual kernels. Must be called after the nonlinear solve and
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
+    /** Local penalty guard bookkeeping (central_dissipation_guard_ledger_
+     * file with an active guard): recomputes BOTH directions' face fluxes
+     * of the ACCEPTED theta state with the capture flag armed (the same
+     * fluxes the step integrated, so a converged solve books the guard's
+     * transport exactly), integrates per channel the gross transport
+     * sum |F| A dt the guard added and the full penalty of the guarded
+     * faces (annulus areas 2 pi r_face dz / 2 pi r_centre dr in RZ, unit
+     * area in 1D; every face owned by exactly one box), accumulates the
+     * cumulative guard-added totals and appends the step's row. Must be
+     * called after UpdateWarpXFields(m_state, ...) and before
+     * FinishStateUpdate; state_prepared = true when the wall ledger has
+     * just refreshed the plasma current and the cell-centred fields. */
+    void AccumulatePenaltyGuardLedger (amrex::Real dt, int step,
+                                       amrex::Real a_time, bool state_prepared);
 
     // ---- GLOBAL ENERGY AUDIT (implicit_mhd.energy_audit_file; off when
     // empty, bit-identical: none of the audit code runs and the RHS
@@ -2409,6 +2423,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
                   ImplicitSolver::MHDConductionPCFaceDensityComponent);
     static_assert(ConductionPCCrossElectron ==
                   ImplicitSolver::MHDConductionPCCrossComponent);
+    // ---- Local penalty guard ledger registers (see
+    // m_central_dissipation_guard_ledger_file): one face-type MultiFab per
+    // direction, allocated on the first ledger pass and written by the
+    // face kernels only while m_penalty_guard_capture is set -- the face
+    // switch S and, per channel, the penalty the guard added and the full
+    // penalty of the face (FaceFlux::guard_* / penalty_*). Never touched
+    // by a residual evaluation.
+    struct PenaltyGuardRegister {
+        enum : int {
+            guard_switch = 0,
+            guard_mass,
+            guard_electron_energy,
+            guard_ion_energy,
+            guard_ion_internal_energy,
+            penalty_mass,
+            penalty_electron_energy,
+            penalty_ion_energy,
+            penalty_ion_internal_energy,
+            count
+        };
+    };
+    amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM>
+        m_penalty_guard_register;
     // ---- Fluid upwind rows of the block preconditioner
     // (pc_mhd_block.fluid_upwind = residual | rusanov | upwind; the
     // solver reads the same key to know whether to emit). With a mode
@@ -2647,6 +2684,59 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // back (shocks, acoustic fronts); pressure-balanced faces keep the
     // flow speed exactly. See the kernel's TOTAL-PRESSURE GATE block.
     amrex::Real m_central_dissipation_entropy_gate = 0.0;
+    // ---- LOCAL PENALTY GUARD (see the LOCAL PENALTY GUARD block of
+    // central_flux in ThetaImplicitMHD_K.H): the face coefficients of
+    // every penalised channel become c_face = c + (1 - c) S, S in [0, 1]
+    // the max over the two cells of three C-infinity switches, each off
+    // (bit-identical) by default. A reduced c keeps the closed-flux mass
+    // and energy the full penalty diffused; the guard restores the full
+    // penalty only where the converging flow stagnates and digs the
+    // dispersive near-floor holes the full penalty used to refill.
+    // implicit_mhd.central_dissipation_floor_guard_density [m^-3] (0 = off):
+    // S_n = 1 where the STEP-OLD number density is at or below n_g, 0 at
+    // or above n_g 10^width, a C-infinity step in log10(n_old / n_g)
+    // between (smooth_unit_step_down). Frozen across the Newton solve
+    // like the conduction coefficients (a per-solve constant for the
+    // JFNK). Converted to a mass density with the ion charge-to-mass,
+    // like the static pedestal density.
+    amrex::Real m_central_dissipation_floor_guard_density = 0.0;
+    // implicit_mhd.central_dissipation_floor_guard_width: the log10 width
+    // of the density switch (default 0.5: fully off at 3.16 n_g).
+    amrex::Real m_central_dissipation_floor_guard_width = 0.5;
+    // implicit_mhd.central_dissipation_symmetry_plane_cells = N (0 = off;
+    // RZ, requires z_lo_boundary_fluid = symmetry): S_sym = 1 in the N
+    // cell rows nearest the z_lo mirror plane, a C-infinity taper over
+    // the next two rows (0.82, 0.18), 0 beyond. Static geometry.
+    int m_central_dissipation_symmetry_plane_cells = 0;
+    // implicit_mhd.central_dissipation_wall_band_guard = 0 | 1 (requires
+    // wall_viscosity_mask): S_band = 1 on the cells of the wall viscosity
+    // band (Chebyshev distance <= wall_viscosity_mask_width of the masked
+    // contour, the same test the band coefficient uses). Static geometry.
+    int m_central_dissipation_wall_band_guard = 0;
+    // True when any of the three switches is on (the kernel then
+    // evaluates and reads CellState::penalty_guard); false = the legacy
+    // arithmetic bit for bit.
+    bool m_central_dissipation_guard_active = false;
+    // implicit_mhd.central_dissipation_guard_ledger_file (requires an
+    // active guard; empty = no booking): one row per step, written by
+    // AccumulatePenaltyGuardLedger from a face-flux pass on the ACCEPTED
+    // theta state -- the number of guarded faces (S > 0), the gross
+    // transport sum |F| A dt the guard ADDED per channel (mass [kg], U_e,
+    // E_i, U_i [J]), the gross FULL penalty transport of the guarded
+    // faces per channel, and the cumulative guard-added totals.
+    std::string m_central_dissipation_guard_ledger_file;
+    bool m_central_dissipation_guard_ledger_started = false;
+    // Capture flag of the ledger pass (FluxParameters::
+    // central_dissipation_guard_capture): true only inside
+    // AccumulatePenaltyGuardLedger's face-flux evaluation.
+    bool m_penalty_guard_capture = false;
+    // Cumulative guard-added gross transport [kg, J, J, J].
+    amrex::Real m_penalty_guard_mass_moved = 0.0;
+    amrex::Real m_penalty_guard_electron_energy_moved = 0.0;
+    amrex::Real m_penalty_guard_ion_energy_moved = 0.0;
+    amrex::Real m_penalty_guard_ion_internal_energy_moved = 0.0;
+    /** The banner's one-line description of the local penalty guard. */
+    [[nodiscard]] std::string PenaltyGuardBannerText () const;
     // Explicit ion kinematic viscosity nu_i [m^2/s] of the recast face
     // fluxes (0 = off; required positive for fluid_flux = central). The
     // normal-gradient viscous stress and its velocity-weighted work enter

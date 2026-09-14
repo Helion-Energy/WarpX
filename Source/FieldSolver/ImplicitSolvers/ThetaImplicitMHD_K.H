@@ -252,6 +252,23 @@ struct FluxParameters {
     // / _flow for the block preconditioner's fluid upwind rows
     // (pc_mhd_block.fluid_upwind), also when every coefficient is zero.
     bool emit_dissipation_speeds = false;
+    // LOCAL PENALTY GUARD (implicit_mhd.central_dissipation_floor_guard_
+    // density / _floor_guard_width, central_dissipation_symmetry_plane_
+    // cells, central_dissipation_wall_band_guard; see the LOCAL PENALTY
+    // GUARD block of central_flux). A per-solve constant: when set the
+    // face coefficients become c_face = c + (1 - c) S with
+    // S = max(left.penalty_guard, right.penalty_guard) in [0, 1], the
+    // per-cell switch ComputeDirectionalFaceFluxes evaluates from the
+    // STEP-OLD density, the distance to the z_lo mirror plane and the
+    // wall viscosity band. False (every guard knob off) = the per-solve
+    // constant coefficients bit for bit.
+    bool central_dissipation_guard = false;
+    // Ledger capture (the guard ledger's own face-flux pass on the
+    // accepted theta state; a per-solve constant, false in every residual
+    // evaluation): central_flux fills FaceFlux::guard_* / penalty_* with
+    // the part of the penalty the guard added and the full penalty of
+    // the face, per channel.
+    bool central_dissipation_guard_capture = false;
 };
 
 // C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
@@ -307,6 +324,14 @@ struct CellState {
     // advects no field). Set by ComputeDirectionalFaceFluxes on the band
     // cells of the force mask; every other channel ignores it. ---
     amrex::Real induction_velocity_weight = 1.0;
+    // --- Local penalty guard (FluxParameters::central_dissipation_guard):
+    // this cell's switch S in [0, 1] -- the max of the step-old-density
+    // switch, the z_lo mirror-plane proximity and the wall-band
+    // membership (ComputeDirectionalFaceFluxes sets it after the
+    // reconstruction, so the wall image copies the interior's value).
+    // central_flux raises the face coefficients by max(left, right) of
+    // it; every other consumer ignores it. Default 0 = no raise. ---
+    amrex::Real penalty_guard = 0.0;
 };
 
 struct FaceFlux {
@@ -373,6 +398,22 @@ struct FaceFlux {
     // per-cell wave speed) and the smoothed normal flow speed.
     amrex::Real dissipation_speed_fast = 0.0;
     amrex::Real dissipation_speed_flow = 0.0;
+    // Local penalty guard ledger (FluxParameters::central_dissipation_
+    // guard_capture, the ledger's own face pass only): the face switch S,
+    // the part of each channel's Rusanov penalty the guard ADDED,
+    // (c_face - c) / c_face of the term, and the FULL penalty of the face
+    // (flux units: kg m^-2 s^-1 for mass, W m^-2 for the energies; the
+    // sign of the term the flux was reduced by). Zero in every residual
+    // evaluation.
+    amrex::Real guard_switch = 0.0;
+    amrex::Real guard_mass = 0.0;
+    amrex::Real guard_electron_energy = 0.0;
+    amrex::Real guard_ion_energy = 0.0;
+    amrex::Real guard_ion_internal_energy = 0.0;
+    amrex::Real penalty_mass = 0.0;
+    amrex::Real penalty_electron_energy = 0.0;
+    amrex::Real penalty_ion_energy = 0.0;
+    amrex::Real penalty_ion_internal_energy = 0.0;
 };
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
@@ -668,6 +709,27 @@ smooth_sign (const amrex::Real value, const amrex::Real width) noexcept {
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 smooth_abs (const amrex::Real value, const amrex::Real width) noexcept {
     return value * smooth_sign(value, width);
+}
+
+// C-infinity unit step DOWN: EXACTLY 1 for x <= 0, EXACTLY 0 for x >= 1,
+// and in between the classic bump-function partition of unity
+//     e(1 - x) / (e(1 - x) + e(x)),   e(t) = exp(-1/t)  (t > 0),
+// which is 1/2 at x = 1/2 and has every derivative vanishing at both
+// ends (so the two exact plateaus join the ramp without any kink). The
+// local penalty guard builds its density switch and its mirror-plane
+// taper from it: the exact plateaus are what make a guard whose
+// arguments never leave the "off" plateau bit-identical to no guard.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smooth_unit_step_down (const amrex::Real x) noexcept {
+    if (x <= 0.0) {
+        return 1.0;
+    }
+    if (x >= 1.0) {
+        return 0.0;
+    }
+    const amrex::Real e_up = std::exp(-1.0 / (1.0 - x));
+    const amrex::Real e_down = std::exp(-1.0 / x);
+    return e_up / (e_up + e_down);
 }
 
 // Smooth max(value, floor) for floor >= 0 -- the same C^1 smooth-max
@@ -3354,8 +3416,45 @@ central_flux (const CellState& left, const CellState& right,
     // speed keeps acting on rho and on the internal energies). phi is
     // exactly 0 wherever dp is exactly 0, so pressure-balanced statics
     // stay machine-preserved.
-    const bool momentum_penalty = parameters.central_dissipation_momentum > 0.0;
-    const bool entropy_penalty = parameters.central_dissipation_entropy > 0.0;
+    //
+    // LOCAL PENALTY GUARD (central_dissipation_guard; the knobs
+    // central_dissipation_floor_guard_density / _floor_guard_width,
+    // central_dissipation_symmetry_plane_cells and
+    // central_dissipation_wall_band_guard). A reduced coefficient
+    // c < 1 keeps the closed-flux mass and energy the penalty used to
+    // diffuse (the point of the ladder), but the FULL penalty was also
+    // what refilled the dispersive density holes the converging flow
+    // digs where it stagnates -- the axis at the implosion's
+    // convergence, the no-slip wall band, and the z_lo mirror plane
+    // where u_z is odd -- and a hole whose density collapses toward the
+    // floor while its internal energy stays finite is a T = U/n runaway
+    // (measured: a 7e17 m^-3 cell four cells off the wall at the mirror
+    // plane at 177 keV on the c = 0.25 arm, none at c = 1). The guard
+    // restores the full penalty LOCALLY: with S = max(left, right) of
+    // the two face states' CellState::penalty_guard (each the max of a
+    // C-infinity step in the STEP-OLD density -- 1 at n_old <= n_g, 0 at
+    // n_old >= n_g 10^width, frozen across the Newton solve like the
+    // conduction coefficients so the JFNK sees a constant --, the
+    // mirror-plane proximity (1 within N cells of the z_lo plane, a
+    // C-infinity taper over the next two) and the wall viscosity band
+    // (1 on its faces)), EVERY penalised channel takes
+    //
+    //     c_face = c + (1 - c) S
+    //
+    // in place of its coefficient: the reduced c wherever S = 0, the
+    // full c = 1 wherever S = 1, C-infinity in between; the speeds and
+    // the reconstruction are untouched, so on a guarded face the term
+    // is exactly the c = 1 penalty of the same face states. With every
+    // guard knob off the coefficients are the per-solve constants and
+    // the arithmetic below is the legacy one bit for bit (S is not
+    // read). The guard's own transport is booked by the ledger pass
+    // (central_dissipation_guard_capture): per channel the full penalty
+    // of the face and the share (c_face - c) / c_face the guard added.
+    const bool penalty_guard = parameters.central_dissipation_guard;
+    const bool momentum_penalty =
+        parameters.central_dissipation_momentum > 0.0 || penalty_guard;
+    const bool entropy_penalty =
+        parameters.central_dissipation_entropy > 0.0 || penalty_guard;
     if (momentum_penalty || entropy_penalty ||
         parameters.emit_dissipation_speeds) {
         const amrex::Real dissipation_speed = smooth_max(
@@ -3396,14 +3495,100 @@ central_flux (const CellState& left, const CellState& right,
         }
         flux.dissipation_speed_fast = dissipation_speed;
         if (momentum_penalty || entropy_penalty) {
+            // The face coefficients: the per-solve constants, raised
+            // locally by the guard (c_face = c + (1 - c) S; the raise is
+            // exactly zero where S is exactly zero, and the products
+            // below are then the legacy ones bit for bit).
+            amrex::Real c_momentum = parameters.central_dissipation_momentum;
+            amrex::Real c_entropy = parameters.central_dissipation_entropy;
+            amrex::Real guard_switch = 0.0;
+            if (penalty_guard) {
+                guard_switch =
+                    std::max(left.penalty_guard, right.penalty_guard);
+                c_momentum += (1.0 - c_momentum) * guard_switch;
+                c_entropy += (1.0 - c_entropy) * guard_switch;
+            }
             const amrex::Real coefficient_momentum =
-                0.5 * parameters.central_dissipation_momentum *
-                dissipation_speed;
+                0.5 * c_momentum * dissipation_speed;
             const amrex::Real coefficient_entropy =
-                0.5 * parameters.central_dissipation_entropy * entropy_speed;
+                0.5 * c_entropy * entropy_speed;
             const amrex::Real coefficient_electron =
-                0.5 * parameters.central_dissipation_entropy *
-                electron_entropy_speed;
+                0.5 * c_entropy * electron_entropy_speed;
+            if (parameters.central_dissipation_guard_capture) {
+                // Ledger pass only (a per-solve constant, off in every
+                // residual evaluation): book the penalty each channel
+                // receives on this face and the share the guard added.
+                // The ion total-energy split below is repeated here
+                // verbatim so the residual arithmetic stays untouched.
+                const amrex::Real share_momentum =
+                    c_momentum > 0.0
+                        ? (c_momentum -
+                           parameters.central_dissipation_momentum) /
+                              c_momentum
+                        : 0.0;
+                const amrex::Real share_entropy =
+                    c_entropy > 0.0
+                        ? (c_entropy - parameters.central_dissipation_entropy) /
+                              c_entropy
+                        : 0.0;
+                // penalty_* books the GUARDED faces only (S > 0): an
+                // unguarded face's penalty is the deck's own business.
+                const amrex::Real guarded = guard_switch > 0.0 ? 1.0 : 0.0;
+                flux.guard_switch = guard_switch;
+                flux.penalty_mass =
+                    guarded * coefficient_entropy *
+                    (right.density - left.density);
+                flux.guard_mass = share_entropy * flux.penalty_mass;
+                flux.penalty_electron_energy =
+                    guarded * coefficient_electron *
+                    (right.electron_energy - left.electron_energy);
+                flux.guard_electron_energy =
+                    share_entropy * flux.penalty_electron_energy;
+                if (parameters.total_energy_closure) {
+                    if (parameters.central_dissipation_split_ion_energy) {
+                        amrex::Real kinetic_jump = 0.0;
+                        amrex::Real face_speed_squared = 0.0;
+                        for (int component = 0; component < 3; ++component) {
+                            const amrex::Real face_velocity =
+                                0.5 * (left.ion_velocity[component] +
+                                       right.ion_velocity[component]);
+                            kinetic_jump +=
+                                face_velocity * (right.momentum[component] -
+                                                 left.momentum[component]);
+                            face_speed_squared +=
+                                face_velocity * face_velocity;
+                        }
+                        kinetic_jump -= 0.5 * face_speed_squared *
+                                        (right.density - left.density);
+                        const amrex::Real entropy_jump =
+                            (right.ion_energy - left.ion_energy) -
+                            kinetic_jump;
+                        const amrex::Real penalty_kinetic =
+                            coefficient_momentum * kinetic_jump;
+                        const amrex::Real penalty_entropy =
+                            coefficient_entropy * entropy_jump;
+                        flux.penalty_ion_energy =
+                            guarded * (penalty_kinetic + penalty_entropy);
+                        flux.guard_ion_energy =
+                            share_momentum * penalty_kinetic +
+                            share_entropy * penalty_entropy;
+                    } else {
+                        flux.penalty_ion_energy =
+                            guarded * coefficient_momentum *
+                            (right.ion_energy - left.ion_energy);
+                        flux.guard_ion_energy =
+                            share_momentum * coefficient_momentum *
+                            (right.ion_energy - left.ion_energy);
+                    }
+                }
+                if (parameters.dual_energy_closure) {
+                    flux.penalty_ion_internal_energy =
+                        guarded * coefficient_entropy *
+                        (right.ion_internal_energy - left.ion_internal_energy);
+                    flux.guard_ion_internal_energy =
+                        share_entropy * flux.penalty_ion_internal_energy;
+                }
+            }
             flux.mass -= coefficient_entropy * (right.density - left.density);
             for (int component = 0; component < 3; ++component) {
                 flux.momentum[component] -=

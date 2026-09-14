@@ -1835,6 +1835,73 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_central_dissipation_entropy_gate >= 0.0_rt,
         "implicit_mhd.central_dissipation_entropy_gate cannot be negative "
         "(0 = off: the pure flow speed on every entropy face)");
+    // Local penalty guard (see the members and the LOCAL PENALTY GUARD
+    // block of central_flux): three switches, each off by default, that
+    // raise the face coefficient to c_face = c + (1 - c) S.
+    utils::parser::queryWithParser(pp, "central_dissipation_floor_guard_density",
+                                   m_central_dissipation_floor_guard_density);
+    utils::parser::queryWithParser(pp, "central_dissipation_floor_guard_width",
+                                   m_central_dissipation_floor_guard_width);
+    utils::parser::queryWithParser(pp, "central_dissipation_symmetry_plane_cells",
+                                   m_central_dissipation_symmetry_plane_cells);
+    utils::parser::queryWithParser(pp, "central_dissipation_wall_band_guard",
+                                   m_central_dissipation_wall_band_guard);
+    pp.query("central_dissipation_guard_ledger_file",
+             m_central_dissipation_guard_ledger_file);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_floor_guard_density >= 0.0_rt,
+        "implicit_mhd.central_dissipation_floor_guard_density [m^-3] cannot "
+        "be negative (0 = off)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_floor_guard_width > 0.0_rt,
+        "implicit_mhd.central_dissipation_floor_guard_width (log10 decades) "
+        "must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_symmetry_plane_cells >= 0,
+        "implicit_mhd.central_dissipation_symmetry_plane_cells cannot be "
+        "negative (0 = off)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_wall_band_guard == 0 ||
+            m_central_dissipation_wall_band_guard == 1,
+        "implicit_mhd.central_dissipation_wall_band_guard must be 0 (off) "
+        "or 1");
+    m_central_dissipation_guard_active =
+        (m_central_dissipation_floor_guard_density > 0.0_rt) ||
+        (m_central_dissipation_symmetry_plane_cells > 0) ||
+        (m_central_dissipation_wall_band_guard != 0);
+    if (m_central_dissipation_guard_active) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_central,
+            "the local penalty guard (implicit_mhd.central_dissipation_"
+            "floor_guard_density / _symmetry_plane_cells / _wall_band_guard) "
+            "raises the central flux's Rusanov coefficient and requires "
+            "implicit_mhd.fluid_flux = central");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_central_dissipation_momentum < 1.0_rt ||
+                m_central_dissipation_entropy < 1.0_rt,
+            "the local penalty guard raises c_face = c + (1 - c) S: with "
+            "both penalty coefficients already at 1 it does nothing (a knob "
+            "that does nothing is never accepted silently); reduce "
+            "implicit_mhd.central_dissipation (or _momentum / _entropy) or "
+            "drop the guard knobs");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_central_dissipation_symmetry_plane_cells == 0 ||
+                m_z_lo_boundary_fluid == "symmetry",
+            "implicit_mhd.central_dissipation_symmetry_plane_cells guards "
+            "the z_lo MIRROR plane and requires implicit_mhd.z_lo_boundary_"
+            "fluid = symmetry (on a non-mirror z_lo end the switch would "
+            "guard an ordinary boundary row)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_central_dissipation_wall_band_guard == 0 || m_wall_viscosity_mask,
+            "implicit_mhd.central_dissipation_wall_band_guard guards the "
+            "wall viscosity band and requires implicit_mhd.wall_viscosity_"
+            "mask = 1 (the band it would guard does not exist otherwise)");
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation_guard_ledger_file.empty() ||
+            m_central_dissipation_guard_active,
+        "implicit_mhd.central_dissipation_guard_ledger_file books the local "
+        "penalty guard's transport and requires an active guard switch");
     {
         // The block preconditioner's fluid upwind rows
         // (pc_mhd_block.fluid_upwind) need the face penalty speeds from
@@ -4790,6 +4857,8 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? " (face penalty speeds emitted for pc_mhd_block)"
                            : std::string{})
                    << "\n"
+                   << "Central penalty guard:         "
+                   << PenaltyGuardBannerText() << "\n"
                    << "Shaped conducting-wall mask:   "
                    << m_wall_mask.ModeName() << "\n"
                    << "Wall thermal BC:               "
@@ -6762,6 +6831,22 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // accepted theta state, before FinishStateUpdate extrapolates it
         // to t^{n+1}.
         AccumulateHaloRelaxationLedger(m_dt, step);
+    }
+    if (m_use_recast && m_central_dissipation_guard_active &&
+        !m_central_dissipation_guard_ledger_file.empty()) {
+        // Book the local penalty guard's transport from the accepted theta
+        // state (both directions' face fluxes recomputed with the capture
+        // flag armed), before FinishStateUpdate extrapolates it to t^{n+1}.
+        // The wall ledger above, when it ran, has already refreshed the
+        // plasma current and the cell-centred fields of this state.
+        bool state_prepared = false;
+#if defined(WARPX_DIM_RZ)
+        state_prepared =
+            (m_r_open && m_r_open_fluid == "absorb") ||
+            m_wall_mask.GetThermalBC() != ImplicitMHDWallMask::ThermalBC::none;
+#endif
+        AccumulatePenaltyGuardLedger(m_dt, step, start_time + m_theta * m_dt,
+                                     state_prepared);
     }
     // Global energy audit: the accepted theta-state evaluation (face
     // fluxes, Ohm E, RHS with the registers armed; Efield_fp restored),
@@ -9988,6 +10073,12 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     flux_parameters.central_dissipation_entropy_gate =
         m_central_dissipation_entropy_gate;
     flux_parameters.emit_dissipation_speeds = m_fluid_upwind_pc_active;
+    // Local penalty guard (per-solve constants; the capture flag is set
+    // only inside the ledger's own face pass).
+    flux_parameters.central_dissipation_guard =
+        m_central_dissipation_guard_active;
+    flux_parameters.central_dissipation_guard_capture =
+        m_central_dissipation_guard_active && m_penalty_guard_capture;
     // Per-step frozen pedestal state (0 while the pedestal is off):
     // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
@@ -11128,6 +11219,34 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // constant for the JFNK probes.
     const bool wall_viscosity_band_capped =
         (m_wall_viscosity_band_mode == WallViscosityBandMode::capped);
+    // Local penalty guard (see the members and the LOCAL PENALTY GUARD
+    // block of central_flux): the per-cell switch is evaluated in the
+    // kernel from static geometry and the frozen step-old density, so
+    // every branch is a constant for the JFNK probes. Off = the kernel
+    // never reads these.
+    const bool penalty_guard = m_central_dissipation_guard_active;
+    // n_g [m^-3] -> mass density, like the static pedestal density.
+    const amrex::Real guard_mass_density =
+        penalty_guard ? m_central_dissipation_floor_guard_density *
+                            PhysConst::q_e / m_ion_charge_to_mass
+                      : 0.0_rt;
+    const amrex::Real guard_inverse_log_width =
+        1.0_rt / m_central_dissipation_floor_guard_width;
+    const int guard_symmetry_cells =
+        penalty_guard ? m_central_dissipation_symmetry_plane_cells : 0;
+    const bool guard_wall_band = penalty_guard &&
+                                 (m_central_dissipation_wall_band_guard != 0) &&
+                                 m_wall_mask.IsActive();
+    const int* const AMREX_RESTRICT guard_band_first_masked =
+        guard_wall_band ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int guard_band_width = m_wall_viscosity_mask_width;
+    // The cell row adjacent to the z_lo plane (RZ: the j index; the
+    // mirror plane is RZ-only, see the parse, so the 1D value is unused).
+#if defined(WARPX_DIM_RZ)
+    const int guard_axial_lo = m_WarpX->Geom(0).Domain().smallEnd(1);
+#else
+    const int guard_axial_lo = m_WarpX->Geom(0).Domain().smallEnd(0);
+#endif
     // The reference code's nu_op open-region viscosity multiplier (see the header):
     // a per-cell table over the whole domain, rebuilt once per step from
     // the step-old poloidal flux, so the branch structure is constant
@@ -11904,6 +12023,26 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         m_fluid_upwind_pc_speed[conduction_pc_dim] != nullptr;
     const int fluid_upwind_pc_fast = FluidUpwindPCFast;
     const int fluid_upwind_pc_flow = FluidUpwindPCFlow;
+    // Local penalty guard ledger registers (AccumulatePenaltyGuardLedger
+    // arms the capture around its own face pass; every residual
+    // evaluation sees false and never touches them).
+    const bool guard_capture =
+        penalty_guard && m_penalty_guard_capture &&
+        m_penalty_guard_register[conduction_pc_dim] != nullptr;
+    constexpr int guard_reg_switch = PenaltyGuardRegister::guard_switch;
+    constexpr int guard_reg_mass = PenaltyGuardRegister::guard_mass;
+    constexpr int guard_reg_electron_energy =
+        PenaltyGuardRegister::guard_electron_energy;
+    constexpr int guard_reg_ion_energy = PenaltyGuardRegister::guard_ion_energy;
+    constexpr int guard_reg_ion_internal_energy =
+        PenaltyGuardRegister::guard_ion_internal_energy;
+    constexpr int guard_reg_penalty_mass = PenaltyGuardRegister::penalty_mass;
+    constexpr int guard_reg_penalty_electron_energy =
+        PenaltyGuardRegister::penalty_electron_energy;
+    constexpr int guard_reg_penalty_ion_energy =
+        PenaltyGuardRegister::penalty_ion_energy;
+    constexpr int guard_reg_penalty_ion_internal_energy =
+        PenaltyGuardRegister::penalty_ion_internal_energy;
     const amrex::Real conduction_pc_stage_weight =
         conduction_stage ? stage_new_weight : 1.0_rt;
     const int conduction_pc_electron = ConductionPCElectron;
@@ -11975,6 +12114,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         const auto fluid_upwind_pc =
             emit_fluid_upwind_pc
                 ? m_fluid_upwind_pc_speed[conduction_pc_dim]->array(mfi)
+                : amrex::Array4<amrex::Real>{};
+        const auto guard_register =
+            guard_capture
+                ? m_penalty_guard_register[conduction_pc_dim]->array(mfi)
                 : amrex::Array4<amrex::Real>{};
         const auto rho = density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
@@ -12118,6 +12261,70 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 if (i >= force_band_first_cc[jzr]) {
                     right.induction_velocity_weight = 0.0_rt;
                 }
+            }
+
+            // Local penalty guard: the two cells' switches (see
+            // CellState::penalty_guard and the LOCAL PENALTY GUARD block
+            // of central_flux), set after the reconstruction (which
+            // rebuilds the face states) and before the wall image is
+            // formed below (which copies them, so an interface face
+            // carries its interior cell's switch on both sides). Static
+            // geometry plus the frozen step-old density: constants for
+            // the JFNK probes; nothing here is read when the guard is off.
+            if (penalty_guard) {
+                const auto guard_weight = [=] (const int ic, const int jc,
+                                               const int kc) {
+                    amrex::Real weight = 0.0_rt;
+                    if (guard_mass_density > 0.0_rt) {
+                        // C-infinity step in log10(rho_old / rho_g): exactly
+                        // 1 at or below rho_g, exactly 0 at or above
+                        // rho_g 10^width.
+                        const amrex::Real ratio =
+                            std::max(rho_old(ic, jc, kc),
+                                     std::numeric_limits<amrex::Real>::min()) /
+                            guard_mass_density;
+                        weight = std::max(
+                            weight, theta_implicit_mhd::smooth_unit_step_down(
+                                        std::log10(ratio) *
+                                        guard_inverse_log_width));
+                    }
+                    if (guard_symmetry_cells > 0) {
+                        // Rows 0 .. N-1 above the mirror plane take 1, rows
+                        // N and N+1 the taper (0.82, 0.18), the rest 0.
+#if defined(WARPX_DIM_RZ)
+                        const int distance = jc - guard_axial_lo;
+#else
+                        const int distance = ic - guard_axial_lo;
+#endif
+                        weight = std::max(
+                            weight,
+                            theta_implicit_mhd::smooth_unit_step_down(
+                                static_cast<amrex::Real>(
+                                    distance - (guard_symmetry_cells - 1)) /
+                                3.0_rt));
+                    }
+#if defined(WARPX_DIM_RZ)
+                    if (guard_band_first_masked != nullptr) {
+                        // The wall viscosity band's own membership test
+                        // (Chebyshev distance <= width of the masked
+                        // contour, z index clamped to the table).
+                        for (int dj = -guard_band_width; dj <= guard_band_width;
+                             ++dj) {
+                            const int jz = std::max(
+                                wall_mask_z_lo,
+                                std::min(wall_mask_z_hi, jc + dj));
+                            if (ic >= guard_band_first_masked[jz] -
+                                          guard_band_width) {
+                                weight = 1.0_rt;
+                                break;
+                            }
+                        }
+                    }
+#endif
+                    return weight;
+                };
+                left.penalty_guard = guard_weight(il, jl, kl);
+                right.penalty_guard = guard_weight(i, j, k);
             }
 
             // Wall face classification against the cell-centered mask
@@ -14736,8 +14943,42 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.viscous_dissipation = 0.0_rt;
                 flux.wall_friction_work = 0.0_rt;
                 flux.electron_velocity = 0.0_rt;
+                // The guard ledger books no penalty through a zero-flux
+                // wall face either.
+                flux.guard_switch = 0.0_rt;
+                flux.guard_mass = 0.0_rt;
+                flux.guard_electron_energy = 0.0_rt;
+                flux.guard_ion_energy = 0.0_rt;
+                flux.guard_ion_internal_energy = 0.0_rt;
+                flux.penalty_mass = 0.0_rt;
+                flux.penalty_electron_energy = 0.0_rt;
+                flux.penalty_ion_energy = 0.0_rt;
+                flux.penalty_ion_internal_energy = 0.0_rt;
             }
 #endif
+            if (guard_capture && guard_register.contains(i, j, k) &&
+                !(wall_left_masked && wall_right_masked)) {
+                // Ledger pass only (see AccumulatePenaltyGuardLedger):
+                // the face switch and the per-channel penalties central_flux
+                // booked; interior-metal faces (both cells masked) carry no
+                // live fluid and stay zero, like the PC registers.
+                guard_register(i, j, k, guard_reg_switch) = flux.guard_switch;
+                guard_register(i, j, k, guard_reg_mass) = flux.guard_mass;
+                guard_register(i, j, k, guard_reg_electron_energy) =
+                    flux.guard_electron_energy;
+                guard_register(i, j, k, guard_reg_ion_energy) =
+                    flux.guard_ion_energy;
+                guard_register(i, j, k, guard_reg_ion_internal_energy) =
+                    flux.guard_ion_internal_energy;
+                guard_register(i, j, k, guard_reg_penalty_mass) =
+                    flux.penalty_mass;
+                guard_register(i, j, k, guard_reg_penalty_electron_energy) =
+                    flux.penalty_electron_energy;
+                guard_register(i, j, k, guard_reg_penalty_ion_energy) =
+                    flux.penalty_ion_energy;
+                guard_register(i, j, k, guard_reg_penalty_ion_internal_energy) =
+                    flux.penalty_ion_internal_energy;
+            }
             flux_arr(i, j, k, flux_mass) = flux.mass;
             for (int component = 0; component < 3; ++component) {
                 flux_arr(i, j, k, flux_momentum + component) =
@@ -15075,6 +15316,186 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
     }
 #else
     amrex::ignore_unused(dt, step);
+#endif
+}
+
+void ThetaImplicitMHD::AccumulatePenaltyGuardLedger (const amrex::Real dt,
+                                                     const int step,
+                                                     const amrex::Real a_time,
+                                                     const bool state_prepared)
+{
+#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RZ)
+    using ablastr::fields::Direction;
+    if (!state_prepared) {
+        // The wall ledger's refresh (see AccumulateAbsorbedWallLedger):
+        // the plasma current and the cell-centred fields of the accepted
+        // theta state, so the face pass below sees exactly what the
+        // residual saw. UpdateWarpXFields(m_state, ...) has just refilled
+        // the fluid sources and the theta-stage B.
+        const auto magnetic_field =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, 0);
+        m_hybrid_pic_model->CalculatePlasmaCurrent(
+            magnetic_field, m_WarpX->GetEBUpdateEFlag());
+        if (m_z_neumann) {
+            for (int direction = 0; direction < 3; ++direction) {
+                amrex::MultiFab& current_component = *m_WarpX->m_fields.get(
+                    FieldType::hybrid_current_fp_plasma, Direction{direction},
+                    0);
+                ApplyNeumannZDomainGhosts(current_component, 1);
+                if (direction == 2) {
+                    // z_lo mirror: J_z is ODD (see ComputeRHS).
+                    ApplyMirrorZLoDomainGhosts(current_component, {-1, -1, -1});
+                }
+            }
+        }
+        FillCellCenteredElectromagneticFields();
+    }
+    // The face registers (see PenaltyGuardRegister), zeroed for this pass.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
+        if (m_penalty_guard_register[direction] == nullptr) {
+            m_penalty_guard_register[direction] =
+                std::make_unique<amrex::MultiFab>(
+                    amrex::convert(density.boxArray(),
+                                   amrex::IntVect::TheDimensionVector(direction)),
+                    density.DistributionMap(),
+                    static_cast<int>(PenaltyGuardRegister::count), 0);
+        }
+        m_penalty_guard_register[direction]->setVal(0.0_rt);
+    }
+    // The capture pass: the same face fluxes the residual computed, with
+    // central_flux booking its penalties into the registers.
+    m_penalty_guard_capture = true;
+#if defined(WARPX_DIM_1D_Z)
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
+                                 a_time);
+#else
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxRName, 0), 0,
+                                 a_time);
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
+                                 a_time);
+#endif
+    m_penalty_guard_capture = false;
+
+    // Gross transport per channel: sum over the faces of |F| A (times dt
+    // below), the guarded-face count in the switch slot. Face-type
+    // validboxes share their boundary faces between adjacent boxes; the
+    // owner masks give each face to exactly one box (the wall ledger's
+    // rule).
+    const amrex::Geometry& geom = m_WarpX->Geom(0);
+    constexpr int n_sums = static_cast<int>(PenaltyGuardRegister::count);
+    amrex::Real sums[n_sums] = {};
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
+        amrex::MultiFab& reg = *m_penalty_guard_register[direction];
+        const amrex::Box face_domain =
+            amrex::convert(geom.Domain(), reg.ixType().toIntVect());
+        const auto owner = reg.OwnerMask(geom.periodicity());
+#if defined(WARPX_DIM_RZ)
+        // Annulus areas: 2 pi r_face dz on r-normal faces, 2 pi r_centre dr
+        // on z-normal faces (the cylindrical divergence weights the RHS
+        // integrates these fluxes with).
+        const bool radial = (direction == 0);
+        const amrex::Real radial_lower = geom.ProbLo(0);
+        const amrex::Real dr = geom.CellSize(0);
+        const amrex::Real dz = geom.CellSize(1);
+        const amrex::Real two_pi = 2.0_rt * MathConst::pi;
+#endif
+        for (int component = 0; component < n_sums; ++component) {
+            const bool count_faces =
+                (component == PenaltyGuardRegister::guard_switch);
+            amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (amrex::MFIter mfi(reg); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox() & face_domain;
+                if (box.isEmpty()) {
+                    continue;
+                }
+                const auto arr = reg.const_array(mfi);
+                const auto own = owner->const_array(mfi);
+                reduce_op.eval(
+                    box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                        if (!own(i, j, k)) {
+                            return {0.0_rt};
+                        }
+                        const amrex::Real value = arr(i, j, k, component);
+                        if (count_faces) {
+                            return {value > 0.0_rt ? 1.0_rt : 0.0_rt};
+                        }
+                        amrex::Real area = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                        area = radial ? two_pi * (radial_lower + i * dr) * dz
+                                      : two_pi *
+                                            (radial_lower + (i + 0.5_rt) * dr) *
+                                            dr;
+#endif
+                        return {area * std::abs(value)};
+                    });
+            }
+            sums[component] += amrex::get<0>(reduce_data.value(reduce_op));
+        }
+    }
+    amrex::ParallelAllReduce::Sum(sums, n_sums,
+                                  amrex::ParallelContext::CommunicatorSub());
+    const amrex::Real guarded_faces = sums[PenaltyGuardRegister::guard_switch];
+    const amrex::Real guard_mass = dt * sums[PenaltyGuardRegister::guard_mass];
+    const amrex::Real guard_electron_energy =
+        dt * sums[PenaltyGuardRegister::guard_electron_energy];
+    const amrex::Real guard_ion_energy =
+        dt * sums[PenaltyGuardRegister::guard_ion_energy];
+    const amrex::Real guard_ion_internal_energy =
+        dt * sums[PenaltyGuardRegister::guard_ion_internal_energy];
+    m_penalty_guard_mass_moved += guard_mass;
+    m_penalty_guard_electron_energy_moved += guard_electron_energy;
+    m_penalty_guard_ion_energy_moved += guard_ion_energy;
+    m_penalty_guard_ion_internal_energy_moved += guard_ion_internal_energy;
+
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        if (!m_central_dissipation_guard_ledger_started) {
+            const auto parent =
+                std::filesystem::path(m_central_dissipation_guard_ledger_file)
+                    .parent_path();
+            if (!parent.empty()) {
+                std::error_code ignored;
+                std::filesystem::create_directories(parent, ignored);
+            }
+        }
+        // Truncate at the first write of the run (a stale file from a
+        // previous run in the same directory would otherwise keep
+        // accumulating appended rows), append afterwards.
+        std::ofstream ledger(m_central_dissipation_guard_ledger_file,
+                             m_central_dissipation_guard_ledger_started
+                                 ? std::ios::app
+                                 : std::ios::trunc);
+        if (!m_central_dissipation_guard_ledger_started) {
+            ledger << "# local penalty guard ledger: per step the GROSS "
+                      "transport sum |F| A dt over the faces (kg for mass, J "
+                      "for the energies); guard_* = the part of the Rusanov "
+                      "penalty the guard ADDED (c_face - c of c_face), "
+                      "penalty_* = the FULL penalty of the guarded faces; "
+                      "guarded_faces = faces with S > 0\n"
+                   << "# step guarded_faces guard_mass guard_Ue guard_Ei "
+                      "guard_Ui penalty_mass penalty_Ue penalty_Ei penalty_Ui "
+                      "cum_guard_mass cum_guard_Ue cum_guard_Ei cum_guard_Ui\n";
+        }
+        m_central_dissipation_guard_ledger_started = true;
+        ledger.precision(17);
+        ledger << step + 1 << " " << guarded_faces << " " << guard_mass << " "
+               << guard_electron_energy << " " << guard_ion_energy << " "
+               << guard_ion_internal_energy << " "
+               << dt * sums[PenaltyGuardRegister::penalty_mass] << " "
+               << dt * sums[PenaltyGuardRegister::penalty_electron_energy]
+               << " " << dt * sums[PenaltyGuardRegister::penalty_ion_energy]
+               << " "
+               << dt * sums[PenaltyGuardRegister::penalty_ion_internal_energy]
+               << " " << m_penalty_guard_mass_moved << " "
+               << m_penalty_guard_electron_energy_moved << " "
+               << m_penalty_guard_ion_energy_moved << " "
+               << m_penalty_guard_ion_internal_energy_moved << "\n";
+    }
+#else
+    amrex::ignore_unused(dt, step, a_time, state_prepared);
 #endif
 }
 
@@ -20115,6 +20536,37 @@ void ThetaImplicitMHD::WriteDualEnergyGuardLedgerRow (const int step,
     ledger.precision(17);
     ledger << step + 1 << " " << guarded_cells << " "
            << m_dual_energy_guard_discarded << "\n";
+}
+
+std::string ThetaImplicitMHD::PenaltyGuardBannerText () const
+{
+    if (!m_central_dissipation_guard_active) {
+        return "off";
+    }
+    std::ostringstream text;
+    text.precision(4);
+    text << "ON, c_face = c + (1 - c) S with S = max of";
+    const char* separator = "";
+    if (m_central_dissipation_floor_guard_density > 0.0_rt) {
+        text << " [step-old n <= " << m_central_dissipation_floor_guard_density
+             << " m^-3, log10 width "
+             << m_central_dissipation_floor_guard_width << "]";
+        separator = ",";
+    }
+    if (m_central_dissipation_symmetry_plane_cells > 0) {
+        text << separator << " [" << m_central_dissipation_symmetry_plane_cells
+             << " cell rows at the z_lo mirror plane + 2-row taper]";
+        separator = ",";
+    }
+    if (m_central_dissipation_wall_band_guard != 0) {
+        text << separator << " [wall viscosity band, width "
+             << m_wall_viscosity_mask_width << "]";
+    }
+    text << "; every penalised channel; transport "
+         << (m_central_dissipation_guard_ledger_file.empty()
+                 ? std::string{"NOT booked (no ledger file)"}
+                 : "booked in " + m_central_dissipation_guard_ledger_file);
+    return text.str();
 }
 
 void ThetaImplicitMHD::BuildLorentzForceBandTable ()

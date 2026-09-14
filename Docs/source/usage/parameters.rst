@@ -6788,6 +6788,80 @@ Jacobian probes.
     fast-speed behaviour at the shock while leaving pressure-balanced
     structures flow-upwinded.
 
+.. pp:param:: implicit_mhd.central_dissipation_floor_guard_density
+    :type: ``float`` [m^-3]
+    :default: ``0`` (off)
+
+    Local penalty guard, density switch. A reduced coefficient
+    :math:`c < 1` keeps the closed-flux mass and energy the full Rusanov
+    penalty diffused, but the full penalty was also what refilled the
+    dispersive density holes the converging flow digs where it stagnates
+    (the axis at the implosion's convergence, the no-slip wall band, the
+    :math:`z_\mathrm{lo}` mirror plane where :math:`u_z` is odd): a cell
+    whose density collapses toward the floor while its internal energy
+    stays finite is a :math:`T = U/n` runaway. The guard restores the
+    full penalty locally. Every penalised channel takes the face
+    coefficient
+
+    .. math::
+
+        c_\mathrm{face} = c + (1 - c)\, S, \qquad
+        S = \max(S_\mathrm{L}, S_\mathrm{R}) \in [0, 1],
+
+    :math:`S` the maximum over the two cells of three :math:`C^\infty`
+    switches, each off by default (the arithmetic is then the legacy one
+    bit for bit). This knob sets the density switch: :math:`S_n = 1`
+    where the STEP-OLD number density is at or below :math:`n_g`,
+    :math:`S_n = 0` at or above :math:`n_g\,10^{w}`, and between them
+    the :math:`C^\infty` unit step :math:`e(1-x)/(e(1-x) + e(x))`,
+    :math:`e(t) = \exp(-1/t)`, in :math:`x = \log_{10}(n_\mathrm{old}/n_g)
+    / w` -- exact plateaus at both ends, every derivative vanishing there.
+    The step-old density is frozen across the Newton solve (like the
+    conduction coefficients), so the JFNK sees a constant coefficient.
+    Requires ``fluid_flux = central`` and a penalty coefficient below 1;
+    the number density is converted with the ion charge-to-mass.
+
+.. pp:param:: implicit_mhd.central_dissipation_floor_guard_width
+    :type: ``float``
+    :default: ``0.5``
+
+    The :math:`\log_{10}` width :math:`w` (decades) of the density
+    switch: fully off at :math:`n_g\,10^{w}` (3.16 :math:`n_g` by
+    default).
+
+.. pp:param:: implicit_mhd.central_dissipation_symmetry_plane_cells
+    :type: ``int``
+    :default: ``0`` (off)
+
+    Local penalty guard, mirror-plane switch (RZ; requires
+    :pp:param:`implicit_mhd.z_lo_boundary_fluid` ``= symmetry``): the
+    :math:`N` cell rows nearest the :math:`z_\mathrm{lo}` mirror plane
+    take :math:`S = 1`, the next two rows the :math:`C^\infty` taper
+    (0.82, 0.18), the rest 0. Static geometry.
+
+.. pp:param:: implicit_mhd.central_dissipation_wall_band_guard
+    :type: ``int``
+    :default: ``0`` (off)
+
+    Local penalty guard, wall-band switch (``1`` = on; requires
+    :pp:param:`implicit_mhd.wall_viscosity_mask`): the cells of the wall
+    viscosity band -- Chebyshev distance at most
+    :pp:param:`implicit_mhd.wall_viscosity_mask_width` of the masked
+    contour, the same test the band coefficient uses -- take
+    :math:`S = 1`. Static geometry.
+
+.. pp:param:: implicit_mhd.central_dissipation_guard_ledger_file
+    :type: ``string``
+    :default: empty (no booking)
+
+    Books the local penalty guard's own transport (requires an active
+    guard switch). One row per step from a face-flux pass on the
+    accepted theta state: the number of guarded faces (:math:`S > 0`),
+    the gross transport :math:`\sum |F| A\, \Delta t` the guard ADDED per
+    channel (mass [kg]; :math:`U_e`, :math:`E_i`, :math:`U_i` [J]), the
+    full penalty transport of the guarded faces per channel, and the
+    cumulative guard-added totals. A ``#`` header names the columns.
+
 .. pp:param:: implicit_mhd.reconstruction_kappa
     :type: ``float``
     :default: ``0.01``

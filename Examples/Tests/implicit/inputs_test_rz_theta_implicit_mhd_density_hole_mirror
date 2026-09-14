@@ -1,0 +1,153 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0 = 10.0
+my_constants.Pe = n0 * T0 * q_e
+my_constants.Pi = n0 * T0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.Lr = 0.08
+my_constants.Lz = 0.4
+my_constants.nr = 16
+my_constants.nz = 64
+my_constants.dz = Lz / nz
+my_constants.eta0 = 1.0e-5
+my_constants.sound_speed = sqrt(gamma*(Pe+Pi)/rho0)
+my_constants.alfven_speed = B0 / sqrt(mu0*rho0)
+my_constants.dt = 0.25 * dz / (sound_speed + alfven_speed)
+# The near-floor density hole one cell row in from the z_lo mirror plane
+# (rows j_lo .. j_hi, counted from the plane; row 1 = the second cell
+# row), its density as a fraction of the ambient, and its temperature as
+# a fraction of the ambient (inflow) temperature T0.
+my_constants.hole_j_lo = 1
+my_constants.hole_j_hi = 1
+my_constants.hole_rho_ratio = 1.0e-2
+my_constants.hole_T_ratio = 1.0
+# The axial inflow toward the plane (a fraction of the sound speed),
+# uniform in the ambient gas; the plane stagnates it (u_z is odd there).
+my_constants.inflow_mach = 0.5
+my_constants.u0 = inflow_mach * sound_speed
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+# The mirror-plane density-hole rig of the local penalty guard: a
+# uniform column of T0 gas flows toward the z_lo mirror plane (the
+# machine's midplane: u_z is odd there, so the flow stagnates against
+# it) through a near-floor density hole one cell row in from the plane,
+# with the central flux at the production ladder's reduced Rusanov
+# coefficient (van Albada, c = 0.25). The guard restores the full
+# penalty in the hole (step-old density below n_g) and in the rows
+# nearest the plane. What the rig shows: the hole REFILLS (the central
+# average of the mass flux is large enough at c = 0.25) and the column's
+# peak temperature is the stagnation / compression heating of the plane
+# row (1.6 x T0 at Mach 0.5, the same at c = 1), NOT the production
+# run's near-floor runaway, which needs the pedestal machinery (the mass
+# gate shut at the pedestal while momentum and energy keep flowing) a
+# 100-step column does not carry. The analysis gates what the column
+# can: the unguarded rig within 2 x T0 and in the Newton budget, the
+# guarded twin at or below it with its transport booked and the switch
+# geometry (208 mirror-plane faces) in the ledger.
+max_step = 100
+amr.n_cell = nr nz
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none pmc
+boundary.field_hi = pec none
+boundary.particle_lo = none reflecting
+boundary.particle_hi = reflecting absorbing
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = eta0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = sound_speed
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4 * Pe
+implicit_mhd.ion_pressure_floor = 1.0e-4 * Pi
+# the production ladder's L5 flux stack: central + van Albada + a quarter
+# of the Rusanov penalty; the guard knobs are set per registration
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.fluid_reconstruction = vanalbada
+implicit_mhd.central_dissipation = 0.25
+implicit_mhd.z_boundary_fluid = outflow
+implicit_mhd.z_lo_boundary_fluid = symmetry
+implicit_mhd.mass_density(x,y,z) = \
+    "if((z >= hole_j_lo*dz) and (z < (hole_j_hi+1)*dz), hole_rho_ratio*rho0, rho0)"
+implicit_mhd.electron_pressure(x,y,z) = \
+    "if((z >= hole_j_lo*dz) and (z < (hole_j_hi+1)*dz), hole_rho_ratio*hole_T_ratio*Pe, Pe)"
+implicit_mhd.ion_pressure(x,y,z) = \
+    "if((z >= hole_j_lo*dz) and (z < (hole_j_hi+1)*dz), hole_rho_ratio*hole_T_ratio*Pi, Pi)"
+implicit_mhd.velocity_z(x,y,z) = "-u0"
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 100
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_momentum_r \
+                       implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

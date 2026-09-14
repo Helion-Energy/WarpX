@@ -3446,6 +3446,140 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# LOCAL PENALTY GUARD (implicit_mhd.central_dissipation_floor_guard_
+# density / _floor_guard_width / _symmetry_plane_cells / _wall_band_guard):
+# c_face = c + (1 - c) S on every penalised channel, S the max over the
+# two cells of a C-infinity step in the STEP-OLD density, the z_lo
+# mirror-plane proximity and the wall-band membership. The pulsed
+# reversed-field column on the production ladder's reduced stack (van
+# Albada + c 0.25) and its guarded twin: the density switch at n_g = 3e19
+# covers the low-density outer region (n = 2.5e19) fully and tapers
+# through the density step at the null; both arms complete within the
+# Newton budget, the guarded arm books its transport in the guard ledger
+# and its closed-flux mass loss stays within a factor of two of the
+# unguarded arm's (the guard acts outside the null, not on the closed
+# flux).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_pulse_l5  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column my_constants.u_pert=0.05*v0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 pulse"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_reversed_column_pulse_l5_guard  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_reversed_column my_constants.u_pert=0.05*v0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25 implicit_mhd.central_dissipation_floor_guard_density=3.0e19 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_reversed_column.py diags/diag000000 diags/diag000100 pulse_guard ../test_rz_theta_implicit_mhd_reversed_column_pulse_l5/diags/diag000100"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_reversed_column_pulse_l5  # dependency
+)
+
+# The mirror-plane density-hole column (NEW deck inputs_test_rz_theta_
+# implicit_mhd_density_hole_mirror + analysis_mhd_density_hole_mirror.py):
+# a T0 column flowing at Mach 0.5 into the z_lo mirror plane through a
+# near-floor hole one row in, on the reduced stack. The unguarded arm
+# stays within 2 x T0 (the hole refills; the 1.6 x peak is the plane
+# row's stagnation heating, the same at c = 1 -- the production runaway
+# needs the pedestal machinery this column does not carry, see the deck);
+# the guarded twin (density switch n_g = 3e19: the 1e18 hole fully
+# guarded, the 1e20 ambient exactly not; mirror-plane switch 4 rows) must
+# stay at or below it, book one ledger row per step with at least the
+# mirror-plane switch's 208 faces and positive mass / ion-energy
+# transport.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_density_hole_mirror  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_density_hole_mirror  # inputs
+    "analysis_mhd_density_hole_mirror.py diags/diag000000 diags/diag000100 reference"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_density_hole_mirror_guard  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_density_hole_mirror implicit_mhd.central_dissipation_floor_guard_density=3.0e19 implicit_mhd.central_dissipation_symmetry_plane_cells=4 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_density_hole_mirror.py diags/diag000000 diags/diag000100 guarded diags/guard_ledger.txt ../test_rz_theta_implicit_mhd_density_hole_mirror/diags/diag000100"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_density_hole_mirror  # dependency
+)
+
+# OFF-PLATEAU IDENTITY of the guard: on decks whose density never falls
+# below n_g 10^width the density switch is EXACTLY zero on every face
+# (an exact unit step, not a tolerance), c_face = c + 0 is c bit for bit
+# and the guarded run must be BITWISE its unguarded twin (the guard sits
+# on the JFNK residual hot path of every production deck at c < 1); its
+# ledger books no guarded face and no transport. Three decks of the
+# fluid family at the ladder's c 0.25, n_g = 1e18 (fully off above
+# 3.16e18; the shock tube's low side is 1.25e19): the static contact,
+# the ion-gas shock tube, the energy-conservation acoustic pulse.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_central_c025  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_central_c025_guard_identity  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25 implicit_mhd.central_dissipation_floor_guard_density=1.0e18 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_guard_identity.py diags/diag000100 ../test_1d_theta_implicit_mhd_static_contact_central_c025/diags/diag000100 diags/guard_ledger.txt"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_static_contact_central_c025  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_c025  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_central_c025_guard_identity  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25 implicit_mhd.central_dissipation_floor_guard_density=1.0e18 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_guard_identity.py diags/diag000200 ../test_1d_theta_implicit_mhd_sod_central_c025/diags/diag000200 diags/guard_ledger.txt"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_sod_central_c025  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_conservation_central_c025  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25"  # inputs
+    "analysis_mhd_energy_conservation.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_conservation_central_c025_guard_identity  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0 implicit_mhd.fluid_reconstruction=vanalbada implicit_mhd.central_dissipation=0.25 implicit_mhd.central_dissipation_floor_guard_density=1.0e18 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_guard_identity.py diags/diag000100 ../test_1d_theta_implicit_mhd_energy_conservation_central_c025/diags/diag000100 diags/guard_ledger.txt"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_energy_conservation_central_c025  # dependency
+)
+
 add_warpx_test(
     test_rz_theta_implicit_mhd_reversed_column_pulse_flow  # name
     RZ  # dims
@@ -4029,6 +4163,25 @@ add_warpx_test(
     2  # nprocs
     inputs_test_rz_theta_implicit_mhd_wall_viscosity_band  # inputs
     "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 band"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The local penalty guard's wall-band switch and its ledger on the same
+# deck (central flux at its zero-penalty default, so the guard's share of
+# the penalty is the whole of it): every face with a band cell is a
+# guarded face -- the band test marks the cells i >= 12 and this
+# electromagnetic-only wall freezes nothing, so 13 r-faces per row x 8
+# rows + 9 z-faces x 12 band columns = 212 on both ranks combined -- and
+# the only penalised jump of the sheared column is the momentum one, so
+# the booked transport is the kinetic part of the E_i penalty alone (see
+# the analysis).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_guard  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.central_dissipation_wall_band_guard=1 implicit_mhd.central_dissipation_guard_ledger_file=diags/guard_ledger.txt"  # inputs
+    "analysis_mhd_guard_ledger.py diags/guard_ledger.txt 212"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

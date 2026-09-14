@@ -2800,6 +2800,44 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         drives the ion energy onto its floor on an electron-pressure-
         dominated shock and locks the Newton line search).
 
+    central_dissipation_floor_guard_density: float, default=0 (off)
+        Local penalty guard, density switch: the step-old number density
+        n_g [m^-3] at or below which a cell takes the FULL Rusanov
+        penalty. The face coefficient of every penalised channel becomes
+        c_face = c + (1 - c) S with S = max over the two cells of the
+        guard switches; this switch is a C-infinity step in
+        log10(n_old / n_g), exactly 1 at or below n_g and exactly 0 at or
+        above n_g 10^width, evaluated on the STEP-OLD density (frozen
+        across the Newton solve). A reduced c keeps the closed-flux mass
+        the full penalty diffused; the guard restores the full penalty
+        only where a near-floor density hole would otherwise run away in
+        temperature (T = U/n with n collapsing). Requires
+        fluid_flux="central" and a coefficient below 1.
+
+    central_dissipation_floor_guard_width: float, default=0.5
+        log10 width (decades) of the density switch: fully off at
+        n_g 10^width.
+
+    central_dissipation_symmetry_plane_cells: int, default=0 (off)
+        Local penalty guard, mirror-plane switch: the N cell rows nearest
+        the z_lo mirror plane take S = 1, the next two rows a C-infinity
+        taper (0.82, 0.18), the rest 0. RZ only; requires
+        z_lo_boundary_fluid="symmetry" (u_z is odd at the plane, a third
+        stagnation locus of the converging flow).
+
+    central_dissipation_wall_band_guard: int, default=0 (off)
+        Local penalty guard, wall-band switch (1 = on): the cells of the
+        wall viscosity band (within wall_viscosity_mask_width of the
+        masked contour) take S = 1. Requires wall_viscosity_mask.
+
+    central_dissipation_guard_ledger_file: str, optional
+        Books the guard's transport (requires an active guard switch):
+        one row per step -- the number of guarded faces, the gross
+        transport sum |F| A dt the guard ADDED per channel (mass, U_e,
+        E_i, U_i), the full penalty transport of the guarded faces, and
+        the cumulative guard-added totals -- from a face-flux pass on the
+        accepted theta state.
+
     viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
         fluxes (fluid_flux="hlld" or "central"; required positive for
@@ -4416,6 +4454,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         central_dissipation_entropy=None,
         central_dissipation_flow_kappa=None,
         central_dissipation_entropy_gate=None,
+        central_dissipation_floor_guard_density=None,
+        central_dissipation_floor_guard_width=None,
+        central_dissipation_symmetry_plane_cells=None,
+        central_dissipation_wall_band_guard=None,
+        central_dissipation_guard_ledger_file=None,
         viscosity=None,
         viscosity_open_multiplier=None,
         viscosity_open_psi=None,
@@ -4610,6 +4653,21 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.central_dissipation_entropy = central_dissipation_entropy
         self.central_dissipation_flow_kappa = central_dissipation_flow_kappa
         self.central_dissipation_entropy_gate = central_dissipation_entropy_gate
+        self.central_dissipation_floor_guard_density = (
+            central_dissipation_floor_guard_density
+        )
+        self.central_dissipation_floor_guard_width = (
+            central_dissipation_floor_guard_width
+        )
+        self.central_dissipation_symmetry_plane_cells = (
+            central_dissipation_symmetry_plane_cells
+        )
+        self.central_dissipation_wall_band_guard = (
+            central_dissipation_wall_band_guard
+        )
+        self.central_dissipation_guard_ledger_file = (
+            central_dissipation_guard_ledger_file
+        )
         self.viscosity = viscosity
         self.viscosity_open_multiplier = viscosity_open_multiplier
         self.viscosity_open_psi = viscosity_open_psi
@@ -4861,6 +4919,21 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         )
         implicit_mhd.central_dissipation_entropy_gate = (
             self.central_dissipation_entropy_gate
+        )
+        implicit_mhd.central_dissipation_floor_guard_density = (
+            self.central_dissipation_floor_guard_density
+        )
+        implicit_mhd.central_dissipation_floor_guard_width = (
+            self.central_dissipation_floor_guard_width
+        )
+        implicit_mhd.central_dissipation_symmetry_plane_cells = (
+            self.central_dissipation_symmetry_plane_cells
+        )
+        implicit_mhd.central_dissipation_wall_band_guard = (
+            self.central_dissipation_wall_band_guard
+        )
+        implicit_mhd.central_dissipation_guard_ledger_file = (
+            self.central_dissipation_guard_ledger_file
         )
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width

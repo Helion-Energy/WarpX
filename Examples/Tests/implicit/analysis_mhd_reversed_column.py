@@ -94,7 +94,7 @@ def field_null_radius(fields, r_center):
 initial, r_center, dr, dz = load(sys.argv[1])
 final, _, _, _ = load(sys.argv[2])
 mode = sys.argv[3]
-assert mode in ("exact", "diffuse", "pulse", "pulse_pc")
+assert mode in ("exact", "diffuse", "pulse", "pulse_pc", "pulse_guard")
 
 r_null = field_null_radius(initial, r_center)
 m_in_initial = closed_mass(initial, r_center, dr, dz, r_null)
@@ -155,14 +155,48 @@ else:
         assert 0 < total_gmres <= 5.0e4, (
             f"cumulative GMRES {total_gmres:.0f} exceeds the pc-on budget"
         )
+    if mode == "pulse_guard":
+        # The local penalty guard on the reduced-penalty pulse: the density
+        # switch (n_g = 3e19, the low-density outer region fully guarded,
+        # the step at the null in its taper) restores the full penalty on
+        # the guarded faces, so the run must complete in the Newton budget
+        # like its unguarded twin and its ledger must book the transport
+        # the guard added -- mass across the density step at the null and
+        # ion energy through the pulse -- on every step.
+        rows = [
+            line.split()
+            for line in open("diags/guard_ledger.txt")
+            if line.strip() and not line.startswith("#")
+        ]
+        table = np.array(rows, dtype=float)
+        faces, guard_mass, guard_ei = table[:, 1], table[:, 2], table[:, 4]
+        print(f"guard ledger: {len(rows)} rows; guarded faces "
+              f"{faces.min():.0f}..{faces.max():.0f}; guard mass per step "
+              f"{guard_mass.min():.3e}..{guard_mass.max():.3e} kg (cumulative "
+              f"{table[-1, 10]:.3e}); guard E_i per step {guard_ei.min():.3e}.."
+              f"{guard_ei.max():.3e} J (cumulative {table[-1, 12]:.3e})")
+        # one row per step (the newton file's last step number, not its row
+        # count: the solver appends to newton.txt across reruns in one dir)
+        assert len(rows) == int(newton_history[-1, 0]), "the ledger missed a step"
+        assert np.all(faces > 0), "the guard booked no guarded face"
+        assert np.all(guard_mass > 0.0) and np.all(guard_ei > 0.0), (
+            "the guard booked no transport"
+        )
     if len(sys.argv) > 4:
         reference, _, _, _ = load(sys.argv[4])
         m_in_reference = closed_mass(reference, r_center, dr, dz, r_null)
         reference_change = (m_in_reference - m_in_initial) / m_in_initial
         print(f"reference arm closed-flux mass change {reference_change:+.3e}")
-        assert abs(m_in_change) <= 0.5 * abs(reference_change), (
-            f"closed-flux mass loss {m_in_change:+.3e} is not below half the "
-            f"reference arm's {reference_change:+.3e}"
-        )
+        if mode == "pulse_guard":
+            # reported, not gated: the guard restores the full penalty on
+            # the density step at the null, so the guarded arm leaks MORE
+            # closed-flux mass than its reduced-penalty twin by design
+            print(f"guarded / unguarded closed-flux mass loss ratio "
+                  f"{abs(m_in_change) / max(abs(reference_change), 1e-300):.2f}")
+        else:
+            assert abs(m_in_change) <= 0.5 * abs(reference_change), (
+                f"closed-flux mass loss {m_in_change:+.3e} is not below half the "
+                f"reference arm's {reference_change:+.3e}"
+            )
 
 print(f"mode = {mode}: PASS")
