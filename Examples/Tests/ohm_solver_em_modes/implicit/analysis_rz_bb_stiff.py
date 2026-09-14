@@ -7,14 +7,30 @@
 # --- block-banded direct preconditioner holds the count flat, so the
 # --- iteration ceiling below is a sharp regression tripwire for the
 # --- preconditioner itself. Convergence is enforced in the run
-# --- (newton.require_convergence) and the operator-correctness gates
-# --- (extraction self-check, LU/Apply round-trips, FD-JVP comparison)
-# --- abort the run on failure, so this script only checks the counts.
+# --- (newton.require_convergence), the extraction self-check aborts on
+# --- failure, and the LU/Apply round-trips plus FD-JVP comparison are printed
+# --- for evidence review. This script verifies the intended one-box/two-rank
+# --- layout as well as the solver counts and diagnostic contract.
 
 import re
 from pathlib import Path
 
 import numpy as np
+
+cell_header = Path("diags/diag1000010/Level_0/Cell_H")
+box_count_match = next(
+    (
+        re.fullmatch(r"\((\d+)\s+\d+", line)
+        for line in cell_header.read_text(encoding="utf-8").splitlines()
+        if re.fullmatch(r"\((\d+)\s+\d+", line)
+    ),
+    None,
+)
+assert box_count_match is not None, "could not read BoxArray size from Cell_H"
+box_count = int(box_count_match.group(1))
+assert box_count == 1, (
+    f"empty-rank regression requires one BoxArray box, found {box_count}"
+)
 
 diag_path = Path("diags/newton_diag.txt")
 header = diag_path.read_text(encoding="utf-8").splitlines()[0]
@@ -64,6 +80,7 @@ gmres_mean = gmres_iters.mean()
 gmres_max = gmres_iters.max()
 
 print("pc_block_banded stiff arm (dt x8):")
+print(f"  BoxArray boxes:       {box_count} across 2 MPI ranks")
 print(f"  Newton iters/step: max {newton_max:.0f}, mean {newton_iters.mean():.2f}")
 print(f"  GMRES iters/step:  max {gmres_max:.0f}, mean {gmres_mean:.2f}")
 

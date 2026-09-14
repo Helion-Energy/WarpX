@@ -14,7 +14,7 @@ import dill
 import numpy as np
 from mpi4py import MPI as mpi
 
-from pywarpx import picmi
+from pywarpx import amr, picmi
 
 constants = picmi.constants
 
@@ -152,6 +152,13 @@ class CylindricalNormalModes(object):
         # Set geometry and boundary conditions                                #
         #######################################################################
 
+        if self.test and self.pc_bb:
+            # AMReX otherwise refines a one-box layout until it has at least
+            # one box per MPI rank. Keep this arm at one BoxArray box so its
+            # second CTest rank has no local box and exercises the resolved
+            # local path for precond.bb_global=-1.
+            amr.refine_grid_layout = False
+
         self.grid = picmi.CylindricalGrid(
             number_of_cells=[self.Nr, self.Nz],
             warpx_max_grid_size=self.Nz,
@@ -207,9 +214,10 @@ class CylindricalNormalModes(object):
         # factor, ~2 s/rebuild at this scale on a full host) inside the CI
         # budget on a 2-core runner while still running the verification
         # gates at five distinct states across the run. In test mode the
-        # 64x128 domain with max_grid_size=128 is one BoxArray box. The
-        # two-rank CTest therefore leaves one rank with no local box and
-        # explicitly exercises auto-global resolution to local mode.
+        # explicit refine_grid_layout=False setting above keeps the 64x128
+        # domain in one BoxArray box. The two-rank CTest therefore leaves one
+        # rank with no local box and explicitly exercises auto-global
+        # resolution to local mode.
         pc = None
         if self.pc_bb:
             pc = picmi.BlockBandedPreconditioner(
