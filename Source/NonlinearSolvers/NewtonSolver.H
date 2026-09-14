@@ -330,7 +330,31 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
         diagnostic_file << "[" << c++ << "]gmres_total_iters";
         diagnostic_file << " ";
         diagnostic_file << "[" << c++ << "]gmres_last_res";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]exit_status";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]convergence_status";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]line_search_min_alpha";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]line_search_halvings";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]line_search_trials";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]linear_rtol_last";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]linear_rtol_min";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]linear_rtol_max";
+        diagnostic_file << " ";
+        diagnostic_file << "[" << c++ << "]residual_evals";
         diagnostic_file << "\n";
+        diagnostic_file << "# exit_status is the public GetExitStatus value; "
+                           "convergence_status: 2=absolute, 3=relative, "
+                           "-5=tolerance-bearing nonconvergence, 0=fixed-iteration/no verdict.\n";
+        diagnostic_file << "# line_search_min_alpha is the minimum accepted alpha (1 when off "
+                           "or unused); counts are per solve. residual_evals counts full "
+                           "nonlinear residual evaluations and excludes matrix-free JVP probes.\n";
         diagnostic_file.close();
     }
 }
@@ -409,9 +433,35 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real linsol_rtol = m_linsol_rtol;
     amrex::Real zeta_prev = m_forcing_zeta_max;
     amrex::Real norm_prev = 1._rt;
+    amrex::Real linear_rtol_last = 0._rt;
+    amrex::Real linear_rtol_min = 0._rt;
+    amrex::Real linear_rtol_max = 0._rt;
+    bool linear_solve_performed = false;
+
+    // Per-solve evidence counters. A line search accepts one alpha per
+    // Newton update; retain its minimum and aggregate the explored ladder.
+    // With line search disabled (or no update needed), alpha remains one and
+    // both counts remain zero.
+    amrex::Real line_search_min_alpha = 1._rt;
+    int line_search_halvings = 0;
+    int line_search_trials = 0;
+
+    // Count the full nonlinear residual evaluations initiated by this
+    // routine. Matrix-free JVP probes call ComputeRHS directly and are
+    // intentionally excluded; their count is represented by the linear
+    // iteration columns instead.
+    int residual_evals = 0;
+    auto eval_residual = [&] (Vec& a_F, const Vec& a_residual_U, int a_iter) {
+        ++residual_evals;
+        EvalResidual(a_F, a_residual_U, a_b, a_time, a_iter);
+    };
 
     int iter;
     int linear_solver_iters = 0;
+    // Solve() is const and the object is reused across time steps. Always
+    // clear a prior success/failure before grading this solve.
+    this->m_exit_status = 0;
+    int convergence_status = 0;
     m_residual_current = false;
     for (iter = 0; iter <= m_maxits; ++iter) {
 
@@ -421,7 +471,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // the previous iteration already evaluated this exact state.
         if (!(m_line_search_reuse_residual && m_residual_current)) {
             m_ops->SetMassMatricesWanted(true);
-            EvalResidual(m_F, a_U, a_b, a_time, iter);
+            eval_residual(m_F, a_U, iter);
         }
         m_residual_current = false;
 
@@ -442,6 +492,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         if (norm_abs < m_atol) {
             this->m_exit_status = 2;
+            convergence_status = 2;
             if (this->m_verbose) {
                 amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
                                << ". Satisfied absolute tolerance " << m_atol << "\n";
@@ -451,6 +502,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         if (norm_rel < m_rtol) {
             this->m_exit_status = 3;
+            convergence_status = 3;
             if (this->m_verbose) {
                 amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
                                << ". Satisfied relative tolerance " << m_rtol << "\n";
@@ -471,6 +523,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         if (norm_abs > 100._rt*norm0) {
             this->m_exit_status = -9;
+            convergence_status = -9;
             amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
                            << ". SOLVER DIVERGED! relative tolerance = " << m_rtol << "\n";
             std::stringstream convergenceMsg;
@@ -516,6 +569,15 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         }
 
         // Solve linear system for Newton step [Jac]*dU = F
+        linear_rtol_last = linsol_rtol;
+        if (linear_solve_performed) {
+            linear_rtol_min = std::min(linear_rtol_min, linsol_rtol);
+            linear_rtol_max = std::max(linear_rtol_max, linsol_rtol);
+        } else {
+            linear_rtol_min = linsol_rtol;
+            linear_rtol_max = linsol_rtol;
+            linear_solve_performed = true;
+        }
         m_dU.zero();
         m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
@@ -551,7 +613,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 m_linear_function->apply(Jv, v);
                 const amrex::Real Jvnorm = Jv.norm2();
                 // Fresh nonlinear-semantics base for the secants.
-                EvalResidual(F0, a_U, a_b, a_time, iter);
+                eval_residual(F0, a_U, iter);
                 const amrex::Real unorm = a_U.norm2();
                 // Ladder tops out at the JFNK scale: larger rungs create
                 // perturbed states wild enough to push particles past the
@@ -560,7 +622,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                     const amrex::Real eps = std::pow(10._rt, 2*p) * 1.0e-6_rt
                         * (unorm > 0._rt ? unorm : 1._rt);
                     Up.linComb(1._rt, a_U, eps, v);
-                    EvalResidual(Fp, Up, a_b, a_time, iter);
+                    eval_residual(Fp, Up, iter);
                     Fp.linComb(1._rt/eps, Fp, -1._rt/eps, F0);
                     Fp.linComb(1._rt, Fp, -1._rt, Jv);
                     amrex::Print() << "JAC_CHECK: iter = " << iter
@@ -569,7 +631,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                         << Fp.norm2()/Jvnorm << "\n";
                 }
                 // Restore the base-state evaluation for the update below.
-                EvalResidual(m_F, a_U, a_b, a_time, iter);
+                eval_residual(m_F, a_U, iter);
             }
         }
 
@@ -601,10 +663,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             amrex::Real best_alpha = alpha;
             amrex::Real best_norm = -1._rt;
             amrex::Real last_alpha = alpha;
+            int trials_this_update = 0;
             m_ops->SetMassMatricesWanted(false);   // trials never deposit mass matrices
             for (int ls = 0; ls <= m_line_search_max_halvings; ++ls) {
                 a_U.linComb(1._rt, m_U_ls, -alpha, m_dU);
-                EvalResidual(m_F, a_U, a_b, a_time, iter);
+                eval_residual(m_F, a_U, iter);
+                ++trials_this_update;
                 last_alpha = alpha;
                 amrex::Real const trial_norm = m_F.norm2();
                 if (best_norm < 0._rt || trial_norm < best_norm) {
@@ -615,6 +679,9 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 alpha *= 0.5_rt;
             }
             a_U.linComb(1._rt, m_U_ls, -best_alpha, m_dU);
+            line_search_min_alpha = std::min(line_search_min_alpha, best_alpha);
+            line_search_trials += trials_this_update;
+            line_search_halvings += trials_this_update - 1;
             // m_F and the operator's RHS hold F at the last trial; that is the
             // accepted state exactly when the accepted alpha was the last tried.
             m_residual_current = (best_alpha == last_alpha);
@@ -636,6 +703,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     // tests above. A zero relative tolerance requests a fixed number of Newton
     // updates and intentionally suppresses the non-convergence warning.
     if (norm_rel >= m_rtol && norm_abs >= m_atol && m_rtol > 0.) {
+        // Keep GetExitStatus behavior compatible: a permissive solve returns
+        // zero so the caller can continue. The diagnostic convergence status
+        // remains negative so those tolerated failures cannot be mistaken
+        // for converged campaign evidence.
+        convergence_status = -5;
         std::stringstream convergenceMsg;
         convergenceMsg << "Newton solver failed to converge after " << iter <<
                           " iterations. Relative norm is " << norm_rel <<
@@ -670,6 +742,24 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         diagnostic_file << m_total_linsol_iters;
         diagnostic_file << " ";
         diagnostic_file << m_linear_solver->getResidualNorm();
+        diagnostic_file << " ";
+        diagnostic_file << this->m_exit_status;
+        diagnostic_file << " ";
+        diagnostic_file << convergence_status;
+        diagnostic_file << " ";
+        diagnostic_file << line_search_min_alpha;
+        diagnostic_file << " ";
+        diagnostic_file << line_search_halvings;
+        diagnostic_file << " ";
+        diagnostic_file << line_search_trials;
+        diagnostic_file << " ";
+        diagnostic_file << linear_rtol_last;
+        diagnostic_file << " ";
+        diagnostic_file << linear_rtol_min;
+        diagnostic_file << " ";
+        diagnostic_file << linear_rtol_max;
+        diagnostic_file << " ";
+        diagnostic_file << residual_evals;
         diagnostic_file << "\n";
         diagnostic_file.close();
     }

@@ -11,11 +11,53 @@
 # --- (extraction self-check, LU/Apply round-trips, FD-JVP comparison)
 # --- abort the run on failure, so this script only checks the counts.
 
+import re
+from pathlib import Path
+
 import numpy as np
 
-data = np.atleast_2d(np.loadtxt("diags/newton_diag.txt"))
+diag_path = Path("diags/newton_diag.txt")
+header = diag_path.read_text(encoding="utf-8").splitlines()[0]
+columns = re.findall(r"\[\d+\]([^\s]+)", header)
+expected_columns = [
+    "step()",
+    "time(s)",
+    "iters",
+    "total_iters",
+    "norm_abs",
+    "norm_rel",
+    "gmres_iters",
+    "gmres_total_iters",
+    "gmres_last_res",
+    "exit_status",
+    "convergence_status",
+    "line_search_min_alpha",
+    "line_search_halvings",
+    "line_search_trials",
+    "linear_rtol_last",
+    "linear_rtol_min",
+    "linear_rtol_max",
+    "residual_evals",
+]
+assert columns == expected_columns, (
+    f"unexpected Newton diagnostic schema: {columns} != {expected_columns}"
+)
+
+data = np.atleast_2d(np.loadtxt(diag_path))
+assert data.shape[1] == len(expected_columns), (
+    f"Newton diagnostic has {data.shape[1]} values but {len(expected_columns)} columns"
+)
 newton_iters = data[:, 2]
 gmres_iters = data[:, 6]
+exit_status = data[:, 9].astype(int)
+convergence_status = data[:, 10].astype(int)
+line_search_min_alpha = data[:, 11]
+line_search_halvings = data[:, 12].astype(int)
+line_search_trials = data[:, 13].astype(int)
+linear_rtol_last = data[:, 14]
+linear_rtol_min = data[:, 15]
+linear_rtol_max = data[:, 16]
+residual_evals = data[:, 17].astype(int)
 
 newton_max = newton_iters.max()
 gmres_mean = gmres_iters.mean()
@@ -42,6 +84,36 @@ assert gmres_mean <= GMRES_MEAN_CEIL, (
 )
 assert gmres_max <= GMRES_MAX_CEIL, (
     f"max GMRES/step regressed: {gmres_max} > ceiling {GMRES_MAX_CEIL}"
+)
+
+# Evidence-contract gates. This arm requires convergence, enables line search,
+# and uses fixed 1e-4 linear forcing. It therefore exercises the appended
+# schema without relying on a particular accepted-alpha history.
+assert np.all(np.isin(exit_status, (2, 3))), (
+    f"non-success public Newton statuses: {exit_status}"
+)
+assert np.array_equal(convergence_status, exit_status), (
+    "required-convergence arm disagrees between public and convergence statuses"
+)
+assert np.all((line_search_min_alpha > 0.0) & (line_search_min_alpha <= 1.0)), (
+    f"invalid accepted line-search alpha: {line_search_min_alpha}"
+)
+assert np.array_equal(line_search_halvings, line_search_trials - newton_iters), (
+    "line-search halvings must equal evaluated trials minus one first trial per update"
+)
+assert np.all(line_search_trials >= newton_iters), (
+    "line search must evaluate at least one trial per Newton update"
+)
+for name, values in (
+    ("last", linear_rtol_last),
+    ("minimum", linear_rtol_min),
+    ("maximum", linear_rtol_max),
+):
+    assert np.allclose(values, 1.0e-4, rtol=1.0e-13, atol=0.0), (
+        f"fixed linear tolerance has unexpected {name} values: {values}"
+    )
+assert np.all(residual_evals >= newton_iters + 1 + line_search_trials), (
+    "residual-evaluation count misses a base or line-search evaluation"
 )
 
 print("pc_block_banded stiff-arm CI gates passed")
