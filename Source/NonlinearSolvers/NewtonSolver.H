@@ -413,7 +413,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     int iter;
     int linear_solver_iters = 0;
     m_residual_current = false;
-    for (iter = 0; iter < m_maxits;) {
+    for (iter = 0; iter <= m_maxits; ++iter) {
 
         // Compute residual: F(U) = U - b - R(U). This is the evaluation the
         // linear solve linearizes about: the operator may deposit its
@@ -434,7 +434,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         norm_rel = norm_abs/norm0;
 
         // Check for convergence criteria
-        if (this->m_verbose || iter == m_maxits) {
+        if (this->m_verbose) {
             amrex::Print() << "Newton: iteration = " << std::setw(3) << iter <<  ", norm = "
                            << std::scientific << std::setprecision(5) << norm_abs << " (abs.), "
                            << std::scientific << std::setprecision(5) << norm_rel << " (rel.)" << "\n";
@@ -454,6 +454,17 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             if (this->m_verbose) {
                 amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter
                                << ". Satisfied relative tolerance " << m_rtol << "\n";
+            }
+            break;
+        }
+
+        // The last permitted Newton update has already been applied when
+        // iter == m_maxits. Check its residual above before declaring that
+        // the iteration limit was reached.
+        if (iter == m_maxits) {
+            if (this->m_verbose) {
+                amrex::Print() << "Newton: exiting at iter = " << std::setw(3) << iter
+                               << ". Maximum iteration reached: iter = " << m_maxits << "\n";
             }
             break;
         }
@@ -615,22 +626,16 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             a_U -= m_dU;
         }
 
-        iter++;
-        if (iter >= m_maxits) {
-            if (this->m_verbose) {
-                amrex::Print() << "Newton: exiting at iter = " << std::setw(3) << iter
-                               << ". Maximum iteration reached: iter = " << m_maxits << "\n";
-            }
-            break;
-        }
-
     }
 
     // Update total iteration count
     m_total_iters += iter;
     m_total_linsol_iters += linear_solver_iters;
 
-    if (m_rtol > 0. && iter == m_maxits) {
+    // The failure comparison is the exact complement of the strict success
+    // tests above. A zero relative tolerance requests a fixed number of Newton
+    // updates and intentionally suppresses the non-convergence warning.
+    if (norm_rel >= m_rtol && norm_abs >= m_atol && m_rtol > 0.) {
         std::stringstream convergenceMsg;
         convergenceMsg << "Newton solver failed to converge after " << iter <<
                           " iterations. Relative norm is " << norm_rel <<
