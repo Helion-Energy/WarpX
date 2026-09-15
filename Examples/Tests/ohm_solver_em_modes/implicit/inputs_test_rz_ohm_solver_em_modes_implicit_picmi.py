@@ -57,7 +57,17 @@ class CylindricalNormalModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, verbose, pc_bb=False, d1=False, dt_mult=1.0, steps=None):
+    def __init__(
+        self,
+        test,
+        verbose,
+        pc_bb=False,
+        d1=False,
+        dt_mult=1.0,
+        steps=None,
+        mm_jacobian=False,
+        mm_pc=None,
+    ):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.verbose = verbose or self.test
@@ -67,7 +77,7 @@ class CylindricalNormalModes(object):
 
         # The one/two-rank D1 pair keeps the sole BoxArray box on rank zero;
         # a fixed seed makes its particle realization an exact common input.
-        if self.d1:
+        if self.d1 or mm_pc is not None:
             simulation.random_seed = 20260914
 
         # calculate various plasma parameters based on the simulation input
@@ -119,7 +129,7 @@ class CylindricalNormalModes(object):
                 f"\ttotal steps = {self.total_steps:d}\n",
                 flush=True,
             )
-        self.setup_run()
+        self.setup_run(mm_jacobian=mm_jacobian, mm_pc=mm_pc)
 
     def get_plasma_quantities(self):
         """Calculate various plasma parameters based on the simulation input."""
@@ -151,7 +161,7 @@ class CylindricalNormalModes(object):
         # Larmor radius (m)
         self.rho_i = self.v_ti / self.w_ci
 
-    def setup_run(self):
+    def setup_run(self, mm_jacobian=False, mm_pc=None):
         """Setup simulation components."""
 
         #######################################################################
@@ -247,7 +257,8 @@ class CylindricalNormalModes(object):
             linear_solver=gmres_solver,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
-            use_mass_matrices_jacobian=True if self.d1 else None,
+            use_mass_matrices_jacobian=(True if (self.d1 or mm_jacobian) else None),
+            use_mass_matrices_pc=mm_pc,
             pc_type=pc,
             diagnostic_file="diags/newton_diag.txt" if self.test else None,
         )
@@ -349,6 +360,17 @@ parser.add_argument(
     action="store_true",
 )
 parser.add_argument(
+    "--mm-jacobian",
+    help="explicitly enable the mass-matrix Jacobian for the MM-PC twin",
+    action="store_true",
+)
+parser.add_argument(
+    "--mm-pc",
+    choices=("default", "on", "off"),
+    default="default",
+    help="tri-state mass-matrix preconditioner control; default emits no setting",
+)
+parser.add_argument(
     "--dt-mult",
     help="time-step multiplier (>1 also enables the Newton line search)",
     type=float,
@@ -363,6 +385,17 @@ parser.add_argument(
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
+mm_pc = None if args.mm_pc == "default" else args.mm_pc == "on"
+if mm_pc is not None:
+    if not args.test or not args.pc_bb or args.d1:
+        parser.error("explicit --mm-pc requires --test --pc-bb and excludes --d1")
+    if not args.mm_jacobian:
+        parser.error("explicit --mm-pc requires --mm-jacobian")
+    if args.steps is None or args.steps <= 0:
+        parser.error("explicit --mm-pc requires a positive --steps value")
+elif args.mm_jacobian:
+    parser.error("--mm-jacobian is reserved for an explicit --mm-pc twin")
+
 run = CylindricalNormalModes(
     test=args.test,
     verbose=args.verbose,
@@ -370,5 +403,7 @@ run = CylindricalNormalModes(
     d1=args.d1,
     dt_mult=args.dt_mult,
     steps=args.steps,
+    mm_jacobian=args.mm_jacobian,
+    mm_pc=mm_pc,
 )
 simulation.step()

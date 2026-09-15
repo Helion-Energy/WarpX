@@ -191,6 +191,34 @@ add_warpx_test(
 )
 label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_d1_2rank_picmi slow)
 
+# Default-preserving P1 attribution pair. The mass-matrix Jacobian and
+# block-banded preconditioner are identical in both arms; only the independent
+# mass-matrix-PC request changes. BlockBandedPC does not consume those PC
+# matrices, so the dependent on-arm requires byte-identical solver records,
+# serialized parameters, and normalized used inputs before a production twin
+# can be considered. Timing is deliberately outside this CI gate.
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_off_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --pc-bb --mm-jacobian --mm-pc off --steps 1"  # inputs
+    "analysis_rz_mm_pc.py --expect off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_off_picmi slow)
+
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_on_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --pc-bb --mm-jacobian --mm-pc on --steps 1"  # inputs
+    "analysis_rz_mm_pc.py --expect on --reference ../test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_off_picmi"  # analysis
+    OFF  # checksum
+    test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_off_picmi  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_mm_pc_on_picmi slow)
+
 # 3D Cartesian coverage of the theta-implicit hybrid solver and its Darwin
 # variant (CI-sized column: Nz = 128, NPPC = 32 in test mode; the physics
 # dispersion analyses live in the 1D tests).
