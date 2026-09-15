@@ -17,6 +17,12 @@ from pathlib import Path
 
 import numpy as np
 
+# D1 is strictly opt-in.  The default block-banded regression must not create
+# its dedicated record stream or pay any of the diagnostic residual cost.
+assert not Path("diags/d1_operator_partition.txt").exists(), (
+    "default-off run unexpectedly emitted D1 operator-partition records"
+)
+
 cell_header = Path("diags/diag1000010/Level_0/Cell_H")
 box_count_match = next(
     (

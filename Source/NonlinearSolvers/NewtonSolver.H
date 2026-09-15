@@ -18,9 +18,15 @@
 #include <AMReX_ParmParse.H>
 #include <AMReX_Config.H>
 
+#include <array>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <vector>
 #include <istream>
 #include <filesystem>
+#include <sstream>
+#include <string>
 
 /**
  * \brief Newton method to solve nonlinear equation of form:
@@ -137,6 +143,17 @@ private:
      * (matrix-free Jacobian action) in the linear solve.
      */
     amrex::Real m_jfnk_epsilon = 1.0e-6;
+
+    /** Default-off D1 common-direction operator partition.  This is a
+     * destructive evidence diagnostic, not a timing mode: it adds full
+     * particle residual evaluations and intentionally reports them in the
+     * ordinary residual-evaluation count. */
+    bool m_d1_operator_partition = false;
+    int m_d1_step = -1;
+    int m_d1_iteration = -1;
+    bool m_d1_once = true;
+    std::string m_d1_diagnostic_file;
+    mutable bool m_d1_done = false;
 
     /**
      * \brief Maximum iterations for the Newton solver.
@@ -256,6 +273,13 @@ private:
                         amrex::Real  a_time,
                         int          a_iter ) const;
 
+    void RunD1OperatorPartition (const Vec& a_U,
+                                 const Vec& a_b,
+                                 amrex::Real a_time,
+                                 int a_step,
+                                 int a_iter,
+                                 int& a_residual_evals) const;
+
 };
 
 template <class Vec, class Ops>
@@ -370,6 +394,11 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("max_iterations",      m_maxits);
     pp_newton.query("require_convergence", m_require_convergence);
     pp_newton.query("jfnk_epsilon",        m_jfnk_epsilon);
+    pp_newton.query("d1_operator_partition", m_d1_operator_partition);
+    pp_newton.query("d1_step",             m_d1_step);
+    pp_newton.query("d1_iteration",        m_d1_iteration);
+    pp_newton.query("d1_once",             m_d1_once);
+    pp_newton.query("d1_diagnostic_file",  m_d1_diagnostic_file);
     pp_newton.query("line_search",          m_use_line_search);
     pp_newton.query("line_search_max_halvings", m_line_search_max_halvings);
     pp_newton.query("line_search_reuse_residual", m_line_search_reuse_residual);
@@ -399,6 +428,15 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
 
     const amrex::ParmParse pp_jac("jacobian");
     pp_jac.query("pc_type", m_pc_type);
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_jfnk_epsilon > 0.0 && std::isfinite(m_jfnk_epsilon),
+        "newton.jfnk_epsilon must be positive and finite");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_d1_step >= -1 && m_d1_iteration >= -1,
+        "newton.d1_step and newton.d1_iteration must be -1 or non-negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_d1_operator_partition ||
+        m_pc_type == PreconditionerType::pc_block_banded,
+        "newton.d1_operator_partition requires jacobian.pc_type = pc_block_banded; "
+        "C is not exposed for other or curl-curl preconditioners");
 }
 
 template <class Vec, class Ops>
@@ -582,6 +620,15 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
 
+        const bool d1_selected = m_d1_operator_partition
+            && (!m_d1_once || !m_d1_done)
+            && (m_d1_step < 0 || m_d1_step == a_step)
+            && (m_d1_iteration < 0 || m_d1_iteration == iter);
+        if (d1_selected) {
+            RunD1OperatorPartition(a_U, a_b, a_time, a_step, iter,
+                                   residual_evals);
+        }
+
         // Jacobian consistency instrument (WARPX_JAC_CHECK=1): along the
         // solved Newton direction, compare the linear operator GMRES used
         // (probe/linear-stage semantics) against true-residual secants over
@@ -764,6 +811,299 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         diagnostic_file.close();
     }
 
+}
+
+template <class Vec, class Ops>
+void NewtonSolver<Vec,Ops>::RunD1OperatorPartition (
+    const Vec& a_U, const Vec& a_b, amrex::Real a_time,
+    int a_step, int a_iter, int& a_residual_evals) const
+{
+    using namespace amrex::literals;
+    static constexpr int schema = 1;
+    static constexpr int nrungs = 3;
+
+    std::ofstream d1_file;
+    if (amrex::ParallelDescriptor::IOProcessor()
+        && !m_d1_diagnostic_file.empty()) {
+        const std::filesystem::path path(m_d1_diagnostic_file);
+        const std::filesystem::path dir = path.parent_path();
+        if (!dir.empty()) { std::filesystem::create_directories(dir); }
+        // A solver may emit several selected records when d1_once=false, but
+        // the first selected record of each process must replace stale output
+        // from an earlier run in the same directory.
+        const auto mode = std::ofstream::out
+            | (m_d1_done ? std::ofstream::app : std::ofstream::trunc);
+        d1_file.open(m_d1_diagnostic_file, mode);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(d1_file.good(),
+            "could not open newton.d1_diagnostic_file for append");
+    }
+    auto emit = [&] (const std::string& line) {
+        amrex::Print() << line << "\n";
+        if (d1_file.is_open()) { d1_file << line << "\n"; }
+    };
+    auto line_prefix = [&] (const char* record) {
+        std::ostringstream os;
+        os << record << " schema=" << schema
+           << " step=" << a_step << " iteration=" << a_iter;
+        return os;
+    };
+
+    // Retain the exact full base used to anchor the matrix-free operator.
+    // GMRES owns independent copies, but these let us form B_g-B_s and
+    // measure whether a later full evaluation repeats the saved base.
+    Vec R_full_saved, F_full_saved;
+    R_full_saved.Define(a_U); F_full_saved.Define(a_U);
+    R_full_saved.Copy(m_R); F_full_saved.Copy(m_F);
+
+    // One layout-independent deterministic RZ direction.  Periodic duplicate
+    // z nodes hash to the same physical node; WarpXSolverVec's norm uses the
+    // field dot mask, so normalization is invariant to ownership layout.
+    Vec v;
+    v.Define(a_U);
+    v.zero();
+    const auto& geom = m_ops->GetGeometry(0);
+    const int zlo = geom.Domain().smallEnd(1);
+    const int zn = geom.Domain().length(1);
+    const bool zperiodic = geom.isPeriodic(1);
+    auto& v_fields = v.getArrayVec();
+    for (int comp = 0; comp < 3; ++comp) {
+        amrex::MultiFab& mf = *(v_fields[0][comp]);
+        for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+            auto arr = mf.array(mfi);
+            amrex::ParallelFor(mfi.validbox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    int jw = j;
+                    if (zperiodic) {
+                        jw = zlo + (((j-zlo) % zn) + zn) % zn;
+                    }
+                    unsigned int h = static_cast<unsigned int>(i*73856093)
+                                   ^ static_cast<unsigned int>(jw*19349663)
+                                   ^ static_cast<unsigned int>(comp*83492791);
+                    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+                    arr(i,j,k) = amrex::Real(h % 20011u)
+                               / amrex::Real(20011.0) - amrex::Real(0.5);
+                });
+        }
+        mf.FillBoundaryAndSync(geom.periodicity());
+    }
+    const amrex::Real raw_vnorm = v.norm2();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(raw_vnorm) && raw_vnorm > 0._rt,
+        "D1 deterministic direction has invalid norm");
+    v.scale(1._rt/raw_vnorm);
+    const amrex::Real vnorm = v.norm2();
+
+    {
+        auto os = line_prefix("D1_BEGIN");
+        os << " direction=rz_periodic_hash_v1"
+           << " direction_norm=" << std::scientific << std::setprecision(17)
+           << vnorm << " epsilon_relative_top=" << m_jfnk_epsilon
+           << " rungs=" << nrungs << " destructive=1 timing_valid=0";
+        emit(os.str());
+    }
+    for (int comp = 0; comp < 3; ++comp) {
+        const amrex::MultiFab& mf = *(v.getArrayVec()[0][comp]);
+        auto os = line_prefix("D1_DIRECTION");
+        os << " component=" << comp
+           << " norm=" << std::scientific << std::setprecision(17)
+           << mf.norm2(0) << " max_abs=" << mf.norminf(0);
+        emit(os.str());
+    }
+
+    // Machine-readable metric emitter.  Every record has the same scalar
+    // fields; component records also identify the worst absolute (r,z) row.
+    auto emit_metric = [&] (const std::string& quantity,
+                            const Vec& value, const Vec& reference,
+                            int rung, amrex::Real eps_relative,
+                            amrex::Real eps_absolute) {
+        const amrex::Real n = value.norm2();
+        const amrex::Real nr = reference.norm2();
+        const amrex::Real rel = (nr > 0._rt) ? n/nr : n;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(n) && std::isfinite(nr) && std::isfinite(rel),
+            "D1 produced a non-finite global metric");
+        {
+            auto os = line_prefix("D1_METRIC");
+            os << " rung=" << rung
+               << " eps_relative=" << std::scientific << std::setprecision(17)
+               << eps_relative << " eps_absolute=" << eps_absolute
+               << " quantity=" << quantity << " norm=" << n
+               << " reference_norm=" << nr << " relative=" << rel;
+            emit(os.str());
+        }
+        for (int comp = 0; comp < 3; ++comp) {
+            const amrex::MultiFab& mf = *(value.getArrayVec()[0][comp]);
+            const amrex::MultiFab& ref_mf = *(reference.getArrayVec()[0][comp]);
+            const amrex::Real cn = mf.norm2(0);
+            const amrex::Real cr = ref_mf.norm2(0);
+            const amrex::Real crel = (cr > 0._rt) ? cn/cr : cn;
+            amrex::MultiFab abs_mf(mf.boxArray(), mf.DistributionMap(), 1, 0);
+            amrex::MultiFab::Copy(abs_mf, mf, 0, 0, 1, 0);
+            abs_mf.abs(0, 1, 0);
+            const amrex::Real vmax = abs_mf.norminf(0);
+            const amrex::IntVect loc = abs_mf.maxIndex(0);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                std::isfinite(cn) && std::isfinite(cr)
+                && std::isfinite(crel) && std::isfinite(vmax),
+                "D1 produced a non-finite component metric");
+            auto os = line_prefix("D1_COMPONENT");
+            os << " rung=" << rung
+               << " eps_relative=" << std::scientific << std::setprecision(17)
+               << eps_relative << " eps_absolute=" << eps_absolute
+               << " quantity=" << quantity << " component=" << comp
+               << " norm=" << cn << " reference_norm=" << cr
+               << " relative=" << crel << " max_abs=" << vmax
+               << " max_r=" << loc[0] << " max_z=" << loc[1];
+            emit(os.str());
+        }
+    };
+
+    // B_g must be sampled before any additional full residual changes the
+    // held particle/mass-matrix state.  The same stored directions feed all
+    // subsequent legs of the evidence chain.
+    const std::array<amrex::Real, nrungs> eps_relative = {
+        m_jfnk_epsilon*1.0e-4_rt,
+        m_jfnk_epsilon*1.0e-2_rt,
+        m_jfnk_epsilon
+    };
+    std::array<amrex::Real, nrungs> eps_absolute{};
+    std::array<Vec, nrungs> B_g;
+    for (int rung = 0; rung < nrungs; ++rung) {
+        B_g[rung].Define(a_U);
+        eps_absolute[rung] = m_linear_function->perturbationScale(
+            v, eps_relative[rung]);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(eps_absolute[rung]) && eps_absolute[rung] > 0._rt,
+            "D1 produced an invalid absolute epsilon");
+        m_linear_function->applyWithJFNKEps(
+            B_g[rung], v, eps_relative[rung]);
+    }
+
+    // C is the unfactored frozen BB action, not the inverse applied by GMRES.
+    Vec C;
+    C.Define(a_U);
+    if (!m_linear_function->applyFrozenPreconditionerOperator(C, v)) {
+        auto os = line_prefix("D1_STATUS");
+        os << " status=failed reason=frozen_operator_unavailable";
+        emit(os.str());
+        WARPX_ABORT_WITH_MESSAGE(
+            "D1 requires a built e-form pc_block_banded frozen operator");
+    }
+
+    // Stage base and repeat still use the intact linear-stage state.  These
+    // complete B_s and measure its same-state noise before the first full
+    // particle residual below invalidates that state.
+    Vec R_stage0, R_stage1, stage_repeat;
+    R_stage0.Define(a_U); R_stage1.Define(a_U); stage_repeat.Define(a_U);
+    m_ops->ComputeRHS(R_stage0, a_U, a_time, -1, true);
+    m_ops->ComputeRHS(R_stage1, a_U, a_time, -1, true);
+    stage_repeat.Copy(R_stage1);
+    stage_repeat.increment(R_stage0, -1._rt);
+
+    // Two consecutive full evaluations establish the full-map repeat floor.
+    // The saved-vs-fresh record additionally detects drift since the exact
+    // full base used by GMRES was captured.
+    Vec F_full0, F_full1, full_repeat, full_saved_repeat;
+    F_full0.Define(a_U); F_full1.Define(a_U);
+    full_repeat.Define(a_U); full_saved_repeat.Define(a_U);
+    ++a_residual_evals;
+    EvalResidual(F_full0, a_U, a_b, a_time, a_iter);
+    ++a_residual_evals;
+    EvalResidual(F_full1, a_U, a_b, a_time, a_iter);
+    full_repeat.Copy(F_full1);
+    full_repeat.increment(F_full0, -1._rt);
+    full_saved_repeat.Copy(F_full0);
+    full_saved_repeat.increment(F_full_saved, -1._rt);
+
+    emit_metric("stage_repeat", stage_repeat, R_stage0,
+                -1, 0._rt, 0._rt);
+    emit_metric("full_repeat", full_repeat, F_full0,
+                -1, 0._rt, 0._rt);
+    emit_metric("full_saved_repeat", full_saved_repeat, F_full_saved,
+                -1, 0._rt, 0._rt);
+
+    Vec U_probe, F_probe, A, saved_base_drift_over_eps, anchor, B_s;
+    Vec A_minus_B_s, B_s_minus_C, B_g_minus_B_s, A_minus_C, closure;
+    U_probe.Define(a_U); F_probe.Define(a_U); A.Define(a_U);
+    saved_base_drift_over_eps.Define(a_U);
+    anchor.Define(a_U); B_s.Define(a_U);
+    A_minus_B_s.Define(a_U); B_s_minus_C.Define(a_U);
+    B_g_minus_B_s.Define(a_U); A_minus_C.Define(a_U);
+    closure.Define(a_U);
+
+    for (int rung = 0; rung < nrungs; ++rung) {
+        const amrex::Real eps = eps_absolute[rung];
+
+        // B_g-B_s = [R_full(U)-R_stage(U)]/eps.  Deriving B_s from
+        // the already-captured B_g uses the identical stage probe and avoids
+        // contaminating the partition with a second probe evaluation.
+        anchor.linComb(1._rt/eps, R_full_saved,
+                       -1._rt/eps, R_stage0);
+        B_s.Copy(B_g[rung]);
+        B_s.increment(anchor, -1._rt);
+
+        U_probe.linComb(1._rt, a_U, eps, v);
+        ++a_residual_evals;
+        EvalResidual(F_probe, U_probe, a_b, a_time, a_iter);
+        // Primary A is the full nonlinear derivative diagnostic: use the
+        // fresh full-map base, matching the established WARPX_JAC_CHECK
+        // semantics.  The saved GMRES/Newton base can cease to be
+        // reproducible after the linear-stage state transition; report that
+        // actual-base consistency defect separately at its 1/eps scale so it
+        // cannot erase the differential A-B_s measurement.
+        A.linComb(1._rt/eps, F_probe, -1._rt/eps, F_full0);
+        saved_base_drift_over_eps.Copy(full_saved_repeat);
+        saved_base_drift_over_eps.scale(1._rt/eps);
+
+        A_minus_B_s.Copy(A);
+        A_minus_B_s.increment(B_s, -1._rt);
+        B_s_minus_C.Copy(B_s);
+        B_s_minus_C.increment(C, -1._rt);
+        B_g_minus_B_s.Copy(B_g[rung]);
+        B_g_minus_B_s.increment(B_s, -1._rt);
+        A_minus_C.Copy(A);
+        A_minus_C.increment(C, -1._rt);
+
+        // Four-operator closure:
+        // (A-B_g) + (B_g-B_s) + (B_s-C) - (A-C) = 0.
+        closure.Copy(A);
+        closure.increment(B_g[rung], -1._rt);
+        closure.increment(B_g_minus_B_s, 1._rt);
+        closure.increment(B_s_minus_C, 1._rt);
+        closure.increment(A_minus_C, -1._rt);
+
+        emit_metric("A", A, A, rung, eps_relative[rung], eps);
+        emit_metric("B_g", B_g[rung], B_g[rung], rung,
+                    eps_relative[rung], eps);
+        emit_metric("B_s", B_s, B_s, rung, eps_relative[rung], eps);
+        emit_metric("C", C, C, rung, eps_relative[rung], eps);
+        emit_metric("A_minus_B_s", A_minus_B_s, A, rung,
+                    eps_relative[rung], eps);
+        emit_metric("B_s_minus_C", B_s_minus_C, B_s, rung,
+                    eps_relative[rung], eps);
+        emit_metric("B_g_minus_B_s", B_g_minus_B_s, B_g[rung], rung,
+                    eps_relative[rung], eps);
+        emit_metric("A_minus_C", A_minus_C, A, rung,
+                    eps_relative[rung], eps);
+        emit_metric("full_saved_drift_over_eps", saved_base_drift_over_eps,
+                    A, rung, eps_relative[rung], eps);
+        emit_metric("closure", closure, A_minus_C, rung,
+                    eps_relative[rung], eps);
+    }
+
+    // Leave the ordinary Newton update at a freshly evaluated full base, as
+    // the legacy WARPX_JAC_CHECK path does.  This extra evaluation is part of
+    // the diagnostic cost and therefore remains visible in residual_evals.
+    ++a_residual_evals;
+    EvalResidual(m_F, a_U, a_b, a_time, a_iter);
+
+    {
+        auto os = line_prefix("D1_END");
+        os << " status=complete rungs=" << nrungs;
+        emit(os.str());
+    }
+    if (d1_file.is_open()) { d1_file.flush(); }
+    m_d1_done = true;
 }
 
 template <class Vec, class Ops>

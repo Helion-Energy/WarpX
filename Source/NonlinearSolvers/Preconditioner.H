@@ -70,6 +70,21 @@ class Preconditioner
         virtual void Apply (T& a_x, const T& a_b) = 0;
 
         /**
+         * \brief Apply the frozen operator represented by this preconditioner.
+         *
+         * This is an optional, diagnostics-only hook.  It applies the model
+         * operator itself (C*v), not the inverse/preconditioning action
+         * (C^{-1}*v).  Preconditioners that do not expose such an operator
+         * return false and leave the output unspecified.
+         */
+        virtual bool ApplyFrozenOperator (T& a_out, const T& a_in)
+        {
+            static_cast<void>(a_out);
+            static_cast<void>(a_in);
+            return false;
+        }
+
+        /**
          * \brief Get the sparse matrix form of the preconditioner
          *
          * If the preconditioner is based on constructing and solving the

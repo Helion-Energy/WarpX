@@ -277,6 +277,11 @@ Overall simulation parameters
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
           - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6) Relative perturbation scale for the finite-difference JVP in the matrix-free linear solve.
+          - ``newton.d1_operator_partition`` (``bool``, default: false): emit a destructive, non-timing D1 diagnostic that applies the fresh-base full nonlinear secant :math:`A`, the actual anchored GMRES operator :math:`B_g`, the linear-stage self-secant :math:`B_s`, and the frozen block-banded operator :math:`C` to one common deterministic direction at three epsilon rungs ending at ``newton.jfnk_epsilon``. The records include both residual-map repeat floors, saved-to-fresh full-base drift at its :math:`1/\epsilon` scale, the :math:`B_g-B_s` base-anchor defect, pairwise differences, four-operator closure, component norms, and worst :math:`(r,z)` rows. This mode requires ``jacobian.pc_type = pc_block_banded`` and adds full particle pushes to the ordinary residual-evaluation count.
+          - ``newton.d1_step`` (``int``, default: -1): zero-based internal solve step selected for D1 (the first evolved solve is step 0; the ordinary Newton diagnostic table displays this as step 1); -1 accepts any step.
+          - ``newton.d1_iteration`` (``int``, default: -1): zero-based Newton iteration selected for D1; -1 accepts any iteration.
+          - ``newton.d1_once`` (``bool``, default: true): after the first selected record, suppress D1 for the lifetime of this Newton solver.
+          - ``newton.d1_diagnostic_file`` (``string``, default: None): optional file receiving the same schema-v1 ``D1_*`` records written to standard output.
           - ``newton.diagnostic_file`` (``string``, default: None)
           - ``newton.diagnostic_interval`` (``int``, default: 1)
           - ``newton.adaptive_forcing`` (``bool``, default: false)
@@ -414,7 +419,7 @@ Overall simulation parameters
             - ``precond.bb_update_interval`` (``int``, default: 1): number of steps between operator rebuilds; 0 rebuilds every Newton iteration.
             - ``precond.bb_include_drift`` (``bool``, default: true): include the drift/motional :math:`(J_0-J_{i,0})\times\delta B` leg.
             - ``precond.bb_include_hyper`` (``bool``, default: true): include the hyper-resistive leg.
-            - ``precond.bb_verify`` (``bool``, default: false): run verification gates at every rebuild (LU and Apply round-trip checks, and a finite-difference Jacobian-vector-product comparison against the true residual).
+            - ``precond.bb_verify`` (``bool``, default: false): run verification gates at every rebuild (LU and Apply round-trip checks, and a linear-stage self-secant :math:`B_s` comparison against the frozen operator :math:`C`). The legacy ``J_fd``/``J_pc`` output alias is retained for existing parsers, but it does not denote a full nonlinear-residual secant.
             - ``precond.bb_max_mem_gb`` (``float``, default: 8): memory budget for the extracted blocks; setup aborts if the estimate exceeds it.
             - ``precond.bb_wall_identity`` (``int``, default: -1): tangential-E identity rows at the outer radial wall; -1 auto-detects from a PEC or PEC-insulator field boundary, 0 off, 1 force on.
             - ``precond.bb_overlap`` (``int``, default: 8): restricted-additive-Schwarz overlap depth in cells (per-box mode only).

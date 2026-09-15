@@ -155,6 +155,42 @@ add_warpx_test(
 )
 label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_stiff_picmi slow)
 
+# One-shot D1 common-direction operator partition.  The grid remains one
+# BoxArray box in both arms, so the two-rank arm has one empty rank and must
+# reproduce the one-rank A/B_g/B_s/C metrics and worst-row locations.
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_d1_default_off_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --pc-bb --steps 1"  # inputs
+    "analysis_rz_d1.py --assert-default-off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_d1_default_off_picmi slow)
+
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_d1_1rank_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --d1 --steps 1"  # inputs
+    "analysis_rz_d1.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_d1_1rank_picmi slow)
+
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_d1_2rank_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --d1 --steps 1"  # inputs
+    "analysis_rz_d1.py --compare ../test_rz_ohm_solver_em_modes_implicit_bb_d1_1rank_picmi/diags/d1_operator_partition.txt"  # analysis
+    OFF  # checksum
+    test_rz_ohm_solver_em_modes_implicit_bb_d1_1rank_picmi  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_d1_2rank_picmi slow)
+
 # 3D Cartesian coverage of the theta-implicit hybrid solver and its Darwin
 # variant (CI-sized column: Nz = 128, NPPC = 32 in test mode; the physics
 # dispersion analyses live in the 1D tests).

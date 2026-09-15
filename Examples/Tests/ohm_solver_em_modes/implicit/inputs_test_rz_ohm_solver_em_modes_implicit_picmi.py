@@ -57,12 +57,18 @@ class CylindricalNormalModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, verbose, pc_bb=False, dt_mult=1.0, steps=None):
+    def __init__(self, test, verbose, pc_bb=False, d1=False, dt_mult=1.0, steps=None):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.verbose = verbose or self.test
         self.pc_bb = pc_bb
+        self.d1 = d1
         self.dt_mult = dt_mult
+
+        # The one/two-rank D1 pair keeps the sole BoxArray box on rank zero;
+        # a fixed seed makes its particle realization an exact common input.
+        if self.d1:
+            simulation.random_seed = 20260914
 
         # calculate various plasma parameters based on the simulation input
         self.get_plasma_quantities()
@@ -241,9 +247,20 @@ class CylindricalNormalModes(object):
             linear_solver=gmres_solver,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
+            use_mass_matrices_jacobian=True if self.d1 else None,
             pc_type=pc,
             diagnostic_file="diags/newton_diag.txt" if self.test else None,
         )
+
+        if self.d1:
+            import pywarpx
+
+            newton = pywarpx.warpx.get_bucket("newton")
+            newton.d1_operator_partition = 1
+            newton.d1_step = 0
+            newton.d1_iteration = 0
+            newton.d1_once = 1
+            newton.d1_diagnostic_file = "diags/d1_operator_partition.txt"
 
         # Create the theta-implicit hybrid evolve scheme
         evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
@@ -276,20 +293,24 @@ class CylindricalNormalModes(object):
         # Add diagnostics                                                     #
         #######################################################################
 
-        field_diag = picmi.FieldDiagnostic(
-            name="field_diag",
-            grid=self.grid,
-            period=self.diag_steps,
-            data_list=["B", "E"],
-            write_dir="diags",
-            warpx_file_prefix="field_diags",
-            warpx_format="openpmd",
-            warpx_openpmd_backend="h5",
-        )
-        simulation.add_diagnostic(field_diag)
+        one_step_bb_diagnostic = self.test and self.pc_bb and self.total_steps == 1
+        if not one_step_bb_diagnostic:
+            field_diag = picmi.FieldDiagnostic(
+                name="field_diag",
+                grid=self.grid,
+                period=self.diag_steps,
+                data_list=["B", "E"],
+                write_dir="diags",
+                warpx_file_prefix="field_diags",
+                warpx_format="openpmd",
+                warpx_openpmd_backend="h5",
+            )
+            simulation.add_diagnostic(field_diag)
 
         # add particle diagnostic for checksum
-        if self.test:
+        # The one-step BB diagnostic arms have checksums disabled and inspect
+        # only their solver record streams, so avoid unrelated plotfile I/O.
+        if self.test and not one_step_bb_diagnostic:
             part_diag = picmi.ParticleDiagnostic(
                 name="diag1",
                 period=self.total_steps,
@@ -323,6 +344,11 @@ parser.add_argument(
     action="store_true",
 )
 parser.add_argument(
+    "--d1",
+    help="emit one schema-v1 D1 common-direction operator partition at internal step 0, Newton iteration 0",
+    action="store_true",
+)
+parser.add_argument(
     "--dt-mult",
     help="time-step multiplier (>1 also enables the Newton line search)",
     type=float,
@@ -340,7 +366,8 @@ sys.argv = sys.argv[:1] + left
 run = CylindricalNormalModes(
     test=args.test,
     verbose=args.verbose,
-    pc_bb=args.pc_bb,
+    pc_bb=args.pc_bb or args.d1,
+    d1=args.d1,
     dt_mult=args.dt_mult,
     steps=args.steps,
 )

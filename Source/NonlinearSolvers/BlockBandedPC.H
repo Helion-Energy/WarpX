@@ -126,8 +126,9 @@
  *                                    motional leg)
  *    precond.bb_include_hyper       (bool, default true when the model runs
  *                                    hyper-resistivity)
- *    precond.bb_verify              (bool, default false: FD-JVP vs
- *                                    assembled-operator agreement gate +
+ *    precond.bb_verify              (bool, default false: configured
+ *                                    linear-stage self-secant B_s vs frozen
+ *                                    operator C agreement gate +
  *                                    factorization round-trip check)
  *    precond.bb_max_mem_gb          (Real, default 8: abort if the block
  *                                    storage estimate exceeds this)
@@ -151,6 +152,7 @@ class BlockBandedPC : public Preconditioner<T,Ops>
         void Define (const T&, Ops*) override;
         void Update (const T& a_U) override;
         void Apply (T&, const T&) override;
+        bool ApplyFrozenOperator (T&, const T&) override;
         void printParameters() const override;
 
         [[nodiscard]] inline bool IsDefined () const override { return m_is_defined; }
@@ -421,6 +423,8 @@ class BlockBandedPC : public Preconditioner<T,Ops>
         void GatherGlobal (const amrex::MultiFab& src, int scomp,
                            HostFab& out, int ng) const;
         void ApplyFrozenBox (BoxSys& S, bool a_A_only = false) const;
+        void ApplyFrozenOperatorImpl (T& a_out, const T& a_in,
+                                      bool a_A_only = false);
         /** curlcurl_form stage 4: rows of (A - N) (or A alone). wallEt/
          *  wallEz carry the saved wall-column inputs for the identity
          *  rows (the PEC column kill of ApplyFrozenBox). */
@@ -2281,11 +2285,132 @@ void BlockBandedPC<T,Ops>::SelfCheck (BoxSys& S, int isys, bool a_A_only) const
 }
 
 template <class T, class Ops>
+bool BlockBandedPC<T,Ops>::ApplyFrozenOperator (T& a_out, const T& a_in)
+{
+    // The curl-curl form represents A^{-1}(A-N); applying its outer frozen
+    // operator would require both the unfactored A action and a solve.  D1's
+    // first tranche deliberately exposes only the direct e-form model C.
+    if (!m_have_built || m_form_curlcurl) { return false; }
+    ApplyFrozenOperatorImpl(a_out, a_in);
+    return true;
+}
+
+template <class T, class Ops>
+void BlockBandedPC<T,Ops>::ApplyFrozenOperatorImpl (
+    T& a_out, const T& a_in, bool a_A_only)
+{
+    a_out.zero();
+    const auto& in_vec = a_in.getArrayVec();
+    auto& out_vec = a_out.getArrayVec();
+
+    if (m_global_on) {
+        // Gather the common direction once, apply the single replicated
+        // global system, then write only each rank's owned boxes.
+        BoxSys& S = m_sys[0];
+        HostFab hEr, hEt, hEz;
+        GatherGlobal(*(in_vec[0][0]), 0, hEr, 1);
+        GatherGlobal(*(in_vec[0][1]), 0, hEt, 1);
+        GatherGlobal(*(in_vec[0][2]), 0, hEz, 1);
+        S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
+        for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
+            for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) {
+                S.inEr.ref(i,j) = hEr.get(i,j);
+            }
+        }
+        for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
+            for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) {
+                S.inEt.ref(i,j) = hEt.get(i,j);
+            }
+        }
+        for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
+            for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
+                S.inEz.ref(i,j) = hEz.get(i,j);
+            }
+        }
+        ApplyFrozenBox(S, a_A_only);
+        for (int dim = 0; dim < 3; dim++) {
+            amrex::MultiFab& mf = *(out_vec[0][dim]);
+            const PArr& out = (dim == 0) ? S.oEr : ((dim == 1) ? S.oEt : S.oEz);
+            for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+                const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
+#ifdef AMREX_USE_GPU
+                amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
+                auto ha = hout.array();
+                amrex::LoopOnCpu(tb, [&] (int i, int j, int k) {
+                    ha(i,j,k) = out.get(i,j);
+                });
+                amrex::FArrayBox& dfab = mf[mfi];
+                amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
+                                        hout.size()*sizeof(amrex::Real));
+#else
+                auto darr = mf.array(mfi);
+                amrex::LoopOnCpu(tb, [&] (int i, int j, int k) {
+                    darr(i,j,k) = out.get(i,j);
+                });
+#endif
+            }
+        }
+        return;
+    }
+
+    // Per-box research mode: preserve VerifyFD's Dirichlet-truncated local
+    // semantics exactly.  Inputs outside a box's valid FAB read as zero.
+    const amrex::MultiFab& Ermf = *(in_vec[0][0]);
+    int isys = 0;
+    for (amrex::MFIter mfi(Ermf); mfi.isValid(); ++mfi, ++isys) {
+        BoxSys& S = m_sys[isys];
+        HostFab hEr, hEt, hEz;
+        CopyFabToHost(*(in_vec[0][0]), mfi, hEr);
+        CopyFabToHost(*(in_vec[0][1]), mfi, hEt);
+        CopyFabToHost(*(in_vec[0][2]), mfi, hEz);
+        S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
+        for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
+            for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) {
+                S.inEr.ref(i,j) = hEr.get(i,j);
+            }
+        }
+        for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
+            for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) {
+                S.inEt.ref(i,j) = hEt.get(i,j);
+            }
+        }
+        for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
+            for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
+                S.inEz.ref(i,j) = hEz.get(i,j);
+            }
+        }
+        ApplyFrozenBox(S, a_A_only);
+
+        for (int dim = 0; dim < 3; dim++) {
+            amrex::MultiFab& mf = *(out_vec[0][dim]);
+            const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
+            const PArr& out = (dim == 0) ? S.oEr : ((dim == 1) ? S.oEt : S.oEz);
+#ifdef AMREX_USE_GPU
+            amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
+            auto ha = hout.array();
+            amrex::LoopOnCpu(tb, [&] (int i, int j, int k) {
+                ha(i,j,k) = out.get(i,j);
+            });
+            amrex::FArrayBox& dfab = mf[mfi];
+            amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
+                                    hout.size()*sizeof(amrex::Real));
+#else
+            auto darr = mf.array(mfi);
+            amrex::LoopOnCpu(tb, [&] (int i, int j, int k) {
+                darr(i,j,k) = out.get(i,j);
+            });
+#endif
+        }
+    }
+}
+
+template <class T, class Ops>
 void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
 {
-    // FD-JVP of the true residual vs the assembled operator on a
-    // deterministic pseudo-random direction. Expected agreement ~1e-5
-    // (FD noise + deliberately omitted legs).
+    // Self-secant of the configured linear-stage residual (B_s) versus the
+    // assembled frozen operator on a deterministic pseudo-random direction.
+    // This is not a full nonlinear-residual secant.  Expected agreement is
+    // limited by FD noise and the deliberately omitted frozen-model legs.
     T dU, R0, R1, Z, Jd;
     dU.Define(a_U); R0.Define(a_U); R1.Define(a_U); Z.Define(a_U); Jd.Define(a_U);
     dU.zero();
@@ -2367,111 +2492,20 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
     Jd.increment(R1, -RT(1.0)/eps);
     Jd.increment(R0,  RT(1.0)/eps);
 
-    // assembled-operator action on the same direction, per box
+    // Frozen assembled-operator action on the same direction.  The helper is
+    // also the diagnostics-only hook used by the D1 common-direction chain.
     T Jm;
     Jm.Define(a_U);
-    Jm.zero();
-    auto& jm_vec = Jm.getArrayVec();
-    auto& du_vec2 = dU.getArrayVec();
-    const amrex::MultiFab& Ermf = *(du_vec2[0][0]);
-
-    if (m_global_on) {
-        // gather the direction once (collective), apply the single global
-        // system, then write the owned boxes
-        BoxSys& S = m_sys[0];
-        auto apply_model = [&](T& a_out, T& a_in, bool a_A_only)
-        {
-            auto& in_vec = a_in.getArrayVec();
-            auto& out_vec = a_out.getArrayVec();
-            HostFab hEr, hEt, hEz;
-            GatherGlobal(*(in_vec[0][0]), 0, hEr, 1);
-            GatherGlobal(*(in_vec[0][1]), 0, hEt, 1);
-            GatherGlobal(*(in_vec[0][2]), 0, hEz, 1);
-            S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
-            for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
-                for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = hEr.get(i,j); }
-            }
-            for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
-                for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = hEt.get(i,j); }
-            }
-            for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
-                for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = hEz.get(i,j); }
-            }
-            ApplyFrozenBox(S, a_A_only);
-            for (int dim = 0; dim < 3; dim++) {
-                amrex::MultiFab& mf = *(out_vec[0][dim]);
-                const PArr& out = (dim==0) ? S.oEr : ((dim==1) ? S.oEt : S.oEz);
-                for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
-                    const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
-#ifdef AMREX_USE_GPU
-                    amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
-                    auto ha = hout.array();
-                    amrex::LoopOnCpu(tb, [&](int i, int j, int k) { ha(i,j,k) = out.get(i,j); });
-                    amrex::FArrayBox& dfab = mf[mfi];
-                    amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
-                                            hout.size()*sizeof(amrex::Real));
-#else
-                    auto darr = mf.array(mfi);
-                    amrex::LoopOnCpu(tb, [&](int i, int j, int k) { darr(i,j,k) = out.get(i,j); });
-#endif
-                }
-            }
-        };
-        apply_model(Jm, dU, false);
-        if (m_form_curlcurl) {
-            // A-composed gate: the model J = A^{-1}(A - N) cannot be
-            // applied without factoring A, so compare pure applies instead:
-            // A (J_fd du) must equal (A - N) du. Replace Jd by A*Jd; Jm
-            // already holds (A - N) du.
-            T AJd;
-            AJd.Define(a_U);
-            AJd.zero();
-            apply_model(AJd, Jd, true);
-            Jd.Copy(AJd);
-        }
-    } else {
-
-    int isys = 0;
-    for (amrex::MFIter mfi(Ermf); mfi.isValid(); ++mfi, ++isys) {
-        BoxSys& S = m_sys[isys];
-        HostFab hEr, hEt, hEz;
-        CopyFabToHost(*(du_vec2[0][0]), mfi, hEr);
-        CopyFabToHost(*(du_vec2[0][1]), mfi, hEt);
-        CopyFabToHost(*(du_vec2[0][2]), mfi, hEz);
-        S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
-        for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
-            for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = hEr.get(i,j); }
-        }
-        for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
-            for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = hEt.get(i,j); }
-        }
-        for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
-            for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = hEz.get(i,j); }
-        }
-        ApplyFrozenBox(S);
-
-        // write outputs into Jm on the valid box (host staging)
-        for (int dim = 0; dim < 3; dim++) {
-            amrex::MultiFab& mf = *(jm_vec[0][dim]);
-            const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
-            const PArr& out = (dim==0) ? S.oEr : ((dim==1) ? S.oEt : S.oEz);
-#ifdef AMREX_USE_GPU
-            amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
-            auto ha = hout.array();
-            amrex::LoopOnCpu(tb, [&](int i, int j, int k) {
-                ha(i,j,k) = out.get(i, j);
-            });
-            amrex::FArrayBox& dfab = mf[mfi];
-            amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
-                                    hout.size()*sizeof(amrex::Real));
-#else
-            auto darr = mf.array(mfi);
-            amrex::LoopOnCpu(tb, [&](int i, int j, int k) {
-                darr(i,j,k) = out.get(i, j);
-            });
-#endif
-        }
-    }
+    ApplyFrozenOperatorImpl(Jm, dU);
+    if (m_form_curlcurl) {
+        // A-composed gate: the model J = A^{-1}(A - N) cannot be
+        // applied without factoring A, so compare pure applies instead:
+        // A (B_s du) must equal (A - N) du. Replace Jd by A*Jd; Jm
+        // already holds (A - N) du.
+        T AJd;
+        AJd.Define(a_U);
+        ApplyFrozenOperatorImpl(AJd, Jd, true);
+        Jd.Copy(AJd);
     }
 
     // compare
@@ -2482,14 +2516,23 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
     const RT nJd = Jd.norm2();
     const RT ndiff = diff.norm2();
     if (m_form_curlcurl) {
+        amrex::Print() << "pc_curlcurl_banded STAGE VERIFY (A-composed): "
+            << "||A B_s du|| = " << nJd
+            << ", ||A B_s du - (A-N) du||/||A B_s du|| = "
+            << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
+        // Compatibility alias retained for existing evidence parsers.
         amrex::Print() << "pc_curlcurl_banded VERIFY (A-composed): "
             << "||A J_fd du|| = " << nJd
             << ", ||A J_fd du - (A-N) du||/||A J_fd du|| = "
             << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
     } else {
-    amrex::Print() << "pc_block_banded VERIFY: ||J_fd*du|| = " << nJd
-        << ", ||J_fd*du - J_pc*du||/||J_fd*du|| = "
-        << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
+        amrex::Print() << "pc_block_banded STAGE VERIFY: ||B_s*du|| = " << nJd
+            << ", ||B_s*du - C*du||/||B_s*du|| = "
+            << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
+        // Compatibility alias retained byte-for-byte for existing evidence parsers.
+        amrex::Print() << "pc_block_banded VERIFY: ||J_fd*du|| = " << nJd
+            << ", ||J_fd*du - J_pc*du||/||J_fd*du|| = "
+            << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
     }
 
     // per-component breakdown + worst-row locator (localizes wall/axis
@@ -2521,6 +2564,15 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
 }
 
 #endif  // WARPX_DIM_RZ
+
+#if !defined(WARPX_DIM_RZ)
+template <class T, class Ops>
+bool BlockBandedPC<T,Ops>::ApplyFrozenOperator (T& a_out, const T& a_in)
+{
+    amrex::ignore_unused(a_out, a_in);
+    return false;
+}
+#endif
 
 #if defined(WARPX_DIM_RZ) && defined(WARPX_USE_CUDSS)
 
