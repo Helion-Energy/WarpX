@@ -15,8 +15,9 @@
 
 #include <ablastr/warn_manager/WarnManager.H>
 
-#include <AMReX_ParmParse.H>
+#include <AMReX_Array4.H>
 #include <AMReX_Config.H>
+#include <AMReX_ParmParse.H>
 
 #include <array>
 #include <cmath>
@@ -27,6 +28,36 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+
+namespace newton_solver_detail
+{
+    /** Named device functor for the D1 direction fill.  NVCC cannot lower an
+     * extended device lambda whose enclosing member is private, while this
+     * namespace-scope functor keeps the diagnostic orchestration private. */
+    struct D1RZHashDirection
+    {
+        amrex::Array4<amrex::Real> values;
+        int zlo;
+        int zn;
+        int component;
+        bool zperiodic;
+
+        AMREX_GPU_HOST_DEVICE
+        void operator() (int i, int j, int k) const noexcept
+        {
+            int jw = j;
+            if (zperiodic) {
+                jw = zlo + (((j-zlo) % zn) + zn) % zn;
+            }
+            unsigned int h = (static_cast<unsigned int>(i) * 73856093u)
+                           ^ (static_cast<unsigned int>(jw) * 19349663u)
+                           ^ (static_cast<unsigned int>(component) * 83492791u);
+            h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+            values(i,j,k) = amrex::Real(h % 20011u)
+                          / amrex::Real(20011.0) - amrex::Real(0.5);
+        }
+    };
+}
 
 /**
  * \brief Newton method to solve nonlinear equation of form:
@@ -870,19 +901,10 @@ void NewtonSolver<Vec,Ops>::RunD1OperatorPartition (
         amrex::MultiFab& mf = *(v_fields[0][comp]);
         for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
             auto arr = mf.array(mfi);
-            amrex::ParallelFor(mfi.validbox(),
-                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                    int jw = j;
-                    if (zperiodic) {
-                        jw = zlo + (((j-zlo) % zn) + zn) % zn;
-                    }
-                    unsigned int h = static_cast<unsigned int>(i*73856093)
-                                   ^ static_cast<unsigned int>(jw*19349663)
-                                   ^ static_cast<unsigned int>(comp*83492791);
-                    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-                    arr(i,j,k) = amrex::Real(h % 20011u)
-                               / amrex::Real(20011.0) - amrex::Real(0.5);
-                });
+            amrex::ParallelFor(
+                mfi.validbox(),
+                newton_solver_detail::D1RZHashDirection{
+                    arr, zlo, zn, comp, zperiodic});
         }
         mf.FillBoundaryAndSync(geom.periodicity());
     }
