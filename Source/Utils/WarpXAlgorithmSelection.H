@@ -163,7 +163,7 @@ AMREX_ENUM(EmbeddedBoundaryType,
 
 /** MPI reductions
  */
-AMREX_ENUM(ReductionType,
+AMREX_ENUM(FieldReductionType,
            Maximum,
            Minimum,
            Sum,

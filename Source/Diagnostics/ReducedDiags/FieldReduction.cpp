@@ -103,15 +103,15 @@ void FieldReduction::ComputeDiags (int step)
     // Judge if the diags should be done
     if (!m_intervals.contains(step+1)) { return; }
 
-    if (m_reduction_type == ReductionType::Maximum)
+    if (m_reduction_type == FieldReductionType::Maximum)
     {
         ComputeFieldReduction<amrex::ReduceOpMax>();
     }
-    else if (m_reduction_type == ReductionType::Minimum)
+    else if (m_reduction_type == FieldReductionType::Minimum)
     {
         ComputeFieldReduction<amrex::ReduceOpMin>();
     }
-    else if (m_reduction_type == ReductionType::Sum)
+    else if (m_reduction_type == FieldReductionType::Sum)
     {
         ComputeFieldReduction<amrex::ReduceOpSum>();
     }

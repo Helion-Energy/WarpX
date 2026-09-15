@@ -73,7 +73,7 @@ private:
     std::unique_ptr<amrex::Parser> m_parser;
 
     // Type of reduction (e.g. Maximum, Minimum or Sum)
-    ReductionType m_reduction_type;
+    FieldReductionType m_reduction_type;
 
 public:
 
