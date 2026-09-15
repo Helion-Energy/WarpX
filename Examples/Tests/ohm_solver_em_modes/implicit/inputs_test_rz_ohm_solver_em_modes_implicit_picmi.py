@@ -9,6 +9,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 import dill
 import numpy as np
@@ -395,6 +396,14 @@ if mm_pc is not None:
         parser.error("explicit --mm-pc requires a positive --steps value")
 elif args.mm_jacobian:
     parser.error("--mm-jacobian is reserved for an explicit --mm-pc twin")
+
+# Newton diagnostics are append-only during normal runs. The explicit CI twin
+# owns this one-step file and must start from a clean record on every replay so
+# a prior CTest invocation cannot become either evidence or a false failure.
+if mm_pc is not None:
+    if comm.rank == 0:
+        Path("diags/newton_diag.txt").unlink(missing_ok=True)
+    comm.Barrier()
 
 run = CylindricalNormalModes(
     test=args.test,
