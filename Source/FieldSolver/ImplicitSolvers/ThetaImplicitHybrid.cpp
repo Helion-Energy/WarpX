@@ -16,6 +16,7 @@
 #include <ablastr/warn_manager/WarnManager.H>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <sstream>
 
@@ -185,6 +186,20 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         pp.query("qdsmc_outer_relative_tolerance", m_qdsmc_outer_relative_tolerance);
         pp.query("qdsmc_outer_require_convergence", m_qdsmc_outer_require_convergence);
         pp.query("qdsmc_outer_verbose", m_qdsmc_outer_verbose);
+    }
+
+    pp.query("darwin_segregated_solve", m_darwin_segregated_solve);
+    if (m_darwin_segregated_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin && !m_qdsmc_segregated_solve,
+            "darwin_segregated_solve requires Darwin and the coupled energy stage");
+        pp.query("darwin_outer_max_iterations", m_darwin_outer_max_iterations);
+        pp.query("darwin_outer_relative_tolerance", m_darwin_outer_rtol);
+        pp.query("darwin_outer_absolute_tolerance", m_darwin_outer_atol);
+        pp.query("darwin_outer_verbose", m_darwin_outer_verbose);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_outer_max_iterations > 0
+            && m_darwin_outer_rtol >= 0 && m_darwin_outer_atol >= 0
+            && (m_darwin_outer_rtol > 0 || m_darwin_outer_atol > 0),
+            "Darwin outer iterations and tolerances must be positive");
     }
 
     // Circuit-in-the-residual coupling (see the member documentation in
@@ -449,7 +464,9 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     // Solve nonlinear system for E^{n+theta} (and eventually Pe^{n+theta})
     int exit_status = 0;
-    if (m_qdsmc_segregated_solve) {
+    if (m_darwin_segregated_solve) {
+        exit_status = SolveDarwinSegregated(start_time, a_step);
+    } else if (m_qdsmc_segregated_solve) {
         exit_status = SolveSegregated( start_time, a_step );
     } else {
         m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
@@ -634,6 +651,133 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     }
 
     return exit_status;
+}
+
+void ThetaImplicitHybrid::RefreshDarwinELong (amrex::Real theta_time)
+{
+    ablastr::fields::MultiLevelScalarField rho_half_alias;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rho_half_store(m_num_amr_levels);
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        auto& rho = *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+        rho_half_store[lev] = std::make_unique<amrex::MultiFab>(
+            rho, amrex::make_alias, rho.nComp()/2, 1);
+        rho_half_alias.push_back(rho_half_store[lev].get());
+    }
+    m_hybrid_pic_model->ComputeDarwinELong(
+        rho_half_alias, theta_time, m_darwin_segregated_solve);
+}
+
+int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_step)
+{
+    BL_PROFILE("ThetaImplicitHybrid::SolveDarwinSegregated()");
+    using ablastr::fields::Direction;
+    // Keep ghosts too: a rejected candidate must not alter the field gathered
+    // by the converged particle/energy stage. Scratch is local to this step.
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>, 3>> previous(
+        m_num_amr_levels);
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        for (int dir = 0; dir < 3; ++dir) {
+            auto const& field = *m_WarpX->m_fields.get("hybrid_E_long_fp", Direction{dir}, lev);
+            previous[lev][dir] = std::make_unique<amrex::MultiFab>(
+                field.boxArray(), field.DistributionMap(), field.nComp(), field.nGrowVect());
+        }
+    }
+    amrex::Real field_rtol, field_atol;
+    int field_maxits;
+    m_nlsolver->GetSolverParams(field_rtol, field_atol, field_maxits);
+    amrex::ignore_unused(field_maxits);
+    WarpXSolverVec residual;
+    residual.Define(m_E);
+    amrex::Real field_reference = 0.0_rt;
+    for (int outer = 0; outer < m_darwin_outer_max_iterations; ++outer) {
+        // Grade the coupled solve against this STEP's initial field residual.
+        // Starting a fresh relative Newton solve after every tiny E_L update
+        // would tighten the physical tolerance repeatedly, down to roundoff.
+        ComputeRHS(residual, m_E, start_time, 0, false);
+        residual.increment(m_Eold, 1.0_rt);
+        residual.increment(m_E, -1.0_rt);
+        amrex::Real const field_norm = residual.norm2();
+        if (!std::isfinite(field_norm)) { return -8; }
+        if (outer == 0 || field_reference == 0.0_rt) { field_reference = field_norm; }
+        amrex::Real const field_target = std::max(field_atol, field_rtol * field_reference);
+        if (m_darwin_outer_verbose) {
+            amrex::Print() << "Darwin field: outer=" << outer
+                << " residual=" << field_norm << " target=" << field_target << "\n";
+        }
+        int status = 3;
+        if (!(field_norm == 0.0_rt || field_norm < field_target)) {
+            // E_L stays fixed for every Jv and line search in this solve.
+            m_nlsolver->SetConvergenceReferenceNorm(field_reference);
+            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step);
+            m_nlsolver->SetConvergenceReferenceNorm(0.0_rt);
+            status = m_nlsolver->GetExitStatus();
+            if (status < 0) { return status; }
+            // A permissive/fixed-iteration inner solve is not evidence that
+            // the field equation converged. The split requires both gates.
+            if (status != 2 && status != 3) { return -8; }
+        }
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                auto const& field = *m_WarpX->m_fields.get(
+                    "hybrid_E_long_fp", Direction{dir}, lev);
+                amrex::MultiFab::Copy(*previous[lev][dir], field, 0, 0,
+                                      field.nComp(), field.nGrowVect());
+            }
+        }
+        // The successful solver leaves the particle deposits, pressure and
+        // inertial field at its accepted state. Test the constraint there.
+        RefreshDarwinELong(start_time + m_theta*m_dt);
+        amrex::Real change = 0.0_rt;
+        amrex::Real scale = 0.0_rt;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                auto const& field = *m_WarpX->m_fields.get(
+                    "hybrid_E_long_fp", Direction{dir}, lev);
+                auto const& old = *previous[lev][dir];
+                if (!field.is_finite()) { return -8; }
+                amrex::MultiFab diff(field.boxArray(), field.DistributionMap(),
+                                    field.nComp(), 0);
+                amrex::MultiFab::Copy(diff, field, 0, 0, field.nComp(), 0);
+                amrex::MultiFab::Subtract(diff, old, 0, 0, field.nComp(), 0);
+                change = std::max(change, diff.norminf());
+                scale = std::max(scale, std::max(field.norminf(), old.norminf()));
+            }
+        }
+        amrex::Real const target = m_darwin_outer_atol + m_darwin_outer_rtol * scale;
+        if (m_darwin_outer_verbose) {
+            amrex::Print() << "Darwin segregated: outer=" << outer
+                << " constraint_change=" << change << " target=" << target << "\n";
+        }
+        if (change <= target) {
+            // Accept the pair actually solved by Newton. Its independently
+            // measured longitudinal defect is bounded by the outer tolerance.
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                for (int dir = 0; dir < 3; ++dir) {
+                    auto& field = *m_WarpX->m_fields.get(
+                        "hybrid_E_long_fp", Direction{dir}, lev);
+                    amrex::MultiFab::Copy(field, *previous[lev][dir], 0, 0,
+                                          field.nComp(), field.nGrowVect());
+                }
+            }
+            return status;
+        }
+        // Warm-start at unchanged E_total: E_T(new) = E_T(old) - delta E_L.
+        // The next Newton solve handles any BC-induced change of the A/B map.
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                auto& transverse = *m_E.getArrayVec()[lev][dir];
+                auto const& field = *m_WarpX->m_fields.get(
+                    "hybrid_E_long_fp", Direction{dir}, lev);
+                amrex::MultiFab::Add(transverse, *previous[lev][dir], 0, 0,
+                                     transverse.nComp(), 0);
+                amrex::MultiFab::Subtract(transverse, field, 0, 0,
+                                          transverse.nComp(), 0);
+            }
+        }
+    }
+    ablastr::warn_manager::WMRecordWarning("ThetaImplicitHybrid",
+        "Darwin segregated longitudinal constraint failed to converge");
+    return -8;
 }
 
 int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
@@ -967,17 +1111,11 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // iterate-to-iterate map -- freezing it (as is done for the noisy
     // per-species particle deposits) makes Newton chase a moving target
     // and stall near 50% residuals. The particle push of this evaluation
-    // used the previous evaluation's E_L; both agree at convergence.
-    if (m_darwin) {
-        ablastr::fields::MultiLevelScalarField rho_half_alias;
-        amrex::Vector<std::unique_ptr<amrex::MultiFab>> rho_half_store(m_num_amr_levels);
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            amrex::MultiFab & rho_mf = *rho_fp[lev];
-            rho_half_store[lev] = std::make_unique<amrex::MultiFab>(
-                rho_mf, amrex::make_alias, rho_mf.nComp()/2, 1);
-            rho_half_alias.push_back(rho_half_store[lev].get());
-        }
-        m_hybrid_pic_model->ComputeDarwinELong(rho_half_alias, start_time + m_theta*m_dt);
+    // used the previous evaluation's E_L; both agree at convergence. The
+    // opt-in segregated solve instead updates E_L only between complete
+    // nonlinear solves, so no residual or Jv consumes hidden E_L history.
+    if (m_darwin && !m_darwin_segregated_solve) {
+        RefreshDarwinELong(theta_time);
     }
 
     // Solve Ohm's law: E_ohm = f(B^{n+theta}, J_ion^{n+1/2}, rho^{n+1/2}, Pe)

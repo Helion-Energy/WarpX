@@ -1258,6 +1258,9 @@ public:
      *  (1978); Hewett, Comput. Phys. Comm. 84, 243 (1994)). Consumed by
      *  ThetaImplicitHybrid. */
     bool m_darwin = false;
+    /** Opt-in FD tensor projection for periodic, regular 3D grids. Unlike
+     *  MLEBNodeFDLaplacian, it advertises the constant nullspace to MLMG. */
+    bool m_darwin_periodic_projection = false;
     amrex::Real m_darwin_poisson_rtol = 1.0e-10;
     amrex::Real m_darwin_poisson_atol = 0.0;
     int m_darwin_poisson_max_iters = 200;
@@ -1783,23 +1786,20 @@ public:
     amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
-    /** Iteration operator of the recovery correction solve.
-     *  "poisson" (default): the nodal FD vector-Poisson map (truncated
-     *  identity -lap dA = mu0 J_imp; the defect J_imp is still measured
-     *  by composed curls, so the recovery FIXED POINT -- masked
-     *  curl(curl A) = 0 -- is exact either way; a nonzero div dA along
-     *  the iteration never reaches B, since B = curl A).
-     *  "curlcurl": the native amrex::MLCurlCurl operator on the edge (A)
-     *  staggering -- (curlcurl + beta) dA = -mu0 J_imp -- which cancels
-     *  the measured defect in a single solve instead of asymptotically
-     *  and needs no nodal-edge interpolation of dA. beta is a small
-     *  Tikhonov regularization of the curl-curl null space (the discrete
-     *  gradient family; the masked rhs is not orthogonal to it): it
-     *  shapes the iteration only, not the fixed point, and its gradient-
-     *  family content in dA is invisible to B. Cartesian (3D / 2D-XZ)
-     *  only: amrex::MLCurlCurl carries no RZ metric (the in-tree fused RZ
-     *  curl-curl of SolveEPolCurlCurlRZ is the future native-RZ path);
-     *  RZ and embedded boundaries stay on "poisson". */
+    /** Iteration operator of the vacuum correction.
+     *  "poisson" (default): interpolate the edge curl-curl defect to nodes,
+     *  solve a component nodal Poisson problem and interpolate back. These
+     *  transfers can lose edge modes; a zero nodal correction does not by
+     *  itself certify a zero native edge current, especially near an EB.
+     *  "curlcurl": approximately invert the defect with amrex::MLCurlCurl
+     *  and a small positive regularization of its gradient nullspace.
+     *  Cartesian only, without EB geometry.
+     *  "edge_relaxation": dA = -mu0 J_imp / (4 sum_d 1/dx_d^2) on native
+     *  unconstrained vacuum edges. The outer Newton/Krylov solve supplies
+     *  the global inverse, using its curl-curl preconditioner. No nodal
+     *  transfer or inner recovery solve is needed. Requires 3D, half cadence,
+     *  live probes and zero relaxation time. EB support uses the existing
+     *  update masks, not a conformal cut-cell curl discretization. */
     std::string m_darwin_vacuum_recovery_operator = "poisson";
     /** Tikhonov beta for the "curlcurl" recovery operator, relative to
      *  the grid-scale curl-curl diagonal sum_d 4/dx_d^2. */
@@ -1855,7 +1855,7 @@ public:
      *  E_L = grad(phi) into the "hybrid_E_long_fp" fields (E staggering).
      */
     void ComputeDarwinELong (ablastr::fields::MultiLevelScalarField const& rho,
-                             amrex::Real t);
+                             amrex::Real t, bool reset_guess = false);
     /** Time-advance scheme for the QDSMC energy step (bake-off switch,
      *  hybrid_pic_model.qdsmc_time_advance = euler | leapfrog | pc).
      *  See AdvanceElectronEnergyQDSMC for the scheme definitions.

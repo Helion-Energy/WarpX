@@ -197,6 +197,15 @@ private:
      *  ambipolar constraint (HybridPICModel::ComputeDarwinELong), refreshed
      *  once per nonlinear iteration. */
     bool m_darwin = false;
+    /** Solve E_T at fixed E_L, then update the longitudinal constraint.
+     *  The default keeps the historical residual-evaluation ordering. */
+    bool m_darwin_segregated_solve = false;
+    int m_darwin_outer_max_iterations = 20;
+    amrex::Real m_darwin_outer_rtol = 1.0e-8;
+    amrex::Real m_darwin_outer_atol = 1.0e-12;
+    bool m_darwin_outer_verbose = false;
+    int SolveDarwinSegregated (amrex::Real start_time, int a_step);
+    void RefreshDarwinELong (amrex::Real theta_time);
 
     /** End-of-step E finisher: false (default) extrapolates the algebraic
      *  field, E^{n+1} = (E^theta - (1-theta) E^n)/theta -- a -(1-theta)/

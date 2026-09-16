@@ -15,6 +15,8 @@
 #include "BlockBandedPC.H"
 #include "Utils/TextMsg.H"
 #include <AMReX_Config.H>
+#include <AMReX_ParmParse.H>
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -106,6 +108,7 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     void setBaseRHS ( const T&  a_R )
     {
         m_R0.Copy(a_R);
+        if (m_rhs_scale_floor) { m_normR0 = this->norm2(m_R0); }
     }
 
     inline
@@ -154,6 +157,8 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     bool m_usePreCond = false;
     RT m_epsJFNK = RT(1.0e-6);
     RT m_normY0;
+    bool m_rhs_scale_floor = false;
+    RT m_normR0 = RT(0.0);
     RT m_cur_time, m_dt;
 
     PreconditionerType m_pc_type = PreconditionerType::none;
@@ -178,6 +183,7 @@ void JacobianFunctionMF<T,Ops>::define ( const T& a_U,
     m_R.Define(a_U);
 
     m_ops = a_ops;
+    amrex::ParmParse("jacobian").query("rhs_scale_floor", m_rhs_scale_floor);
 
     m_usePreCond = (a_pc_type != PreconditionerType::none);
     if (m_usePreCond) {
@@ -250,6 +256,13 @@ auto JacobianFunctionMF<T,Ops>::perturbationScaleFromNorm (
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         std::isfinite(a_relative_eps) && a_relative_eps > RT(0.0),
         "JacobianFunctionMF diagnostic JFNK epsilon must be positive and finite");
+    if (m_rhs_scale_floor) {
+        // R has the same units as Y in F(Y)=Y-b-R(Y). Extend the legacy
+        // EXACT-zero fallback continuously to near-zero base states: a tiny
+        // projection remainder must not collapse a Jv probe below roundoff.
+        RT const scale = std::max(m_normY0, m_normR0);
+        if (scale > RT(0.0)) { return a_relative_eps * scale / normY; }
+    }
     if (m_normY0 == RT(0.0)) {
         return a_relative_eps * this->norm2(m_R0) / normY;
     }

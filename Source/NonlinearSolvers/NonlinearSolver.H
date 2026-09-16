@@ -79,6 +79,10 @@ public:
      */
     virtual void GetSolverParams (amrex::Real&, amrex::Real&, int&) = 0;
 
+    /** Optional common reference for nested nonlinear solves. Zero restores
+     *  the ordinary per-solve normalization; only Newton consumes this hook. */
+    virtual void SetConvergenceReferenceNorm (amrex::Real) {}
+
     /**
      * \brief Return preconditioner type.
      */

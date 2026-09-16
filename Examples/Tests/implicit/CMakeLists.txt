@@ -154,3 +154,30 @@ if(WarpX_FFT)
         OFF  # dependency
     )
 endif()
+
+# Opt-in Darwin split: regular nullspace, coupled energy and vacuum induction.
+foreach(case IN ITEMS energy vacuum vacuum_energy)
+    add_warpx_test(
+        test_3d_darwin_split_${case}
+        3 1
+        inputs_test_3d_darwin_split_${case}
+        "analysis_darwin_split.py ${case}"
+        OFF OFF
+    )
+endforeach()
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_darwin_split_eb
+        3 1
+        inputs_test_3d_darwin_split_eb
+        "analysis_darwin_split.py eb"
+        OFF OFF
+    )
+    add_warpx_test(
+        test_3d_darwin_split_eb_vacuum
+        3 1
+        inputs_test_3d_darwin_split_eb_vacuum
+        "analysis_darwin_split.py eb_vacuum"
+        OFF OFF
+    )
+endif()

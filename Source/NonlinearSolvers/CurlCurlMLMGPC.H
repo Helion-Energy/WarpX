@@ -118,6 +118,8 @@ class CurlCurlMLMGPC : public Preconditioner<T,Ops>
         bool m_consolidation = true;
         bool m_use_gmres = false;
         bool m_use_gmres_pc = true;
+        // Opt-in identity rows for solver DOFs constrained by physical BCs.
+        bool m_preserve_dirichlet_rows = false;
 
         int m_max_iter = 10;
         int m_max_coarsening_level = 30;
@@ -195,6 +197,7 @@ void CurlCurlMLMGPC<T,Ops>::readParameters()
     pp.query("relative_tolerance",  m_rtol);
     pp.query("use_gmres",  m_use_gmres);
     pp.query("use_gmres_pc",  m_use_gmres_pc);
+    pp.query("preserve_dirichlet_rows", m_preserve_dirichlet_rows);
 }
 
 template <class T, class Ops>
@@ -246,7 +249,9 @@ void CurlCurlMLMGPC<T,Ops>::Define ( const T& a_U,
 
     // Construct the curl-curl linear operator and set its BCs
     m_curl_curl = std::make_unique<MLCurlCurl>(m_geom, m_grids, m_dmap, *m_info);
-    m_curl_curl->setDomainBC(m_ops->GetLinOpBCLo(), m_ops->GetLinOpBCHi());
+    m_bc_lo = m_ops->GetLinOpBCLo();
+    m_bc_hi = m_ops->GetLinOpBCHi();
+    m_curl_curl->setDomainBC(m_bc_lo, m_bc_hi);
 
     // Dummy value for alpha and beta to avoid abort due to degenerate matrix by MLMG solver
     m_curl_curl->setScalars(1.0, 1.0);
@@ -404,18 +409,21 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
         // owned scratch (a_b is const and its storage is reused by the
         // outer Krylov solver -- never scale it in place).
         std::array<MultiFab,3> b_scaled;
-        if (m_inertia_bcoefs != nullptr) {
+        if (m_inertia_bcoefs != nullptr || m_preserve_dirichlet_rows) {
             for (int c = 0; c < 3; c++) {
                 const MultiFab& bsrc = *b_mfarrvec[n][c];
                 b_scaled[c].define(bsrc.boxArray(), bsrc.DistributionMap(),
                                    1, 0);
                 MultiFab::Copy(b_scaled[c], bsrc, 0, 0, 1, 0);
-                MultiFab::Multiply(b_scaled[c], *(*m_inertia_bcoefs)[n][c],
-                                   0, 0, 1, 0);
+                if (m_inertia_bcoefs != nullptr) {
+                    MultiFab::Multiply(b_scaled[c], *(*m_inertia_bcoefs)[n][c],
+                                       0, 0, 1, 0);
+                }
             }
         }
         auto bptr = [&] (int c) -> MultiFab* {
-            return (m_inertia_bcoefs != nullptr) ? &b_scaled[c]
+            return (m_inertia_bcoefs != nullptr || m_preserve_dirichlet_rows)
+                ? &b_scaled[c]
                                                  : b_mfarrvec[n][c];
         };
 
@@ -458,6 +466,42 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
             m_gmres_solver->solve(solution, rhs, m_rtol, m_atol);
         } else {
             m_solver->solve({&solution}, {&rhs}, m_rtol, m_atol);
+        }
+        if (m_preserve_dirichlet_rows) {
+            // prepareRHS zeroes tangential Dirichlet rows for the interior
+            // elliptic solve. The outer residual still has these DOFs, with
+            // identity rows U_boundary - prescribed_value. Returning zero
+            // here makes the right preconditioner singular on that subspace.
+            // Restore the ORIGINAL, unscaled RHS on precisely those rows.
+            for (int c = 0; c < 3; ++c) {
+                auto& x = *x_mfarrvec[n][c];
+                auto const& b = *b_mfarrvec[n][c];
+                auto const nodal = x.ixType().toIntVect();
+                auto const dom = amrex::convert(m_geom[n].Domain(), nodal);
+                auto const lo = dom.smallEnd();
+                auto const hi = dom.bigEnd();
+                GpuArray<int, AMREX_SPACEDIM> fix_lo{}, fix_hi{};
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    fix_lo[d] = nodal[d] && m_bc_lo[d] == LinOpBCType::Dirichlet;
+                    fix_hi[d] = nodal[d] && m_bc_hi[d] == LinOpBCType::Dirichlet;
+                }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(x, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                    auto const xa = x.array(mfi);
+                    auto const ba = b.const_array(mfi);
+                    ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        IntVect const iv(AMREX_D_DECL(i, j, k));
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            if ((fix_lo[d] && iv[d] == lo[d])
+                                || (fix_hi[d] && iv[d] == hi[d])) {
+                                xa(i,j,k) = ba(i,j,k);
+                            }
+                        }
+                    });
+                }
+            }
         }
     }
 }

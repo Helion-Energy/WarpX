@@ -99,6 +99,11 @@ public:
         a_maxits = m_maxits;
     }
 
+    void SetConvergenceReferenceNorm (amrex::Real norm) override
+    {
+        m_convergence_reference_norm = norm;
+    }
+
     inline void CurTime ( amrex::Real  a_time ) const
     {
         m_cur_time = a_time;
@@ -163,6 +168,7 @@ private:
      * \brief Relative tolerance for the Newton solver.
      */
     amrex::Real m_rtol = 1.0e-6;
+    amrex::Real m_convergence_reference_norm = 0.0;
 
     /**
      * \brief Absolute tolerance for the Newton solver.
@@ -547,7 +553,9 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // Compute norm of the residual
         norm_abs = m_F.norm2();
         if (iter == 0) {
-            if (norm_abs > 0.) { norm0 = norm_abs; }
+            if (m_convergence_reference_norm > 0.) {
+                norm0 = m_convergence_reference_norm;
+            } else if (norm_abs > 0.) { norm0 = norm_abs; }
             else { norm0 = 1._rt; }
         }
         norm_rel = norm_abs/norm0;
@@ -692,13 +700,12 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 const amrex::Real Jvnorm = Jv.norm2();
                 // Fresh nonlinear-semantics base for the secants.
                 eval_residual(F0, a_U, iter);
-                const amrex::Real unorm = a_U.norm2();
                 // Ladder tops out at the JFNK scale: larger rungs create
                 // perturbed states wild enough to push particles past the
                 // deposit guard range and abort the run.
                 for (int p = -2; p <= 0; ++p) {
-                    const amrex::Real eps = std::pow(10._rt, 2*p) * 1.0e-6_rt
-                        * (unorm > 0._rt ? unorm : 1._rt);
+                    const amrex::Real eps = m_linear_function->perturbationScale(
+                        v, std::pow(10._rt, 2*p) * m_jfnk_epsilon);
                     Up.linComb(1._rt, a_U, eps, v);
                     eval_residual(Fp, Up, iter);
                     Fp.linComb(1._rt/eps, Fp, -1._rt/eps, F0);

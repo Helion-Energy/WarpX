@@ -277,6 +277,7 @@ Overall simulation parameters
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
           - ``newton.jfnk_epsilon`` (``float``, default: 1.0e-6) Relative perturbation scale for the finite-difference JVP in the matrix-free linear solve.
+          - ``jacobian.rhs_scale_floor`` (``bool``, default: false): use ``max(norm(U), norm(R))`` as the finite-difference perturbation scale for ``F(U) = U - b - R(U)``. This extends the exact-zero RHS fallback to near-zero base states, avoiding probes below roundoff when a projection leaves a tiny nonzero initial field. The RHS norm is cached once per base evaluation.
           - ``newton.d1_operator_partition`` (``bool``, default: false): emit a destructive, non-timing D1 diagnostic that applies the fresh-base full nonlinear secant :math:`A`, the actual anchored GMRES operator :math:`B_g`, the linear-stage self-secant :math:`B_s`, and the frozen block-banded operator :math:`C` to one common deterministic direction at three epsilon rungs ending at ``newton.jfnk_epsilon``. The records include both residual-map repeat floors, saved-to-fresh full-base drift at its :math:`1/\epsilon` scale, the :math:`B_g-B_s` base-anchor defect, pairwise differences, four-operator closure, component norms, and worst :math:`(r,z)` rows. This mode requires ``jacobian.pc_type = pc_block_banded`` and adds full particle pushes to the ordinary residual-evaluation count.
           - ``newton.d1_step`` (``int``, default: -1): zero-based internal solve step selected for D1 (the first evolved solve is step 0; the ordinary Newton diagnostic table displays this as step 1); -1 accepts any step.
           - ``newton.d1_iteration`` (``int``, default: -1): zero-based Newton iteration selected for D1; -1 accepts any iteration.
@@ -380,6 +381,7 @@ Overall simulation parameters
             - ``pc_curl_curl_mlmg.max_coarsening_level`` (``int``, default: 30)
             - ``pc_curl_curl_mlmg.relative_tolerance`` (``float``, default: 1.0e-4)
             - ``pc_curl_curl_mlmg.absolute_tolerance`` (``float``, default: 1.0e-16)
+            - ``pc_curl_curl_mlmg.preserve_dirichlet_rows`` (``bool``, default: false): return the original RHS on tangential Dirichlet boundary rows after the homogeneous interior solve. Use when the outer residual retains identity equations for these boundary degrees of freedom, including the Darwin boundary-driven vacuum field. The RHS is copied before AMReX boundary preparation. This does not add embedded-boundary geometry to the curl-curl operator.
 
           - ``jacobian.pc_type = pc_jacobi``: Use the Point-Jacobi method. This preconditioner only captures the plasma response via the diagonal mass matrices.
 
@@ -4892,6 +4894,42 @@ Maxwell solver: kinetic-fluid hybrid
     which preserves charge continuity of the electron current.
     Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
 
+.. pp:param:: implicit_evolve.darwin_segregated_solve
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Hold the longitudinal field fixed throughout each inner nonlinear solve,
+    including Jacobian probes and line searches. Then recompute the longitudinal
+    constraint and repeat until the field equation and constraint both converge.
+    This removes dependence of the particle push on the previous residual
+    evaluation's longitudinal field. Requires ``hybrid_pic_model.darwin`` and
+    cannot be combined with ``qdsmc_segregated_solve``; the coupled electron-energy
+    stage remains available.
+
+    The outer controls are ``implicit_evolve.darwin_outer_max_iterations`` (20),
+    ``darwin_outer_relative_tolerance`` (1e-8),
+    ``darwin_outer_absolute_tolerance`` (1e-12 V/m), and ``darwin_outer_verbose``
+    (false). The constraint uses the maximum component infinity norm and accepts
+    a change below ``atol + rtol * max(norm(old), norm(new))``. Failure rejects the
+    time step. Inner Newton solves share the initial field residual of the time
+    step as their relative reference (the first nonzero residual if the step starts
+    at zero), preventing repeated tightening as the outer updates become small.
+    A permissive or fixed-iteration inner solve is rejected if it reports no
+    convergence; both the field and longitudinal gates are required. The accepted pair retains the
+    longitudinal field actually used for the final particle and energy stage.
+
+.. pp:param:: hybrid_pic_model.darwin_periodic_projection
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Use the finite-difference tensor nodal Laplacian with its constant-nullspace
+    handling, synchronize periodic duplicates before taking the divergence, and
+    start the potential solve from zero. The diagonal tensor gives the same
+    seven-point stencil as the staggered divergence of the nodal gradient.
+    Supported only on fully periodic 3D grids without embedded boundaries.
+
 .. pp:param:: hybrid_pic_model.darwin_poisson_relative_tolerance
     :type: ``float``
     :default: ``1e-10``
@@ -5152,6 +5190,18 @@ Maxwell solver: kinetic-fluid hybrid
     end-of-step state; ``full`` applies it at the end-of-step state only (cheaper; the vacuum
     dynamics stay in the residual).
 
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_live_probes
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Recompute the vacuum correction and Faraday target during finite-difference
+    Jacobian probes. Otherwise probes reuse the previous nonlinear evaluation's
+    target, giving an approximate Jacobian. Live probes need a tight recovery
+    tolerance because recovery error is divided by the probe size. The legacy
+    ``WARPX_VACREC_LIVE_PROBES`` environment switch supplies the default when the
+    input is omitted; circuit coupling still forces live probes.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_relaxation_time
     :type: ``float``
     :default: ``0``
@@ -5187,21 +5237,29 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``poisson``
     :optional:
 
-    Iteration operator of the recovery correction solve. ``poisson`` (default) is the
-    nodal finite-difference vector-Poisson map; the recovery defect is measured with
-    composed discrete curls either way, so the converged recovery (masked
-    :math:`\nabla \times (\nabla \times \vec{A}) = 0`) is identical. ``curlcurl`` solves
-    the correction with the native edge-staggered ``amrex::MLCurlCurl`` operator,
-    :math:`(\nabla \times \nabla \times{} + \beta)\, \delta\vec{A} = -\mu_0 \vec{J}_{imp}`,
-    which cancels the measured defect in a single solve and needs no nodal-edge
-    interpolation of the correction. :math:`\beta` (set by
-    ``darwin_vacuum_recovery_curlcurl_beta``, default ``1e-8``, relative to the grid-scale
-    curl-curl diagonal :math:`\sum_d 4/\Delta x_d^2`) is a Tikhonov closure of the
-    curl-curl null space; it shapes the iteration only, not the fixed point, and its
-    gradient-family content in :math:`\delta\vec{A}` never reaches
-    :math:`\vec{B} = \nabla \times \vec{A}`. Cartesian (3D / 2D-XZ) only, no embedded
-    boundaries: ``amrex::MLCurlCurl`` carries no cylindrical metric, so RZ stays on
-    ``poisson``.
+    Iteration operator for the vacuum correction. ``poisson`` (default) interpolates
+    the native edge curl-curl defect to nodes, solves a component nodal Poisson
+    problem, and interpolates back. Those transfers can lose edge modes, so a zero
+    nodal correction does not by itself certify a zero native edge current near an EB.
+
+    ``curlcurl`` approximately inverts the defect with ``amrex::MLCurlCurl``:
+    :math:`(\nabla\times\nabla\times{}+\beta)\delta\vec{A}=-\mu_0\vec{J}_{imp}`.
+    The positive regularization ``darwin_vacuum_recovery_curlcurl_beta`` defaults
+    to ``1e-8`` relative to :math:`\sum_d4/\Delta x_d^2`.
+    This option supports Cartesian 3D and 2D-XZ without embedded boundaries.
+
+    ``edge_relaxation`` applies
+    :math:`\delta\vec{A}=-\mu_0\vec{J}_{imp}/(\sum_d4/\Delta x_d^2)` directly
+    on unconstrained native vacuum edges. The outer Newton/Krylov solve supplies
+    the global inverse; a curl-curl preconditioner is recommended. This avoids
+    nodal transfers and an inner recovery solve. It requires 3D, ``half`` cadence,
+    live recovery probes, and zero relaxation time. The Poisson recovery tolerance
+    and iteration controls are unused by this option.
+
+    With embedded boundaries, ``edge_relaxation`` uses the existing masked curl
+    stencils. It does not supply a conformal cut-cell discretization or add EB
+    geometry to the AMReX curl-curl preconditioner. Convergence alone does not
+    establish geometric accuracy at the conductor surface.
 
 .. pp:param:: hybrid_pic_model.tensor_mass_alpha
     :type: ``float``

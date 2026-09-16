@@ -470,6 +470,11 @@ void HybridPICModel::ReadParameters ()
     // hybrid solver (see the member documentation in HybridPICModel.H).
     pp_hybrid.query("darwin", m_darwin);
     if (m_darwin) {
+        pp_hybrid.query("darwin_periodic_projection", m_darwin_periodic_projection);
+#if !defined(WARPX_DIM_3D)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_darwin_periodic_projection,
+            "darwin_periodic_projection requires 3D");
+#endif
         utils::parser::queryWithParser(
             pp_hybrid, "darwin_poisson_relative_tolerance", m_darwin_poisson_rtol);
         utils::parser::queryWithParser(
@@ -531,9 +536,10 @@ void HybridPICModel::ReadParameters ()
                             m_darwin_vacuum_recovery_operator);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_darwin_vacuum_recovery_operator == "poisson"
-                || m_darwin_vacuum_recovery_operator == "curlcurl",
+                || m_darwin_vacuum_recovery_operator == "curlcurl"
+                || m_darwin_vacuum_recovery_operator == "edge_relaxation",
                 "hybrid_pic_model.darwin_vacuum_recovery_operator must be "
-                "'poisson' or 'curlcurl'");
+                "'poisson', 'curlcurl' or 'edge_relaxation'");
             utils::parser::queryWithParser(
                 pp_hybrid, "darwin_vacuum_recovery_curlcurl_beta",
                 m_darwin_vacrec_cc_beta_rel);
@@ -549,6 +555,18 @@ void HybridPICModel::ReadParameters ()
             // and forced on by circuit-in-the-residual solvers.
             m_vacuum_recovery_live_probes =
                 (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
+            pp_hybrid.query("darwin_vacuum_recovery_live_probes",
+                            m_vacuum_recovery_live_probes);
+            if (m_darwin_vacuum_recovery_operator == "edge_relaxation") {
+#if defined(WARPX_DIM_3D)
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_vacuum_recovery_live_probes
+                    && m_darwin_vacuum_recovery_cadence == "half"
+                    && m_darwin_vacrec_relax_time == 0.0_rt,
+                    "edge_relaxation requires live probes, half cadence and zero relaxation time");
+#else
+                WARPX_ABORT_WITH_MESSAGE("edge_relaxation requires 3D");
+#endif
+            }
 #if defined(WARPX_DIM_1D_Z)
             WARPX_ABORT_WITH_MESSAGE(
                 "hybrid_pic_model.darwin_vacuum_recovery is not supported "
@@ -4591,7 +4609,7 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
 
 void HybridPICModel::ComputeDarwinELong (
     ablastr::fields::MultiLevelScalarField const& rho,
-    amrex::Real const t)
+    amrex::Real const t, bool const reset_guess)
 {
     ABLASTR_PROFILE("HybridPICModel::ComputeDarwinELong()");
 
@@ -4704,6 +4722,7 @@ void HybridPICModel::ComputeDarwinELong (
             // wall nodes anyway. Proper per-boundary-type E_L conditions are
             // a follow-up.
             Sd.setBndry(0.0_rt);
+            if (m_darwin_periodic_projection) { Sd.OverrideSync(geom.periodicity()); }
             Sd.FillBoundary(geom.periodicity());
         }
 
@@ -4714,6 +4733,9 @@ void HybridPICModel::ComputeDarwinELong (
             phi_shape.boxArray(), phi_shape.DistributionMap(),
             phi_shape.nComp(), phi_shape.nGrowVect());
         warpx.get_pointer_fdtd_solver_fp(lev)->ComputeDivE(E_long, *rhs_store[lev]);
+        if (m_darwin_periodic_projection) {
+            rhs_store[lev]->OverrideSync(geom.periodicity());
+        }
     }
 
     // Step 3: MLMG solve of laplacian(phi) = div(S) with the
@@ -4742,41 +4764,61 @@ void HybridPICModel::ComputeDarwinELong (
             amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
             info);
 #else
-        auto linop_fd = std::make_unique<amrex::MLEBNodeFDLaplacian>();
-#if defined(AMREX_USE_EB)
-        if (EB::enabled()) {
-            linop_fd->define(
-                amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
-                amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
-                amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
-                info,
-                amrex::Vector<amrex::EBFArrayBoxFactory const*>{&warpx.fieldEBFactory(lev)});
-            // Embedded conductors are equipotential: phi takes a Dirichlet
-            // value on the body so E_L has no tangential component along
-            // the surface and vanishes inside (the enclosed field is
-            // frozen through the vector potential, held at the gauge zero
-            // in covered cells).
-            linop_fd->setEBDirichlet(0.0_rt);
-        } else
-#endif
-        {
-            linop_fd->define(
+        if (m_darwin_periodic_projection) {
+#if defined(WARPX_DIM_3D)
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                warpx.Geom(lev).isAllPeriodic() && !EB::enabled(),
+                "darwin_periodic_projection requires periodic 3D without EB");
+            auto tensor = std::make_unique<amrex::MLNodeTensorLaplacian>(
                 amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
                 amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
                 amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
                 info);
-        }
-#if defined(WARPX_DIM_RZ)
-        linop_fd->setRZ(true);
-        linop_fd->setSigma({0._rt, 1._rt});
+            tensor->setSigma({1._rt, 0._rt, 0._rt, 1._rt, 0._rt, 1._rt});
+            linop = std::move(tensor);
 #else
-        linop_fd->setSigma({AMREX_D_DECL(1._rt, 1._rt, 1._rt)});
+            WARPX_ABORT_WITH_MESSAGE("darwin_periodic_projection requires 3D");
 #endif
-        linop = std::move(linop_fd);
+        } else {
+            auto linop_fd = std::make_unique<amrex::MLEBNodeFDLaplacian>();
+#if defined(AMREX_USE_EB)
+            if (EB::enabled()) {
+                linop_fd->define(
+                    amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+                    amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                    amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                    info,
+                    amrex::Vector<amrex::EBFArrayBoxFactory const*>{&warpx.fieldEBFactory(lev)});
+                // Embedded conductors are equipotential: phi takes a Dirichlet
+                // value on the body so E_L has no tangential component along
+                // the surface and vanishes inside (the enclosed field is
+                // frozen through the vector potential, held at the gauge zero
+                // in covered cells).
+                linop_fd->setEBDirichlet(0.0_rt);
+            } else
+#endif
+            {
+                linop_fd->define(
+                    amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+                    amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                    amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                    info);
+            }
+#if defined(WARPX_DIM_RZ)
+            linop_fd->setRZ(true);
+            linop_fd->setSigma({0._rt, 1._rt});
+#else
+            linop_fd->setSigma({AMREX_D_DECL(1._rt, 1._rt, 1._rt)});
+#endif
+            linop = std::move(linop_fd);
+        }
 #endif
         linop->setDomainBC(m_darwin_bc_handler->lobc, m_darwin_bc_handler->hibc);
 
         amrex::MultiFab & phi = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
+        // A canonical initial potential avoids retaining an arbitrary constant
+        // and a warm-start roundoff floor when a Jacobian probe has tiny RHS.
+        if (m_darwin_periodic_projection || reset_guess) { phi.setVal(0.0_rt); }
         amrex::MLMG mlmg(*linop);
         mlmg.setVerbose(m_darwin_poisson_verbosity);
         mlmg.setMaxIter(m_darwin_poisson_max_iters);
@@ -4927,6 +4969,47 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
     const amrex::GpuArray<int, 3> A_stag[3] =
         {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+
+    if (m_darwin_vacuum_recovery_operator == "edge_relaxation") {
+        // A Richardson correction on exactly the native edge current space:
+        // dA = -omega * mu0 J / (4 sum_d 1/dx_d^2). Its fixed point is
+        // masked curl(curl A) = 0, without edge-to-node interpolation or an
+        // inner elliptic solve. The nonlinear solver and its curl-curl PC
+        // supply the global inverse. This uses the existing EB update masks;
+        // it does not introduce a conformal cut-cell curl discretization.
+        amrex::Real inverse_scale = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            inverse_scale += 4.0_rt / (geom.CellSize(d) * geom.CellSize(d));
+        }
+        amrex::Real const factor = omega * PhysConst::mu0 / inverse_scale;
+        for (int dir = 0; dir < 3; ++dir) {
+            auto& Ad = *A[dir];
+            auto const stag = A_stag[dir];
+            auto const* eb_flag = EB::enabled()
+                ? warpx.GetEBUpdateEFlag()[lev][dir].get() : nullptr;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(Ad, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const aa = Ad.array(mfi);
+                auto const jj = Jvac[dir]->const_array(mfi);
+                auto const rr = rho.const_array(mfi);
+                auto const eb = eb_flag ? eb_flag->const_array(mfi)
+                    : amrex::Array4<int const>{};
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (eb && eb(i,j,k) == 0) { return; }
+                    amrex::Real const value = Interp(rr, nodal, stag, coarsen_rr, i,j,k,0);
+                    bool const in_mask = mask_mode == 2
+                        || (mask_mode == 0 && value < rho_floor)
+                        || (mask_mode == 1 && value > 0.0_rt && value < rho_floor);
+                    if (in_mask) { aa(i,j,k) -= factor * jj(i,j,k); }
+                });
+            }
+            Ad.FillBoundary(geom.periodicity());
+        }
+        return;
+    }
 
     // Domain BCs for the correction: homogeneous Dirichlet on non-periodic
     // faces (the evolved A already carries the boundary pin there, so the
