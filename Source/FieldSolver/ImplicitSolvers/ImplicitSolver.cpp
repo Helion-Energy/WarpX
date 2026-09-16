@@ -948,7 +948,7 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     // is the case for external particle field maps read from file -- the
     // particles would gather stale or zero fields. Refresh aux here from the
     // current n+theta iterate of Efield_fp/Bfield_fp and re-apply those maps.
-    m_WarpX->UpdateAuxilaryData();
+    m_WarpX->UpdateAuxiliaryData();
     m_WarpX->FillBoundaryAux(m_WarpX->getngUpdateAux());
 
     // Advance the particle positions by 1/2 dt,
