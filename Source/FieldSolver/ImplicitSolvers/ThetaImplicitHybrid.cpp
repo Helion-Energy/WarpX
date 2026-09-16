@@ -208,6 +208,16 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
             "Darwin outer iterations and tolerances must be positive");
     }
 
+    pp.query("darwin_vacuum_pc_regularization", m_darwin_vacuum_pc_regularization);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_vacuum_pc_regularization >= 0.0_rt,
+        "darwin_vacuum_pc_regularization must be nonnegative (0 disables it)");
+    if (m_darwin_vacuum_pc_regularization > 0.0_rt) {
+        bool preserve_rows = false;
+        amrex::ParmParse("pc_curl_curl_mlmg").query("preserve_dirichlet_rows", preserve_rows);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_hybrid_pic_model->m_include_electron_inertia && preserve_rows,
+            "Darwin vacuum PC requires electron inertia and pc_curl_curl_mlmg.preserve_dirichlet_rows=1");
+    }
+
     // Circuit-in-the-residual coupling (see the member documentation in
     // the header).
     pp.query("external_field_iteration", m_external_field_iteration);
@@ -1470,6 +1480,14 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
         "al., J. Comput. Phys. 275, 197 (2014)), or use another "
         "preconditioner.");
 
+    const bool vacuum_pc = m_darwin_vacuum_pc_regularization > 0.0_rt;
+    if (vacuum_pc) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(AMREX_SPACEDIM == 3 && m_darwin_segregated_solve
+            && m_vacuum_recovery_half && !m_external_field_iteration
+            && hybrid->m_darwin_vacuum_recovery_operator == "edge_relaxation"
+            && hybrid->m_darwin_vacuum_recovery_frozen_mask,
+            "Darwin vacuum PC requires 3D split, native half-cadence recovery, frozen mask and no circuit iteration");
+    }
     const Real rho_floor = static_cast<Real>(hybrid->m_n_floor)*PhysConst::q_e;
     const Real floor_w =
         static_cast<Real>(hybrid->m_n_floor_smooth_width)*rho_floor;
@@ -1483,6 +1501,10 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
     if (m_inertia_beta.empty()) {
         m_inertia_beta_owned.resize(m_num_amr_levels);
         m_inertia_beta.resize(m_num_amr_levels);
+        if (vacuum_pc) {
+            m_inertia_rhs_scale_owned.resize(m_num_amr_levels);
+            m_inertia_rhs_scale.resize(m_num_amr_levels);
+        }
         const auto& e_mfarrvec = m_E.getArrayVec();
         for (int lev = 0; lev < m_num_amr_levels; lev++) {
             for (int c = 0; c < 3; c++) {
@@ -1490,11 +1512,27 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
                 m_inertia_beta_owned[lev][c] = std::make_unique<MultiFab>(
                     emf.boxArray(), emf.DistributionMap(), 1, 0);
                 m_inertia_beta[lev][c] = m_inertia_beta_owned[lev][c].get();
+                if (vacuum_pc) {
+                    m_inertia_rhs_scale_owned[lev][c] = std::make_unique<MultiFab>(
+                        emf.boxArray(), emf.DistributionMap(), 1, 0);
+                    m_inertia_rhs_scale[lev][c] = m_inertia_rhs_scale_owned[lev][c].get();
+                }
             }
         }
     }
 
     for (int lev = 0; lev < m_num_amr_levels; lev++) {
+        Real vacuum_scale = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            const Real dx = m_WarpX->Geom(lev).CellSize(d);
+            vacuum_scale += 4.0_rt / (dx*dx);
+        }
+        const Real vacuum_beta = m_darwin_vacuum_pc_regularization * vacuum_scale;
+        const Real mask_floor = rho_floor * hybrid->m_darwin_vacuum_recovery_density_fraction;
+        const int mask_mode = hybrid->m_darwin_vacuum_recovery_mask == "global" ? 2
+            : (hybrid->m_darwin_vacuum_recovery_mask == "transition" ? 1 : 0);
+        const MultiFab* mask_rho = vacuum_pc
+            ? m_WarpX->m_fields.get("hybrid_rho_vacmask_fp", lev) : nullptr;
         const MultiFab* rho_mf = GetRhoMidForPC(lev);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rho_mf != nullptr,
             "FillInertiaBetaCoeff: no midpoint density available");
@@ -1526,6 +1564,14 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
             const int oy = (AMREX_SPACEDIM >= 2 && etype[1] == 0) ? 1 : 0;
             const int oz = (AMREX_SPACEDIM == 3 && etype[2] == 0) ? 1 : 0;
             const bool has_cc = (ox + oy + oz > 0);
+            const Box pc_domain = amrex::convert(m_WarpX->Geom(lev).Domain(), etype);
+            const auto pc_lo = pc_domain.smallEnd();
+            const auto pc_hi = pc_domain.bigEnd();
+            GpuArray<int,AMREX_SPACEDIM> pin_normal{};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                pin_normal[d] = !etype[d] && !m_WarpX->Geom(lev).isPeriodic(d)
+                    && (hybrid->m_add_external_fields || EB::enabled());
+            }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
@@ -1533,6 +1579,10 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
             for (MFIter mfi(bmf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 const Box bx = mfi.tilebox();
                 const auto beta_arr = bmf.array(mfi);
+                const auto rhs_scale = vacuum_pc ? m_inertia_rhs_scale[lev][c]->array(mfi)
+                    : amrex::Array4<Real>{};
+                const auto mask_arr = vacuum_pc ? mask_rho->const_array(mfi)
+                    : amrex::Array4<Real const>{};
                 const auto rho_arr = rho_mf->const_array(mfi, rho_comp);
                 const auto eb_arr = eb_mirror
                     ? eb_update_E[lev][c]->const_array(mfi)
@@ -1541,6 +1591,7 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
                 {
                     if (eb_mirror && eb_arr(i,j,k) == 0) {
                         beta_arr(i,j,k) = beta_id;
+                        if (vacuum_pc) { rhs_scale(i,j,k) = beta_id; }
                         return;
                     }
                     const Real ba = InertiaBetaNode(rho_arr(i,j,k),
@@ -1553,6 +1604,31 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
                         bv = Real(2.0)*ba*bb/(ba + bb);
                     }
                     beta_arr(i,j,k) = bv;
+                    if (vacuum_pc) {
+                        // Match the arithmetic nodal-to-edge mask interpolation
+                        // used by native recovery and the Faraday overwrite.
+                        const Real rho_edge = has_cc ? Real(0.5)*(mask_arr(i,j,k)
+                            + mask_arr(i+ox,j+oy,k+oz)) : mask_arr(i,j,k);
+                        const bool in_mask = mask_mode == 2
+                            || (mask_mode == 0 && rho_edge < mask_floor)
+                            || (mask_mode == 1 && rho_edge > 0.0_rt && rho_edge < mask_floor);
+                        // The native vacuum Jacobian is K/Lambda. Regularize
+                        // only its PC: (K + eps Lambda I)x = Lambda b.
+                        beta_arr(i,j,k) = in_mask ? vacuum_beta : bv;
+                        rhs_scale(i,j,k) = in_mask ? vacuum_scale : bv;
+                        if (in_mask) {
+                            // Darwin A pins include the first/last normal,
+                            // cell-centered DOFs; MLCurlCurl PEC does not.
+                            const IntVect iv(AMREX_D_DECL(i,j,k));
+                            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                                if (pin_normal[d] && (iv[d] == pc_lo[d] || iv[d] == pc_hi[d])) {
+                                    const Real pin_beta = amrex::max(beta_id, Real(1.0e4)*vacuum_scale);
+                                    beta_arr(i,j,k) = pin_beta;
+                                    rhs_scale(i,j,k) = pin_beta;
+                                }
+                            }
+                        }
+                    }
                 });
             }
         }

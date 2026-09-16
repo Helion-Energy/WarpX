@@ -129,6 +129,10 @@ public:
      *  from the E-solve kernel. Non-null only with electron inertia in the
      *  two-point dJe/dt-only (operator) form; aborts in RZ. */
     const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* FillInertiaBetaCoeff () override;
+    const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* GetInertiaPCRHSScale () const override
+    {
+        return m_inertia_rhs_scale.empty() ? nullptr : &m_inertia_rhs_scale;
+    }
 
     /** The ion current deposit consumed by the Ohm solve (current_fp
      *  registry) -- frozen during Jacobian probes, so it is the exact
@@ -148,6 +152,9 @@ private:
      *  component each, no ghosts; allocated lazily on first fill). */
     amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,3>> m_inertia_beta_owned;
     amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_beta;
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,3>> m_inertia_rhs_scale_owned;
+    amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_rhs_scale;
+    amrex::Real m_darwin_vacuum_pc_regularization = 0.0;
 
     /**
      * \brief Solver vectors for the electric field.

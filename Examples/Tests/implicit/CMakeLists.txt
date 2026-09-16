@@ -194,3 +194,21 @@ if(TARGET lib_3d)
     set_tests_properties(test_3d_darwin_pressure_pec PROPERTIES
         ENVIRONMENT "OMP_NUM_THREADS=1")
 endif()
+
+# Vacuum PC tests retain physical field/flux gates and a tighter Newton target.
+add_warpx_test(
+    test_3d_darwin_split_pc_vacuum_energy
+    3 1
+    inputs_test_3d_darwin_split_pc_vacuum_energy
+    "analysis_darwin_split.py pc_vacuum_energy"
+    OFF OFF
+)
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_darwin_split_pc_eb_vacuum
+        3 1
+        inputs_test_3d_darwin_split_pc_eb_vacuum
+        "analysis_darwin_split.py pc_eb_vacuum"
+        OFF OFF
+    )
+endif()

@@ -1,0 +1,140 @@
+# Opt-in Darwin split regression: strict nonlinear and analytic-limit gates.
+# Native edge recovery uses the existing masked EB curls, not conformal metrics.
+# The energy density floor is separate from the field/vacuum density floor.
+
+# algo
+algo.current_deposition = "direct"
+algo.evolve_scheme = "theta_implicit_hybrid"
+algo.maxwell_solver = "hybrid"
+algo.particle_shape = 1
+
+# amr
+amr.max_grid_size = 8
+amr.max_level = 0
+amr.n_cell = 16 16 8
+
+# amrex_gmres
+amrex_gmres.absolute_tolerance = 0.0
+amrex_gmres.max_iterations = 150
+amrex_gmres.relative_tolerance = 1e-06
+amrex_gmres.restart_length = 150
+amrex_gmres.verbose_int = 0
+
+# boundary
+boundary.field_hi = pec pec periodic
+boundary.field_lo = pec pec periodic
+boundary.particle_hi = absorbing absorbing periodic
+boundary.particle_lo = absorbing absorbing periodic
+
+# diagnostics
+diagnostics.diags_names = gate
+
+# external_vector_potential
+external_vector_potential.fields = uniform_analytical
+external_vector_potential.uniform_analytical.A_time_external_function(t) = "t/2.e-8"
+external_vector_potential.uniform_analytical.Ax_external_grid_function(x,y,z) = "-0.5*y*0.01"
+external_vector_potential.uniform_analytical.Ay_external_grid_function(x,y,z) = "0.5*x*0.01"
+external_vector_potential.uniform_analytical.Az_external_grid_function(x,y,z) = "0"
+
+# gate
+gate.diag_type = Full
+gate.fields_to_plot = Bx By Bz Ex Ey Ez rho Te Pe
+gate.file_prefix = diags/gate
+gate.format = plotfile
+gate.intervals = 2
+gate.write_species = 0
+
+# geometry
+geometry.dims = "3"
+geometry.prob_hi = 0.25 0.25 0.0625
+geometry.prob_lo = -0.25 -0.25 -0.0625
+
+# hybrid_pic_model
+hybrid_pic_model.add_external_fields = 1
+hybrid_pic_model.darwin = 1
+hybrid_pic_model.darwin_poisson_relative_tolerance = 1e-10
+hybrid_pic_model.darwin_vacuum_recovery = 1
+hybrid_pic_model.darwin_vacuum_recovery_cadence = "half"
+hybrid_pic_model.darwin_vacuum_recovery_components = "all"
+hybrid_pic_model.darwin_vacuum_recovery_live_probes = 1
+hybrid_pic_model.darwin_vacuum_recovery_operator = edge_relaxation
+hybrid_pic_model.deterministic_pressure_bc = 1
+hybrid_pic_model.elec_temp = 0.5
+hybrid_pic_model.electron_inertia_bdf2 = 0
+hybrid_pic_model.electron_inertia_djedt_only = 1
+hybrid_pic_model.gamma = 1.6666666666666667
+hybrid_pic_model.include_electron_inertia = 1
+hybrid_pic_model.n0_ref = 1e+16
+hybrid_pic_model.n_floor = 6.4e+17
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.qdsmc_te_n_floor = 1e14
+hybrid_pic_model.solve_electron_energy_equation = 1
+hybrid_pic_model.substeps = 2
+
+# implicit_evolve
+implicit_evolve.darwin_outer_verbose = 1
+implicit_evolve.darwin_segregated_solve = 1
+implicit_evolve.max_particle_iterations = 50
+implicit_evolve.nonlinear_solver = "newton"
+implicit_evolve.particle_tolerance = 1e-10
+implicit_evolve.theta = 0.5
+implicit_evolve.use_mass_matrices_jacobian = 0
+implicit_evolve.use_mass_matrices_pc = 0
+
+# ions
+ions.density = 1e+16
+ions.initialize_self_fields = 0
+ions.injection_style = "nuniformpercell"
+ions.momentum_distribution_type = "constant"
+ions.num_particles_per_cell_each_dim = 2 2 2
+ions.profile = "constant"
+ions.species_type = "proton"
+ions.ux = 0.0
+ions.uy = 0.0
+ions.uz = 0.0
+
+# jacobian
+jacobian.pc_type = "pc_curl_curl_mlmg"
+jacobian.rhs_scale_floor = 1
+
+# max_step
+max_step = 2
+
+# newton
+newton.absolute_tolerance = 0.0
+newton.diagnostic_file = "newton.txt"
+newton.linear_solver = "amrex_gmres"
+newton.max_iterations = 30
+newton.relative_tolerance = 1e-08
+newton.require_convergence = 1
+newton.verbose = 1
+
+# particles
+particles.species_names = ions
+
+# pc_curl_curl_mlmg
+pc_curl_curl_mlmg.absolute_tolerance = 0.0
+pc_curl_curl_mlmg.agglomeration = 1
+pc_curl_curl_mlmg.bottom_verbose = 0
+pc_curl_curl_mlmg.consolidation = 1
+pc_curl_curl_mlmg.max_coarsening_level = 30
+pc_curl_curl_mlmg.max_iter = 2
+pc_curl_curl_mlmg.preserve_dirichlet_rows = 1
+pc_curl_curl_mlmg.relative_tolerance = 0.0
+pc_curl_curl_mlmg.verbose = 0
+
+# warpx
+warpx.B_ext_grid_init_style = "parse_b_ext_grid_function"
+warpx.Bx_external_grid_function(x,y,z) = "0"
+warpx.By_external_grid_function(x,y,z) = "0"
+warpx.Bz_external_grid_function(x,y,z) = "0.1"
+warpx.const_dt = 1e-09
+warpx.random_seed = 12345
+warpx.serialize_initial_conditions = 1
+warpx.use_filter = 0
+warpx.verbose = 1
+
+# Regularized native vacuum PC; this changes only the preconditioner.
+implicit_evolve.darwin_vacuum_pc_regularization = 1e-4
+# Explicit vacuum electron-fluid closure, independent of resistivity.
+hybrid_pic_model.electron_inertia_floor_taper = 0.02

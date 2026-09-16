@@ -8,11 +8,13 @@ import numpy as np
 import yt
 
 mode = sys.argv[1]
+rtol = 1e-8 if mode.startswith("pc_") else 1e-6
+mode = mode.removeprefix("pc_")
 yt.set_log_level(50)
 rows = np.loadtxt("newton.txt", ndmin=2)
 assert rows.shape[1] == 18 and np.isfinite(rows).all()
 assert np.all(rows[:, 9:11] == 3), "a nonlinear solve was not accepted"
-assert np.all(rows[:, 5] < 1e-6), "the shared step-relative tolerance was not met"
+assert np.all(rows[:, 5] < rtol), "the shared step-relative tolerance was not met"
 plots = sorted(p for p in Path("diags").glob("gate[0-9]*")
                if len(p.name) == 10 and p.name[4:].isdigit())
 assert plots[-1].name == "gate000002", "two complete steps are required"

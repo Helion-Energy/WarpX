@@ -203,6 +203,13 @@ public:
         return nullptr;
     }
 
+    /** Optional independent RHS scale for the hybrid curl-curl PC.
+     *  nullptr retains the electron-inertia beta scale. */
+    virtual const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* GetInertiaPCRHSScale () const
+    {
+        return nullptr;
+    }
+
     /**
      * \brief Return per-direction pointers to the ion (particle) current
      * deposit consumed by the Ohm solve on level lev, for preconditioners

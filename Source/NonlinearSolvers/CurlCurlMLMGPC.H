@@ -409,6 +409,8 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
         // owned scratch (a_b is const and its storage is reused by the
         // outer Krylov solver -- never scale it in place).
         std::array<MultiFab,3> b_scaled;
+        auto const* rhs_scale = m_ops->GetInertiaPCRHSScale();
+        if (rhs_scale == nullptr) { rhs_scale = m_inertia_bcoefs; }
         if (m_inertia_bcoefs != nullptr || m_preserve_dirichlet_rows) {
             for (int c = 0; c < 3; c++) {
                 const MultiFab& bsrc = *b_mfarrvec[n][c];
@@ -416,7 +418,7 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
                                    1, 0);
                 MultiFab::Copy(b_scaled[c], bsrc, 0, 0, 1, 0);
                 if (m_inertia_bcoefs != nullptr) {
-                    MultiFab::Multiply(b_scaled[c], *(*m_inertia_bcoefs)[n][c],
+                    MultiFab::Multiply(b_scaled[c], *(*rhs_scale)[n][c],
                                        0, 0, 1, 0);
                 }
             }

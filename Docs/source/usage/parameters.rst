@@ -4894,6 +4894,29 @@ Maxwell solver: kinetic-fluid hybrid
     which preserves charge continuity of the electron current.
     Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
 
+.. pp:param:: implicit_evolve.darwin_vacuum_pc_regularization
+
+    ``0`` (default) retains the electron-inertia curl-curl preconditioner.
+    A positive value ``epsilon`` selects a regularized native vacuum PC:
+    on the frozen vacuum mask it solves
+    ``(curl curl + epsilon Lambda I) x = Lambda b``, with
+    ``Lambda = sum_d 4/dx_d**2``. Plasma rows retain their inertia coefficient
+    and RHS scale. This changes only the preconditioner, not the nonlinear
+    residual or the vacuum closure. AMReX requires a positive mass term;
+    the regularization controls its curl-free subspace.
+
+    The first/last normal-component cells pinned by Darwin's vector-potential
+    boundary operator receive a large finite identity penalty. Tangential
+    physical rows use ``pc_curl_curl_mlmg.preserve_dirichlet_rows = 1``, which
+    is required. This does not supply conformal EB geometry to AMReX.
+
+    Requires 3D, electron inertia, ``darwin_segregated_solve = 1``, native
+    ``edge_relaxation`` recovery at half cadence, a frozen vacuum mask,
+    and no circuit iteration. Existing inertia-PC restrictions also apply.
+    Values such as ``1e-4`` must be verified against field/flux accuracy and
+    iteration counts for the intended mesh and interface. Selecting the
+    electron-inertia density taper is a separate model choice.
+
 .. pp:param:: hybrid_pic_model.deterministic_pressure_bc
     :type: ``bool``
     :default: ``false``
