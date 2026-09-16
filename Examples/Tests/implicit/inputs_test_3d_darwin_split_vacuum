@@ -56,6 +56,7 @@ hybrid_pic_model.darwin_vacuum_recovery_cadence = "half"
 hybrid_pic_model.darwin_vacuum_recovery_components = "all"
 hybrid_pic_model.darwin_vacuum_recovery_live_probes = 1
 hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance = 1e-12
+hybrid_pic_model.deterministic_pressure_bc = 1
 hybrid_pic_model.elec_temp = 0.5
 hybrid_pic_model.electron_inertia_bdf2 = 0
 hybrid_pic_model.electron_inertia_djedt_only = 1

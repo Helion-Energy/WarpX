@@ -181,3 +181,16 @@ if(WarpX_EB)
         OFF OFF
     )
 endif()
+
+# Manufactured pressure BC catches GPU read/write races at PEC intersections.
+if(TARGET lib_3d)
+    add_executable(test_3d_pressure_pec test_pressure_pec.cpp)
+    target_link_libraries(test_3d_pressure_pec PRIVATE lib_3d)
+    target_include_directories(test_3d_pressure_pec PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_3d_pressure_pec)
+    endif()
+    add_test(NAME test_3d_darwin_pressure_pec COMMAND test_3d_pressure_pec)
+    set_tests_properties(test_3d_darwin_pressure_pec PROPERTIES
+        ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()

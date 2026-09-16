@@ -4894,6 +4894,20 @@ Maxwell solver: kinetic-fluid hybrid
     which preserves charge continuity of the electron current.
     Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
 
+.. pp:param:: hybrid_pic_model.deterministic_pressure_bc
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Apply the PEC electron-pressure fill by gathering from the complete interior
+    mirror image in all PEC directions. Boundary nodes retain the one-cell inward
+    zero-gradient closure, and intersecting PEC faces copy from the corresponding
+    diagonal interior node. This avoids reading a boundary node concurrently
+    updated by another GPU thread. Duplicate values and periodic ghosts are
+    synchronized before the fill. Requires at least two cells in each PEC
+    direction and a ghost width no greater than the domain length in those directions.
+    This option is consumed only when PEC pressure boundaries are used.
+
 .. pp:param:: implicit_evolve.darwin_segregated_solve
     :type: ``bool``
     :default: ``false``

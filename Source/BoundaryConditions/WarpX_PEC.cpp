@@ -14,6 +14,7 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_MFIter.H>
 #include <AMReX_MultiFab.H>
+#include <AMReX_ParmParse.H>
 #include <AMReX_REAL.H>
 #include <AMReX_SPACE.H>
 
@@ -1174,6 +1175,15 @@ PEC::ApplyPECtoElectronPressure (
     const amrex::Geometry& geom,
     const int lev, PatchType patch_type, const amrex::Vector<amrex::IntVect>& ref_ratios)
 {
+    // Read here so the opt-in changes only this pressure boundary operator.
+    bool deterministic = false;
+    amrex::ParmParse("hybrid_pic_model").query("deterministic_pressure_bc", deterministic);
+    if (deterministic) {
+        // A corner may gather from an adjacent box's interior/periodic ghost.
+        Pefield->OverrideSync(geom.periodicity());
+        Pefield->FillBoundary(geom.periodicity());
+    }
+
     amrex::Box domain_box = geom.Domain();
     if (patch_type == PatchType::coarse && (lev > 0)) {
         domain_box.coarsen(ref_ratios[lev-1]);
@@ -1201,6 +1211,14 @@ PEC::ApplyPECtoElectronPressure (
         mirrorfac[idim][0] = 2*domain_lo[idim] - (1 - Pe_nodal[idim]);
         mirrorfac[idim][1] = 2*domain_hi[idim] + (1 - Pe_nodal[idim]);
     }
+    if (deterministic) {
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !(is_pec[d][0] || is_pec[d][1]) || (domain_box.length(d) - Pe_nodal[d] >= 2
+                    && Pefield->nGrowVect()[d] <= domain_box.length(d) - Pe_nodal[d]),
+                "deterministic_pressure_bc needs at least two cells and no more ghosts than cells in PEC directions");
+        }
+    }
     const int nComp = Pefield->nComp();
 
 #ifdef AMREX_USE_OMP
@@ -1217,6 +1235,34 @@ PEC::ApplyPECtoElectronPressure (
 
         // Extract field data
         auto const& Pe_array = Pefield->array(mfi);
+
+        if (deterministic) {
+            // Gather each destination from its complete interior image. The
+            // legacy scatter updates a boundary node while a corner thread
+            // reads it, so PEC intersections depend on GPU thread ordering.
+            // Folding every PEC direction before reading removes that race:
+            // no source lies on a PEC node written by this kernel.
+            amrex::ParallelFor(fabbox, nComp,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+                amrex::IntVect const dst(AMREX_D_DECL(i,j,k));
+                amrex::IntVect src = dst;
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    if (is_pec[d][0] && src[d] < domain_lo[d]) {
+                        src[d] = mirrorfac[d][0] - src[d];
+                    } else if (is_pec[d][1] && src[d] > domain_hi[d]) {
+                        src[d] = mirrorfac[d][1] - src[d];
+                    }
+                    if (Pe_nodal[d]) {
+                        if (is_pec[d][0] && src[d] == domain_lo[d]) { ++src[d]; }
+                        else if (is_pec[d][1] && src[d] == domain_hi[d]) { --src[d]; }
+                    }
+                }
+                if (src != dst && fabbox.contains(src)) {
+                    Pe_array(dst,n) = Pe_array(src,n);
+                }
+            });
+            continue;
+        }
 
         // Loop over valid cells (i.e. cells inside the domain)
         amrex::ParallelFor(mfi.validbox(), nComp,
