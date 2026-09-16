@@ -196,6 +196,12 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         pp.query("darwin_outer_relative_tolerance", m_darwin_outer_rtol);
         pp.query("darwin_outer_absolute_tolerance", m_darwin_outer_atol);
         pp.query("darwin_outer_verbose", m_darwin_outer_verbose);
+        pp.query("darwin_outer_relaxation", m_darwin_outer_relaxation);
+        pp.query("darwin_outer_relaxation_start", m_darwin_outer_relaxation_start);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_outer_relaxation > 0.0_rt
+            && m_darwin_outer_relaxation <= 1.0_rt
+            && m_darwin_outer_relaxation_start >= 0,
+            "darwin_outer_relaxation must be in (0,1] and its start iteration nonnegative");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_outer_max_iterations > 0
             && m_darwin_outer_rtol >= 0 && m_darwin_outer_atol >= 0
             && (m_darwin_outer_rtol > 0 || m_darwin_outer_atol > 0),
@@ -760,6 +766,21 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
                 }
             }
             return status;
+        }
+        if (m_darwin_outer_relaxation != 1.0_rt
+            && outer >= m_darwin_outer_relaxation_start) {
+            // Grade the unrelaxed constraint defect above. Damping controls
+            // the iteration only; it must never reduce the acceptance test.
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                for (int dir = 0; dir < 3; ++dir) {
+                    auto& field = *m_WarpX->m_fields.get(
+                        "hybrid_E_long_fp", Direction{dir}, lev);
+                    amrex::MultiFab::LinComb(field,
+                        m_darwin_outer_relaxation, field, 0,
+                        1.0_rt - m_darwin_outer_relaxation, *previous[lev][dir], 0,
+                        0, field.nComp(), field.nGrowVect());
+                }
+            }
         }
         // Warm-start at unchanged E_total: E_T(new) = E_T(old) - delta E_L.
         // The next Newton solve handles any BC-induced change of the A/B map.

@@ -69,6 +69,9 @@ hybrid_pic_model.substeps = 2
 
 # implicit_evolve
 implicit_evolve.darwin_outer_verbose = 1
+implicit_evolve.darwin_outer_relaxation = 0.5
+implicit_evolve.darwin_outer_relaxation_start = 2
+implicit_evolve.darwin_outer_max_iterations = 60
 implicit_evolve.darwin_segregated_solve = 1
 implicit_evolve.max_particle_iterations = 50
 implicit_evolve.nonlinear_solver = "newton"

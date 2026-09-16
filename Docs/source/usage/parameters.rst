@@ -4929,6 +4929,13 @@ Maxwell solver: kinetic-fluid hybrid
     time step. Inner Newton solves share the initial field residual of the time
     step as their relative reference (the first nonzero residual if the step starts
     at zero), preventing repeated tightening as the outer updates become small.
+    ``implicit_evolve.darwin_outer_relaxation`` (default 1, range (0,1]) damps
+    a rejected longitudinal update before the next inner solve, preserving the
+    total-field warm start. The acceptance test always uses the full, unrelaxed
+    constraint defect. Smaller values can stabilize an oscillatory outer map
+    and usually need a larger ``darwin_outer_max_iterations`` budget.
+    ``implicit_evolve.darwin_outer_relaxation_start`` (default 0) is the zero-based
+    outer iteration at which damping begins; earlier updates use full steps.
     A permissive or fixed-iteration inner solve is rejected if it reports no
     convergence; both the field and longitudinal gates are required. The accepted pair retains the
     longitudinal field actually used for the final particle and energy stage.

@@ -204,6 +204,8 @@ private:
     amrex::Real m_darwin_outer_rtol = 1.0e-8;
     amrex::Real m_darwin_outer_atol = 1.0e-12;
     bool m_darwin_outer_verbose = false;
+    amrex::Real m_darwin_outer_relaxation = 1.0;
+    int m_darwin_outer_relaxation_start = 0;
     int SolveDarwinSegregated (amrex::Real start_time, int a_step);
     void RefreshDarwinELong (amrex::Real theta_time);
 
