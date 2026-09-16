@@ -47,11 +47,11 @@
 #include "Parallelization/GuardCellManager.H"
 #include "Particles/ParticleThermalizer/ParticleThermalizer.H"
 #include "Utils/export.H"
-#include "Utils/Parser/IntervalsParser.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
 #include <ablastr/utils/Enums.H>
+#include <ablastr/utils/text/IntervalsParser.H>
 
 #include <AMReX_BaseFwd.H>
 #include <AMReX_AmrCoreFwd.H>
@@ -61,6 +61,7 @@
 #include <AMReX_Array.H>
 #include <AMReX_Config.H>
 #ifdef AMREX_USE_EB
+#   include <AMReX_EB2.H>
 #   include <AMReX_EBFabFactory.H>
 #endif
 #include <AMReX_GpuContainers.H>
@@ -141,7 +142,7 @@ public:
     //
     void SyncMassMatricesPC ();
     void SaveParticlesAtImplicitStepStart ();
-    void FinishImplicitParticleUpdate ();
+    void FinishImplicitParticleUpdate (amrex::Real a_time);
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
     void UpdateMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_thetadt, amrex::Real start_time );
@@ -217,6 +218,11 @@ public:
      *  (0 to 4 correspond to Absorbing, Open, Reflecting, Periodic, Thermal)
      */
     static inline amrex::Array<ParticleBoundaryType,AMREX_SPACEDIM> particle_boundary_hi;
+
+    /** Particle boundary condition at embedded boundaries.
+     *  Default is Absorbing
+     */
+    static inline ParticleBoundaryType eb_particle_boundary = ParticleBoundaryType::Absorbing;
 
     //! Integers that correspond to the time dependency of J (constant, linear)
     //! and rho (linear, quadratic) for the PSATD algorithm
@@ -329,7 +335,7 @@ public:
     static bool do_dynamic_scheduling;
     static bool refine_plasma;
 
-    static utils::parser::IntervalsParser sort_intervals;
+    static ablastr::utils::text::IntervalsParser sort_intervals;
     static amrex::IntVect sort_bin_size;
 
     //! If true, particles will be sorted in the order x -> y -> z -> ppc for faster deposition
@@ -424,7 +430,6 @@ public:
     /**
      * Determine the simulation timestep from the time step limiters
      */
-    amrex::Real ParticleGridSpeedMax ();
     amrex::Real GlobalPlasmaFrequencyMax ();
     amrex::Real GlobalCyclotronFrequencyMax ();
     void ApplyDtLimiters ();
@@ -541,7 +546,7 @@ public:
 
     /** \brief returns the load balance interval
      */
-    [[nodiscard]] utils::parser::IntervalsParser get_load_balance_intervals () const
+    [[nodiscard]] ablastr::utils::text::IntervalsParser get_load_balance_intervals () const
     {
         return load_balance_intervals;
     }
@@ -655,9 +660,9 @@ public:
 
     // This function does aux(lev) = fp(lev) + I(aux(lev-1)-cp(lev)).
     // Caller must make sure fp and cp have ghost cells filled.
-    void UpdateAuxilaryData ();
-    void UpdateAuxilaryDataStagToNodal ();
-    void UpdateAuxilaryDataSameType ();
+    void UpdateAuxiliaryData ();
+    void UpdateAuxiliaryDataStagToNodal ();
+    void UpdateAuxiliaryDataSameType ();
 
     // Fill boundary cells including coarse/fine boundaries
     void FillBoundaryB   (amrex::IntVect ng, std::optional<bool> nodal_sync = std::nullopt);
@@ -804,7 +809,7 @@ public:
     [[nodiscard]] amrex::IntVect get_numprocs() const {return numprocs;}
 
     /** Electrostatic solve call */
-    void ComputeSpaceChargeField (bool reset_fields);
+    void ComputeSpaceChargeField (bool reset_E_field, bool reset_B_field);
 
     // Magnetostatic Solver Interface
     MagnetostaticSolver::VectorPoissonBoundaryHandler m_vector_poisson_boundary_handler;
@@ -892,6 +897,36 @@ public:
         const ablastr::fields::MultiLevelVectorField& mfvec,
         int lev);
 
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    /** Charge/current-conserving binomial smoothing in radial geometry.
+     *
+     * Filtering a density with the plain index-space binomial stencil does
+     * not conserve its volume integral on cells of unequal volume (and an
+     * extensive-quantity variant piles charge onto the small axis cells
+     * instead). This applies the binomial passes in flux form -- the
+     * discrete divergence of a two-point diffusive flux with face-averaged
+     * volume factors (conventions of the inverse-volume-scaling routines),
+     * which conserves the volume integral exactly, leaves constants
+     * untouched, has zero flux through the axis, and reduces to the
+     * standard bilinear filter where the volumes are uniform. */
+    /** \returns the guard-cell width over which dst holds filtered data. */
+    amrex::IntVect ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amrex::MultiFab& src_mf,
+                                    int lev, int scomp, int dcomp, int ncomp);
+#endif
+
+    /** Filter a current density. In radial geometries this dispatches to
+     * the volume-weighted (charge/current conserving) filter; in Cartesian
+     * geometries the cell volumes are uniform and it reduces to
+     * ApplyFilterMF. */
+    void ApplyFilterJ (
+        const ablastr::fields::MultiLevelVectorField& current,
+        int lev,
+        int idim);
+
+    void ApplyFilterJ (
+        const ablastr::fields::MultiLevelVectorField& current,
+        int lev);
+
     // Device vectors of stencil coefficients used for finite-order centering of fields
     amrex::Gpu::DeviceVector<amrex::Real> device_field_centering_stencil_coeffs_x;
     amrex::Gpu::DeviceVector<amrex::Real> device_field_centering_stencil_coeffs_y;
@@ -951,6 +986,16 @@ public:
     //! Use this function to override the Level 0 grids made by AMReX.
     //! This function is called in amrex::AmrCore::InitFromScratch.
     void PostProcessBaseGrids (amrex::BoxArray& ba0) const final;
+
+#ifdef AMREX_USE_EB
+    amrex::EB2::IndexSpace const* GetEBIndexSpace (int lev) const {
+        // If EB data was built separately for each mesh-refinement level, return the one for
+        // this level; otherwise return the single global EB data (built at the finest level
+        // and coarsened for coarser levels).
+        return (m_build_eb_data_per_level && lev < m_eb_index_space.size())
+            ? m_eb_index_space[lev] : &(amrex::EB2::IndexSpace::top());
+    }
+#endif
 
 protected:
 
@@ -1170,7 +1215,8 @@ private:
     amrex::Vector<amrex::Real> t_new;
     amrex::Vector<amrex::Real> t_old;
     amrex::Vector<amrex::Real> dt;
-    utils::parser::IntervalsParser m_dt_update_interval = utils::parser::IntervalsParser{}; // How often to update the timestep when using adaptive timestepping
+    // How often to update the timestep when using adaptive timestepping
+    ablastr::utils::text::IntervalsParser m_dt_update_interval;
     std::string m_dt_update_diagnostic_file;
 
     bool m_safe_guard_cells = false;
@@ -1312,7 +1358,7 @@ private:
     // Load balancing
     /** Load balancing intervals that reads the "load_balance_intervals" string int the input file
      * for getting steps at which load balancing is performed */
-    utils::parser::IntervalsParser load_balance_intervals;
+    ablastr::utils::text::IntervalsParser load_balance_intervals;
     /** Collection of LayoutData to keep track of weights used in load balancing
      * routines. Contains timer-based or heuristic-based costs depending on input option */
     amrex::Vector<std::unique_ptr<amrex::LayoutData<amrex::Real> > > costs;
@@ -1345,7 +1391,7 @@ private:
     amrex::Real costs_heuristic_particles_wt = amrex::Real(0);
 
     // Determines timesteps for override sync
-    utils::parser::IntervalsParser override_sync_intervals;
+    ablastr::utils::text::IntervalsParser override_sync_intervals;
 
     // Other runtime parameters
     int verbose = 1;
@@ -1621,6 +1667,15 @@ private:
      *        is set in WarpX::ReadParameters().
      */
     bool m_collisions_split_momentum_push;
+
+#ifdef AMREX_USE_EB
+    /** Whether to build the EB data separately for each mesh-refinement level (true, default),
+     *  instead of building it once at the finest level and coarsening it down for coarser levels.
+     *  Set via the runtime parameter "warpx.build_eb_data_per_level".
+     */
+    bool m_build_eb_data_per_level = true;
+    amrex::Vector<amrex::EB2::IndexSpace const*> m_eb_index_space;
+#endif
 };
 
 #endif

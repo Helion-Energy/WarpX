@@ -879,8 +879,10 @@ WarpX::InitData ()
     }
     ::WriteUsedInputsFile();
 
-    // Run div cleaner here on loaded external fields
-    if (m_do_initial_div_cleaning) {
+    // Run div cleaner here on loaded external fields (fresh starts only: on
+    // restart the B field is the checkpoint-restored EVOLVED field, and
+    // re-running the t=0 projection would corrupt it)
+    if (m_do_initial_div_cleaning && restart_chkfile.empty()) {
         WarpX::ProjectionCleanDivB();
     }
 
@@ -900,8 +902,9 @@ WarpX::InitData ()
              has_boundary_potential)
             && WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC)
         {
-            bool const reset_fields = false; // Do not erase previous user-specified values on the grid
-            ComputeSpaceChargeField(reset_fields);
+            bool const reset_E_field = false; // Do not erase previous user-specified values on the grid
+            bool const reset_B_field = false; // Do not erase previous user-specified values on the grid
+            ComputeSpaceChargeField(reset_E_field, reset_B_field);
             if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) {
                 ComputeMagnetostaticField();
             }
@@ -969,6 +972,8 @@ WarpX::AddExternalFields (int const lev)
             amrex::MultiFab::Add(*Efield_fp[lev][1], *m_fields.get(FieldType::Efield_fp_external, Direction{1}, lev), 0, 0, 1, guard_cells.ng_alloc_EB);
             amrex::MultiFab::Add(*Efield_fp[lev][2], *m_fields.get(FieldType::Efield_fp_external, Direction{2}, lev), 0, 0, 1, guard_cells.ng_alloc_EB);
         }
+        // Apply E-field boundary such that the initial field satisfies the expected boundary conditions
+        ApplyEfieldBoundary(lev, PatchType::fine, 0.0);
     }
     if (m_p_ext_field_params->B_ext_grid_type != ExternalFieldType::default_zero) {
         ablastr::fields::MultiLevelVectorField const& Bfield_fp = m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, max_level);
@@ -982,6 +987,8 @@ WarpX::AddExternalFields (int const lev)
             amrex::MultiFab::Add(*Bfield_fp[lev][1], *m_fields.get(FieldType::Bfield_fp_external, Direction{1}, lev), 0, 0, 1, guard_cells.ng_alloc_EB);
             amrex::MultiFab::Add(*Bfield_fp[lev][2], *m_fields.get(FieldType::Bfield_fp_external, Direction{2}, lev), 0, 0, 1, guard_cells.ng_alloc_EB);
         }
+        // Apply B-field boundary such that the initial field satisfies the expected boundary conditions
+        ApplyBfieldBoundary(lev, PatchType::fine, SubcyclingHalf::FirstHalf, 0.0);
     }
 }
 
@@ -1009,6 +1016,7 @@ WarpX::InitFromScratch ()
 
     InitPML();
 
+    ExecutePythonCallback("allocdata");
 }
 
 void
