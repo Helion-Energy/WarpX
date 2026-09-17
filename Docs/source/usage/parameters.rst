@@ -4935,6 +4935,10 @@ Maxwell solver: kinetic-fluid hybrid
     pins. The correction has zero native discrete curl. This is a vacuum gauge
     selection, not a change to the nonlinear residual or a conformal EB solve.
     Electric-field accuracy must be checked along with magnetic/flux accuracy.
+    The full diagnostic can output the registered vector components
+    ``hybrid_E_long_fpx``, ``hybrid_E_long_fpy`` and ``hybrid_E_long_fpz``.
+    Subtract these from total ``Ex``, ``Ey`` and ``Ez`` to inspect the transverse
+    field separately from the evolving longitudinal response.
 
 .. pp:param:: hybrid_pic_model.deterministic_pressure_bc
     :type: ``bool``

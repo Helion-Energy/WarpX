@@ -9,12 +9,12 @@ algo.maxwell_solver = "hybrid"
 algo.particle_shape = 1
 
 # amr
-amr.max_grid_size = 8
+amr.max_grid_size = 16
 amr.max_level = 0
-amr.n_cell = 16 16 8
+amr.n_cell = 32 32 16
 
 # amrex_gmres
-amrex_gmres.absolute_tolerance = 0.0
+amrex_gmres.absolute_tolerance = 1e-8
 amrex_gmres.max_iterations = 150
 amrex_gmres.relative_tolerance = 1e-06
 amrex_gmres.restart_length = 150
@@ -41,7 +41,7 @@ gate.diag_type = Full
 gate.fields_to_plot = Bx By Bz Ex Ey Ez rho Te Pe
 gate.file_prefix = diags/gate
 gate.format = plotfile
-gate.intervals = 2
+gate.intervals = 20
 gate.write_species = 0
 
 # geometry
@@ -98,10 +98,10 @@ jacobian.pc_type = "pc_curl_curl_mlmg"
 jacobian.rhs_scale_floor = 1
 
 # max_step
-max_step = 2
+max_step = 20
 
 # newton
-newton.absolute_tolerance = 0.0
+newton.absolute_tolerance = 1e-7
 newton.diagnostic_file = "newton.txt"
 newton.linear_solver = "amrex_gmres"
 newton.max_iterations = 30
@@ -144,3 +144,4 @@ implicit_evolve.darwin_vacuum_gauge_projection = 1
 
 # Diagnose E_T = E - E_L without mistaking the evolved ambipolar field for error.
 gate.additional_fields_to_plot = hybrid_E_long_fpx hybrid_E_long_fpy hybrid_E_long_fpz
+implicit_evolve.darwin_outer_absolute_tolerance = 1e-6

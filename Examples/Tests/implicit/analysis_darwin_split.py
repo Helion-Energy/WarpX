@@ -86,6 +86,13 @@ if check_vacuum_gauge and mode in ("vacuum_energy", "eb_vacuum"):
     if mode == "vacuum_energy":
         x = np.asarray(grid["index", "x"])
         y = np.asarray(grid["index", "y"])
-        assert np.max(np.abs(ex - 2.5e5*y)) < 1e-2, "incorrect inductive Ex"
-        assert np.max(np.abs(ey + 2.5e5*x)) < 1e-2, "incorrect inductive Ey"
+        # Mobile ions develop a physical longitudinal field. The analytic
+        # drive specifies E_T, so compare the diagnosed decomposition rather
+        # than requiring total E to remain purely inductive at later times.
+        elx = np.asarray(grid["boxlib", "hybrid_E_long_fpx"])
+        ely = np.asarray(grid["boxlib", "hybrid_E_long_fpy"])
+        elz = np.asarray(grid["boxlib", "hybrid_E_long_fpz"])
+        assert np.max(np.abs(elz)) < 1e-2, "longitudinal field lost z symmetry"
+        assert np.max(np.abs(ex - elx - 2.5e5*y)) < 1e-2, "incorrect transverse Ex"
+        assert np.max(np.abs(ey - ely + 2.5e5*x)) < 1e-2, "incorrect transverse Ey"
 print("Darwin split", mode, "checks passed")
