@@ -195,7 +195,7 @@ if(TARGET lib_3d)
         ENVIRONMENT "OMP_NUM_THREADS=1")
 endif()
 
-# Vacuum PC tests retain physical field/flux gates and a tighter Newton target.
+# Vacuum PC tests check electric gauge as well as magnetic/flux/temperature gates.
 add_warpx_test(
     test_3d_darwin_split_pc_vacuum_energy
     3 1
@@ -212,6 +212,16 @@ if(WarpX_EB)
         OFF OFF
     )
 endif()
+
+
+# Exercise ghost exchange and duplicate ownership in the masked projection.
+add_warpx_test(
+    test_3d_darwin_split_pc_vacuum_mpi
+    3 2
+    inputs_test_3d_darwin_split_pc_vacuum_energy
+    "analysis_darwin_split.py pc_vacuum_energy"
+    OFF OFF
+)
 
 # Changing E_L after a near-steady field guess must not trigger divergence at
 # Newton iteration zero merely because the shared step reference is tiny.

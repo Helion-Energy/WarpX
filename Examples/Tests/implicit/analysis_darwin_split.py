@@ -8,7 +8,8 @@ import numpy as np
 import yt
 
 mode = sys.argv[1]
-rtol = 1e-8 if mode.startswith("pc_") else 1e-6
+check_vacuum_gauge = mode.startswith("pc_")
+rtol = 1e-8 if check_vacuum_gauge else 1e-6
 mode = mode.removeprefix("pc_")
 steps = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 atol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
@@ -72,4 +73,19 @@ elif mode == "eb_vacuum":
     assert np.min(np.asarray(grid["boxlib", "Te"])[exterior]) > 0
 else:
     assert mode == "eb"
+if check_vacuum_gauge and mode in ("vacuum_energy", "eb_vacuum"):
+    # These drives and initial states are invariant in z. A curl-free electric
+    # error can leave every magnetic/flux gate above unchanged; test E directly.
+    # 0.01 V/m is <2e-7 of the imposed in-plane inductive field scale.
+    ex = np.asarray(grid["boxlib", "Ex"])
+    ey = np.asarray(grid["boxlib", "Ey"])
+    ez = np.asarray(grid["boxlib", "Ez"])
+    assert np.max(np.abs(ez)) < 1e-2, "spurious longitudinal Ez"
+    assert np.max(np.ptp(ex, axis=2)) < 1e-2, "Ex lost z symmetry"
+    assert np.max(np.ptp(ey, axis=2)) < 1e-2, "Ey lost z symmetry"
+    if mode == "vacuum_energy":
+        x = np.asarray(grid["index", "x"])
+        y = np.asarray(grid["index", "y"])
+        assert np.max(np.abs(ex - 2.5e5*y)) < 1e-2, "incorrect inductive Ex"
+        assert np.max(np.abs(ey + 2.5e5*x)) < 1e-2, "incorrect inductive Ey"
 print("Darwin split", mode, "checks passed")

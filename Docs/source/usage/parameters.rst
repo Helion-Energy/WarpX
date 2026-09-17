@@ -4917,6 +4917,25 @@ Maxwell solver: kinetic-fluid hybrid
     iteration counts for the intended mesh and interface. Selecting the
     electron-inertia density taper is a separate model choice.
 
+.. pp:param:: implicit_evolve.darwin_vacuum_gauge_projection
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Project vacuum preconditioner corrections and split warm starts onto the
+    complement of their admissible discrete gradient nullspace. Requires the
+    3D segregated split and a positive ``darwin_vacuum_pc_regularization``.
+    Without this projection the regularized PC can select a large curl-free
+    electric field even when magnetic and flux errors are small.
+
+    A masked finite-difference nodal Poisson solve removes gradients supported
+    entirely on unconstrained frozen-vacuum edges. Potential nodes touching
+    plasma or covered edges are fixed. The physical wall and its adjacent nodal
+    layer are also fixed, preserving both tangential and normal Darwin boundary
+    pins. The correction has zero native discrete curl. This is a vacuum gauge
+    selection, not a change to the nonlinear residual or a conformal EB solve.
+    Electric-field accuracy must be checked along with magnetic/flux accuracy.
+
 .. pp:param:: hybrid_pic_model.deterministic_pressure_bc
     :type: ``bool``
     :default: ``false``

@@ -138,3 +138,6 @@ warpx.verbose = 1
 implicit_evolve.darwin_vacuum_pc_regularization = 1e-4
 # Explicit vacuum electron-fluid closure, independent of resistivity.
 hybrid_pic_model.electron_inertia_floor_taper = 0.02
+
+# Fix the unconstrained vacuum gradient while preserving boundary/EB pins.
+implicit_evolve.darwin_vacuum_gauge_projection = 1

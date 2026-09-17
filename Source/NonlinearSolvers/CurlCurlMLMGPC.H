@@ -506,6 +506,7 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
             }
         }
     }
+    m_ops->ProjectDarwinVacuumGauge(a_x);
 }
 
 #endif

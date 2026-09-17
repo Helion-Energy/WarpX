@@ -210,6 +210,9 @@ public:
         return nullptr;
     }
 
+    /** Remove unconstrained vacuum gradient directions when requested. */
+    virtual void ProjectDarwinVacuumGauge (WarpXSolverVec&) {}
+
     /**
      * \brief Return per-direction pointers to the ion (particle) current
      * deposit consumed by the Ohm solve on level lev, for preconditioners

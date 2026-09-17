@@ -13,6 +13,8 @@
 #include <AMReX_Array.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_REAL.H>
+#include <AMReX_MLNodeTensorLaplacian.H>
+#include <AMReX_MLMG.H>
 
 class HybridPICModel;
 
@@ -134,6 +136,8 @@ public:
         return m_inertia_rhs_scale.empty() ? nullptr : &m_inertia_rhs_scale;
     }
 
+    void ProjectDarwinVacuumGauge (WarpXSolverVec& field) override;
+
     /** The ion current deposit consumed by the Ohm solve (current_fp
      *  registry) -- frozen during Jacobian probes, so it is the exact
      *  drift-leg coefficient of the linear solve. */
@@ -155,6 +159,13 @@ private:
     amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,3>> m_inertia_rhs_scale_owned;
     amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_rhs_scale;
     amrex::Real m_darwin_vacuum_pc_regularization = 0.0;
+    bool m_darwin_vacuum_gauge_projection = false;
+    amrex::Array<amrex::MultiFab,3> m_vacuum_gauge_edges;
+    std::unique_ptr<amrex::iMultiFab> m_vacuum_gauge_mask;
+    std::unique_ptr<amrex::MultiFab> m_vacuum_gauge_phi;
+    std::unique_ptr<amrex::MultiFab> m_vacuum_gauge_rhs;
+    std::unique_ptr<amrex::MLNodeTensorLaplacian> m_vacuum_gauge_op;
+    std::unique_ptr<amrex::MLMG> m_vacuum_gauge_solver;
 
     /**
      * \brief Solver vectors for the electric field.

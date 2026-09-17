@@ -218,6 +218,13 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
             "Darwin vacuum PC requires electron inertia and pc_curl_curl_mlmg.preserve_dirichlet_rows=1");
     }
 
+    pp.query("darwin_vacuum_gauge_projection", m_darwin_vacuum_gauge_projection);
+    if (m_darwin_vacuum_gauge_projection) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(AMREX_SPACEDIM == 3 && m_darwin_segregated_solve
+            && m_darwin_vacuum_pc_regularization > 0.0_rt,
+            "darwin_vacuum_gauge_projection requires 3D split and native vacuum PC");
+    }
+
     // Circuit-in-the-residual coupling (see the member documentation in
     // the header).
     pp.query("external_field_iteration", m_external_field_iteration);
@@ -686,6 +693,11 @@ void ThetaImplicitHybrid::RefreshDarwinELong (amrex::Real theta_time)
 int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_step)
 {
     BL_PROFILE("ThetaImplicitHybrid::SolveDarwinSegregated()");
+    // The density mask is frozen only within this step. Rebuild its scalar
+    // correction space before projecting the first guess and Krylov updates.
+    m_vacuum_gauge_solver.reset();
+    m_vacuum_gauge_op.reset();
+    ProjectDarwinVacuumGauge(m_E);
     using ablastr::fields::Direction;
     // Keep ghosts too: a rejected candidate must not alter the field gathered
     // by the converged particle/energy stage. Scratch is local to this step.
@@ -805,6 +817,9 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
                                           transverse.nComp(), 0);
             }
         }
+        // E_L changes can inject a vacuum gradient through the total-E
+        // warm start. Select the same gauge used by all Krylov corrections.
+        ProjectDarwinVacuumGauge(m_E);
     }
     ablastr::warn_manager::WMRecordWarning("ThetaImplicitHybrid",
         "Darwin segregated longitudinal constraint failed to converge");
@@ -1634,6 +1649,142 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
         }
     }
     return &m_inertia_beta;
+#endif
+}
+
+void ThetaImplicitHybrid::ProjectDarwinVacuumGauge (WarpXSolverVec& field)
+{
+    if (!m_darwin_vacuum_gauge_projection) { return; }
+#if defined(WARPX_DIM_3D)
+    BL_PROFILE("ThetaImplicitHybrid::ProjectDarwinVacuumGauge()");
+    using namespace amrex;
+    constexpr int lev = 0;
+    auto const& geom = m_WarpX->Geom(lev);
+    auto const& period = geom.periodicity();
+    auto const dx = geom.CellSizeArray();
+    auto& rho = *m_WarpX->m_fields.get("hybrid_rho_vacmask_fp", lev);
+    auto const& shape = *m_WarpX->m_fields.get("hybrid_phi_darwin_fp", lev);
+    auto const& vectors = field.getArrayVec()[lev];
+    if (!m_vacuum_gauge_solver) {
+        rho.OverrideSync(period);
+        rho.FillBoundary(period);
+        m_vacuum_gauge_mask = std::make_unique<iMultiFab>(
+            shape.boxArray(), shape.DistributionMap(), 1, 0);
+        m_vacuum_gauge_phi = std::make_unique<MultiFab>(
+            shape.boxArray(), shape.DistributionMap(), 1, 1);
+        m_vacuum_gauge_rhs = std::make_unique<MultiFab>(
+            shape.boxArray(), shape.DistributionMap(), 1, 0);
+        Real const floor = PhysConst::q_e * m_hybrid_pic_model->m_n_floor
+            * m_hybrid_pic_model->m_darwin_vacuum_recovery_density_fraction;
+        int const mode = m_hybrid_pic_model->m_darwin_vacuum_recovery_mask == "global" ? 2
+            : (m_hybrid_pic_model->m_darwin_vacuum_recovery_mask == "transition" ? 1 : 0);
+        auto const dom = surroundingNodes(geom.Domain());
+        auto const lo = dom.smallEnd();
+        auto const hi = dom.bigEnd();
+        GpuArray<int,3> per{geom.isPeriodic(0),geom.isPeriodic(1),geom.isPeriodic(2)};
+        bool const use_eb = EB::enabled();
+        auto const& flags = m_WarpX->GetEBUpdateEFlag();
+        for (MFIter mfi(*m_vacuum_gauge_mask); mfi.isValid(); ++mfi) {
+            auto const mask = m_vacuum_gauge_mask->array(mfi);
+            auto const rr = rho.const_array(mfi);
+            GpuArray<Array4<int const>,3> eb{};
+            if (use_eb) {
+                for (int d = 0; d < 3; ++d) { eb[d] = flags[lev][d]->const_array(mfi); }
+            }
+            ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                IntVect const iv(i,j,k);
+                // phi=0 on the wall AND its neighboring nodal layer keeps
+                // grad(phi)=0 on all pinned tangential and normal A rows.
+                for (int d = 0; d < 3; ++d) {
+                    if (!per[d] && (iv[d] <= lo[d]+1 || iv[d] >= hi[d]-1)) {
+                        mask(iv) = 0; return;
+                    }
+                }
+                // Permit a potential only if all incident edges belong to
+                // the unconstrained vacuum. Its gradient is then zero on
+                // plasma/covered rows and lies in the native curl nullspace.
+                for (int d = 0; d < 3; ++d) {
+                    IntVect off(0); off[d] = 1;
+                    for (int side = 0; side < 2; ++side) {
+                        IntVect const edge = side ? iv-off : iv;
+                        Real const re = Real(0.5)*(rr(edge)+rr(edge+off));
+                        bool const vac = mode == 2 || (mode == 0 && re < floor)
+                            || (mode == 1 && re > 0.0_rt && re < floor);
+                        if (!vac || (use_eb && eb[d](edge) == 0)) {
+                            mask(iv) = 0; return;
+                        }
+                    }
+                }
+                mask(iv) = 1;
+            });
+        }
+        m_vacuum_gauge_mask->OverrideSync(period);
+        LPInfo const info;
+        m_vacuum_gauge_op = std::make_unique<MLNodeTensorLaplacian>(
+            Vector<Geometry>{geom}, Vector<BoxArray>{m_WarpX->boxArray(lev)},
+            Vector<DistributionMapping>{m_WarpX->DistributionMap(lev)}, info);
+        m_vacuum_gauge_op->setSigma({1._rt,0._rt,0._rt,1._rt,0._rt,1._rt});
+        Array<LinOpBCType,3> lo_bc, hi_bc;
+        for (int d = 0; d < 3; ++d) {
+            lo_bc[d] = hi_bc[d] = per[d] ? LinOpBCType::Periodic : LinOpBCType::Dirichlet;
+        }
+        m_vacuum_gauge_op->setDomainBC(lo_bc,hi_bc);
+        // With no known nodes in a fully periodic vacuum, leave AMReX's
+        // singular/nullspace handling active rather than attaching an all-1 mask.
+        if (m_vacuum_gauge_mask->min(0) == 0) {
+            m_vacuum_gauge_op->setOversetMask(lev,*m_vacuum_gauge_mask);
+        }
+        m_vacuum_gauge_solver = std::make_unique<MLMG>(*m_vacuum_gauge_op);
+        m_vacuum_gauge_solver->setVerbose(0);
+        m_vacuum_gauge_solver->setMaxIter(200);
+    }
+    // Solver vectors have no ghosts. Divergence needs neighboring edges,
+    // including those across box/rank boundaries, so use owned ghosted scratch.
+    for (int d = 0; d < 3; ++d) {
+        auto& edge = m_vacuum_gauge_edges[d];
+        if (!edge.isDefined()) {
+            edge.define(vectors[d]->boxArray(), vectors[d]->DistributionMap(), 1, 1);
+        }
+        edge.setVal(0.0_rt);
+        MultiFab::Copy(edge,*vectors[d],0,0,1,0);
+        edge.OverrideSync(period);
+        edge.FillBoundary(period);
+    }
+    ablastr::fields::VectorField vf{
+        &m_vacuum_gauge_edges[0],&m_vacuum_gauge_edges[1],&m_vacuum_gauge_edges[2]};
+    auto& rhs = *m_vacuum_gauge_rhs;
+    auto& phi = *m_vacuum_gauge_phi;
+    m_WarpX->get_pointer_fdtd_solver_fp(lev)->ComputeDivE(vf,rhs);
+    for (MFIter mfi(rhs); mfi.isValid(); ++mfi) {
+        auto const rr = rhs.array(mfi);
+        auto const mask = m_vacuum_gauge_mask->const_array(mfi);
+        ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+            if (mask(i,j,k) == 0) { rr(i,j,k) = 0.0_rt; }
+        });
+    }
+    rhs.OverrideSync(period);
+    phi.setVal(0.0_rt);
+    m_vacuum_gauge_solver->solve({&phi},{&rhs},1.e-12_rt,0.0_rt);
+    phi.OverrideSync(period);
+    phi.FillBoundary(period);
+    for (int d = 0; d < 3; ++d) {
+        auto& v = *vectors[d];
+        IntVect off(0); off[d] = 1;
+        Real const idx = 1.0_rt/dx[d];
+        for (MFIter mfi(v); mfi.isValid(); ++mfi) {
+            auto const vv = v.array(mfi);
+            auto const pp = phi.const_array(mfi);
+            ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                IntVect const iv(i,j,k);
+                vv(iv) -= (pp(iv+off)-pp(iv))*idx;
+            });
+        }
+        v.OverrideSync(period);
+        v.FillBoundary(period);
+    }
+#else
+    amrex::ignore_unused(field);
+    WARPX_ABORT_WITH_MESSAGE("darwin_vacuum_gauge_projection requires 3D");
 #endif
 }
 
