@@ -223,6 +223,24 @@ add_warpx_test(
     OFF OFF
 )
 
+# A cheaper PC projection must retain strict electric-field and boundary gates.
+add_warpx_test(
+    test_3d_darwin_split_pc_gauge_tolerance
+    3 2
+    "inputs_test_3d_darwin_split_pc_vacuum_energy implicit_evolve.darwin_vacuum_gauge_pc_relative_tolerance=1e-6"
+    "analysis_darwin_split.py pc_vacuum_energy"
+    OFF OFF
+)
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_darwin_split_pc_gauge_tolerance_eb
+        3 1
+        "inputs_test_3d_darwin_split_pc_eb_vacuum implicit_evolve.darwin_vacuum_gauge_pc_relative_tolerance=1e-6"
+        "analysis_darwin_split.py pc_eb_vacuum"
+        OFF OFF
+    )
+endif()
+
 # Mobile ions develop E_L; the diagnosed E - E_L must retain the inductive limit.
 add_warpx_test(
     test_3d_darwin_split_pc_mobile

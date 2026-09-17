@@ -4940,6 +4940,19 @@ Maxwell solver: kinetic-fluid hybrid
     Subtract these from total ``Ex``, ``Ey`` and ``Ez`` to inspect the transverse
     field separately from the evolving longitudinal response.
 
+.. pp:param:: implicit_evolve.darwin_vacuum_gauge_pc_relative_tolerance
+    :type: ``float``
+    :default: ``1e-12``
+    :optional:
+
+    Relative tolerance of the masked nodal gauge solve for curl-curl
+    preconditioner corrections when ``darwin_vacuum_gauge_projection`` is enabled.
+    Must lie strictly between zero and one. Larger values can reduce PC cost,
+    but can also increase Krylov or nonlinear iterations. The split solution
+    and warm-start projections retain a relative tolerance of ``1e-12``.
+    Check total solve time and electric-field accuracy against a strict reference;
+    magnetic and flux agreement alone cannot detect a gradient-field error.
+
 .. pp:param:: hybrid_pic_model.deterministic_pressure_bc
     :type: ``bool``
     :default: ``false``

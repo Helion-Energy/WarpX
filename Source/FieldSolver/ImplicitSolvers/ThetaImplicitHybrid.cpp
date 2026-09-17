@@ -219,6 +219,10 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
     }
 
     pp.query("darwin_vacuum_gauge_projection", m_darwin_vacuum_gauge_projection);
+    pp.query("darwin_vacuum_gauge_pc_relative_tolerance", m_darwin_vacuum_gauge_pc_rtol);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_vacuum_gauge_pc_rtol > 0.0_rt
+        && m_darwin_vacuum_gauge_pc_rtol < 1.0_rt,
+        "darwin_vacuum_gauge_pc_relative_tolerance must lie strictly between 0 and 1");
     if (m_darwin_vacuum_gauge_projection) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(AMREX_SPACEDIM == 3 && m_darwin_segregated_solve
             && m_darwin_vacuum_pc_regularization > 0.0_rt,
@@ -1674,7 +1678,7 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
 #endif
 }
 
-void ThetaImplicitHybrid::ProjectDarwinVacuumGauge (WarpXSolverVec& field)
+void ThetaImplicitHybrid::ProjectDarwinVacuumGauge (WarpXSolverVec& field, bool preconditioner)
 {
     if (!m_darwin_vacuum_gauge_projection) { return; }
 #if defined(WARPX_DIM_3D)
@@ -1786,7 +1790,10 @@ void ThetaImplicitHybrid::ProjectDarwinVacuumGauge (WarpXSolverVec& field)
     }
     rhs.OverrideSync(period);
     phi.setVal(0.0_rt);
-    m_vacuum_gauge_solver->solve({&phi},{&rhs},1.e-12_rt,0.0_rt);
+    // Only preconditioner corrections may use a cheaper projection. The split
+    // solution and warm start retain the strict gauge used by the field gates.
+    Real const rtol = preconditioner ? m_darwin_vacuum_gauge_pc_rtol : 1.e-12_rt;
+    m_vacuum_gauge_solver->solve({&phi},{&rhs},rtol,0.0_rt);
     phi.OverrideSync(period);
     phi.FillBoundary(period);
     for (int d = 0; d < 3; ++d) {
@@ -1805,7 +1812,7 @@ void ThetaImplicitHybrid::ProjectDarwinVacuumGauge (WarpXSolverVec& field)
         v.FillBoundary(period);
     }
 #else
-    amrex::ignore_unused(field);
+    amrex::ignore_unused(field, preconditioner);
     WARPX_ABORT_WITH_MESSAGE("darwin_vacuum_gauge_projection requires 3D");
 #endif
 }

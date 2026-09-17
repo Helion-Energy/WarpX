@@ -136,7 +136,7 @@ public:
         return m_inertia_rhs_scale.empty() ? nullptr : &m_inertia_rhs_scale;
     }
 
-    void ProjectDarwinVacuumGauge (WarpXSolverVec& field) override;
+    void ProjectDarwinVacuumGauge (WarpXSolverVec& field, bool preconditioner = false) override;
 
     /** The ion current deposit consumed by the Ohm solve (current_fp
      *  registry) -- frozen during Jacobian probes, so it is the exact
@@ -160,6 +160,7 @@ private:
     amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_rhs_scale;
     amrex::Real m_darwin_vacuum_pc_regularization = 0.0;
     bool m_darwin_vacuum_gauge_projection = false;
+    amrex::Real m_darwin_vacuum_gauge_pc_rtol = 1.e-12;
     amrex::Array<amrex::MultiFab,3> m_vacuum_gauge_edges;
     std::unique_ptr<amrex::iMultiFab> m_vacuum_gauge_mask;
     std::unique_ptr<amrex::MultiFab> m_vacuum_gauge_phi;

@@ -211,7 +211,7 @@ public:
     }
 
     /** Remove unconstrained vacuum gradient directions when requested. */
-    virtual void ProjectDarwinVacuumGauge (WarpXSolverVec&) {}
+    virtual void ProjectDarwinVacuumGauge (WarpXSolverVec&, bool = false) {}
 
     /**
      * \brief Return per-direction pointers to the ion (particle) current
