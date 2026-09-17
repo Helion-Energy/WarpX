@@ -245,3 +245,16 @@ if(WarpX_COMPUTE STREQUAL "CUDA")
         OFF OFF
     )
 endif()
+
+# A residual must be a function of the current iterate, independent of the
+# preceding particle push or Krylov probe. Both electron closures are covered.
+if(TARGET app_3d)
+    find_package(Python COMPONENTS Interpreter REQUIRED)
+    add_test(NAME test_3d_darwin_residual_freshness
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_darwin_residual_freshness.py
+            $<TARGET_FILE:app_3d>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_residual_freshness
+            ${CMAKE_CURRENT_BINARY_DIR}/residual_freshness)
+    set_tests_properties(test_3d_darwin_residual_freshness PROPERTIES TIMEOUT 200)
+endif()

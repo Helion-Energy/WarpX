@@ -1063,6 +1063,22 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     ablastr::fields::MultiLevelScalarField rho_fp =
         m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
 
+    // The split residual must consume THIS evaluation's midpoint density.
+    // Component zero is deposited before the particle push and, after the
+    // first evaluation, contains the previous evaluation's midpoint state.
+    // Ohm's law and the algebraic pressure closure read component zero of
+    // their argument, so expose the new midpoint component through an alias.
+    // Leave the registered two-time-level density intact for inertia/history.
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rho_half_store(m_num_amr_levels);
+    if (m_darwin_segregated_solve) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            auto& rho = *rho_fp[lev];
+            rho_half_store[lev] = std::make_unique<amrex::MultiFab>(
+                rho, amrex::make_alias, rho.nComp()/2, 1);
+            rho_fp[lev] = rho_half_store[lev].get();
+        }
+    }
+
     // Compute J_plasma = curl(B^{n+theta})/mu_0. The split-field (non-
     // darwin) branch computed it in UpdateWarpXFields from the plasma-
     // response field, BEFORE the external assembly -- recomputing it here
@@ -1146,7 +1162,13 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
             m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, !a_from_jacobian);
         }
     } else {
-        m_hybrid_pic_model->CalculateElectronPressure();
+        if (m_darwin_segregated_solve) {
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                m_hybrid_pic_model->CalculateElectronPressure(lev, *rho_fp[lev]);
+            }
+        } else {
+            m_hybrid_pic_model->CalculateElectronPressure();
+        }
     }
 
     // Darwin: refresh the longitudinal constraint field from this

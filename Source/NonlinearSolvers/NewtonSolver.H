@@ -672,6 +672,47 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                                    residual_evals);
         }
 
+        // Opt-in residual history audit. Compare a saved nonlinear residual
+        // with fresh, repeated and excursion-return evaluations, then compare
+        // full and Jacobian-stage semantics at identical states. This performs
+        // extra particle stages; leave disabled for production timing.
+        if (std::getenv("WARPX_RESIDUAL_CHECK") != nullptr) {
+            Vec F0, F1, Fprobe, Rstage, Fstage, delta, Up, v;
+            F0.Define(a_U); F1.Define(a_U); Fprobe.Define(a_U);
+            Rstage.Define(a_U); Fstage.Define(a_U); delta.Define(a_U);
+            Up.Define(a_U); v.Define(a_U);
+            auto report = [&] (char const* label, Vec const& lhs, Vec const& rhs) {
+                delta.linComb(1._rt, lhs, -1._rt, rhs);
+                amrex::Print() << "RESIDUAL_CHECK: step = " << a_step
+                    << ", iter = " << iter << ", " << label
+                    << ", difference = " << std::scientific << std::setprecision(12)
+                    << delta.norm2() << ", reference = " << rhs.norm2() << "\n";
+            };
+            eval_residual(F0, a_U, iter);
+            report("saved_vs_fresh", m_F, F0);
+            eval_residual(F1, a_U, iter);
+            report("repeat", F1, F0);
+            m_ops->ComputeRHS(Rstage, a_U, a_time, -1, true);
+            Fstage.Copy(a_U); Fstage -= Rstage; Fstage -= a_b;
+            report("stage_base_vs_full", Fstage, F0);
+            v.Copy(m_dU);
+            const amrex::Real vnorm = v.norm2();
+            if (vnorm > 0._rt) {
+                v.scale(1._rt/vnorm);
+                const amrex::Real eps = m_linear_function->perturbationScale(
+                    v, m_jfnk_epsilon);
+                Up.linComb(1._rt, a_U, eps, v);
+                m_ops->ComputeRHS(Rstage, Up, a_time, -1, true);
+                Fstage.Copy(Up); Fstage -= Rstage; Fstage -= a_b;
+                eval_residual(Fprobe, Up, iter);
+                report("stage_probe_vs_full", Fstage, Fprobe);
+                eval_residual(F1, a_U, iter);
+                report("excursion_return", F1, F0);
+            }
+            // Restore the actual iterate for subsequent instrumentation/update.
+            eval_residual(m_F, a_U, iter);
+        }
+
         // Jacobian consistency instrument (WARPX_JAC_CHECK=1): along the
         // solved Newton direction, compare the linear operator GMRES used
         // (probe/linear-stage semantics) against true-residual secants over
