@@ -499,6 +499,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
     amrex::Real norm_abs = 0.;
     amrex::Real norm0 = 1._rt;
+    amrex::Real solve_norm0 = 1._rt;
     amrex::Real norm_rel = 0.;
 
     // Eisenstat-Walker adaptive forcing state: per-iteration GMRES relative
@@ -553,10 +554,9 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // Compute norm of the residual
         norm_abs = m_F.norm2();
         if (iter == 0) {
-            if (m_convergence_reference_norm > 0.) {
-                norm0 = m_convergence_reference_norm;
-            } else if (norm_abs > 0.) { norm0 = norm_abs; }
-            else { norm0 = 1._rt; }
+            solve_norm0 = norm_abs > 0. ? norm_abs : 1._rt;
+            norm0 = m_convergence_reference_norm > 0.
+                ? m_convergence_reference_norm : solve_norm0;
         }
         norm_rel = norm_abs/norm0;
 
@@ -598,7 +598,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             break;
         }
 
-        if (norm_abs > 100._rt*norm0) {
+        // A shared outer convergence reference may be much smaller than
+        // this inner solve's initial residual after its constraint changes.
+        // Divergence means growth within THIS Newton solve, not growth from
+        // a different outer problem. Preserve the same convergence target.
+        if (norm_abs > 100._rt*solve_norm0) {
             this->m_exit_status = -9;
             convergence_status = -9;
             amrex::Print() << "Newton: exiting at iteration = " << std::setw(3) << iter

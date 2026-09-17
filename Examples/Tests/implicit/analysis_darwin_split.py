@@ -10,14 +10,18 @@ import yt
 mode = sys.argv[1]
 rtol = 1e-8 if mode.startswith("pc_") else 1e-6
 mode = mode.removeprefix("pc_")
+steps = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+atol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
 yt.set_log_level(50)
 rows = np.loadtxt("newton.txt", ndmin=2)
 assert rows.shape[1] == 18 and np.isfinite(rows).all()
-assert np.all(rows[:, 9:11] == 3), "a nonlinear solve was not accepted"
-assert np.all(rows[:, 5] < rtol), "the shared step-relative tolerance was not met"
+status = rows[:, 10]
+assert np.all(rows[:, 9] == status), "public and convergence status differ"
+assert np.all(((status == 3) & (rows[:, 5] < rtol)) |
+              ((status == 2) & (rows[:, 4] < atol))), "nonlinear convergence gate"
 plots = sorted(p for p in Path("diags").glob("gate[0-9]*")
                if len(p.name) == 10 and p.name[4:].isdigit())
-assert plots[-1].name == "gate000002", "two complete steps are required"
+assert plots[-1].name == f"gate{steps:06d}", "required steps did not complete"
 ds = yt.load(str(plots[-1]))
 grid = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
 for field in ds.field_list:

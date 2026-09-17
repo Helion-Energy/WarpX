@@ -212,3 +212,17 @@ if(WarpX_EB)
         OFF OFF
     )
 endif()
+
+# Changing E_L after a near-steady field guess must not trigger divergence at
+# Newton iteration zero merely because the shared step reference is tiny.
+# The reproduced false-divergence case is a million-cell CUDA run. Keep
+# its mesh/backend rather than claiming the small CPU case detects it.
+if(WarpX_COMPUTE STREQUAL "CUDA")
+    add_warpx_test(
+        test_3d_darwin_split_pc_vacuum_long
+        3 1
+        inputs_test_3d_darwin_split_pc_vacuum_long
+        "analysis_darwin_split.py pc_vacuum_energy 5 1e-7"
+        OFF OFF
+    )
+endif()
