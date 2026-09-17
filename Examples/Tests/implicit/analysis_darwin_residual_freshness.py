@@ -9,14 +9,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 PATTERN = re.compile(
     r"RESIDUAL_CHECK: step = (\d+), iter = (\d+), (\w+), "
     r"difference = ([^,]+), reference = (\S+)"
 )
 LABELS = {
-    "saved_vs_fresh", "repeat", "stage_base_vs_full",
-    "stage_probe_vs_full", "excursion_return",
+    "saved_vs_fresh",
+    "repeat",
+    "stage_base_vs_full",
+    "stage_probe_vs_full",
+    "excursion_return",
 }
 
 
@@ -40,16 +42,28 @@ def main():
     for energy in (0, 1):
         run = Path(tempfile.mkdtemp(prefix=f"energy{energy}_", dir=output_root))
         environment = dict(os.environ, OMP_NUM_THREADS="1", WARPX_RESIDUAL_CHECK="1")
-        command = [str(executable.resolve()), str(inputs.resolve()),
-                   f"hybrid_pic_model.solve_electron_energy_equation={energy}"]
-        result = subprocess.run(command, cwd=run, env=environment,
-                                capture_output=True, text=True, timeout=90)
+        command = [
+            str(executable.resolve()),
+            str(inputs.resolve()),
+            f"hybrid_pic_model.solve_electron_energy_equation={energy}",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=run,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
         output = result.stdout + result.stderr
         (run / "stdout.txt").write_text(output)
         assert result.returncode == 0, f"simulation failed; see {run}"
         worst = check_output(output)
-        rows = [line.split() for line in (run / "newton.txt").read_text().splitlines()
-                if line and not line.startswith("#")]
+        rows = [
+            line.split()
+            for line in (run / "newton.txt").read_text().splitlines()
+            if line and not line.startswith("#")
+        ]
         assert rows and {int(row[0]) for row in rows} == {1, 2}
         assert all(int(row[10]) in (2, 3) for row in rows), "nonlinear failure"
         print(f"energy={energy}, worst normalized residual drift={worst}; {run}")

@@ -18,10 +18,14 @@ rows = np.loadtxt("newton.txt", ndmin=2)
 assert rows.shape[1] == 18 and np.isfinite(rows).all()
 status = rows[:, 10]
 assert np.all(rows[:, 9] == status), "public and convergence status differ"
-assert np.all(((status == 3) & (rows[:, 5] < rtol)) |
-              ((status == 2) & (rows[:, 4] < atol))), "nonlinear convergence gate"
-plots = sorted(p for p in Path("diags").glob("gate[0-9]*")
-               if len(p.name) == 10 and p.name[4:].isdigit())
+assert np.all(
+    ((status == 3) & (rows[:, 5] < rtol)) | ((status == 2) & (rows[:, 4] < atol))
+), "nonlinear convergence gate"
+plots = sorted(
+    p
+    for p in Path("diags").glob("gate[0-9]*")
+    if len(p.name) == 10 and p.name[4:].isdigit()
+)
 assert plots[-1].name == f"gate{steps:06d}", "required steps did not complete"
 ds = yt.load(str(plots[-1]))
 grid = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
@@ -35,17 +39,19 @@ if mode == "energy":
     g0 = initial.covering_grid(0, initial.domain_left_edge, initial.domain_dimensions)
     te0 = np.asarray(g0["boxlib", "Te"])
     assert np.min(te) > 0
-    assert np.max(np.abs(te-te0)) / np.max(te0) < 1e-8
+    assert np.max(np.abs(te - te0)) / np.max(te0) < 1e-8
 elif mode in ("vacuum", "vacuum_energy"):
     # Boundary A imposes dBz/dt = 5e5 T/s. The entire volume must receive
     # the flux at eta <= 1e-6, beyond what resistive diffusion can deliver.
     expected = 0.1 + 5e5 * float(ds.current_time)
-    error = np.max(np.abs(np.asarray(grid["boxlib", "Bz"])-expected))
+    error = np.max(np.abs(np.asarray(grid["boxlib", "Bz"]) - expected))
     assert error < 3e-7, (error, expected)
     if mode == "vacuum_energy":
         te = np.asarray(grid["boxlib", "Te"])
         initial = yt.load(str(plots[0]))
-        g0 = initial.covering_grid(0, initial.domain_left_edge, initial.domain_dimensions)
+        g0 = initial.covering_grid(
+            0, initial.domain_left_edge, initial.domain_dimensions
+        )
         te0 = np.asarray(g0["boxlib", "Te"])
         assert np.min(te) > 0
         # Cold ions and a short smooth drive must not produce the artificial
@@ -58,18 +64,20 @@ elif mode == "eb_vacuum":
     bz0 = np.asarray(g0["boxlib", "Bz"])
     x = np.asarray(grid["index", "x"])
     y = np.asarray(grid["index", "y"])
-    radius = np.sqrt(x*x+y*y)
+    radius = np.sqrt(x * x + y * y)
     inside = radius < 0.03
     exterior = (radius > 0.13) & (np.abs(x) < 0.2) & (np.abs(y) < 0.2)
-    assert np.max(np.abs((bz-bz0)[inside])) < 1e-12
+    assert np.max(np.abs((bz - bz0)[inside])) < 1e-12
     assert np.ptp(bz[exterior]) < 3e-7
-    assert np.min(bz[exterior]-bz0[exterior]) > 0.9*5e5*float(ds.current_time)
+    assert np.min(bz[exterior] - bz0[exterior]) > 0.9 * 5e5 * float(ds.current_time)
     dx = np.asarray(ds.domain_width) / ds.domain_dimensions
-    flux_change = np.sum(bz-bz0, axis=(0, 1)) * dx[0]*dx[1]
-    expected = 5e5*float(ds.current_time)*float(ds.domain_width[0]*ds.domain_width[1])
+    flux_change = np.sum(bz - bz0, axis=(0, 1)) * dx[0] * dx[1]
+    expected = (
+        5e5 * float(ds.current_time) * float(ds.domain_width[0] * ds.domain_width[1])
+    )
     # Discrete Stokes gate for the existing masked curl (not a claim about
     # cut-cell metric accuracy): the outer boundary A supplies this flux.
-    assert np.max(np.abs(flux_change-expected)) < 1e-8*expected
+    assert np.max(np.abs(flux_change - expected)) < 1e-8 * expected
     assert np.min(np.asarray(grid["boxlib", "Te"])[exterior]) > 0
 else:
     assert mode == "eb"
@@ -93,6 +101,6 @@ if check_vacuum_gauge and mode in ("vacuum_energy", "eb_vacuum"):
         ely = np.asarray(grid["boxlib", "hybrid_E_long_fpy"])
         elz = np.asarray(grid["boxlib", "hybrid_E_long_fpz"])
         assert np.max(np.abs(elz)) < 1e-2, "longitudinal field lost z symmetry"
-        assert np.max(np.abs(ex - elx - 2.5e5*y)) < 1e-2, "incorrect transverse Ex"
-        assert np.max(np.abs(ey - ely + 2.5e5*x)) < 1e-2, "incorrect transverse Ey"
+        assert np.max(np.abs(ex - elx - 2.5e5 * y)) < 1e-2, "incorrect transverse Ex"
+        assert np.max(np.abs(ey - ely + 2.5e5 * x)) < 1e-2, "incorrect transverse Ey"
 print("Darwin split", mode, "checks passed")

@@ -5,39 +5,91 @@ import argparse
 import math
 from pathlib import Path
 
-
 SCHEMAS = {
     "D1_BEGIN": {
-        "schema", "step", "iteration", "direction", "direction_norm",
-        "epsilon_relative_top", "rungs", "destructive", "timing_valid",
+        "schema",
+        "step",
+        "iteration",
+        "direction",
+        "direction_norm",
+        "epsilon_relative_top",
+        "rungs",
+        "destructive",
+        "timing_valid",
     },
     "D1_DIRECTION": {
-        "schema", "step", "iteration", "component", "norm", "max_abs",
+        "schema",
+        "step",
+        "iteration",
+        "component",
+        "norm",
+        "max_abs",
     },
     "D1_METRIC": {
-        "schema", "step", "iteration", "rung", "eps_relative",
-        "eps_absolute", "quantity", "norm", "reference_norm", "relative",
+        "schema",
+        "step",
+        "iteration",
+        "rung",
+        "eps_relative",
+        "eps_absolute",
+        "quantity",
+        "norm",
+        "reference_norm",
+        "relative",
     },
     "D1_COMPONENT": {
-        "schema", "step", "iteration", "rung", "eps_relative",
-        "eps_absolute", "quantity", "component", "norm", "reference_norm",
-        "relative", "max_abs", "max_r", "max_z",
+        "schema",
+        "step",
+        "iteration",
+        "rung",
+        "eps_relative",
+        "eps_absolute",
+        "quantity",
+        "component",
+        "norm",
+        "reference_norm",
+        "relative",
+        "max_abs",
+        "max_r",
+        "max_z",
     },
     "D1_END": {"schema", "step", "iteration", "status", "rungs"},
 }
 
 RUNG_QUANTITIES = {
-    "A", "B_g", "B_s", "C", "A_minus_B_s", "B_s_minus_C",
-    "B_g_minus_B_s", "A_minus_C", "full_saved_drift_over_eps", "closure",
+    "A",
+    "B_g",
+    "B_s",
+    "C",
+    "A_minus_B_s",
+    "B_s_minus_C",
+    "B_g_minus_B_s",
+    "A_minus_C",
+    "full_saved_drift_over_eps",
+    "closure",
 }
 NOISE_QUANTITIES = {"stage_repeat", "full_repeat", "full_saved_repeat"}
 FLOAT_FIELDS = {
-    "direction_norm", "epsilon_relative_top", "norm", "max_abs",
-    "eps_relative", "eps_absolute", "reference_norm", "relative",
+    "direction_norm",
+    "epsilon_relative_top",
+    "norm",
+    "max_abs",
+    "eps_relative",
+    "eps_absolute",
+    "reference_norm",
+    "relative",
 }
 INT_FIELDS = {
-    "schema", "step", "iteration", "rungs", "destructive", "timing_valid",
-    "component", "rung", "max_r", "max_z",
+    "schema",
+    "step",
+    "iteration",
+    "rungs",
+    "destructive",
+    "timing_valid",
+    "component",
+    "rung",
+    "max_r",
+    "max_z",
 }
 
 
@@ -85,10 +137,9 @@ def validate(path):
     assert end["status"] == "complete"
     assert (begin["step"], begin["iteration"]) == (end["step"], end["iteration"])
     identity = (begin["step"], begin["iteration"])
-    assert all((fields["step"], fields["iteration"]) == identity
-               for _, fields in records), (
-        "all D1 records must share the D1_BEGIN step/iteration identity"
-    )
+    assert all(
+        (fields["step"], fields["iteration"]) == identity for _, fields in records
+    ), "all D1 records must share the D1_BEGIN step/iteration identity"
 
     directions = by_kind["D1_DIRECTION"]
     assert len(directions) == 3
@@ -102,13 +153,11 @@ def validate(path):
     expected = {(-1, q) for q in NOISE_QUANTITIES}
     expected |= {(rung, q) for rung in range(3) for q in RUNG_QUANTITIES}
     assert set(metric_key) == expected, (
-        f"metric inventory mismatch: missing={expected-set(metric_key)}, "
-        f"extra={set(metric_key)-expected}"
+        f"metric inventory mismatch: missing={expected - set(metric_key)}, "
+        f"extra={set(metric_key) - expected}"
     )
 
-    component_key = {
-        (r["rung"], r["quantity"], r["component"]): r for r in components
-    }
+    component_key = {(r["rung"], r["quantity"], r["component"]): r for r in components}
     assert len(component_key) == len(components), "duplicate D1_COMPONENT key"
     expected_components = {(r, q, c) for r, q in expected for c in range(3)}
     assert set(component_key) == expected_components, "component inventory mismatch"
@@ -126,8 +175,10 @@ def validate(path):
         # C is one frozen action reused across the ladder.
         if rung:
             assert math.isclose(
-                metric_key[(rung, "C")]["norm"], metric_key[(0, "C")]["norm"],
-                rel_tol=2e-14, abs_tol=0.0,
+                metric_key[(rung, "C")]["norm"],
+                metric_key[(0, "C")]["norm"],
+                rel_tol=2e-14,
+                abs_tol=0.0,
             )
         closure = metric_key[(rung, "closure")]
         assert closure["relative"] <= 1e-10, (
@@ -177,14 +228,18 @@ def compare(left, right, rtol):
     b = indexed(right)
     assert set(a) == set(b), "one/two-rank record inventory differs"
     numeric = {
-        "norm", "reference_norm", "relative", "max_abs", "eps_relative",
+        "norm",
+        "reference_norm",
+        "relative",
+        "max_abs",
+        "eps_relative",
         "eps_absolute",
     }
     for key in sorted(a, key=str):
         for name in numeric & a[key].keys():
             av, bv = a[key][name], b[key][name]
             scale = max(abs(av), abs(bv), 1e-300)
-            assert abs(av-bv) <= rtol*scale, (
+            assert abs(av - bv) <= rtol * scale, (
                 f"one/two-rank mismatch {key} {name}: {av:.17e} vs {bv:.17e}"
             )
         for name in {"max_r", "max_z"} & a[key].keys():
@@ -195,7 +250,9 @@ def compare(left, right, rtol):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--file", type=Path, default=Path("diags/d1_operator_partition.txt"))
+parser.add_argument(
+    "--file", type=Path, default=Path("diags/d1_operator_partition.txt")
+)
 parser.add_argument("--compare", type=Path)
 parser.add_argument("--compare-rtol", type=float, default=1e-9)
 parser.add_argument("--assert-default-off", action="store_true")
