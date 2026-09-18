@@ -22,6 +22,8 @@
 #include "WarpX.H"
 
 #include <ablastr/particles/DepositCharge.H>
+
+#include <AMReX_Print.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
 #include <ablastr/utils/Communication.H>
 #include <AMReX_Box.H>
@@ -173,6 +175,14 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
                     "'equal' or 'opal'."
                 );
             }
+            // Printed so that a run's log shows which model was actually
+            // read: a build without this parameter ignores it silently.
+            amrex::Print() << "  " << collision_name
+                           << " ionization energy sharing: " << energy_sharing;
+            if (energy_sharing == "opal") {
+                amrex::Print() << " (w = " << m_ionization_opal_w << " eV)";
+            }
+            amrex::Print() << "\n";
 
             m_ionization_processes.push_back(std::move(process));
         } else {
