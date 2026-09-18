@@ -9,6 +9,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "WarpX.H"
+#include "Circuit/CircuitCoupling.H"
 
 #include "BoundaryConditions/PML.H"
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
@@ -862,6 +863,9 @@ WarpX::InitData ()
 
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
         m_hybrid_pic_model->InitData(m_fields);
+    }
+    if (m_circuit_coupling) {
+        m_circuit_coupling->InitData();
     }
 
     if (ParallelDescriptor::IOProcessor()) {

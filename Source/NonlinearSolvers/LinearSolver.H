@@ -1,6 +1,8 @@
 #ifndef WARPX_LINEAR_SOLVER_H_
 #define WARPX_LINEAR_SOLVER_H_
 
+#include <AMReX.H>
+
 /**
  * \brief Top-level class for the linear solver
  *

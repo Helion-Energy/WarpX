@@ -10,6 +10,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "WarpX.H"
+#include "Circuit/CircuitCoupling.H"
 
 #include "BoundaryConditions/FieldBoundaries.H"
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
@@ -443,6 +444,10 @@ WarpX::WarpX ()
     {
         // Create hybrid-PIC model object if needed
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
+    }
+
+    if (CircuitCoupling::IsConfigured()) {
+        m_circuit_coupling = std::make_unique<CircuitCoupling>();
     }
 
     // The conformal embedded-boundary field update is used by the ECT Maxwell

@@ -63,6 +63,8 @@ class HybridPICModel;
  *
  */
 
+class CircuitCoupler;
+
 class ThetaImplicitHybrid : public ImplicitSolver
 {
 public:
@@ -248,24 +250,30 @@ private:
     bool m_vacuum_recovery = false;
     bool m_vacuum_recovery_half = false;
 
-    /** Circuit-in-the-residual coupling
-     *  (implicit_evolve.external_field_iteration): every residual
-     *  evaluation executes the "externalcoiltheta" python callback after
-     *  the iterate's plasma current is computed (and FinishFieldUpdate the
-     *  "externalcoilfinish" one before the end-of-step boundary values are
-     *  imposed), then re-imposes the external-drive boundary values of A
-     *  at the updated coil scales and re-derives B. Python measures the
-     *  flux linkage of the iterate's plasma current
-     *  (hybrid_current_fp_plasma), re-advances the coupled circuit, and
-     *  pushes coil scale segments (SetScale). The map stays smooth in the
-     *  state, so matrix-free Jacobian probes see the coupled
-     *  plasma-circuit physics and Newton converges both together (a
-     *  step-lagged circuit is unstable at strong coil-plasma coupling).
-     *  On the Darwin unified drive the scales re-enter through the
-     *  boundary pin (+ vacuum recovery); on the split-field path the
-     *  callback runs in the plasma-response frame (stored externals
-     *  subtracted, refreshed at the new scales, then restored). */
+    /** Execute the stage/finish circuit callbacks. Unified Darwin exposes total
+     * B; split-field hybrid exposes plasma-response B during the stage callback.
+     * Callbacks replay accepted circuit state and publish trial scale segments.
+     * Segregated Darwin converges these scales before particles by default;
+     * the legacy branch instead updates A/B after particles and current.
+     * Finish must commit the accepted candidate, not reinterpret the as-left
+     * theta B as an endpoint observation. */
     bool m_external_field_iteration = false;
+
+    /** Eliminate circuit scales before particles, using a replayable B/Jp-only
+     * callback. Enabled by default for single-level 3D segregated Darwin circuit coupling. */
+    bool m_darwin_circuit_consistent_stage = false;
+    bool m_circuit_native = false;
+    bool m_native_circuit_configured = false;
+    bool m_native_circuit_step_open = false;
+    CircuitCoupler& NativeCircuitCoupler () const;
+    void CommitNativeCircuitStage (amrex::Real start_time);
+    int m_darwin_circuit_max_iterations = 20;
+    amrex::Vector<amrex::Real> m_darwin_circuit_accepted_scales;
+    amrex::Real m_darwin_circuit_scale_tolerance = amrex::Real(1.e-14);
+
+    void ConvergeDarwinCircuitStage (WarpXSolverVec const& electric_field,
+                                    amrex::Real start_time, bool from_jacobian);
+    void RefreshDarwinCircuitCurrent ();
 
     /** Apply the particle boundary conditions and re-bin (Redistribute)
      *  BEFORE the end-of-step deposits

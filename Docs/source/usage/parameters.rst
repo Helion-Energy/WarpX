@@ -271,7 +271,15 @@ Overall simulation parameters
         - ``implicit_evolve.nonlinear_solver = newton``: Use a PS-JFNK method. Required for large time steps, but efficiency often relies on preconditioning and/or using ``implicit_evolve.use_mass_matrices_jacobian = true``.
 
           - ``newton.verbose`` (``bool``, default: true)
-          - ``newton.linear_solver`` (``string``, default: "gmres") Other excepted value, "petsc_ksp".
+          - ``newton.linear_solver`` (``string``, default: ``amrex_gmres``)
+            Select ``amrex_fgmres`` for right flexible GMRES when the preconditioner varies
+            between applications or uses an iterative solve with RHS-dependent stopping.
+            Flexible GMRES stores the preconditioned basis and checks the recomputed linear
+            residual at each restart and convergence candidate. Its basis requires approximately
+            twice the vector storage of ordinary GMRES. Configure its tolerances, restart length,
+            iteration limit and verbosity in the ``amrex_fgmres`` namespace, using the same
+            parameter names as ``amrex_gmres``. The matrix action must remain a consistent
+            frozen linear problem. ``petsc_ksp`` is also supported when built with PETSc.
           - ``newton.require_convergence`` (``bool``, default: true)
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
@@ -4284,32 +4292,119 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    If ``algo.evolve_scheme = theta_implicit_hybrid`` with external vector-potential fields, iterate the
-    external drive inside the nonlinear residual (circuit-in-the-residual coupling): every residual
-    evaluation executes the ``externalcoiltheta`` python callback after the plasma current of the current
-    iterate has been computed (``hybrid_current_fp_plasma``), then refreshes the external fields at the
-    updated coil scales. From the callback, python measures the flux linkage of the iterate's plasma
-    response, re-advances a coupled external circuit against it, and pushes updated coil scale segments
-    through ``set_external_vector_potential_scale`` (the coils must be declared with
-    :pp:param:`external_vector_potential.<field_name>.python_scale`). At the end of the step the
-    ``externalcoilfinish`` callback runs once before the end-of-step external state is finalized, so the
-    circuit state and the final coil segments are left at :math:`t^{n+1}`. Because the callback runs in
-    every evaluation, the coupled plasma-circuit map stays smooth in the state and matrix-free Jacobian
-    probes see the coupled physics — Newton converges plasma and circuit together (a step-lagged circuit
-    is unstable at strong coil-plasma coupling).
+    Evaluate the ``externalcoiltheta`` callback inside the field residual and
+    ``externalcoilfinish`` once when finalizing the step. Callbacks publish external
+    vector-potential scale segments using ``set_external_vector_potential_scale``;
+    the coils must use :pp:param:`external_vector_potential.<field_name>.python_scale`.
 
-    On the Darwin unified drive (:pp:param:`hybrid_pic_model.darwin`) the updated scales re-enter through
-    the boundary values of the evolved vector potential (re-running the vacuum recovery when active) and B
-    is re-derived. The recovery's live-probe mode is then forced on; run with a tight
-    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance`, and note the recovery is
-    re-applied after the callback in every evaluation, so a finite
-    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relaxation_time` is currently applied twice per
-    evaluation — run circuit-coupled decks with the default (instant) recovery.
+    On the split-field hybrid path, the stage callback sees plasma-response B, with
+    stored external fields removed. On the unified Darwin path it sees **total B**
+    and field-derived plasma current, including longitudinal displacement current.
+    A circuit adapter must account consistently for coil self-flux and plasma flux
+    in its probe and inductance model. Merely installing a callback does not ensure
+    a reproducible residual or a consistent electromagnetic boundary condition.
 
-    On the split-field path (standard theta-implicit hybrid) the callback runs in the plasma-response
-    frame: the stored external fields are subtracted from the totals first (so flux-linkage probes reading
-    B measure the response only), the externals are refreshed at the updated scales, and the totals are
-    restored for the Ohm solve of the same evaluation.
+    Single-level 3D segregated Darwin coupling uses the consistent stage described below by default.
+    The legacy Darwin order (when that option is disabled) updates the boundary and
+    repeats recovery after particles and plasma current have already been computed;
+    these quantities can then disagree with the B used by Ohm's law.
+
+    The final callback must commit the already accepted circuit candidate once.
+    It must not remeasure B assuming it is the delivered end-of-step field: the
+    Darwin finisher invokes this callback before deriving that field. A B-based
+    adapter can sample the delivered endpoint at the next ``beforestep`` callback
+    to establish its next accepted linkage reference. Trial callbacks must always
+    replay the accepted circuit state; they must not commit filters, switches or
+    other history during residual or Jacobian evaluations. The field solver does
+    not enforce an arbitrary callback's private state or circuit time discretization.
+
+.. pp:param:: implicit_evolve.darwin_circuit_consistent_stage
+    :type: ``bool``
+    :default: ``true`` for single-level 3D segregated Darwin circuit coupling; otherwise ``false``
+    :optional:
+
+    Before pushing particles, iterate the field boundary, vacuum recovery and
+    circuit scales at the same trial transverse E and frozen longitudinal E.
+    The native plugin receives magnetic-response flux from freshly derived B.
+    The compatibility callback receives freshly derived B and plasma current.
+    Once all coil scales converge, rebuild the final fields and push particles once. This removes
+    the old post-push circuit update and its second recovery application.
+    It applies equally to full residuals and matrix-free Jacobian probes.
+
+    Requires a single-level 3D grid, :pp:param:`implicit_evolve.darwin_segregated_solve`,
+    :pp:param:`implicit_evolve.external_field_iteration` and instantaneous vacuum
+    recovery with a frozen mask. The native driver requires a compiled circuit
+    plugin; the compatibility driver requires a replayable ``externalcoiltheta``
+    callback. The callback
+    may observe B and field-derived plasma current; it must not depend on the
+    current evaluation's ion deposit, electron temperature or other post-push state.
+    It must preserve every coil's accepted start-of-step scale. The solver rejects
+    nonfinite scales, changed accepted scales and failure to converge the scale loop.
+    Existing native-PC/circuit compatibility restrictions remain in force.
+
+    Disabling this option retains the old ordering for compatibility-driver
+    regression comparisons. The native driver requires it to remain enabled.
+    The option does not add a circuit model, electrical wall/charge condition or
+    scalar boundary constraint, and does not repair a circuit adapter that assumes
+    plasma-response B in the unified Darwin solver.
+
+.. pp:param:: implicit_evolve.circuit_driver
+    :type: ``string``
+    :default: ``native`` when consistent Darwin circuit stages are enabled; otherwise ``python``
+    :optional:
+
+    ``native`` uses ``circuit.engine=external`` and ``circuit.plugin_library``
+    through the compiled ExternalCircuit ABI. It requires double precision,
+    single-level 3D segregated Darwin and consistent circuit stages. No Python
+    callback is invoked for trial advance or accepted circuit commit.
+    ``python`` retains the installed-callback compatibility/diagnostic path.
+    A configured external plugin is rejected unless the native driver owns its
+    lifecycle; merely loading a plugin does not activate circuit feedback.
+
+    Native coupling currently supports ``disk`` and ``none`` probes. The disk
+    measurement subtracts every imposed unit-field contribution from total B
+    using the same discrete flux functional. ``circuit.probe_crosscheck=1`` also
+    compares this result against direct field subtraction. All plugin ports must
+    own distinct external fields with ``python_scale=1`` (the historical name
+    denotes an externally supplied scale segment, including C++ supply).
+    Painted loop fields with EB are rejected pending ghost-field qualification;
+    supplied unit fields use ``fill_unit_field=0``.
+
+    Set ``circuit.linkage_reference=first_iterate`` and
+    ``circuit.residual_advance=full_step``. The driver explicitly measures the
+    accepted field at step entry. Every trial starts from those accepted coil
+    scales and advances the plugin over the full step with the theta-stage EMF.
+    The accepted solve commits that same stage EMF exactly once, verifies that
+    acceptance preserves its coil scales, and closes the circuit step. This is
+    a stage-consistent convention; it does not remeasure endpoint B for a second
+    circuit integration. Physical time-accuracy and port-work qualification are
+    still required for each production model.
+
+    The current native adapter is a host reference: its batched probe transfers
+    one coil vector to the host for each trial. A separate CUDA/HIP device probe
+    entry point retains that vector on device and requires GPU-aware MPI for
+    multiple ranks, but the complete device circuit and scale-consumer path is
+    not yet integrated. Selecting ``native`` alone does not eliminate residual
+    host transfers or qualify production circuit/EB closure.
+
+.. pp:param:: implicit_evolve.darwin_circuit_max_iterations
+    :type: ``int``
+    :default: ``20``
+    :optional:
+
+    Maximum field/circuit fixed-point iterations in one residual evaluation.
+    Failure is fatal; an unconverged circuit stage is not silently accepted.
+
+.. pp:param:: implicit_evolve.darwin_circuit_scale_tolerance
+    :type: ``float``
+    :default: ``1.e-14``
+    :optional:
+
+    Each coil must satisfy ``abs(s_new-s_old)/max(1,abs(s_new),abs(s_old))`` below
+    this tolerance at the theta time. The same scaled check protects the accepted
+    start-of-step scale. Choose a value below the residual/Jacobian noise budget
+    for the coil normalization in use. A tolerance appropriate to double precision
+    is not automatically appropriate to a single-precision build.
 
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``

@@ -423,7 +423,13 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) { return; }
+                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) {
+                    // This is a freshly computed curl, not an incremental update.
+                    // A skipped row must not retain a previous residual's
+                    // longitudinal-current correction or external subtraction.
+                    Jx(i, j, k) = 0._rt;
+                    return;
+                }
 
                 Jx(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDz(By, coefs_z, n_coefs_z, i, j, k)
@@ -435,7 +441,13 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) { return; }
+                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) {
+                    // This is a freshly computed curl, not an incremental update.
+                    // A skipped row must not retain a previous residual's
+                    // longitudinal-current correction or external subtraction.
+                    Jy(i, j, k) = 0._rt;
+                    return;
+                }
 
                 Jy(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDx(Bz, coefs_x, n_coefs_x, i, j, k)
@@ -447,7 +459,13 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { return; }
+                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) {
+                    // This is a freshly computed curl, not an incremental update.
+                    // A skipped row must not retain a previous residual's
+                    // longitudinal-current correction or external subtraction.
+                    Jz(i, j, k) = 0._rt;
+                    return;
+                }
 
                 Jz(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDy(Bx, coefs_y, n_coefs_y, i, j, k)

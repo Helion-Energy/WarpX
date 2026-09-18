@@ -276,3 +276,74 @@ if(TARGET app_3d)
             ${CMAKE_CURRENT_BINARY_DIR}/residual_freshness)
     set_tests_properties(test_3d_darwin_residual_freshness PROPERTIES TIMEOUT 200)
 endif()
+
+# Algebraic variable-PC negative control and flexible reconstruction contract.
+if(TARGET app_3d)
+    add_executable(test_flexible_gmres test_flexible_gmres.cpp)
+    target_include_directories(test_flexible_gmres PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(test_flexible_gmres PRIVATE AMReX::amrex_3d)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_flexible_gmres)
+    endif()
+    add_test(NAME test_flexible_gmres COMMAND test_flexible_gmres)
+    set_tests_properties(test_flexible_gmres PROPERTIES
+        TIMEOUT 30 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()
+
+# Nonzero installed circuit feedback, including a legacy-order negative control.
+if(TARGET lib_3d)
+    add_executable(test_darwin_circuit_stage test_darwin_circuit_stage.cpp)
+    target_link_libraries(test_darwin_circuit_stage PRIVATE lib_3d)
+    target_include_directories(test_darwin_circuit_stage PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_darwin_circuit_stage)
+    endif()
+    add_test(NAME test_3d_darwin_circuit_stage
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_darwin_circuit_stage.py
+            $<TARGET_FILE:test_darwin_circuit_stage>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_circuit_stage
+            ${CMAKE_CURRENT_BINARY_DIR}/circuit_stage)
+    set_tests_properties(test_3d_darwin_circuit_stage PROPERTIES TIMEOUT 280)
+endif()
+
+# Compiled plugin oracle shared with the implicit MHD coupling tests.
+if(TARGET app_3d)
+    add_library(darwin_rl_test_circuit MODULE rl_test_circuit.cpp)
+    target_include_directories(darwin_rl_test_circuit PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(darwin_rl_test_circuit PRIVATE AMReX::amrex_3d)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(darwin_rl_test_circuit)
+    endif()
+    add_test(NAME test_3d_darwin_native_circuit
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_darwin_native_circuit.py
+            $<TARGET_FILE:app_3d> $<TARGET_FILE:darwin_rl_test_circuit>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_native_circuit
+            ${CMAKE_CURRENT_BINARY_DIR}/native_circuit ${WarpX_EB})
+    set_tests_properties(test_3d_darwin_native_circuit PROPERTIES TIMEOUT 400)
+endif()
+
+# Device communication uses GPU-aware transfers and GPU arithmetic, including
+# MPI builds without accelerator-aware reduction collectives.
+if(TARGET app_3d)
+    add_executable(test_circuit_device_sum test_circuit_device_sum.cpp)
+    target_include_directories(test_circuit_device_sum PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(test_circuit_device_sum PRIVATE AMReX::amrex_3d)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_circuit_device_sum)
+    endif()
+    add_test(NAME test_circuit_device_sum COMMAND test_circuit_device_sum)
+    set_tests_properties(test_circuit_device_sum PROPERTIES
+        TIMEOUT 30 ENVIRONMENT "OMP_NUM_THREADS=1")
+    # GPU MPI is exercised by the hardware validation runner: ordinary CI
+    # MPI installations need not support device buffers.
+    if(WarpX_MPI AND AMReX_GPU_BACKEND STREQUAL "NONE")
+        add_test(NAME test_circuit_device_sum_mpi
+            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_circuit_device_sum>
+                ${MPIEXEC_POSTFLAGS})
+        set_tests_properties(test_circuit_device_sum_mpi PROPERTIES
+            TIMEOUT 30 PROCESSORS 2 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endif()
+endif()

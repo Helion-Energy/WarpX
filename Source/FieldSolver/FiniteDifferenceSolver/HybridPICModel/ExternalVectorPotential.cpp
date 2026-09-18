@@ -299,7 +299,7 @@ ExternalVectorPotential::CalculateExternalCurlA ()
 }
 
 void
-ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
+ExternalVectorPotential::CalculateExternalCurlA (const std::string& coil_name)
 {
     using ablastr::fields::Direction;
     auto & warpx = WarpX::GetInstance();

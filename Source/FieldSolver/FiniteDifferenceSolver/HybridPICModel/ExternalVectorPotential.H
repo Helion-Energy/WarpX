@@ -114,6 +114,19 @@ public:
         return m_A_time_scale[i](t);
     }
 
+    [[nodiscard]] bool UsesPythonScale (int i) const { return m_use_python_scale[i]; }
+
+    bool GetScaleSegment (int i, amrex::Real& s_old, amrex::Real& s_new,
+                          amrex::Real& t_old, amrex::Real& t_new) const
+    {
+        if (!m_use_python_scale[i]) { return false; }
+        s_old = m_python_scale[i].s_old;
+        s_new = m_python_scale[i].s_new;
+        t_old = m_python_scale[i].t_old;
+        t_new = m_python_scale[i].t_new;
+        return true;
+    }
+
     /** Set the piecewise-linear scale segment of a python-driven coil for
      * the upcoming step. Must be called before the step's field refresh
      * (e.g. from a "beforestep" or "externalcoiltheta" callback); aborts
@@ -148,7 +161,7 @@ public:
     void InitData ();
 
     void CalculateExternalCurlA ();
-    void CalculateExternalCurlA (std::string& coil_name);
+    void CalculateExternalCurlA (const std::string& coil_name);
 
     AMREX_FORCE_INLINE
     void AddExternalFieldFromVectorPotential (

@@ -5,6 +5,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "Fields.H"
+#include "Circuit/CircuitCoupling.H"
 #include "ThetaImplicitHybrid.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "EmbeddedBoundary/Enabled.H"
@@ -232,6 +233,27 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
     // Circuit-in-the-residual coupling (see the member documentation in
     // the header).
     pp.query("external_field_iteration", m_external_field_iteration);
+    m_darwin_circuit_consistent_stage =
+        AMREX_SPACEDIM == 3 && m_WarpX->maxLevel() == 0
+        && m_darwin && m_darwin_segregated_solve && m_external_field_iteration;
+    pp.query("darwin_circuit_consistent_stage", m_darwin_circuit_consistent_stage);
+    pp.query("darwin_circuit_max_iterations", m_darwin_circuit_max_iterations);
+    pp.query("darwin_circuit_scale_tolerance", m_darwin_circuit_scale_tolerance);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_circuit_max_iterations > 0
+        && std::isfinite(m_darwin_circuit_scale_tolerance)
+        && m_darwin_circuit_scale_tolerance > 0._rt
+        && m_darwin_circuit_scale_tolerance < 1._rt,
+        "Darwin circuit stage requires positive iteration limit and scale tolerance in (0,1)");
+    if (m_darwin_circuit_consistent_stage) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(AMREX_SPACEDIM == 3 && m_WarpX->maxLevel() == 0
+            && m_darwin && m_darwin_segregated_solve && m_external_field_iteration,
+            "darwin_circuit_consistent_stage requires single-level 3D segregated Darwin coupling");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_vacuum_recovery
+            || (m_hybrid_pic_model->m_darwin_vacrec_relax_time == 0._rt
+                && m_hybrid_pic_model->m_darwin_vacuum_recovery_frozen_mask),
+            "Darwin circuit stage requires instantaneous recovery with a frozen mask");
+    }
+
 
     // Redistribute ahead of the end-of-step deposits (see the member
     // documentation in the header).
@@ -251,6 +273,19 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
             // tight darwin_vacuum_recovery_relative_tolerance.
             m_hybrid_pic_model->m_vacuum_recovery_live_probes = true;
         }
+    }
+
+    {
+        std::string driver = m_darwin_circuit_consistent_stage ? "native" : "python";
+        pp.query("circuit_driver", driver);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(driver == "native" || driver == "python",
+            "implicit_evolve.circuit_driver must be native or python");
+        m_circuit_native = driver == "native";
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_circuit_native
+            || (AMREX_SPACEDIM == 3 && m_WarpX->maxLevel() == 0 && m_darwin
+                && m_darwin_segregated_solve && m_external_field_iteration
+                && m_darwin_circuit_consistent_stage && sizeof(amrex::Real) == sizeof(double)),
+            "Native circuit driver requires single-level 3D double-precision segregated Darwin with consistent circuit stages");
     }
 
     parseNonlinearSolverParams( pp );
@@ -289,6 +324,17 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     BL_PROFILE("ThetaImplicitHybrid::OneStep()");
 
     m_dt = a_dt;
+
+    if (m_darwin_circuit_consistent_stage) {
+        auto const& external = *m_hybrid_pic_model->m_external_vector_potential;
+        m_darwin_circuit_accepted_scales.resize(external.nFields());
+        for (int coil = 0; coil < external.nFields(); ++coil) {
+            auto const value = external.TimeScale(coil, start_time);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(value),
+                "Nonfinite accepted circuit scale");
+            m_darwin_circuit_accepted_scales[coil] = value;
+        }
+    }
 
     // tensor_form: publish the theta interval and snapshot the step-start
     // plasma current Jp^n = curl(B^n)/mu0 - J_ext (Bfield_fp holds the
@@ -479,6 +525,18 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_hybrid_pic_model->QDSMCSaveImplicitStepStart();
     }
 
+    if (m_circuit_native) {
+        auto& coupler = NativeCircuitCoupler();
+        if (!m_native_circuit_configured) {
+            coupler.ConfigureDarwinMagneticResponse();
+            m_native_circuit_configured = true;
+        }
+        // These are the actual accepted B^n registers, before any trial update.
+        coupler.MeasureDarwinLinkages(start_time);
+        coupler.BeginStepMeasured(start_time, m_dt);
+        m_native_circuit_step_open = true;
+    }
+
     // Initial guess: E^{n+theta} = E^n, or the linear extrapolation of the
     // field history (1 + theta) E^n - theta E^{n-1} when opted in and E^{n-1}
     // exists (saves the Newton iteration that otherwise rebuilds the step's
@@ -509,6 +567,8 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     // Advance particles from t^{n+1/2} to t^{n+1}
     m_WarpX->FinishImplicitParticleUpdate(new_time);
+
+    if (m_circuit_native) { CommitNativeCircuitStage(start_time); }
 
     // Advance fields from t^{n+theta} to t^{n+1}
     FinishFieldUpdate( new_time );
@@ -926,8 +986,13 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
 {
     BL_PROFILE("ThetaImplicitHybrid::ComputeRHS()");
 
-    // Update B^{n+theta} from current E estimate via Faraday's law
-    UpdateWarpXFields( a_E, a_from_jacobian, start_time );
+    // The circuit and field stage must agree before particles gather B/E.
+    // Replaying only after the push leaves both the moments and Jp stale.
+    if (m_darwin_circuit_consistent_stage) {
+        ConvergeDarwinCircuitStage(a_E, start_time, a_from_jacobian);
+    } else {
+        UpdateWarpXFields(a_E, a_from_jacobian, start_time);
+    }
 
     // Split-field circuit-in-the-residual coupling, run BEFORE the
     // particle stage: python measures the flux linkage of THIS iterate's
@@ -1122,8 +1187,14 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // coupling runs BEFORE the particle stage (top of this function): its
     // scales enter the gathered push field, which must not lag the
     // iterate.
-    if (m_external_field_iteration && m_darwin) {
-        ExecutePythonCallback("externalcoiltheta");
+    if (m_external_field_iteration && m_darwin && !m_darwin_circuit_consistent_stage) {
+        if (m_circuit_native) {
+            auto& coupler = NativeCircuitCoupler();
+            coupler.MeasureDarwinLinkages(theta_time);
+            coupler.EvaluateInterval(start_time, start_time + m_dt, false, m_theta*m_dt);
+        } else {
+            ExecutePythonCallback("externalcoiltheta");
+        }
         DarwinApplyABoundary(theta_time);
         if (m_vacuum_recovery_half) {
             // Recompute the recovery against the re-imposed boundary
@@ -1269,6 +1340,119 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     }
     a_RHS.Copy(FieldType::Efield_fp);         // a_RHS = E_ohm
     a_RHS.linComb(1.0, a_RHS, -1.0, m_Eold);  // a_RHS = E_ohm - E_old
+}
+
+CircuitCoupler& ThetaImplicitHybrid::NativeCircuitCoupler () const
+{
+    auto* coupling = m_WarpX->get_pointer_CircuitCoupling();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(coupling != nullptr && coupling->Coupler() != nullptr
+        && coupling->Coupler()->Plugin() != nullptr,
+        "Native Darwin circuit driver requires circuit.coils, engine=external and plugin_library");
+    return *coupling->Coupler();
+}
+
+void ThetaImplicitHybrid::CommitNativeCircuitStage (amrex::Real start_time)
+{
+    BL_PROFILE("ThetaImplicitHybrid::CommitNativeCircuitStage()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_native_circuit_step_open,
+        "Native circuit step is not open");
+    auto& external = *m_hybrid_pic_model->m_external_vector_potential;
+    auto const time = start_time + m_theta*m_dt;
+    amrex::Vector<amrex::Real> candidate(external.nFields());
+    for (int field = 0; field < external.nFields(); ++field) {
+        candidate[field] = external.TimeScale(field, time);
+    }
+    auto& coupler = NativeCircuitCoupler();
+    coupler.MeasureDarwinLinkages(time);
+    // The same stage EMF drives a full-step candidate and its exact acceptance.
+    // Do not reinterpret the theta linkage as an endpoint measurement.
+    coupler.EvaluateInterval(start_time, start_time + m_dt, true, m_theta*m_dt);
+    for (int field = 0; field < external.nFields(); ++field) {
+        auto const accepted = external.TimeScale(field, time);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(accepted)
+            && std::abs(accepted - candidate[field]) <= m_darwin_circuit_scale_tolerance
+                *std::max({1._rt, std::abs(accepted), std::abs(candidate[field])}),
+            "Exact circuit acceptance changed the converged stage; rejecting inconsistent commit");
+    }
+    coupler.FinishStep();
+    m_native_circuit_step_open = false;
+}
+
+void ThetaImplicitHybrid::RefreshDarwinCircuitCurrent ()
+{
+    BL_PROFILE("ThetaImplicitHybrid::RefreshDarwinCircuitCurrent()");
+    using ablastr::fields::Direction;
+    m_hybrid_pic_model->CalculatePlasmaCurrent(
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+        m_WarpX->GetEBUpdateEFlag());
+    amrex::Real const factor = PhysConst::epsilon_0 / (m_theta * m_dt);
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        for (int dir = 0; dir < 3; ++dir) {
+            auto& current = *m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{dir}, lev);
+            auto const& longitudinal = *m_WarpX->m_fields.get(
+                "hybrid_E_long_fp", Direction{dir}, lev);
+            auto const& old = *m_WarpX->m_fields.get(
+                "hybrid_E_long_old_fp", Direction{dir}, lev);
+            amrex::MultiFab::Saxpy(current, -factor, longitudinal,
+                                 0, 0, current.nComp(), current.nGrowVect());
+            amrex::MultiFab::Saxpy(current, factor, old,
+                                 0, 0, current.nComp(), current.nGrowVect());
+        }
+    }
+}
+
+void ThetaImplicitHybrid::ConvergeDarwinCircuitStage (
+    WarpXSolverVec const& electric_field, amrex::Real start_time, bool from_jacobian)
+{
+    BL_PROFILE("ThetaImplicitHybrid::ConvergeDarwinCircuitStage()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_circuit_native
+        || IsPythonCallbackInstalled("externalcoiltheta"),
+        "Darwin circuit stage requires its native plugin or compatibility callback");
+    auto& external = *m_hybrid_pic_model->m_external_vector_potential;
+    amrex::Real const stage_time = start_time + m_theta * m_dt;
+    auto const& accepted = m_darwin_circuit_accepted_scales;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(accepted.size() == external.nFields(),
+        "Circuit scales must be captured at the start of the step");
+    // A warm start from the preceding residual makes finite fixed-point error
+    // depend on probe order. Rebuild each native trial from accepted scales.
+    if (m_circuit_native) { NativeCircuitCoupler().ResetDarwinTrialScales(start_time, m_dt); }
+    amrex::Vector<amrex::Real> previous(external.nFields());
+    for (int iteration = 0; iteration < m_darwin_circuit_max_iterations; ++iteration) {
+        // Always rebuild from the same trial E and accepted A, including Jv probes.
+        // No particles or circuit accepted-state commits occur inside this loop.
+        UpdateWarpXFields(electric_field, from_jacobian, start_time);
+        if (!m_circuit_native) { RefreshDarwinCircuitCurrent(); }
+        for (int coil = 0; coil < external.nFields(); ++coil) {
+            previous[coil] = external.TimeScale(coil, stage_time);
+        }
+        if (m_circuit_native) {
+            auto& coupler = NativeCircuitCoupler();
+            coupler.MeasureDarwinLinkages(stage_time);
+            coupler.EvaluateInterval(start_time, start_time + m_dt, false, m_theta*m_dt);
+        } else {
+            ExecutePythonCallback("externalcoiltheta");
+        }
+        amrex::Real defect = 0._rt;
+        for (int coil = 0; coil < external.nFields(); ++coil) {
+            amrex::Real const current = external.TimeScale(coil, stage_time);
+            amrex::Real const start = external.TimeScale(coil, start_time);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(current) && std::isfinite(start)
+                && std::isfinite(previous[coil]), "Nonfinite trial circuit scale");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::abs(start - accepted[coil])
+                <= m_darwin_circuit_scale_tolerance * std::max(1._rt, std::abs(accepted[coil])),
+                "externalcoiltheta changed the accepted start-of-step coil scale");
+            defect = std::max(defect, std::abs(current - previous[coil])
+                / std::max({1._rt, std::abs(current), std::abs(previous[coil])}));
+        }
+        if (defect <= m_darwin_circuit_scale_tolerance) {
+            // Use the final published segment, not the preceding fixed-point iterate.
+            UpdateWarpXFields(electric_field, from_jacobian, start_time);
+            if (!m_circuit_native) { RefreshDarwinCircuitCurrent(); }
+            return;
+        }
+    }
+    WARPX_ABORT_WITH_MESSAGE("Darwin circuit stage failed to converge its coil scales");
 }
 
 void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
@@ -1991,7 +2175,7 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab::Add(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
-        if (m_external_field_iteration) {
+        if (m_external_field_iteration && !m_circuit_native) {
             // Final circuit pass against the converged theta-stage plasma
             // current (hybrid_current_fp_plasma as left by the last
             // residual evaluation), leaving the circuit state -- and the
