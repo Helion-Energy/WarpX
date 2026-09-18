@@ -17,6 +17,8 @@
 #include <AMReX_Random.H>
 #include <AMReX_REAL.H>
 
+#include <cmath>
+
 /** @file
  *
  * This file contains filter and transform functors for impact ionization
@@ -138,6 +140,9 @@ public:
     * or mixed precision builds of WarpX).
     *
     * @param[in] energy_cost energy cost of ionization
+    * @param[in] opal_w the Opal energy sharing parameter, w, in eV. When zero
+                 the energy left after ionization is split equally between the
+                 two outgoing electrons instead.
     * @param[in] mass1 mass of the colliding species
     * @param[in] sqrt_kb_m value of sqrt(kB/m), where kB is Boltzmann's constant
                  and m is the background neutral mass
@@ -146,9 +151,10 @@ public:
     * @param[in] t the current simulation time
     */
     ImpactIonizationTransformFunc(
-        amrex::ParticleReal energy_cost, double mass1, amrex::ParticleReal sqrt_kb_m,
+        amrex::ParticleReal energy_cost, double opal_w, double mass1,
+        amrex::ParticleReal sqrt_kb_m,
         amrex::ParserExecutor<4> const& T_a_func, amrex::Real t
-    ) :  m_energy_cost(energy_cost), m_mass1(mass1),
+    ) :  m_energy_cost(energy_cost), m_opal_w(opal_w), m_mass1(mass1),
          m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t) { }
 
     /**
@@ -201,18 +207,39 @@ public:
         constexpr auto eV = PhysConst::q_e;
         E_coll = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass1)/eV;
 
-        // each electron gets half the energy (could change this later)
-        const auto E_out = static_cast<amrex::ParticleReal>((E_coll - m_energy_cost) / 2.0_prt * eV);
+        // Share the energy left after paying the ionization cost between the
+        // incident electron and the one it ejects.
+        const double E_avail = E_coll - m_energy_cost;
+        double E_eject;
+        if (m_opal_w > 0.0) {
+            // Opal, Peterson & Beaty, J. Chem. Phys. 55, 4100 (1971) measured
+            // the ejected electron energy to be distributed as 1/(1+(W/w)^2).
+            // Truncating that at half of the available energy, so that the
+            // ejected electron is the slower of the two, inverts to the sample
+            // below (Vahedi & Surendra, Comput. Phys. Commun. 87, 179 (1995)).
+            E_eject = m_opal_w * std::tan(
+                Random(engine) * std::atan(E_avail / (2.0*m_opal_w)));
+        } else {
+            // Equal sharing draws no random number, so it leaves the random
+            // stream as it was.
+            E_eject = E_avail / 2.0;
+        }
+
+        const auto E_out_scat = static_cast<amrex::ParticleReal>((E_avail - E_eject) * eV);
+        const auto E_out_eject = static_cast<amrex::ParticleReal>(E_eject * eV);
 
         // precalculate often used value
         constexpr auto c2 = PhysConst::c2;
         const auto mc2 = m_mass1*c2;
 
-        const amrex::ParticleReal up = sqrt(E_out * (E_out + 2.0_prt*mc2) / c2) / m_mass1;
+        const amrex::ParticleReal up_scat =
+            sqrt(E_out_scat * (E_out_scat + 2.0_prt*mc2) / c2) / m_mass1;
+        const amrex::ParticleReal up_eject =
+            sqrt(E_out_eject * (E_out_eject + 2.0_prt*mc2) / c2) / m_mass1;
 
         // isotropically scatter electrons
-        ParticleUtils::RandomizeVelocity(ux, uy, uz, up, engine);
-        ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up, engine);
+        ParticleUtils::RandomizeVelocity(ux, uy, uz, up_scat, engine);
+        ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up_eject, engine);
 
         // get velocities for the ion from a Maxwellian distribution
         i_ux = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
@@ -222,6 +249,8 @@ public:
 
 private:
     amrex::ParticleReal m_energy_cost;
+    /** Opal energy sharing parameter in eV; zero selects equal sharing */
+    double m_opal_w;
     double m_mass1;
     amrex::ParticleReal m_sqrt_kb_m;
     amrex::ParserExecutor<4> m_T_a_func;

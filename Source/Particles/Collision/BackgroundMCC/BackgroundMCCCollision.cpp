@@ -176,6 +176,26 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
             pp_collision_name.get("ionization_species", secondary_species);
             m_species_names.push_back(secondary_species);
 
+            // How the energy left after paying the ionization cost is shared
+            // between the incident electron and the one it ejects. The
+            // default splits it equally, which is what MCC has always done.
+            std::string energy_sharing = "equal";
+            pp_collision_name.query("ionization_energy_sharing", energy_sharing);
+            if (energy_sharing == "opal") {
+                utils::parser::getWithParser(
+                    pp_collision_name, "ionization_opal_w", m_ionization_opal_w);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    (m_ionization_opal_w > 0),
+                    collision_name + ".ionization_opal_w must be greater than 0."
+                );
+            } else {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    (energy_sharing == "equal"),
+                    collision_name + ".ionization_energy_sharing must be either "
+                    "'equal' or 'opal'."
+                );
+            }
+
             m_ionization_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
@@ -581,6 +601,7 @@ void BackgroundMCCCollision::doBackgroundIonization
 
         auto Transform = ImpactIonizationTransformFunc(
                                                        m_ionization_processes[0].getEnergyPenalty(),
+                                                       m_ionization_opal_w,
                                                        m_mass1, sqrt_kb_m, m_background_temperature_func, t
                                                        );
 

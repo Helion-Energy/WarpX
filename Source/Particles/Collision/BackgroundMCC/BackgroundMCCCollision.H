@@ -125,6 +125,11 @@ private:
     amrex::ParticleReal m_nu_max;
     amrex::ParticleReal m_nu_max_ioniz;
 
+    /** Opal energy sharing parameter, w, in eV. Zero, the default, splits
+     *  the energy left after ionization equally between the two outgoing
+     *  electrons, which reproduces the historical behaviour exactly. */
+    double m_ionization_opal_w = 0;
+
     amrex::Parser m_background_density_parser;
     amrex::Parser m_background_temperature_parser;
 

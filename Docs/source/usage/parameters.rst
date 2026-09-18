@@ -3093,6 +3093,43 @@ Details about the collision models can be found in the :ref:`theory section <mul
     produced species must also be given. For example if argon properties is used
     for the background gas, a species of argon ions should be specified here.
 
+.. pp:param:: <collision_name>.ionization_energy_sharing
+    :type: ``string``
+    :default: ``equal``
+    :optional:
+
+    Only for ``background_mcc`` with the ``ionization`` scattering process. How the energy
+    left after paying the ionization cost is shared between the incident electron and the
+    electron it ejects. The possible values are ``equal`` and ``opal``.
+
+    With ``equal``, the two electrons each leave with half of the available energy.
+
+    With ``opal``, the ejected electron energy :math:`W` is sampled from the secondary
+    electron distribution of :cite:t:`param-Opal1971`,
+
+    .. math::
+        \frac{d\sigma}{dW} \propto \frac{1}{1 + (W/w)^2}
+
+    truncated at half of the available energy :math:`\Delta E = E - E_{ioniz}`, which
+    gives the sample used here :cite:p:`param-Vahedi1995`,
+
+    .. math::
+        W = w \tan\left(R \arctan\frac{\Delta E}{2w}\right)
+
+    with :math:`R` uniform on :math:`[0, 1)`. The incident electron keeps the rest,
+    :math:`\Delta E - W`, and so is always the faster of the two. The parameter
+    :math:`w` is set with ``<collision_name>.ionization_opal_w``. Both electrons are
+    still scattered isotropically, as they are with ``equal``.
+
+.. pp:param:: <collision_name>.ionization_opal_w
+    :type: ``float``
+
+    Only for ``background_mcc``, where it is required when
+    ``<collision_name>.ionization_energy_sharing`` is set to ``opal``. The Opal energy
+    sharing parameter :math:`w` in eV, tabulated per gas in :cite:t:`param-Opal1971`. It is
+    roughly 8-17 eV for common gases, and is often approximated by the ionization
+    potential of the gas.
+
 .. pp:param:: <collision_name>.ionization_target_species
     :type: ``string``
 
