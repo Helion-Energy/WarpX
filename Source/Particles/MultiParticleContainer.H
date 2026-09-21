@@ -92,7 +92,7 @@ public:
         return allcontainers[index]->meanParticleVelocity();
     }
 
-    amrex::ParticleReal maxParticleVelocity();
+    amrex::ParticleReal maxParticleDtInv();
 
     void TransformMomentumToCurvilinear (bool forward);
 
@@ -174,10 +174,13 @@ public:
      *                          current positions of the particles. When different than 0,
      *                          the particle position will be temporarily modified to match
      *                          the time of the deposition.
+     * \param[in] push_type Type of particle push used with the deposition. With
+     *                      PushType::Implicit the time-centered velocities are used.
      */
     void
     DepositCurrent (ablastr::fields::MultiLevelVectorField const& J,
-                    amrex::Real dt, amrex::Real relative_time);
+                    amrex::Real dt, amrex::Real relative_time,
+                    PushType push_type = PushType::Explicit);
 
     /**
      * \brief Deposit temperature to species MFs. This is done for each
@@ -200,6 +203,12 @@ public:
 
     std::unique_ptr<amrex::MultiFab> GetGlobalPlasmaFrequency (int lev);
     void GenerateGlobalDebyeLength ();
+
+    /*
+     * \brief Calculates the electron-ion collision frequency for the specified species
+     * @param[in] electron_species_name name of the electon species
+     */
+    void CalculateNuei (std::string const & electron_species_name);
 
     void doFieldIonization (int lev,
                             const amrex::MultiFab& Ex, const amrex::MultiFab& Ey, const amrex::MultiFab& Ez,
@@ -256,7 +265,7 @@ public:
 
     void deleteInvalidParticles ();
 
-    void RedistributeLocal (int max_cells_travelled);
+    void RedistributeLocal (const amrex::IntVect& max_cells_travelled);
 
     /** Apply BC. For now, just discard particles outside the domain, regardless
      *  of the whole simulation BC. */
@@ -542,6 +551,10 @@ private:
     amrex::Vector<std::unique_ptr<WarpXParticleContainer>> allcontainers;
 
     void ReadParameters ();
+
+    /** Guards ReadParameters against running twice for this instance.
+     */
+    bool m_params_initialized = false;
 
     void mapSpeciesProduct ();
 

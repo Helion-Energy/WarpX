@@ -9,6 +9,7 @@
 #include "Particles/Collision/BackgroundMCC/BackgroundMCCCollision.H"
 #include "Particles/Collision/PulsedDecay/PulsedDecay.H"
 #include "Particles/Collision/BackgroundStopping/BackgroundStopping.H"
+#include "Particles/Collision/HybridResistiveDrag/HybridResistiveDrag.H"
 #include "Particles/Collision/BinaryCollision/BinaryCollision.H"
 #include "Particles/Collision/BinaryCollision/Bremsstrahlung/BremsstrahlungFunc.H"
 #include "Particles/Collision/BinaryCollision/Bremsstrahlung/PhotonCreationFunc.H"
@@ -19,6 +20,7 @@
 #include "Particles/Collision/BinaryCollision/LinearBreitWheeler/LinearBreitWheelerCollisionFunc.H"
 #include "Particles/Collision/BinaryCollision/LinearCompton/LinearComptonCollisionFunc.H"
 #include "Particles/Collision/BinaryCollision/ParticleCreationFunc.H"
+#include "Particles/Collision/InverseBremsstrahlung/InverseBremsstrahlung.H"
 #include "Utils/TextMsg.H"
 
 #include <algorithm>
@@ -70,6 +72,9 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
         else if (type == "background_stopping") {
             allcollisions[i] = std::make_unique<BackgroundStopping>(collision_names[i]);
         }
+        else if (type == "hybrid_resistive_drag") {
+            allcollisions[i] = std::make_unique<HybridResistiveDrag>(collision_names[i]);
+        }
         else if (type == "dsmc") {
             allcollisions[i] =
                 std::make_unique<BinaryCollision<DSMCFunc, SplitAndScatterFunc>>(
@@ -87,6 +92,10 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
                std::make_unique<BinaryCollision<BremsstrahlungFunc, PhotonCreationFunc>>(
                     collision_names[i], mypc
                 );
+        }
+        else if (type == "inverse_bremsstrahlung") {
+            allcollisions[i] = std::make_unique<InverseBremsstrahlung>(collision_names[i], mypc);
+            m_use_global_debye_length = true;
         }
         else if (type == "linear_breit_wheeler") {
             allcollisions[i] =
@@ -106,6 +115,14 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
 
     }
 
+}
+
+/* \brief Allocate any data needed for the collision */
+void CollisionHandler::AllocData ()
+{
+    for (auto& collision : allcollisions) {
+        collision->AllocData();
+    }
 }
 
 /** Perform all collisions
@@ -181,6 +198,8 @@ void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Rea
 #endif
 
     if (m_use_global_debye_length) {
+        // This will calculate the temperature, Vbar, and particle number that are needed by
+        // the various collision algorithms
         mypc->GenerateGlobalDebyeLength();
     }
 

@@ -13,6 +13,7 @@
 #include "Preconditioner.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX.H>
 #include <AMReX_ParmParse.H>
@@ -103,7 +104,7 @@ class MatrixPC : public Preconditioner<T,Ops>
         /**
          * \brief Update the preconditioner
          */
-        void Update (const T& a_U) override;
+        void Update () override;
 
         /**
          * \brief Assemble the matrix
@@ -113,7 +114,7 @@ class MatrixPC : public Preconditioner<T,Ops>
          * non-zero elements (return value is difference in current number
          * of nonzero elements and the desired number).
          */
-        int Assemble (const T& a_U);
+        int Assemble ();
 
         /**
          * \brief Apply (solve) the preconditioner given a RHS
@@ -184,6 +185,7 @@ class MatrixPC : public Preconditioner<T,Ops>
 
         int m_ndofs_l = 0;
         int m_ndofs_g = 0;
+
         bool m_pc_diag_only = false;
         int m_pc_mat_nnz = 1;
         bool m_include_mass_matrices = false;
@@ -246,9 +248,6 @@ void MatrixPC<T,Ops>::Define ( const T& a_U,
     // read preconditioner parameters
     readParameters();
 
-    // a_U is not needed
-    amrex::ignore_unused(a_U);
-
     // Set number of AMR levels and create geometry, grids, and
     // distribution mapping vectors.
     m_num_amr_levels = m_ops->numAMRLevels();
@@ -281,7 +280,7 @@ void MatrixPC<T,Ops>::Define ( const T& a_U,
 }
 
 template <class T, class Ops>
-void MatrixPC<T,Ops>::Update (const T& a_U)
+void MatrixPC<T,Ops>::Update ()
 {
     BL_PROFILE("MatrixPC::Update()");
     using namespace amrex;
@@ -292,7 +291,7 @@ void MatrixPC<T,Ops>::Update (const T& a_U)
 
     while(true) {
 
-        auto nnz_diff = Assemble(a_U);
+        auto nnz_diff = Assemble();
         AMREX_ALWAYS_ASSERT(nnz_diff >= 0);
         if (nnz_diff) {
 
@@ -314,7 +313,7 @@ void MatrixPC<T,Ops>::Update (const T& a_U)
 }
 
 template <class T, class Ops>
-int MatrixPC<T,Ops>::Assemble (const T& a_U)
+int MatrixPC<T,Ops>::Assemble ()
 {
     // Assemble the sparse matrix representation of the preconditioner
     //      A = curl (alpha * curl []) + M
@@ -346,11 +345,8 @@ int MatrixPC<T,Ops>::Assemble (const T& a_U)
                        << "alpha = " << alpha << "\n";
     }
 
-    // Get DOF object from a_U
-    const auto& dofs_obj = a_U.getDOFsObject();
-    const auto& dofs_mfarrvec = dofs_obj->m_array;
-    AMREX_ALWAYS_ASSERT(m_ndofs_l == dofs_obj->m_nDoFs_l);
-    AMREX_ALWAYS_ASSERT(m_ndofs_g == dofs_obj->m_nDoFs_g);
+    // The DOF object is shared by every solver vector.
+    const auto& dofs_mfarrvec = T::getDOFsObject()->m_array;
 
     m_r_indices_g.clear();
     m_num_nz.clear();
@@ -393,8 +389,10 @@ int MatrixPC<T,Ops>::Assemble (const T& a_U)
 
                 auto dof_arr = dofs_mfarrvec[lev][dir]->const_array(mfi);
 
-                // Set row indices and identity diagonal (unconditional)
-                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                // Set row indices and identity diagonal (unconditional).
+                // amrex::For: iterations share the nnz_actual overflow counter
+                // (no SIMD pragma, see issue #7097)
+                For(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     const int ridx_l = dof_arr(i,j,k,0);
                     if (ridx_l < 0) { return; }
@@ -444,7 +442,9 @@ int MatrixPC<T,Ops>::Assemble (const T& a_U)
                                                           dofs_mfarrvec[lev][tdir2]->const_array(mfi) ) }};
 #endif
 
-                    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    // amrex::For: iterations share the nnz_actual overflow counter
+                    // (no SIMD pragma, see issue #7097)
+                    For(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
                         const int ridx_l = dof_arr(i,j,k,0);
                         if (ridx_l < 0) { return; }
@@ -767,7 +767,9 @@ int MatrixPC<T,Ops>::Assemble (const T& a_U)
                         MM_width[space_dir] = (MM_ncomp[space_dir] - 1)/2;
                     }
 
-                    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    // amrex::For: iterations share the nnz_actual overflow counter
+                    // (no SIMD pragma, see issue #7097)
+                    For(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
                         const int ridx_l = dof_arr(i,j,k,0);
                         if (ridx_l < 0) { return; }
