@@ -7,6 +7,7 @@
 #include "Fields.H"
 #include "Circuit/CircuitCoupling.H"
 #include "ThetaImplicitHybrid.H"
+#include "DarwinVacuumERecovery.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -95,6 +96,14 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
             m_hybrid_pic_model->m_external_split = false;
         }
     }
+
+#if defined(WARPX_DIM_3D)
+    if (m_vacuum_recovery) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_hybrid_pic_model->m_darwin_vacrec_relax_time == 0._rt,
+            "Spatial vacuum electric recovery requires instantaneous magnetic recovery");
+    }
+#endif
 
     m_E.Define( m_WarpX, "Efield_fp" );
     m_Eold.Define( m_E );
@@ -2239,9 +2248,15 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 m_vacuum_recovery_half ? (1.0_rt - m_theta) * m_dt
                                        : m_dt);
             DarwinApplyABoundary(end_time);
-            // The delivered end-of-step field in the band is the Faraday
-            // value of the recovered A across the step (Efield_fp holds
-            // the full field here, so E_L is added back on top).
+            // Recover the endpoint transverse electric field spatially in 3D.
+            // The implicit current and theta-stage updates are unchanged.
+#if defined(WARPX_DIM_3D)
+            auto const& endpoint = m_E.getArrayVec()[0];
+            auto const& accepted = m_Eold.getArrayVec()[0];
+            RecoverDarwinVacuumE(*m_WarpX, *m_hybrid_pic_model,
+                {endpoint[0], endpoint[1], endpoint[2]},
+                {accepted[0], accepted[1], accepted[2]}, end_time, m_dt);
+#else
             m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true, false,
                                                     true /* BDF2 */);
             // Rotate the A history for the next step's BDF2: A^n becomes
@@ -2257,6 +2272,7 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                                           Anm1.nGrowVect());
                 }
             }
+#endif
         }
         // B^{n+1} = B_static + curl A^{n+1}
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {

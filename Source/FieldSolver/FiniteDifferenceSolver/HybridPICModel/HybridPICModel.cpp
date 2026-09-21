@@ -1361,13 +1361,13 @@ void HybridPICModel::AllocateLevelMFs (
                 fields.alloc_init("hybrid_E_vac_target_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
                     0.0_rt);
-                // A^{n-1} for the BDF2 endpoint reconstruction of the band
-                // field. Zero is the EXACT pre-history under the gauge-free
-                // initialization (A = 0 for t <= 0, B_static carries B(0)),
-                // so BDF2 is valid from the first step.
+#if !defined(WARPX_DIM_3D)
+                // Legacy lower-dimensional endpoint reconstruction. The 3D
+                // recovery solves the spatial electric equation without this history.
                 fields.alloc_init("hybrid_A_vac_nm1_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
                     0.0_rt);
+#endif
             }
             // Frozen mask density (see the member documentation): the
             // per-step snapshot of the committed entry rho the recovery
@@ -5548,8 +5548,13 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             : nullptr;
         amrex::MultiFab & Etgt = *warpx.m_fields.get(
             "hybrid_E_vac_target_fp", Direction{dir}, lev);
-        amrex::MultiFab const & Anm1 = *warpx.m_fields.get(
-            "hybrid_A_vac_nm1_fp", Direction{dir}, lev);
+        amrex::MultiFab const* Anm1 = nullptr;
+#if !defined(WARPX_DIM_3D)
+        Anm1 = warpx.m_fields.get("hybrid_A_vac_nm1_fp", Direction{dir}, lev);
+#else
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!a_bdf2,
+            "3D endpoint recovery uses the spatial electric equation, not BDF2");
+#endif
         amrex::GpuArray<int, 3> const Astag = A_stag[dir];
         const amrex::iMultiFab* eb_flag =
             (!warpx.GetEBUpdateEFlag().empty()
@@ -5563,7 +5568,8 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             auto const & tgt_arr  = Etgt.array(mfi);
             auto const & a_arr    = A.const_array(mfi);
             auto const & aold_arr = A_old.const_array(mfi);
-            auto const & anm1_arr = Anm1.const_array(mfi);
+            auto const anm1_arr = Anm1 ? Anm1->const_array(mfi)
+                : amrex::Array4<amrex::Real const>{};
             auto const & rho_arr  = rho.const_array(mfi);
             const bool from_jac = a_from_jacobian && !live_probes;
             const bool bdf2 = a_bdf2;

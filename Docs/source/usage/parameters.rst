@@ -5346,6 +5346,58 @@ Maxwell solver: kinetic-fluid hybrid
     empty mask reduces to the exact identity. Supported in 2D, 3D and RZ (:math:`m = 0`),
     single level.
 
+    In 3D, the final electric recovery solves the native spatial curl-curl
+    equation with the endpoint plasma trace and current external-field slope.
+    Its correction starts from zero relative to the accepted vacuum electric
+    field, preserving the curl null modes (local charge and enclosed flux).
+    It updates both the solver transverse field and the physical total electric
+    field. No vector-potential derivative history or BDF2 reconstruction is used
+    at the endpoint. The implicit electron-current advance and theta-stage
+    recovery remain unchanged.
+
+    The endpoint uses unpreconditioned conjugate gradients; arbitrary
+    preconditioning can change the preserved electric null modes even when the
+    spatial residual converges. This supports a single Cartesian level and the
+    native EB update masks; conformal cut-cell metrics are not supported.
+
+    The 3D endpoint solve requires instantaneous magnetic recovery
+    (``darwin_vacuum_recovery_relaxation_time = 0``). Nonperiodic domains require
+    the existing Darwin vector-potential boundary pin, activated by external
+    fields or embedded-boundary update flags. Unsupported combinations fail
+    explicitly rather than selecting additional electric boundary constraints.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_e_relative_tolerance
+    :type: ``float``
+    :default: ``1e-12``
+    :optional:
+
+    Relative tolerance of the true endpoint spatial electric residual, measured
+    against its initial norm. The curl-curl operator is normalized by
+    :math:`\sum_d 4/\Delta x_d^2`.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_e_absolute_tolerance
+    :type: ``float``
+    :default: ``1e-10``
+    :optional:
+
+    Absolute tolerance of the normalized endpoint electric residual in V/m.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_e_max_iterations
+    :type: ``int``
+    :default: ``2000``
+    :optional:
+
+    Maximum endpoint electric CG iterations. Failure to satisfy the recomputed
+    true residual stops the run.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_e_check_operator
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Check the native recovery operator's symmetry and curl-energy identity with
+    deterministic masked vectors. Intended for grid decomposition and EB checks.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_mask
     :type: ``string``
     :default: ``vacuum``

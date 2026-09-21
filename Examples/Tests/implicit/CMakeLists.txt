@@ -390,3 +390,51 @@ if(TARGET test_device_external_fields)
             ${CMAKE_CURRENT_BINARY_DIR}/device_external_fields ${WarpX_EB})
     set_tests_properties(test_device_external_fields PROPERTIES TIMEOUT 150)
 endif()
+
+# Direct endpoint test: preserve nonzero enclosed charge and local divergence,
+# and reconstruct physical E at wall/box intersections without field history.
+if(TARGET lib_3d)
+    add_executable(test_darwin_vacuum_recovery test_darwin_vacuum_recovery.cpp)
+    target_link_libraries(test_darwin_vacuum_recovery PRIVATE lib_3d)
+    target_include_directories(test_darwin_vacuum_recovery PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_darwin_vacuum_recovery)
+    endif()
+    foreach(grid IN ITEMS 8 16)
+        add_test(NAME test_3d_darwin_vacuum_recovery_${grid}
+            COMMAND test_darwin_vacuum_recovery
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_split_vacuum_energy
+                amr.max_grid_size=${grid} amr.blocking_factor=8
+                max_step=0 diagnostics.enable=0
+                hybrid_pic_model.darwin_vacuum_e_check_operator=1)
+        set_tests_properties(test_3d_darwin_vacuum_recovery_${grid} PROPERTIES
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET test_darwin_vacuum_recovery)
+    add_test(NAME test_3d_darwin_vacuum_recovery_periodic
+        COMMAND test_darwin_vacuum_recovery
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_split_vacuum_energy
+            amr.max_grid_size=8 amr.blocking_factor=8 max_step=0 diagnostics.enable=0
+            "boundary.field_lo=periodic periodic periodic"
+            "boundary.field_hi=periodic periodic periodic"
+            "boundary.particle_lo=periodic periodic periodic"
+            "boundary.particle_hi=periodic periodic periodic"
+            hybrid_pic_model.add_external_fields=0
+            hybrid_pic_model.darwin_vacuum_recovery_mask=global
+            hybrid_pic_model.darwin_vacuum_e_check_operator=1)
+    set_tests_properties(test_3d_darwin_vacuum_recovery_periodic PROPERTIES
+        TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    if(WarpX_EB)
+        add_test(NAME test_3d_darwin_vacuum_recovery_eb
+            COMMAND test_darwin_vacuum_recovery
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_split_vacuum_energy
+                amr.max_grid_size=8 amr.blocking_factor=8 max_step=0 diagnostics.enable=0
+                "warpx.eb_implicit_function=0.06**2-x*x-y*y"
+                hybrid_pic_model.use_conformal_eb=0
+                hybrid_pic_model.darwin_vacuum_e_check_operator=1)
+        set_tests_properties(test_3d_darwin_vacuum_recovery_eb PROPERTIES
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endif()
+endif()
