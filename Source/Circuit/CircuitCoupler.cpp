@@ -32,8 +32,10 @@ CircuitCoupler::CircuitCoupler (warpx::circuit::CoilSet const& coils,
                                 std::vector<warpx::circuit::ProbeKind> probes,
                                 std::vector<double> probe_exclusion,
                                 Params params,
-                                std::unique_ptr<ExternalCircuit> plugin)
-    : m_coils(coils),
+                                std::unique_ptr<ExternalCircuit> plugin,
+                                WarpxCircuitAffineApiV1 const* affine_api)
+    : m_affine_api(affine_api),
+      m_coils(coils),
       m_probes(std::move(probes)),
       m_probe_exclusion(std::move(probe_exclusion)),
       m_params(params),

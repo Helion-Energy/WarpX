@@ -347,3 +347,46 @@ if(TARGET app_3d)
             TIMEOUT 30 PROCESSORS 2 ENVIRONMENT "OMP_NUM_THREADS=1")
     endif()
 endif()
+
+# Immutable circuit response and release-build refusal tests.
+if(TARGET lib_3d)
+    add_executable(test_device_circuit test_device_circuit.cpp)
+    target_include_directories(test_device_circuit PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(test_device_circuit PRIVATE lib_3d)
+    add_library(darwin_rl_test_no_affine MODULE rl_test_circuit.cpp)
+    target_include_directories(darwin_rl_test_no_affine PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(darwin_rl_test_no_affine PRIVATE AMReX::amrex_3d)
+    target_compile_definitions(darwin_rl_test_no_affine PRIVATE WARPX_TEST_WITHOUT_AFFINE)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_device_circuit)
+        setup_target_for_cuda_compilation(darwin_rl_test_no_affine)
+    endif()
+    add_test(NAME test_device_circuit
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_device_circuit.py
+            $<TARGET_FILE:test_device_circuit> ${CMAKE_CURRENT_BINARY_DIR}/device_circuit)
+    set_tests_properties(test_device_circuit PROPERTIES TIMEOUT 300)
+    add_test(NAME test_3d_darwin_device_circuit
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_darwin_device_circuit.py
+            $<TARGET_FILE:app_3d> $<TARGET_FILE:darwin_rl_test_circuit>
+            $<TARGET_FILE:darwin_rl_test_no_affine>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_native_circuit
+            ${CMAKE_CURRENT_BINARY_DIR}/darwin_device ${WarpX_EB})
+    set_tests_properties(test_3d_darwin_device_circuit PROPERTIES TIMEOUT 1000)
+endif()
+
+if(TARGET lib_3d)
+    add_executable(test_device_external_fields test_device_external_fields.cpp)
+    target_include_directories(test_device_external_fields PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_link_libraries(test_device_external_fields PRIVATE lib_3d)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_device_external_fields)
+    endif()
+endif()
+if(TARGET test_device_external_fields)
+    add_test(NAME test_device_external_fields
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_device_external_fields.py
+            $<TARGET_FILE:test_device_external_fields> $<TARGET_FILE:darwin_rl_test_circuit>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_darwin_native_circuit
+            ${CMAKE_CURRENT_BINARY_DIR}/device_external_fields ${WarpX_EB})
+    set_tests_properties(test_device_external_fields PROPERTIES TIMEOUT 150)
+endif()

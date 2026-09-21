@@ -1,5 +1,7 @@
 CEXE_sources += CircuitCoupler.cpp
 CEXE_sources += CircuitCoupling.cpp
+CEXE_sources += DeviceCircuit.cpp
+CEXE_sources += DarwinDeviceCoupling.cpp
 
 include $(WARPX_HOME)/Source/Circuit/Coils/Make.package
 

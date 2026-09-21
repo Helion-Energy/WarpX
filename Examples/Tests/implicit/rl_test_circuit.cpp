@@ -28,6 +28,7 @@
  */
 
 #include "Circuit/ExternalCircuit.H"
+#include "Circuit/ExternalCircuitAffine.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -74,10 +75,12 @@ public:
         if (!(m_L > 0.) || !(m_R >= 0.) || !std::isfinite(m_V0)) { std::abort(); }
     }
 
-    void BeginStep (amrex::Real /*t0*/, amrex::Real /*dt*/) override
+    void BeginStep (amrex::Real t0, amrex::Real dt) override
     {
         if (m_step_open) { std::abort(); }
         m_step_open = true;
+        m_t0 = t0; m_t1 = t0+dt;
+        ++m_token;
         m_accepted_this_step = false;
         // The committed state IS the interval-entry snapshot.
     }
@@ -118,6 +121,28 @@ public:
         }
     }
 
+    int PrepareAffine (double t0, double t1, WarpxCircuitAffineViewV1* out)
+    {
+        if (!out || out->struct_bytes != sizeof(*out) || !m_step_open
+            || m_accepted_this_step || t0 != m_t0 || t1 != m_t1 || !(t1>t0)) {
+            return WARPX_AFFINE_BAD_REQUEST;
+        }
+        double const dt = t1-t0, denominator = 1.+dt*m_R/m_L;
+        m_p0.resize(m_n); m_g.assign(m_n*m_n,0.);
+        for (int k = 0; k < m_n; ++k) {
+            m_p0[k] = (m_i_committed[k]+(dt/m_L)*m_V0)/denominator;
+            m_g[k*m_n+k] = -(dt/m_L)/denominator;
+        }
+        *out = {};
+        out->struct_bytes = sizeof(*out); out->scalar_kind = WARPX_CIRCUIT_AFFINE_F64;
+        out->guard_kind = WARPX_CIRCUIT_AFFINE_SIGN_GUARD_V1;
+        out->token = m_token; out->n_port = m_n; out->circuit_substeps = 1;
+        out->t0_sim = t0; out->t1_sim = t1;
+        out->entry_current = m_i_committed.data();
+        out->p0 = m_p0.data(); out->g = m_g.data(); out->i_ref = m_i_ref.data();
+        return WARPX_AFFINE_OK;
+    }
+
     void WriteCheckpoint (std::string const& dir) const override
     {
         std::ofstream ofs(dir + "/rl_test_circuit.dat");
@@ -138,6 +163,9 @@ public:
     }
 
 private:
+    uint64_t m_token = 0;
+    double m_t0 = 0., m_t1 = 0.;
+    std::vector<double> m_p0, m_g;
     int m_n = 0;
     double m_R = 1.0;
     double m_L = 1.0;
@@ -165,3 +193,28 @@ extern "C"
         return WARPX_EXTERNAL_CIRCUIT_ABI_VERSION;
     }
 }
+
+#ifndef WARPX_TEST_WITHOUT_AFFINE
+namespace
+{
+    int32_t PrepareAffine (void* instance, double t0, double t1,
+        WarpxCircuitAffineViewV1* out, char* error, uint64_t capacity)
+    {
+        try {
+            if (!instance) { return WARPX_AFFINE_BAD_REQUEST; }
+            return static_cast<RLTestCircuit*>(static_cast<ExternalCircuit*>(instance))
+                ->PrepareAffine(t0,t1,out);
+        } catch (...) {
+            if (error && capacity) { std::snprintf(error,capacity,"RL affine preparation failed"); }
+            return WARPX_AFFINE_INTERNAL_ERROR;
+        }
+    }
+    void ReleaseAffine (void*, uint64_t) {}
+}
+extern "C" WarpxCircuitAffineApiV1 const* warpx_external_circuit_affine_api_v1 ()
+{
+    static WarpxCircuitAffineApiV1 const api{sizeof(WarpxCircuitAffineApiV1),
+        WARPX_CIRCUIT_AFFINE_API_V1,0,PrepareAffine,ReleaseAffine};
+    return &api;
+}
+#endif

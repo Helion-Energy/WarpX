@@ -362,7 +362,8 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
     amrex::Real scale_factor,
     ablastr::fields::VectorField const& srcField,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
-    bool use_eb_flags)
+    bool use_eb_flags, warpx::circuit::DeviceScaleView device_scales,
+    int field, double time, bool electric)
 {
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
@@ -412,21 +413,30 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
                 // Skip field update in the embedded boundaries
                 if (update_Fx_arr && update_Fx_arr(i, j, k) == 0) { return; }
 
-                Fx(i,j,k) += scale_factor * Sx(i,j,k);
+                Real const factor = device_scales.start
+                    ? (electric ? -device_scales.Slope(field) : device_scales.Value(field,time))
+                    : scale_factor;
+                Fx(i,j,k) += factor * Sx(i,j,k);
             },
 
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
                 // Skip field update in the embedded boundaries
                 if (update_Fy_arr && update_Fy_arr(i, j, k) == 0) { return; }
 
-                Fy(i,j,k) += scale_factor * Sy(i,j,k);
+                Real const factor = device_scales.start
+                    ? (electric ? -device_scales.Slope(field) : device_scales.Value(field,time))
+                    : scale_factor;
+                Fy(i,j,k) += factor * Sy(i,j,k);
             },
 
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
                 // Skip field update in the embedded boundaries
                 if (update_Fz_arr && update_Fz_arr(i, j, k) == 0) { return; }
 
-                Fz(i,j,k) += scale_factor * Sz(i,j,k);
+                Real const factor = device_scales.start
+                    ? (electric ? -device_scales.Slope(field) : device_scales.Value(field,time))
+                    : scale_factor;
+                Fz(i,j,k) += factor * Sz(i,j,k);
             }
         );
     }
@@ -461,7 +471,11 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
 
         amrex::Real scale_factor_B;
         amrex::Real scale_factor_E;
-        if (m_use_python_scale[i]) {
+        if (DeviceDriven(i)) {
+            // These host placeholders are never consumed; kernels read the
+            // current circuit segment directly from its device arrays.
+            scale_factor_B = 0.; scale_factor_E = 0.;
+        } else if (m_use_python_scale[i]) {
             // Piecewise-linear python-driven scale: B follows the linear
             // interpolant of the (s_old, s_new) segment and E carries its
             // exact constant slope, so the discrete Faraday relation
@@ -497,9 +511,10 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         const bool conformal_ext = hybrid && hybrid->m_use_conformal_eb
             && EB::enabled();
         const bool ext_use_eb_flags = !conformal_ext;
+        auto const device = DeviceDriven(i) ? m_device_scales : warpx::circuit::DeviceScaleView{};
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], ext_use_eb_flags);
-            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], ext_use_eb_flags);
+            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], ext_use_eb_flags, device, i, t, true);
+            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], ext_use_eb_flags, device, i, t, false);
 
             if (conformal_ext) {
                 hybrid->ZeroConductorEdges(E_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);

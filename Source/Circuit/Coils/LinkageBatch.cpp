@@ -51,7 +51,16 @@ LinkageBatch::MeasureDevice (const CoilSet& coils,
 {
     BL_PROFILE("warpx::circuit::LinkageBatch::MeasureDevice");
     std::vector<amrex::Real> unused;
+#if defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
     MeasureImpl(coils, probes, exclusion_radius, a_ext, bz, j, unused, true);
+#elif !defined(AMREX_USE_GPU)
+    // CPU oracle for exactly the same device response/scale algorithm.
+    MeasureImpl(coils, probes, exclusion_radius, a_ext, bz, j, unused, false);
+    m_lambda_device.resize(unused.size());
+    std::copy(unused.begin(), unused.end(), m_lambda_device.begin());
+#else
+    WARPX_ABORT_WITH_MESSAGE("Device circuit probes require CUDA, HIP, or CPU");
+#endif
     return m_lambda_device;
 }
 

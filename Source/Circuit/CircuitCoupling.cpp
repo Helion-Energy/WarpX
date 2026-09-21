@@ -42,10 +42,11 @@ namespace
     /** Load a compiled ExternalCircuit engine from a shared library
      * exporting the C factory symbol warpx_create_external_circuit. */
     std::unique_ptr<ExternalCircuit>
-    LoadExternalCircuitPlugin (std::string const& path)
+    LoadExternalCircuitPlugin (std::string const& path,
+                               WarpxCircuitAffineApiV1 const*& affine_api)
     {
 #if defined(_WIN32)
-        amrex::ignore_unused(path);
+        amrex::ignore_unused(path, affine_api);
         WARPX_ABORT_WITH_MESSAGE(
             "circuit.engine = external is not supported on Windows");
         return nullptr;
@@ -76,7 +77,14 @@ namespace
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(factory != nullptr,
             "circuit.plugin_library: '" + path + "' does not export "
             "warpx_create_external_circuit");
-        return std::unique_ptr<ExternalCircuit>(factory());
+        using affine_factory_t = WarpxCircuitAffineApiV1 const* (*)();
+        // Optional export; the legacy virtual ABI remains unchanged.
+        auto affine_factory = reinterpret_cast<affine_factory_t>(
+            dlsym(handle, "warpx_external_circuit_affine_api_v1"));
+        affine_api = affine_factory ? affine_factory() : nullptr;
+        auto plugin = std::unique_ptr<ExternalCircuit>(factory());
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(plugin != nullptr, "Circuit plugin factory returned null");
+        return plugin;
 #endif
     }
 }
@@ -96,6 +104,16 @@ CircuitCoupling::CircuitCoupling ()
 
     const amrex::ParmParse pp_circuit("circuit");
     pp_circuit.query("engine", m_engine);
+    std::string trial_backend = "host";
+    pp_circuit.query("trial_backend", trial_backend);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(trial_backend == "host" || trial_backend == "device_affine",
+        "circuit.trial_backend must be host or device_affine");
+    m_coupler_params.device_affine = trial_backend == "device_affine";
+    pp_circuit.query("device_iterations", m_coupler_params.device_iterations);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupler_params.device_iterations > 0
+        && (!m_coupler_params.device_affine || m_engine == "external"),
+        "Device circuit trials require engine=external and device_iterations>0");
+
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_engine == "none" || m_engine == "callbacks" || m_engine == "external",
         "circuit.engine must be one of: none, callbacks, external");
@@ -535,8 +553,14 @@ CircuitCoupling::InitData ()
         }
 
         std::unique_ptr<ExternalCircuit> plugin;
+        WarpxCircuitAffineApiV1 const* affine_api = nullptr;
         if (m_engine == "external") {
-            plugin = LoadExternalCircuitPlugin(m_plugin_library);
+            plugin = LoadExternalCircuitPlugin(m_plugin_library, affine_api);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_coupler_params.device_affine ||
+                (affine_api && affine_api->struct_bytes == sizeof(WarpxCircuitAffineApiV1)
+                    && affine_api->api_version == WARPX_CIRCUIT_AFFINE_API_V1
+                    && affine_api->prepare && affine_api->release),
+                "Device circuit trials require the affine v1 plugin capability; no host fallback");
             // One-time port configuration: coil order fixes the eps/scale
             // vector indexing of every AdvanceInterval call.
             std::vector<std::string> names;
@@ -564,7 +588,7 @@ CircuitCoupling::InitData ()
         }
         m_coupler = std::make_unique<CircuitCoupler>(
             m_coils, m_probes, m_probe_exclusion, m_coupler_params,
-            std::move(plugin));
+            std::move(plugin), affine_api);
         // The coupler's own per-step memory (EMF low-pass state) is part
         // of the checkpoint; restore it with the engine state.
         if (!m_restart_dir.empty()) {

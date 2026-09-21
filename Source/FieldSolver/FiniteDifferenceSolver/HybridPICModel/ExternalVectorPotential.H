@@ -11,6 +11,8 @@
 #define WARPX_EXTERNAL_VECTOR_POTENTIAL_H_
 
 #include "Fields.H"
+#include "Circuit/DeviceScaleView.H"
+#include "Utils/TextMsg.H"
 
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -44,6 +46,8 @@ class ExternalVectorPotential
 {
 protected:
     int m_nFields;
+    warpx::circuit::DeviceScaleView m_device_scales;
+    std::vector<bool> m_device_driven;
 
     std::vector<std::string> m_field_names;
 
@@ -90,6 +94,17 @@ protected:
     std::vector<bool> m_in_initial_field;
 
 public:
+    [[nodiscard]] warpx::circuit::DeviceScaleView DeviceScales () const { return m_device_scales; }
+    [[nodiscard]] bool DeviceDriven (int field) const
+    { return m_device_scales.start != nullptr && m_device_driven[field]; }
+    void SetDeviceScaleSegments (double const* start, double const* end, double t0, double dt,
+                                std::vector<int> const& fields)
+    {
+        m_device_scales = {start,end,t0,dt};
+        m_device_driven.assign(m_nFields,false);
+        for (auto field : fields) { m_device_driven.at(field) = true; }
+    }
+    void ClearDeviceScaleSegments () { m_device_scales = {}; }
 
     /** Number of independent external vector-potential fields. */
     [[nodiscard]] int nFields () const { return m_nFields; }
@@ -102,6 +117,8 @@ public:
      * diagnostics) sees the same scale family. */
     [[nodiscard]] amrex::Real TimeScale (int i, amrex::Real t) const
     {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!DeviceDriven(i),
+            "Host TimeScale cannot read an active device circuit trial");
         if (m_use_python_scale[i]) {
             const ScaleSegment& segment = m_python_scale[i];
             const amrex::Real slope =
@@ -119,6 +136,8 @@ public:
     bool GetScaleSegment (int i, amrex::Real& s_old, amrex::Real& s_new,
                           amrex::Real& t_old, amrex::Real& t_new) const
     {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!DeviceDriven(i),
+            "Host scale segment cannot read an active device circuit trial");
         if (!m_use_python_scale[i]) { return false; }
         s_old = m_python_scale[i].s_old;
         s_new = m_python_scale[i].s_new;
@@ -169,7 +188,9 @@ public:
         amrex::Real scale_factor,
         ablastr::fields::VectorField const& srcField,
         std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
-        bool use_eb_flags = true);
+        bool use_eb_flags = true,
+        warpx::circuit::DeviceScaleView device_scales = {},
+        int field = -1, double time = 0., bool electric = false);
 
     /** Refresh the summed external E/B arrays at time t. With
      * skip_in_initial_field, coils flagged <name>.in_initial_field are

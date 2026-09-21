@@ -534,6 +534,15 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         // These are the actual accepted B^n registers, before any trial update.
         coupler.MeasureDarwinLinkages(start_time);
         coupler.BeginStepMeasured(start_time, m_dt);
+        if (coupler.DeviceTrials()) {
+            if (m_fext_init.empty()) {
+                auto const& ext = *m_hybrid_pic_model->m_external_vector_potential;
+                for (int i = 0; i < ext.nFields(); ++i) {
+                    m_fext_init.push_back(ext.TimeScale(i,start_time));
+                }
+            }
+            coupler.PrepareDarwinDeviceStep(start_time,m_dt,m_theta,m_darwin_circuit_scale_tolerance);
+        }
         m_native_circuit_step_open = true;
     }
 
@@ -1356,6 +1365,12 @@ void ThetaImplicitHybrid::CommitNativeCircuitStage (amrex::Real start_time)
     BL_PROFILE("ThetaImplicitHybrid::CommitNativeCircuitStage()");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_native_circuit_step_open,
         "Native circuit step is not open");
+    if (NativeCircuitCoupler().DeviceTrials()) {
+        NativeCircuitCoupler().CommitDarwinDeviceStep(start_time,m_dt,m_theta,
+                                                     m_darwin_circuit_scale_tolerance);
+        m_native_circuit_step_open = false;
+        return;
+    }
     auto& external = *m_hybrid_pic_model->m_external_vector_potential;
     auto const time = start_time + m_theta*m_dt;
     amrex::Vector<amrex::Real> candidate(external.nFields());
@@ -1411,6 +1426,20 @@ void ThetaImplicitHybrid::ConvergeDarwinCircuitStage (
         "Darwin circuit stage requires its native plugin or compatibility callback");
     auto& external = *m_hybrid_pic_model->m_external_vector_potential;
     amrex::Real const stage_time = start_time + m_theta * m_dt;
+    if (m_circuit_native && NativeCircuitCoupler().DeviceTrials()) {
+        auto& coupler = NativeCircuitCoupler();
+        coupler.ResetDarwinDeviceTrial();
+        // Fixed launch count: convergence and map validity are checked on
+        // device, with no circuit vector/status fetch inside the residual.
+        for (int iteration = 0; iteration < coupler.DeviceIterations(); ++iteration) {
+            UpdateWarpXFields(electric_field,from_jacobian,start_time);
+            coupler.AdvanceDarwinDeviceTrial();
+        }
+        coupler.RequireDarwinDeviceConvergence();
+        UpdateWarpXFields(electric_field,from_jacobian,start_time);
+        return;
+    }
+
     auto const& accepted = m_darwin_circuit_accepted_scales;
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(accepted.size() == external.nFields(),
         "Circuit scales must be captured at the start of the step");
@@ -2046,7 +2075,7 @@ void ThetaImplicitHybrid::DarwinApplyABoundary ( amrex::Real a_time )
             }
         }
         for (int i = 0; i < ext.nFields(); ++i) {
-            scales.push_back(ext.TimeScale(i, a_time) - m_fext_init[i]);
+            scales.push_back(ext.DeviceDriven(i) ? 0. : ext.TimeScale(i, a_time) - m_fext_init[i]);
         }
     }
 
@@ -2066,8 +2095,21 @@ void ThetaImplicitHybrid::DarwinApplyABoundary ( amrex::Real a_time )
                 for (int i = 0; i < ext.nFields(); ++i) {
                     amrex::MultiFab const & Aext = *m_WarpX->m_fields.get(
                         ext.FieldName(i) + "_Aext", Direction{dir}, lev);
-                    amrex::MultiFab::Saxpy(A_bc, scales[i], Aext, 0, 0, 1,
-                                           amrex::min(A.nGrowVect(), Aext.nGrowVect()));
+                    auto const ng = amrex::min(A.nGrowVect(), Aext.nGrowVect());
+                    if (ext.DeviceDriven(i)) {
+                        auto const device = ext.DeviceScales();
+                        double const initial = m_fext_init[i];
+                        int const field = i;
+                        for (amrex::MFIter mfi(A_bc,amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                            auto const dst = A_bc.array(mfi); auto const unit = Aext.const_array(mfi);
+                            amrex::ParallelFor(mfi.growntilebox(ng),
+                                [=] AMREX_GPU_DEVICE(int ii,int jj,int kk) noexcept {
+                                    dst(ii,jj,kk) += (device.Value(field,a_time)-initial)*unit(ii,jj,kk);
+                                });
+                        }
+                    } else {
+                        amrex::MultiFab::Saxpy(A_bc,scales[i],Aext,0,0,1,ng);
+                    }
                 }
             }
 

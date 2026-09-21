@@ -5,6 +5,8 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
         CircuitCoupler.cpp
         CircuitCoupling.cpp
+        DeviceCircuit.cpp
+        DarwinDeviceCoupling.cpp
     )
 endforeach()
 

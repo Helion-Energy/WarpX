@@ -12,6 +12,7 @@
 #include "Coils/CoilSet.H"
 #include "Coils/FluxProbes.H"
 #include "ExternalCircuit.H"
+#include "DeviceCircuit.H"
 
 #include <AMReX_REAL.H>
 
@@ -62,6 +63,8 @@ class CircuitCoupler
 public:
     struct Params
     {
+        bool device_affine = false;
+        int device_iterations = 20;
         int corrector_iterations = 1;
         amrex::Real corrector_rtol = 1.0e-6;
         amrex::Real scale_floor = 1.0e-3;   //!< floor of the convergence denominator
@@ -131,7 +134,8 @@ public:
                     std::vector<warpx::circuit::ProbeKind> probes,
                     std::vector<double> probe_exclusion,
                     Params params,
-                    std::unique_ptr<ExternalCircuit> plugin);
+                    std::unique_ptr<ExternalCircuit> plugin,
+                    WarpxCircuitAffineApiV1 const* affine_api = nullptr);
 
     /** Once per step, after the split-field subtraction (the evolved
      * fields hold the plasma response): seed the linkage registers at t^n
@@ -175,6 +179,16 @@ public:
     void MeasureDarwinLinkages (amrex::Real time);
     /** Deterministic trial seed from the fixed accepted interval entry. */
     void ResetDarwinTrialScales (amrex::Real t0, amrex::Real dt);
+    [[nodiscard]] bool DeviceTrials () const { return m_params.device_affine; }
+    [[nodiscard]] int DeviceIterations () const { return m_params.device_iterations; }
+    void PrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
+                                 amrex::Real theta, amrex::Real tolerance);
+    void ResetDarwinDeviceTrial ();
+    void AdvanceDarwinDeviceTrial (bool force = false);
+    void RequireDarwinDeviceConvergence ();
+    void CommitDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
+                                amrex::Real theta, amrex::Real tolerance);
+
 
 
     /** Newton/iterate-scope driving for implicit consumers, replacing the
@@ -251,6 +265,8 @@ public:
     void ReadMemoryCheckpoint (std::string const& dir);
 
 private:
+    WarpxCircuitAffineApiV1 const* m_affine_api = nullptr;
+    std::unique_ptr<warpx::circuit::DeviceCircuit> m_device;
     std::vector<amrex::Real> m_darwin_unit_response;
     int m_darwin_external_count = -1;
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
