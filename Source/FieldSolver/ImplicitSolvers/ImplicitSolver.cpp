@@ -990,13 +990,9 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         ablastr::fields::VectorField J = m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
         m_WarpX->ApplyInverseVolumeScalingToCurrentDensity(J[0], J[1], J[2], lev);
-        // The particle evolve applies the radial-geometry volume scaling only on the
-        // explicit path; charge density deposited during implicit residual evaluations
-        // must be scaled here or solvers that divide by rho (e.g. the hybrid Ohm's law)
-        // see an unscaled density.
-        if (!mm_linear_stage && m_WarpX->m_fields.has(FieldType::rho_fp, lev)) {
-            m_WarpX->ApplyInverseVolumeScalingToChargeDensity(m_WarpX->m_fields.get(FieldType::rho_fp, lev), lev);
-        }
+        // PushParticlesandDeposit already scales rho on both explicit and
+        // implicit paths. Only J is deferred until after CumulateJ above.
+        // Scaling rho here again also repeats its radial guard fold.
     }
 #endif
 

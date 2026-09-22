@@ -537,3 +537,35 @@ if(TARGET lib_rz)
         endforeach()
     endforeach()
 endif()
+
+# The default prescribed-drive recovery must expose the same map to full
+# residuals and Jacobian probes. The frozen arm verifies test sensitivity.
+if(TARGET lib_rz)
+    foreach(fixture IN ITEMS recovery_probe implicit_density)
+        add_executable(test_${fixture}_rz test_${fixture}_rz.cpp)
+        target_link_libraries(test_${fixture}_rz PRIVATE lib_rz)
+        target_include_directories(test_${fixture}_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+        if(WarpX_COMPUTE STREQUAL "CUDA")
+            setup_target_for_cuda_compilation(test_${fixture}_rz)
+        endif()
+        foreach(grid IN ITEMS 8 32)
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_${fixture}_${grid})
+            add_test(NAME test_rz_${fixture}_${grid}
+                COMMAND test_${fixture}_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe
+                    amr.max_grid_size=${grid})
+            set_tests_properties(test_rz_${fixture}_${grid} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_${fixture}_${grid}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_frozen)
+    add_test(NAME test_rz_recovery_probe_frozen
+        COMMAND test_recovery_probe_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe
+            hybrid_pic_model.darwin_vacuum_recovery_live_probes=0
+            probe_test.expect_frozen=1)
+    set_tests_properties(test_rz_recovery_probe_frozen PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_frozen
+        TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()

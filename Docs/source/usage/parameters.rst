@@ -5766,15 +5766,18 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_live_probes
     :type: ``bool``
-    :default: ``false``
+    :default: ``true``
     :optional:
 
     Recompute the vacuum correction and Faraday target during finite-difference
-    Jacobian probes. Otherwise probes reuse the previous nonlinear evaluation's
-    target, giving an approximate Jacobian. Live probes need a tight recovery
-    tolerance because recovery error is divided by the probe size. The legacy
-    ``WARPX_VACREC_LIVE_PROBES`` environment switch supplies the default when the
-    input is omitted; circuit coupling still forces live probes.
+    Jacobian probes. Half-cadence recovery depends on the field iterate even with
+    prescribed external drive, so probes must use the same recovered map as the
+    nonlinear residual. The density mask remains frozen independently.
+    An explicit ``false`` retains the approximate Jacobian with cached corrections
+    and targets for comparisons; circuit coupling always forces live probes.
+    Recovery error is divided by the probe size, so its relative tolerance defaults
+    to ``1.e-12``. The legacy ``WARPX_VACREC_LIVE_PROBES`` environment switch is
+    redundant with the enabled default.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_relaxation_time
     :type: ``float``
@@ -5801,7 +5804,7 @@ Maxwell solver: kinetic-fluid hybrid
     ``darwin_vacuum_recovery_density_fraction`` (default 1) scales the mask threshold below
     ``n_floor``: use values below 1 when the Ohm's-law floor sits inside real plasma so the
     vacuum treatment stays in the genuine low-density region.
-    The MLMG controls are ``darwin_vacuum_recovery_relative_tolerance`` (default ``1e-8``),
+    The MLMG controls are ``darwin_vacuum_recovery_relative_tolerance`` (default ``1e-12``),
     ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
     ``darwin_vacuum_recovery_max_iterations`` (default 200) and
     ``darwin_vacuum_recovery_verbosity`` (default 0).

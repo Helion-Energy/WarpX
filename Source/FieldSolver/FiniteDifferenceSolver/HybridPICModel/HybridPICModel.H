@@ -1785,7 +1785,7 @@ public:
      *  refreshes between steps. 0 restores the legacy live-density
      *  masks. */
     bool m_darwin_vacuum_recovery_frozen_mask = true;
-    amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
+    amrex::Real m_darwin_vacrec_rtol = 1.0e-12;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
     /** Iteration operator of the vacuum correction.
@@ -1810,12 +1810,12 @@ public:
     /** Recompute the recovery (and evaluate the band field from the live
      *  recovered A) inside matrix-free Jacobian probe evaluations, instead
      *  of reusing the frozen correction and stored target. Initialized
-     *  from the WARPX_VACREC_LIVE_PROBES environment variable; forced on
-     *  by solvers that iterate the external drive inside the residual
-     *  (with per-evaluation scale changes a frozen recovery makes the
-     *  probed map inconsistent with the iterate map). Run with a tight
-     *  darwin_vacuum_recovery_relative_tolerance (<= 1e-10). */
-    bool m_vacuum_recovery_live_probes = false;
+     *  to true: half-cadence recovery depends on the field iterate even
+     *  with prescribed external drive. A frozen correction differentiates
+     *  a different map. An explicit false input retains that approximation
+     *  for comparison; circuit coupling always requires live probes.
+     *  The recovery mask remains frozen independently. */
+    bool m_vacuum_recovery_live_probes = true;
 
     /** Apply the vacuum vector-potential recovery to "hybrid_A_fp" in place
      *  (see m_darwin_vacuum_recovery). Uses Bfield_fp as curl scratch: the

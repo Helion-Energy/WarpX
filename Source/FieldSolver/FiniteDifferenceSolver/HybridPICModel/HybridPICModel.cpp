@@ -636,10 +636,11 @@ void HybridPICModel::ReadParameters ()
                 "carries no cylindrical metric; the RZ recovery stays on "
                 "the fixed-point-exact 'poisson' map).");
 #endif
-            // Live-probe mode (see the member documentation): env-gated,
-            // and forced on by circuit-in-the-residual solvers.
-            m_vacuum_recovery_live_probes =
-                (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
+            // The recovered correction and vacuum field target depend on
+            // the iterate for prescribed drive as well as circuit coupling.
+            // Default to differentiating that same map. The old environment
+            // switch is redundant with the default; an explicit false input
+            // remains available for approximate-Jacobian comparisons.
             pp_hybrid.query("darwin_vacuum_recovery_live_probes",
                             m_vacuum_recovery_live_probes);
             if (m_darwin_vacuum_recovery_operator == "edge_relaxation") {
