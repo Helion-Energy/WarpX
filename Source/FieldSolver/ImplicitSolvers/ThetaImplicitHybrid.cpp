@@ -1886,6 +1886,18 @@ ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
     return m_WarpX->m_fields.get(FieldType::rho_fp, lev);
 }
 
+std::pair<const amrex::MultiFab*, int>
+ThetaImplicitHybrid::GetOhmDensityForPC (const int lev) const
+{
+    if (m_qdsmc_segregated_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_qdsmc_rho_frozen.at(lev) != nullptr,
+            "Ohm PC density requested before the thermal stage is frozen");
+        return {m_qdsmc_rho_frozen[lev].get(), 0};
+    }
+    auto const* rho = m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+    return {rho, m_darwin_segregated_solve ? rho->nComp()/2 : 0};
+}
+
 const amrex::MultiFab*
 ThetaImplicitHybrid::GetRhoPolFrozenForPC ( const int lev ) const
 {

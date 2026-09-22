@@ -622,3 +622,57 @@ if(TARGET test_recovery_probe_rz)
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     endforeach()
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_hybrid_pc_rz test_hybrid_pc_rz.cpp)
+    target_link_libraries(test_hybrid_pc_rz PRIVATE lib_rz)
+    target_include_directories(test_hybrid_pc_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_hybrid_pc_rz)
+    endif()
+    add_test(NAME test_rz_hybrid_pc_outer
+        COMMAND test_hybrid_pc_rz hall_test.grid=8 hall_test.hall=0.05 hall_test.outer=1)
+    set_tests_properties(test_rz_hybrid_pc_outer PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    foreach(grid IN ITEMS 8 32)
+        add_test(NAME test_rz_hybrid_pc_${grid}
+            COMMAND test_hybrid_pc_rz hall_test.grid=${grid})
+        set_tests_properties(test_rz_hybrid_pc_${grid} PROPERTIES
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_hybrid_pc_coefficients_rz test_hybrid_pc_coefficients_rz.cpp)
+    target_link_libraries(test_hybrid_pc_coefficients_rz PRIVATE lib_rz)
+    target_include_directories(test_hybrid_pc_coefficients_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_hybrid_pc_coefficients_rz)
+    endif()
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_hybrid_pc_coefficients)
+    add_test(NAME test_rz_hybrid_pc_coefficients
+        COMMAND test_hybrid_pc_coefficients_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe)
+    set_tests_properties(test_rz_hybrid_pc_coefficients PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_hybrid_pc_coefficients
+        TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()
+
+if(TARGET lib_3d)
+    add_executable(test_hybrid_pc_cartesian test_hybrid_pc_cartesian.cpp)
+    target_link_libraries(test_hybrid_pc_cartesian PRIVATE lib_3d)
+    target_include_directories(test_hybrid_pc_cartesian PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_hybrid_pc_cartesian)
+    endif()
+    foreach(grid_type IN ITEMS staggered collocated)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hybrid_pc_3d_${grid_type})
+        add_test(NAME test_3d_hybrid_pc_${grid_type}
+            COMMAND test_hybrid_pc_cartesian
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_hybrid_pc
+                warpx.grid_type=${grid_type})
+        set_tests_properties(test_3d_hybrid_pc_${grid_type} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hybrid_pc_3d_${grid_type}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()

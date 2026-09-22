@@ -361,13 +361,13 @@ Overall simulation parameters
 
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
-          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, ``pc_block_banded``, or ``pc_curlcurl_banded``).
+          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, ``pc_hybrid_pic``, ``pc_block_banded``, or ``pc_curlcurl_banded``).
 
         - ``implicit_evolve.mass_matrices_pc_width`` (``integer``, default: 0).
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
           In most cases, a width of 1 is sufficient for good GMRES performance.
 
-        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are five options:
+        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. Available options are:
 
           - ``jacobian.pc_type = pc_curl_curl_mlmg``: Use the AMReX MLMG solver for the curl curl formulation of Maxwell's equations. This preconditioner solves the following equation:
 
@@ -417,6 +417,45 @@ Overall simulation parameters
             - ``precond.hall_eta0`` (``float``, optional): constant resistivity used in :math:`a` instead of the parser evaluation.
             - ``precond.hall_etah0`` (``float``, optional): constant hyper-resistivity used in :math:`a` instead of the parser evaluation.
             - ``precond.hall_jacobi_sweeps`` (``int``, default: 0): reserved for future defect-correction sweeps; currently parsed and ignored.
+
+          - ``jacobian.pc_type = pc_hybrid_pic``: Spatial Hall preconditioner for the theta-implicit hybrid solver.
+            This opt-in preconditioner approximately inverts a frozen electric/curl-curl pair,
+            :math:`(\delta E,\widehat W)`, with :math:`\widehat W=s_W\nabla\times\nabla\times\delta E`.
+            Joint vector smoothing and geometric multigrid capture the spatial whistler response.
+            A locally scaled auxiliary field avoids giving the lowest-density cells all the weight in the inner residual norm.
+            The nonlinear field, particle, electron-energy, and longitudinal-field residuals remain unchanged.
+
+            Native staggered RZ uses component-specific layouts, cylindrical curls and axis regularity.
+            Its frozen coefficients include Hall and ion motional response, physical resistivity evaluated with Kelvin electron temperature,
+            Laplacian hyper-resistivity, the local electron-inertia response, and optional deposited ion mass-matrix diagonals.
+            The latter also act on the resistive/hyper-resistive correction.
+            The Ohm density and actual midpoint inertia density remain separate.
+            Prescribed-drive vector-potential derivative pins are applied inside the curl without replacing active electric rows.
+            PEC, PMC (also named Neumann), periodic, and held-field boundaries are supported.
+            This RZ path requires one level, the azimuthally symmetric mode, zero inner radius, and no embedded boundary.
+            Resistive-shell, mixed PEC-insulator, ``tensor_form``, and nested ``curlcurl_form`` rows are rejected.
+            Density derivatives, inertia advection, and the live vacuum/circuit response remain in the outer Jacobian rather than this approximate inverse.
+
+            The Cartesian collocated and periodic staggered implementations are retained separately, including their 3D kernels.
+            They retain their original coefficient reduction and optional scalar-pressure extension;
+            the RZ inertia and physical-boundary adaptations do not yet apply to these Cartesian paths.
+            This option does not provide a conformal embedded-boundary discretization or an AMR preconditioner.
+
+            - ``pc_hybrid_pic.vacuum_rows`` (``bool``, native RZ default: true): use an identity approximation for the components replaced by half-cadence Darwin electric recovery.
+              This follows the recovery's frozen/live density selection and mask exactly; its live nonlocal response remains in the outer Jacobian.
+              False retains the Ohm approximation in those rows for comparison.
+            - ``pc_hybrid_pic.inner_max`` (``int``, default: 8): maximum inner Krylov iterations, up to 63.
+              Positive values require ``newton.linear_solver = amrex_fgmres`` for native RZ.
+              This keeps field vectors on the compute device; only Krylov scalar reductions communicate with the host.
+              Zero selects a fixed linear multigrid action usable with ``amrex_gmres``.
+            - ``pc_hybrid_pic.inner_rtol`` (``float``, default: 0.3): relative tolerance of the scaled pair solve.
+            - ``pc_hybrid_pic.vcycles`` (``int``, default: 1): fixed V-cycles per application when ``inner_max = 0``.
+            - ``pc_hybrid_pic.mg_floor`` (``int``, default: 4): minimum number of cells per box after coarsening.
+            - ``pc_hybrid_pic.sigma`` (``float``, default: 1.3): damping of electric corrections.
+            - ``pc_hybrid_pic.sigma_w`` (``float``, default: 1.2): damping of auxiliary corrections.
+            - ``pc_hybrid_pic.pair_whistler_defect`` (``float``, native RZ default: 1): multiplier of the local curl-curl approximation in the smoother.
+              The collocated implementation defaults to 0.4; periodic Cartesian staggering uses its compact-stencil value.
+            - ``pc_hybrid_pic.verbose`` (``bool``, default: false): inner-solver diagnostics.
 
           - ``jacobian.pc_type = pc_block_banded``: Direct block-banded solve of the frozen-coefficient linearized Ohm operator for the theta-implicit hybrid (generalized Ohm's law) solver. RZ geometry only.
             The linearized operator (theta-Faraday advance of :math:`\delta B`, Ampere response :math:`\delta J`, the whistler :math:`\delta J\times B_0` and drift :math:`(J_0-J_{i,0})\times\delta B` legs, resistive and hyper-resistive legs, RZ metrics with :math:`m=0` axis parity, and the PEC-wall column treatment) is extracted exactly by colored probing of a frozen-coefficient operator application, assembled into dense blocks coupling the three electric-field components along each z-line, and the block-banded system (banded in the radial block index) is factorized and solved directly.

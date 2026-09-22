@@ -12,6 +12,10 @@
 #include "MatrixPC.H"
 #include "JacobiPC.H"
 #include "HallJacobiPC.H"
+#include "HybridPICPC.H"
+#ifdef WARPX_DIM_RZ
+#include "HybridPICRZPC.H"
+#endif
 #include "BlockBandedPC.H"
 #include "Utils/TextMsg.H"
 #include <AMReX_Config.H>
@@ -192,6 +196,15 @@ void JacobianFunctionMF<T,Ops>::define ( const T& a_U,
             m_preCond = std::make_unique<CurlCurlMLMGPC<T,Ops>>();
         } else if (m_pc_type == PreconditionerType::pc_jacobi) {
             m_preCond = std::make_unique<JacobiPC<T,Ops>>();
+        } else if (m_pc_type == PreconditionerType::pc_hybrid_pic) {
+#ifdef WARPX_DIM_RZ
+            if (WarpX::grid_type == ablastr::utils::enums::GridType::Staggered) {
+                m_preCond = std::make_unique<HybridPICRZPC<T,Ops>>();
+            } else
+#endif
+            {
+                m_preCond = std::make_unique<HybridPICPC<T,Ops>>();
+            }
         } else if (m_pc_type == PreconditionerType::pc_hall_jacobi) {
             m_preCond = std::make_unique<HallJacobiPC<T,Ops>>();
         } else if (m_pc_type == PreconditionerType::pc_block_banded) {

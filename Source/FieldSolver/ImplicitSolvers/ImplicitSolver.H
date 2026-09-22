@@ -18,6 +18,8 @@
 #include <AMReX_REAL.H>
 #include <AMReX_LO_BCTYPES.H>
 
+#include <utility>
+
 /**
  * \brief Base class for implicit time solvers. The base functions are those
  *  needed by an implicit solver to be used through WarpX and those needed
@@ -146,6 +148,23 @@ public:
      * that do not carry a hybrid model.
      */
     virtual const HybridPICModel* GetHybridPICModel () const { return nullptr; }
+
+    /** Physical time centering, distinct from GetThetaForPC's light-wave coefficient. */
+    [[nodiscard]] amrex::Real GetTheta () const { return m_theta; }
+
+    /** Density and component actually consumed by the frozen Ohm solve. */
+    virtual std::pair<const amrex::MultiFab*, int> GetOhmDensityForPC (int lev) const
+    {
+        auto const* rho = GetRhoMidForPC(lev);
+        return {rho, rho == nullptr ? 0 : rho->nComp()/2};
+    }
+
+    /** Optional coupled pressure-Newton metadata. The eliminated/segregated
+     *  energy equation does not add a scalar Newton row. Retain the Cartesian
+     *  triangular pressure PC for solvers that expose that row. */
+    virtual bool HasPressureUnknownForPC () const { return false; }
+    virtual amrex::Real PressureScaleForPC () const { return amrex::Real(1.); }
+    virtual amrex::Real PressureConductivityForPC () const { return amrex::Real(0.); }
 
     /**
      * \brief Return per-direction pointers to the theta-midpoint magnetic

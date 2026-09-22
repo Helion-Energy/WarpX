@@ -120,6 +120,7 @@ public:
      *  component convention). Valid only after the first residual evaluation
      *  of the current Newton iterate. */
     const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
+    std::pair<const amrex::MultiFab*, int> GetOhmDensityForPC (int lev) const override;
 
     /** The per-step-frozen rho^n snapshot consumed by the curlcurl_form
      *  poloidal stage (hybrid_rho_n_frozen, component 0); nullptr whenever
