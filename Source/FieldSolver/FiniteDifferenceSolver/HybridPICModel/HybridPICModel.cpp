@@ -613,6 +613,11 @@ void HybridPICModel::ReadParameters ()
             utils::parser::queryWithParser(
                 pp_hybrid, "darwin_vacuum_recovery_max_iterations",
                 m_darwin_vacrec_max_iters);
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_semicoarsening",
+                m_darwin_vacrec_semicoarsening);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_vacrec_semicoarsening >= 0,
+                "hybrid_pic_model.darwin_vacuum_recovery_semicoarsening must be nonnegative");
             pp_hybrid.query("darwin_vacuum_recovery_verbosity",
                             m_darwin_vacrec_verbosity);
             pp_hybrid.query("darwin_vacuum_recovery_frozen_mask",
@@ -5574,7 +5579,27 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
             continue;
         }
 
-        amrex::LPInfo const info;
+        amrex::LPInfo info;
+#if defined(WARPX_DIM_RZ)
+        // Coarsen the more strongly coupled radial direction first. AMReX's
+        // semicoarsening direction is the direction kept fine (z here).
+        // This changes only the hierarchy, not the prepared finest operator.
+        // Keep unqualified geometries on the established hierarchy.
+        if (flux_only && dir == 1 && !EB::enabled()
+            && geom.ProbLo(0) == 0.0_rt && !geom.isPeriodic(1)) {
+            int levels = 0;
+            amrex::Real radial_spacing = geom.CellSize(0);
+            while (levels < m_darwin_vacrec_semicoarsening
+                   && 4.0_rt * radial_spacing <= geom.CellSize(1)) {
+                ++levels;
+                radial_spacing *= 2.0_rt;
+            }
+            if (levels > 0) {
+                info.setSemicoarsening(true).setSemicoarseningDirection(1)
+                    .setMaxSemicoarseningLevel(levels);
+            }
+        }
+#endif
         auto linop = std::make_unique<amrex::MLEBNodeFDLaplacian>();
 #if defined(AMREX_USE_EB)
         if (EB::enabled()) {

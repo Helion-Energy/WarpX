@@ -5826,6 +5826,22 @@ Maxwell solver: kinetic-fluid hybrid
     ``darwin_vacuum_recovery_max_iterations`` (default 200) and
     ``darwin_vacuum_recovery_verbosity`` (default 0).
 
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_semicoarsening
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Maximum number of radial-only multigrid coarsening levels for the RZ
+    ``poisson`` flux-recovery solve. A level is used only while the radial
+    spacing is at most one quarter of the axial spacing. This reduces anisotropy before
+    ordinary coarsening, preserving the finest-grid operator, boundary values,
+    masks and solve tolerances. Set 0 to retain the previous hierarchy.
+
+    This optimization applies only to axis-containing RZ grids without EB,
+    with nonperiodic axial boundaries and ``darwin_vacuum_recovery_components=flux``.
+    Other configurations retain the previous hierarchy. It does not change the
+    endpoint spatial recovery or the implicit electron-current advance.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_operator
     :type: ``string``
     :default: ``poisson``

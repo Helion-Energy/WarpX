@@ -592,3 +592,33 @@ if(TARGET lib_rz)
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_frozen
         TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_recovery_multigrid_rz test_recovery_multigrid_rz.cpp)
+    target_link_libraries(test_recovery_multigrid_rz PRIVATE lib_rz)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_recovery_multigrid_rz)
+    endif()
+    foreach(grid IN ITEMS 8 32)
+        add_test(NAME test_rz_recovery_multigrid_${grid}
+            COMMAND test_recovery_multigrid_rz mg_test.grid=${grid})
+        set_tests_properties(test_rz_recovery_multigrid_${grid} PROPERTIES
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET test_recovery_probe_rz)
+    foreach(semi IN ITEMS 0 1)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_semi_${semi})
+        add_test(NAME test_rz_recovery_probe_semi_${semi}
+            COMMAND test_recovery_probe_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe
+                "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
+                "geometry.prob_hi=0.25 2.0"
+                hybrid_pic_model.darwin_vacuum_recovery_semicoarsening=${semi})
+        set_tests_properties(test_rz_recovery_probe_semi_${semi} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_semi_${semi}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()

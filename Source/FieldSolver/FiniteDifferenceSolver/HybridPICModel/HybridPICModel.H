@@ -1788,6 +1788,10 @@ public:
     amrex::Real m_darwin_vacrec_rtol = 1.0e-12;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
+    /** Maximum radial-only coarsening levels for anisotropic, axis-containing
+     *  RZ flux recovery without EB or periodic axial boundaries. Zero retains
+     *  the isotropic hierarchy; the finest operator and tolerances do not change. */
+    int m_darwin_vacrec_semicoarsening = 1;
     /** Iteration operator of the vacuum correction.
      *  "poisson" (default): interpolate the edge curl-curl defect to nodes,
      *  solve a component nodal Poisson problem and interpolate back. These
