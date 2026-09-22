@@ -530,15 +530,15 @@ public:
             amrex::ParticleReal* AMREX_RESTRICT u1z_before_ptr = nullptr;
             if (m_correct_energy_momentum) {
                 // Check if ux_n was added.
-                std::vector<std::string> const & real_names1 = species_1.GetRealSoANames();
-                auto const pos1 = std::find(real_names1.begin(), real_names1.end(), "ux_n");
-                if (pos1 != real_names1.end()) {
-                    int const n_builtin_real = PIdx::nattribs;
-                    auto const u1x_ni = static_cast<int>(std::distance(real_names1.begin(), pos1));
-                    int const u1x_runtime_ni = u1x_ni - n_builtin_real;
-                    u1x_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni];
-                    u1y_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni + 1];
-                    u1z_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni + 2];
+                // Take the pointers from the tile's SoA, not from soa_1.m_runtime_rdata:
+                // on GPU that pointer array is device memory, so reading it here on
+                // the host segfaults. Look each component up by name rather than
+                // assuming uy_n and uz_n follow ux_n.
+                auto & soa_tile_1 = ptile_1.GetStructOfArrays();
+                if (species_1.HasRealComp("ux_n")) {
+                    u1x_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("ux_n")).dataPtr();
+                    u1y_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("uy_n")).dataPtr();
+                    u1z_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("uz_n")).dataPtr();
                 } else {
                     u1x_before.resize(np1);
                     u1y_before.resize(np1);
@@ -1032,15 +1032,15 @@ public:
             amrex::ParticleReal* AMREX_RESTRICT u1z_before_ptr = nullptr;
             if (m_correct_energy_momentum) {
                 // Check if ux_n was added.
-                std::vector<std::string> const & real_names1 = species_1.GetRealSoANames();
-                auto const pos1 = std::find(real_names1.begin(), real_names1.end(), "ux_n");
-                if (pos1 != real_names1.end()) {
-                    int const n_builtin_real = PIdx::nattribs;
-                    auto const u1x_ni = static_cast<int>(std::distance(real_names1.begin(), pos1));
-                    int const u1x_runtime_ni = u1x_ni - n_builtin_real;
-                    u1x_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni];
-                    u1y_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni + 1];
-                    u1z_before_ptr = soa_1.m_runtime_rdata[u1x_runtime_ni + 2];
+                // Take the pointers from the tile's SoA, not from soa_1.m_runtime_rdata:
+                // on GPU that pointer array is device memory, so reading it here on
+                // the host segfaults. Look each component up by name rather than
+                // assuming uy_n and uz_n follow ux_n.
+                auto & soa_tile_1 = ptile_1.GetStructOfArrays();
+                if (species_1.HasRealComp("ux_n")) {
+                    u1x_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("ux_n")).dataPtr();
+                    u1y_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("uy_n")).dataPtr();
+                    u1z_before_ptr = soa_tile_1.GetRealData(species_1.GetRealCompIndex("uz_n")).dataPtr();
                 } else {
                     u1x_before.resize(np1);
                     u1y_before.resize(np1);
@@ -1059,15 +1059,15 @@ public:
             amrex::ParticleReal* AMREX_RESTRICT u2z_before_ptr = nullptr;
             if (m_correct_energy_momentum) {
                 // Check if ux_n was added.
-                std::vector<std::string> const & real_names2 = species_2.GetRealSoANames();
-                auto const pos2 = std::find(real_names2.begin(), real_names2.end(), "ux_n");
-                if (pos2 != real_names2.end()) {
-                    int const n_builtin_real = PIdx::nattribs;
-                    auto const u2x_ni = static_cast<int>(std::distance(real_names2.begin(), pos2));
-                    int const u2x_runtime_ni = u2x_ni - n_builtin_real;
-                    u2x_before_ptr = soa_2.m_runtime_rdata[u2x_runtime_ni];
-                    u2y_before_ptr = soa_2.m_runtime_rdata[u2x_runtime_ni + 1];
-                    u2z_before_ptr = soa_2.m_runtime_rdata[u2x_runtime_ni + 2];
+                // Take the pointers from the tile's SoA, not from soa_2.m_runtime_rdata:
+                // on GPU that pointer array is device memory, so reading it here on
+                // the host segfaults. Look each component up by name rather than
+                // assuming uy_n and uz_n follow ux_n.
+                auto & soa_tile_2 = ptile_2.GetStructOfArrays();
+                if (species_2.HasRealComp("ux_n")) {
+                    u2x_before_ptr = soa_tile_2.GetRealData(species_2.GetRealCompIndex("ux_n")).dataPtr();
+                    u2y_before_ptr = soa_tile_2.GetRealData(species_2.GetRealCompIndex("uy_n")).dataPtr();
+                    u2z_before_ptr = soa_tile_2.GetRealData(species_2.GetRealCompIndex("uz_n")).dataPtr();
                 } else {
                     u2x_before.resize(np2);
                     u2y_before.resize(np2);
