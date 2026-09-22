@@ -682,14 +682,9 @@ namespace ParticleUtils {
                                   const amrex::Gpu::DeviceVector<int>& d_error_z,
                                   const int max_grid_crossings)
     {
-        // These counters live in device memory, so they must be copied back
-        // rather than subscripted on the host.
-        int h_error_x = 0;
-        int h_error_y = 0;
-        int h_error_z = 0;
-        amrex::Gpu::dtoh_memcpy(&h_error_x, d_error_x.dataPtr(), sizeof(int));
-        amrex::Gpu::dtoh_memcpy(&h_error_y, d_error_y.dataPtr(), sizeof(int));
-        amrex::Gpu::dtoh_memcpy(&h_error_z, d_error_z.dataPtr(), sizeof(int));
+        const int h_error_x = d_error_x[0];
+        const int h_error_y = d_error_y[0];
+        const int h_error_z = d_error_z[0];
 
         if (h_error_x > 0 || h_error_y > 0 || h_error_z > 0) {
             std::string error_msg = "Villasenor deposition error: particles exceeded max_grid_crossings.\n";
