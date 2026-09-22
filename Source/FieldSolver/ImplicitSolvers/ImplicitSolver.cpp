@@ -917,6 +917,14 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         ApplyAdjointGatherGhosts();
     }
 
+    // Particle gathers read the auxiliary fields. These are separate nodal
+    // buffers for momentum-conserving gathers, so updating the solver fields
+    // alone leaves stale data in both residuals and Jacobian probes. Refresh
+    // after all gather-source boundary/filter modifications on every
+    // evaluation.
+    m_WarpX->UpdateAuxiliaryData();
+    m_WarpX->FillBoundaryAux(m_WarpX->getngUpdateAux());
+
     // Advance the particle positions by 1/2 dt,
     // particle velocities by dt, then take average of old and new v,
     // deposit currents, giving J at n+1/2

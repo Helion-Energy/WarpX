@@ -4236,22 +4236,53 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma hyper-resistivity in :math:`\Omega m^3`.
 
-    **This is a numerical stabiliser, not a transport coefficient, and its
-    dissipation is deliberately not booked as heating.** :math:`\eta_H` exists
-    to damp unphysical (typically grid-scale) modes; its magnitude is chosen
-    for stability, so the energy it removes has no claim on the electron
+    **By default this is a numerical stabiliser, not a transport coefficient,
+    and its dissipation is not booked as heating.** :math:`\eta_H` exists
+    to damp unphysical (typically grid-scale) modes; when its magnitude is chosen
+    for stability, the energy it removes has no claim on the electron
     internal energy and no channel returns it to the plasma. Its power is
-    reported — never booked — in the ``P_etaH`` column of the
+    reported in the ``P_etaH`` column of the
     :ref:`HybridDissipation <reduced-diags>` reduced diagnostic.
 
     Because :math:`u_e \approx -J/(e n_e)`, this term has the same
     :math:`\nabla^2`-on-the-current form as the *physical* electron viscosity
     (:pp:param:`hybrid_pic_model.qdsmc_viscosity_model`), and the two differ
     entirely in the coefficient. They are kept as separate terms, separate
-    inputs and separate diagnostic columns for exactly that reason. If a run
-    needs physical viscous dissipation booked into the electron energy
-    equation, enable the viscosity model; do not route :math:`\eta_H` into
-    the energy equation.
+    inputs and separate diagnostic columns for exactly that reason. The
+    :math:`\eta_H` channel can, however, carry a *physical* isotropic
+    coefficient -- the Prandtl-capped value
+    :math:`\eta_{H,\mathrm{phys}} = m_e \nu_{\rm cap}/(e^2 n_e) = m_e \nu_{\rm cap}/(e \rho)`
+    (:math:`5.68\times10^{-12}\,\nu_{\rm cap}[\mathrm{m^2/s}]/\rho[\mathrm{C/m^3}]`) --
+    provided the work it extracts from the current is returned to the electrons
+    with :pp:param:`hybrid_pic_model.hyper_resistivity_heating`. An isotropic
+    electron viscosity is unphysical at the magnetisations of the hybrid targets
+    (see the viscosity model); this is the balanced stand-in until the
+    anisotropic drag is in Ohm's law.
+
+.. pp:param:: hybrid_pic_model.hyper_resistivity_heating
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Book the hyper-resistive dissipation into the electron energy equation.
+    When on, the work the :math:`\eta_H` drag extracts from the current,
+    :math:`Q_H = \boldsymbol{J}\cdot\boldsymbol{E}_H` (globally
+    :math:`+\int \eta_H |\nabla\times\boldsymbol{J}|^2\,dV` in the curl-curl form,
+    :math:`+\int \eta_H |\nabla\boldsymbol{J}|^2\,dV` in the Laplacian form -- the
+    magnetic energy Faraday's law removes), is deposited into :math:`T_e` once per
+    source stage. :math:`\boldsymbol{E}_H` is taken from the E-solve's own kernels
+    (one extra Ohm's-law evaluation per stage), so drag and heating share one
+    stencil and balance by construction; the ions never see :math:`\boldsymbol{E}_H`
+    (the push field is solved without it), so the whole field-energy loss belongs to
+    the electrons. Deposited under the same density gate and one-node-inside rule as
+    the Joule source; the pointwise work is not sign-definite, and a node the deposit
+    would carry below the :math:`T_e` floor is clamped there with the created energy
+    tallied on the ledger line (``hyp_clamp``). Ledger columns ``hyp_bulk`` /
+    ``hyp_band`` (appended to the ``energy_budget_J`` line) and the reduced-diag
+    column ``P_etaH_booked`` make the channel attributable. Requires a nonzero
+    :pp:param:`hybrid_pic_model.plasma_hyper_resistivity(rho,B)` and
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation`. Off (the default)
+    is bit-identical to the legacy unbooked stabiliser.
 
 .. pp:param:: hybrid_pic_model.hyper_resistivity_curlcurl
     :type: ``bool``
@@ -5107,6 +5138,86 @@ Maxwell solver: kinetic-fluid hybrid
     ``smart`` and ``sh`` families reconstruct *fluxes* and have no meaning for an algebraic source with
     no flux divergence, so they are not offered here; naming one is an error rather than a silent
     fallback. ``mc`` is the inner limiter of the ``sh`` family, i.e. the same primitive.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_in_ohms_law
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Apply the Braginskii electron viscous *stress* in Ohm's law,
+    :math:`\boldsymbol{E}_\mathrm{visc} = -\nabla\cdot\Pi_e/(e\,n_\mathrm{eff})`, in the Faraday
+    E-solves (the particle-push field excludes it, like the hyper-resistivity, so the ions never see it
+    and the whole field-energy loss :math:`\boldsymbol{J}\cdot\boldsymbol{E}_\mathrm{visc}` belongs to
+    the electrons). The stress
+    :math:`\Pi_e = -\mu_\perp W - \tfrac{3}{2}(\mu_\parallel - \mu_\perp)\,S\,(\hat b\hat b - I/3)`,
+    :math:`W = \nabla u_e + \nabla u_e^T - \tfrac{2}{3}(\nabla\cdot u_e) I`, :math:`S = \hat b\cdot W\cdot\hat b`,
+    is built on the nodal grid from the **same** electron velocity, gradients (limiter) and capped,
+    flux-limited coefficients as the booked heating of
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_model`, so that :math:`-\Pi_e:\nabla u_e` equals the
+    booked :math:`Q_\nu` at every node and, globally,
+    :math:`\int \boldsymbol{J}\cdot\boldsymbol{E}_\mathrm{visc}\,dV = \int Q_\nu\,dV + \int \Pi_e:\nabla u_i\,dV`
+    (the last term is the ion-strain work, zero for ions at rest). This is what makes the booked viscous
+    heating consistent with the field work. Heating without the corresponding drag creates energy.
+    The drag is the exact
+    adjoint of the gradient chain: the nodal :math:`F = -\nabla_c\cdot\Pi_e/\max(\rho,\rho_\mathrm{floor})`
+    (centred nodal divergence over the same floored nodal :math:`\rho` that built :math:`u_e`) is
+    averaged node-to-edge (the transpose of the edge-to-node average that built :math:`u_e` from
+    :math:`\boldsymbol{J}`), so with centred gradients
+    :math:`\sum_\mathrm{edges}\boldsymbol{J}\cdot\boldsymbol{E}_\mathrm{visc} = \sum_\mathrm{nodes} Q_\nu`
+    holds discretely for ions at rest, with the appropriate volume weights and boundary projection;
+    for that reason the drag requires
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_limiter` = ``none`` (asserted). The ledger line gains
+    ``visc_work_bulk/band`` (cumulative :math:`\boldsymbol{J}\cdot\boldsymbol{E}_\mathrm{visc}`),
+    ``visc_qnu_bulk/band`` (cumulative :math:`Q_\nu`), ``visc_clamp`` and the per-step ratio
+    ``visc_work_over_qnu``; the :ref:`HybridDissipation <reduced-diags>` diag gains ``P_visc_work``.
+    The boot banner prints an explicit-substep estimate from
+    :math:`\eta_\mathrm{eff} = m_e\nu_\mathrm{max}/(e^2 n_\mathrm{floor})` and raises the initial
+    :pp:param:`hybrid_pic_model.substeps` to it when the deck value is below. Non-finite states or
+    gradients gate a node off. Implemented for Cartesian 3D and single-level axisymmetric RZ
+    (Yee grid, :math:`r_\mathrm{min}=0`, no embedded boundary). The RZ path uses cylindrical dual-cell
+    volumes, axis parity and the same PEC tangential-edge projection in the velocity and force.
+    Other reduced geometries are unsupported. Requires :pp:param:`hybrid_pic_model.qdsmc_viscosity_model` other than
+    ``none``.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_heating
+    :type: ``str``
+    :default: ``work``
+    :optional:
+
+    What the viscous channel deposits into :math:`T_e` when
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_in_ohms_law` is on. ``work`` (default) books the drag work
+    :math:`\boldsymbol{J}\cdot\boldsymbol{E}_\mathrm{visc}` itself -- exactly the energy the field lost;
+    not sign-definite pointwise (a node the deposit would carry below the :math:`T_e` floor is clamped
+    and the created energy tallied as ``visc_clamp``). ``strain`` books
+    :math:`Q_\nu = -\Pi_e:\nabla u_e`, the positive-definite local heating, which is **not conserving**
+    in this model: with :math:`u_e = u_i - \boldsymbol{J}/\rho` the ion-strain work
+    :math:`\int\Pi_e:\nabla u_i\,dV` (on a particle code, the shot-noise shear of :math:`u_i`) is paid by
+    no channel while the push field excludes :math:`\boldsymbol{E}_\mathrm{visc}`.
+    In either form the other quantity is still measured and printed.
+    Both viscous deposits convert with the heat capacity of the state the ledger measures: with
+    :pp:param:`hybrid_pic_model.density_pedestal` that is :math:`U_e = \tfrac{3}{2}(n_e + n_\mathrm{ped}) k_B T_e`,
+    so the bracketed ``visc_bulk`` equals the deposited ``visc_work_bulk`` (work form) to round-off on every
+    ledger line -- that equality, not the ratio ``visc_work_over_qnu`` (which is the ion-strain share with
+    moving ions), is the gate when no clamp or masked-node loss occurs. Converting with :math:`n_e`
+    alone would overcount the heat stored by the pedestal.
+
+    The theta-implicit path requires the segregated thermal iteration and :math:`\theta=1/2`.
+    Its inner residuals freeze the ion current; the outer convergence check includes its defect.
+    Source trials and accepted booking use the force's midpoint temperature and magnetic direction.
+    Accepted heating converts with the endpoint heat capacity, and trial evaluations do not
+    increment accepted work or clamp counters. These discrete identities do not remove temporal
+    integration error or qualify a production timestep.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_taper_n
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Edge taper density in :math:`\mathrm{m^{-3}}` for the viscous coefficients: a :math:`C^1`
+    smoothstep from 0 at :math:`n \le n_\mathrm{taper}` to 1 at :math:`n \ge 2 n_\mathrm{taper}` applied to
+    both :math:`\mu_\parallel` and :math:`\mu_\perp`, so :math:`Q_\nu` and :math:`\Pi_e` scale together and
+    the energy identity is untouched. Removes the O(1) jump of :math:`\Pi_e` at the density gate that
+    otherwise makes :math:`\nabla\cdot\Pi_e/\rho_\mathrm{floor}` the largest drag in the run.
 
 .. pp:param:: hybrid_pic_model.Te_shunt_threshold
     :type: ``float``

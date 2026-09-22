@@ -200,6 +200,117 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# BOOKED hyper-resistive dissipation (hybrid_pic_model.hyper_resistivity_heating):
+# a single current mode in a 3D periodic box decays under eta_H alone, and the
+# magnetic energy Faraday removes must reappear as the hyp_bulk/hyp_band ledger
+# columns (and as the time integral of the P_etaH_booked reduced-diag column).
+# This Cartesian arm uses the component Laplacian form.
+# The analysis reads the run's stdout, so the test captures it to run.log.
+add_warpx_test(
+    test_3d_ohm_solver_hyper_res_heating  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_hyper_res_heating amrex.omp_threads=1 > run.log"  # inputs
+    "analysis_hyper_res_heating.py run.log"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The RZ curl-curl extension is exercised below. The Cartesian
+# curl-curl implementation is not part of this change.
+
+# RZ hyper-resistive vacuum relaxation (curl-curl form, PEC wall): exercises
+# the cylindrical hyper-resistive kernels with the EH_out mirror absent. Its
+# value is the checksum -- the fixture is the bit-identity arm of the booking
+# change (compare against a pre-change binary by hand; see the 2026-09-22
+# evisc-drag report).
+add_warpx_test(
+    test_rz_ohm_solver_hyper_res_vacuum  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_ohm_solver_hyper_res_vacuum  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Braginskii electron viscous DRAG in Ohm's law (qdsmc_viscosity_in_ohms_law),
+# energy-balanced with the booked heating. Isotropic arm: the drag on a single
+# divergence-free current mode reduces exactly to a hyper-resistivity with
+# eta_eff = m_e nu/(e^2 n0); the mode decays at the discrete-symbol rate
+# eta_eff kc^2 ky^2/mu0 (T1/T3) and the booked Q_nu, the drag work J.E_visc
+# and the magnetic energy lost agree (T2). Second arm books the work itself.
+# Third arm tilts B 45 deg with nu_perp = 1e-3 nu_par (anisotropic closure).
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag > run.log"  # inputs
+    "analysis_viscous_drag.py run.log"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag_work  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag hybrid_pic_model.qdsmc_viscosity_heating=work > run.log"  # inputs
+    "analysis_viscous_drag.py run.log"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag_aniso  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag warpx.Bx_external_grid_function(x,y,z)=0.0707106781186548 warpx.By_external_grid_function(x,y,z)=0.005*sin(41.887902047863905*x) warpx.Bz_external_grid_function(x,y,z)=0.0707106781186548 hybrid_pic_model.qdsmc_nu_perp(n,Te,B)=0.2817 > run.log"  # inputs
+    "analysis_viscous_drag.py run.log --aniso"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Density-pedestal arms: uniform pedestal 5 pct of n0 with the ion density
+# dipping to 0.04 n0 (below the pedestal, above n_floor 0.02 n0). The ledger
+# state is U_e = 1.5 (n_e + n_ped) kB Te, so a deposit converted with n_e alone
+# would raise U by n_eff/n_e; with the state's
+# heat capacity the bracketed visc_bulk equals the deposited visc_work_bulk to
+# round-off -- the gate the orchestrator reads.
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag_pedestal  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag hybrid_pic_model.qdsmc_viscosity_heating=work hybrid_pic_model.density_pedestal=1 hybrid_pic_model.density_pedestal_profile(x,y,z)=5.0e17 hybrid_pic_model.n_floor=2.0e17 ions.profile=parse_density_function ions.density_function(x,y,z)=1.0e19*(0.52+0.48*cos(20.943951023931955*x)) > run.log"  # inputs
+    "analysis_viscous_drag.py run.log --aniso"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag_pedestal_strain  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag hybrid_pic_model.qdsmc_viscosity_heating=strain hybrid_pic_model.density_pedestal=1 hybrid_pic_model.density_pedestal_profile(x,y,z)=5.0e17 hybrid_pic_model.n_floor=2.0e17 ions.profile=parse_density_function ions.density_function(x,y,z)=1.0e19*(0.52+0.48*cos(20.943951023931955*x)) > run.log"  # inputs
+    "analysis_viscous_drag.py run.log --aniso"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Compressive / 2D arm: B_z(x,y) gives J_x and J_y with G_xx = -G_yy != 0, so
+# the diagonal legs of div Pi and the 2D transposition are exercised (the
+# arms above vary along x only). Strain and work must still agree to
+# round-off -- this is the arm that exposes a non-adjoint diagonal stencil.
+add_warpx_test(
+    test_3d_ohm_solver_viscous_drag_compressive  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_viscous_drag warpx.Bz_external_grid_function(x,y,z)=0.1+0.005*cos(41.887902047863905*x)*cos(83.77580409572781*y) warpx.const_dt=4.0e-9 > run.log"  # inputs
+    "analysis_viscous_drag.py run.log --aniso"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Insulating EB wall (boundary.eb_type = insulating) with the electron energy
 # equation. Entropy-drift tolerances are set from measured values with margin:
 # at rest the open-set drift is a saturating step-1 transient (-1.1e-4 at both

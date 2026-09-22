@@ -260,6 +260,13 @@ WarpX::Evolve (int numsteps)
             t_old[i] = t_new[i];
             t_new[i] = cur_time;
         }
+        if (m_implicit_solver) {
+            // Publish the accepted endpoint to gather/diagnostic buffers even
+            // when no full field output is scheduled. Implicit residuals leave
+            // these buffers at their last trial state.
+            UpdateAuxiliaryData();
+            FillBoundaryAux(guard_cells.ng_UpdateAux);
+        }
         multi_diags->FilterComputePackFlush( step, false, true );
 
         const bool move_j = m_is_synchronized;

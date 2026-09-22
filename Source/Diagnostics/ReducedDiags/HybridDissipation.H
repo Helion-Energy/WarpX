@@ -90,7 +90,22 @@
  * number.
  *
  * Columns: P_eta [W], P_etaH [W], P_diss = P_eta + P_etaH + P_nu [W],
- *          P_nu [W], beta_i_over_4 [-], F_gyro [-].
+ *          P_nu [W], beta_i_over_4 [-], F_gyro [-], P_etaH_booked [W],
+ *          P_visc_work [W].
+ *
+ * P_visc_work (appended 2026-09-22) is the volume integral of the viscous
+ * drag work J . E_visc (hybrid_qdsmc_visc_work_fp, written by
+ * HybridPICModel::QDSMCAddViscousDragWork from the E_visc the E-solve applied)
+ * when hybrid_pic_model.qdsmc_viscosity_in_ohms_law is on, zero otherwise; read
+ * it against P_nu. Not folded into P_diss (P_nu already carries the channel).
+ *
+ * P_etaH_booked (appended 2026-09-22) is the volume integral of the solver's
+ * own booked hyper-resistive work Q_H = J . E_H (hybrid_qdsmc_hyper_heating_fp,
+ * written by HybridPICModel::QDSMCAddHyperResistiveHeating from the E_H the
+ * E-solve actually applied) when hybrid_pic_model.hyper_resistivity_heating
+ * is on, zero otherwise. It is NOT folded into P_diss, which already carries
+ * the re-derived P_etaH. Under hyper_resistivity_curl_curl it is the only
+ * correct hyper-resistive power in the file (see the limitation below).
  *
  * P_nu sits AFTER the total rather than beside the channels it belongs with,
  * deliberately: this file is read positionally across repositories, so columns
@@ -103,6 +118,13 @@
  * skipped on the outermost cell ring of the domain (boundary-condition
  * dependent there); the eta term covers the full domain. Nodal-staggered
  * components use owner masks so shared points count once.
+ *
+ * Geometry: implemented for RZ (cylindrical Yee stencils, 2 pi r dr dz
+ * control volumes with the axis ring at its centroid, both from
+ * QdsmcVolumeElement.H) and for the Cartesian geometries (3D, with 2D-XZ
+ * and 1D reducing through the Cartesian Yee helpers; constant prod(dx)
+ * control volume). The columns, their order and their meaning are the same
+ * in every geometry.
  *
  * KNOWN LIMITATION -- P_etaH under hyper_resistivity_curl_curl. The P_etaH
  * integrand is the component-wise vector Laplacian form -eta_H J.lap(J),

@@ -11,6 +11,8 @@
 #include "EmbeddedBoundary/Enabled.H"
 #if defined(WARPX_DIM_RZ)
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_1D_Z)
+#include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CartesianYeeAlgorithm.H"
 #endif
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
@@ -41,69 +43,80 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
-#if defined(WARPX_DIM_RZ)
+// The diagnostic is implemented for RZ (cylindrical Yee stencils and control
+// volumes) and for the Cartesian geometries (Cartesian Yee stencils, constant
+// cell volume); the spherical / 1D-radial geometries have no hybrid E solve.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || \
+    defined(WARPX_DIM_1D_Z)
+#define WARPX_HYBRID_DISSIPATION_ENABLED 1
+#endif
+
+#if defined(WARPX_HYBRID_DISSIPATION_ENABLED)
 namespace
 {
-    /** Domain mean of f^2 at one Yee component's OWN staggering.
-     *
-     * The f^2 dV and dV sums are accumulated together and returned as a
-     * ratio, so the mean is exact at whatever centring the component carries.
-     * Normalising instead by an analytic domain volume would bias any
-     * radially nodal component at O(1/N_r), because the RZ element gives the
-     * on-axis ring only its half cell. An owner mask keeps nodal points
-     * shared between boxes from counting twice. \p mf_add, when given, is
-     * added pointwise to \p mf first -- the external-split path, where
-     * Bfield_fp carries only the plasma part of B.
-     */
-    amrex::Real
-    DomainMeanSquare (amrex::MultiFab const & mf,
-                      amrex::Geometry const & geom,
-                      amrex::MultiFab const * mf_add = nullptr)
-    {
-        const QdsmcVolumeElement vol = MakeQdsmcVolumeElement(geom, mf.ixType());
-        const auto mask = amrex::OwnerMask(mf, geom.periodicity());
+/** Domain mean of f^2 at one Yee component's OWN staggering.
+ *
+ * The f^2 dV and dV sums are accumulated together and returned as a
+ * ratio, so the mean is exact at whatever centring the component carries.
+ * Normalising instead by an analytic domain volume would bias any
+ * radially nodal component at O(1/N_r), because the RZ element gives the
+ * on-axis ring only its half cell (in Cartesian geometry the element is
+ * the constant cell volume and the ratio is the plain mean). An owner
+ * mask keeps nodal points
+ * shared between boxes from counting twice. \p mf_add, when given, is
+ * added pointwise to \p mf first -- the external-split path, where
+ * Bfield_fp carries only the plasma part of B.
+ */
+amrex::Real
+DomainMeanSquare (amrex::MultiFab const& mf, amrex::Geometry const& geom,
+                  amrex::MultiFab const* mf_add = nullptr) {
+    const QdsmcVolumeElement vol = MakeQdsmcVolumeElement(geom, mf.ixType());
+    const auto mask = amrex::OwnerMask(mf, geom.periodicity());
 
-        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
-        using ReduceTuple = typename decltype(reduce_data)::Type;
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
 
-        for (amrex::MFIter mfi(mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            const amrex::Box box = mfi.tilebox();
-            const auto f = mf.const_array(mfi);
-            const auto f_add = (mf_add != nullptr)
-                ? mf_add->const_array(mfi) : amrex::Array4<const Real>{};
-            const auto own = mask->const_array(mfi);
+    for (amrex::MFIter mfi(mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.tilebox();
+        const auto f = mf.const_array(mfi);
+        const auto f_add = (mf_add != nullptr) ? mf_add->const_array(mfi)
+                                               : amrex::Array4<const Real>{};
+        const auto own = mask->const_array(mfi);
 
-            reduce_op.eval(box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
-                {
-                    if (own(i, j, 0) == 0) { return {0.0_rt, 0.0_rt}; }
-                    const Real dV = vol(i, j);
-                    Real fv = f(i, j, 0);
-                    if (f_add) { fv += f_add(i, j, 0); }
-                    return {fv*fv*dV, dV};
-                });
-        }
-
-        const auto rt = reduce_data.value(reduce_op);
-        amrex::Real rv[2] = {amrex::get<0>(rt), amrex::get<1>(rt)};
-        amrex::ParallelDescriptor::ReduceRealSum(rv, 2);
-        return (rv[1] > 0.0_rt) ? rv[0]/rv[1] : 0.0_rt;
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                if (own(i, j, k) == 0) {
+                    return {0.0_rt, 0.0_rt};
+                }
+                const Real dV = vol(i, j, k);
+                Real fv = f(i, j, k);
+                if (f_add) {
+                    fv += f_add(i, j, k);
+                }
+                return {fv * fv * dV, dV};
+            });
     }
+
+    const auto rt = reduce_data.value(reduce_op);
+    amrex::Real rv[2] = {amrex::get<0>(rt), amrex::get<1>(rt)};
+    amrex::ParallelDescriptor::ReduceRealSum(rv, 2);
+    return (rv[1] > 0.0_rt) ? rv[0] / rv[1] : 0.0_rt;
+}
 }
 #endif
 
 HybridDissipation::HybridDissipation (const std::string& rd_name)
     : ReducedDiags{rd_name}
 {
-#if !defined(WARPX_DIM_RZ)
+#if !defined(WARPX_HYBRID_DISSIPATION_ENABLED)
     WARPX_ABORT_WITH_MESSAGE(
         "the HybridDissipation reduced diagnostic is implemented for RZ "
-        "geometry");
+        "and Cartesian (1D, 2D, 3D) geometry");
 #endif
 
-    m_data.resize(6, 0.0_rt);
+    m_data.resize(8, 0.0_rt);
 
     if (amrex::ParallelDescriptor::IOProcessor() && m_write_header) {
         std::ofstream ofs{m_path + m_rd_name + "." + m_extension,
@@ -126,6 +139,19 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         // last for the same positional-reader reason as P_nu above.
         ofs << m_sep << "[" << c++ << "]beta_i_over_4()";
         ofs << m_sep << "[" << c++ << "]F_gyro()";
+        // Booked hyper-resistive work (hyper_resistivity_heating): the volume
+        // integral of the solver's own Q_H = J . E_H field, i.e. the reading
+        // P_etaH SHOULD give -- correct under hyper_resistivity_curl_curl,
+        // where the re-derived P_etaH is not. Not folded into P_diss (that
+        // already carries P_etaH; folding both would double count the
+        // channel). Zero when the booking is off. Appended, never inserted.
+        ofs << m_sep << "[" << c++ << "]P_etaH_booked(W)";
+        // Viscous drag work (qdsmc_viscosity_in_ohms_law): the volume
+        // integral of the solver's own J . E_visc field, to be read against
+        // P_nu (the strain heating). Equal in the periodic isotropic limit;
+        // their difference is the ion-strain work + discretisation. Not
+        // folded into P_diss (P_nu already carries the viscous channel).
+        ofs << m_sep << "[" << c++ << "]P_visc_work(W)";
         ofs << "\n";
         ofs.close();
     }
@@ -135,7 +161,7 @@ void
 HybridDissipation::ComputeDiags (const int step)
 {
     if (!DoDiags(step)) { return; }
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_HYBRID_DISSIPATION_ENABLED)
     using namespace ablastr::coarsen::sample;
 
     auto& warpx = WarpX::GetInstance();
@@ -173,6 +199,12 @@ HybridDissipation::ComputeDiags (const int step)
         static bool warned = false;
         if (!warned) {
             warned = true;
+            // High priority when the mismatched column is the only
+            // hyper-resistive reading in the file; medium once the booking
+            // supplies P_etaH_booked from the solver's own E_H (the trap the
+            // warning guards against -- a silently wrong power -- is then
+            // labelled rather than hidden, and a deck that aborts on high
+            // warnings can still run the curl-curl form with booking).
             ablastr::warn_manager::WMRecordWarning(
                 "HybridDissipation",
                 "hybrid_pic_model.hyper_resistivity_curl_curl is on, but the "
@@ -180,8 +212,13 @@ HybridDissipation::ComputeDiags (const int step)
                 "form -eta_H J.lap(J), not the curl-curl dissipation "
                 "+Int eta_H |curl J|^2 that the solver actually applies. The "
                 "P_etaH reading does not correspond to this run's "
-                "hyper-resistive dissipation; P_eta and P_nu are unaffected.",
-                ablastr::warn_manager::WarnPriority::high);
+                "hyper-resistive dissipation; P_eta and P_nu are unaffected. "
+                "With hybrid_pic_model.hyper_resistivity_heating = 1 the "
+                "P_etaH_booked column integrates the solver's own J.E_H and "
+                "is the correct reading.",
+                hybrid->m_hyper_res_heating
+                    ? ablastr::warn_manager::WarnPriority::medium
+                    : ablastr::warn_manager::WarnPriority::high);
         }
     }
 
@@ -211,13 +248,15 @@ HybridDissipation::ComputeDiags (const int step)
 
     const auto& geom = warpx.Geom(lev);
     const auto dx = geom.CellSizeArray();
-    const amrex::Real dr = dx[0];
-    const amrex::Real dz = dx[1];
-    const amrex::Real rmin = geom.ProbLo(0);
     const auto dom_lo = amrex::lbound(geom.Domain());
     const auto dom_hi = amrex::ubound(geom.Domain());
 
-    // The stencil coefficients are the inverse cell sizes (cylindrical Yee)
+    // The stencil coefficients are the inverse cell sizes of this geometry's
+    // Yee algorithm -- the same ones the Ohm's-law kernels use.
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real dr = dx[0];
+    const amrex::Real dz = dx[1];
+    const amrex::Real rmin = geom.ProbLo(0);
     std::array<amrex::Real, 3> cell_size = {dx[0], 0.0_rt, dx[1]};
     amrex::Vector<amrex::Real> hc_r, hc_z;
     CylindricalYeeAlgorithm::InitializeStencilCoefficients(cell_size,
@@ -232,6 +271,35 @@ HybridDissipation::ComputeDiags (const int step)
     const auto n_coefs_r = static_cast<int>(dv_r.size());
     const amrex::Real* coefs_z = dv_z.data();
     const auto n_coefs_z = static_cast<int>(dv_z.size());
+#else
+    // Cartesian: cell_size in the WarpX::CellSize convention (absent
+    // directions carry 1, and their stencil helpers return 0 anyway).
+#if defined(WARPX_DIM_3D)
+    std::array<amrex::Real, 3> cell_size = {dx[0], dx[1], dx[2]};
+#elif defined(WARPX_DIM_XZ)
+    std::array<amrex::Real, 3> cell_size = {dx[0], 1.0_rt, dx[1]};
+#else
+    std::array<amrex::Real, 3> cell_size = {1.0_rt, 1.0_rt, dx[0]};
+#endif
+    amrex::Vector<amrex::Real> hc_x, hc_y, hc_z;
+    CartesianYeeAlgorithm::InitializeStencilCoefficients(cell_size, hc_x, hc_y,
+                                                         hc_z);
+    amrex::Gpu::DeviceVector<amrex::Real> dv_x(hc_x.size()), dv_y(hc_y.size()),
+        dv_z(hc_z.size());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, hc_x.begin(), hc_x.end(),
+                          dv_x.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, hc_y.begin(), hc_y.end(),
+                          dv_y.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, hc_z.begin(), hc_z.end(),
+                          dv_z.begin());
+    amrex::Gpu::streamSynchronize();
+    const amrex::Real* coefs_x = dv_x.data();
+    const auto n_coefs_x = static_cast<int>(dv_x.size());
+    const amrex::Real* coefs_y = dv_y.data();
+    const auto n_coefs_y = static_cast<int>(dv_y.size());
+    const amrex::Real* coefs_z = dv_z.data();
+    const auto n_coefs_z = static_cast<int>(dv_z.size());
+#endif
 
     const amrex::GpuArray<int, 3> nodal_iv = {1, 1, 1};
     const amrex::GpuArray<int, 3> coarsen_iv = {1, 1, 1};
@@ -253,7 +321,7 @@ HybridDissipation::ComputeDiags (const int step)
     for (int d = 0; d < 3; ++d) {
         const amrex::GpuArray<int, 3> self_stag =
             (d == 0) ? Jr_stag : ((d == 1) ? Jt_stag : Jz_stag);
-        const bool nodal_r = (self_stag[0] == 1);
+        [[maybe_unused]] const bool nodal_r = (self_stag[0] == 1);
         const QdsmcVolumeElement vol =
             MakeQdsmcVolumeElement(geom, J[d]->ixType());
         // owner mask so shared nodal points count once across boxes
@@ -289,104 +357,132 @@ HybridDissipation::ComputeDiags (const int step)
             }
             const int dcomp = d;
 
-            reduce_op.eval(box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
-                {
-                    if (own(i, j, 0) == 0) { return {0.0_rt, 0.0_rt}; }
-                    if (eb_flag && eb_flag(i, j, 0) == 0) {
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                    if (own(i, j, k) == 0) {
+                        return {0.0_rt, 0.0_rt};
+                    }
+                    if (eb_flag && eb_flag(i, j, k) == 0) {
                         return {0.0_rt, 0.0_rt};
                     }
 
-                    const Real jv = Jself(i, j, 0);
-                    const Real rho_val =
-                        Interp(rho_arr, nodal_iv, self_stag, coarsen_iv,
-                               i, j, 0, 0);
+                    const Real jv = Jself(i, j, k);
+                    const Real rho_val = Interp(rho_arr, nodal_iv, self_stag,
+                                                coarsen_iv, i, j, k, 0);
 
                     Real jtot_val = 0._rt;
                     if (has_J_dep) {
-                        const Real jr_v = (dcomp == 0) ? jv :
-                            Interp(Jr, Jr_stag, self_stag, coarsen_iv,
-                                   i, j, 0, 0);
-                        const Real jt_v = (dcomp == 1) ? jv :
-                            Interp(Jt, Jt_stag, self_stag, coarsen_iv,
-                                   i, j, 0, 0);
-                        const Real jz_v = (dcomp == 2) ? jv :
-                            Interp(Jz, Jz_stag, self_stag, coarsen_iv,
-                                   i, j, 0, 0);
+                        const Real jr_v = (dcomp == 0)
+                                              ? jv
+                                              : Interp(Jr, Jr_stag, self_stag,
+                                                       coarsen_iv, i, j, k, 0);
+                        const Real jt_v = (dcomp == 1)
+                                              ? jv
+                                              : Interp(Jt, Jt_stag, self_stag,
+                                                       coarsen_iv, i, j, k, 0);
+                        const Real jz_v = (dcomp == 2)
+                                              ? jv
+                                              : Interp(Jz, Jz_stag, self_stag,
+                                                       coarsen_iv, i, j, k, 0);
                         jtot_val = std::sqrt(jr_v*jr_v + jt_v*jt_v
                                              + jz_v*jz_v);
                     }
 
-                    // r at this component's radial staggering (the physics
-                    // below needs it); the control volume comes from the
-                    // shared element in QdsmcVolumeElement.H, which is the
-                    // same one the electron-energy budget integrates against
-                    // -- that is what makes the two ledgers comparable.
+                    // The control volume comes from the shared element in
+                    // QdsmcVolumeElement.H, which is the same one the
+                    // electron-energy budget integrates against -- that is
+                    // what makes the two ledgers comparable.
+                    const Real dV = vol(i, j, k);
+#if defined(WARPX_DIM_RZ)
+                    // r at this component's radial staggering (the
+                    // cylindrical Laplacian below needs it).
                     const Real r = nodal_r ? (rmin + i*dr)
                                            : (rmin + (i + 0.5_rt)*dr);
-                    const Real dV = vol(i, j);
+#endif
 
                     const Real eta_val =
-                        eta_has_Te
-                            ? eta_te(rho_val, jtot_val,
-                                     Interp(te_arr, nodal_iv, self_stag, coarsen_iv, i, j, 0, 0),
-                                     t_new)
-                            : eta(rho_val, jtot_val, t_new);
+                        eta_has_Te ? eta_te(rho_val, jtot_val,
+                                            Interp(te_arr, nodal_iv, self_stag,
+                                                   coarsen_iv, i, j, k, 0),
+                                            t_new)
+                                   : eta(rho_val, jtot_val, t_new);
                     const Real pe = eta_val * jv * jv * dV;
 
                     Real ph = 0._rt;
-                    const bool interior =
-                        (i > dom_lo.x) && (j > dom_lo.y) &&
-                        (i < dom_hi.x + self_stag[0]) &&
-                        (j < dom_hi.y + self_stag[1]);
+                    // One-cell-inside test in every simulated direction
+                    // (the stencil below reads one neighbour each way).
+                    bool interior =
+                        (i > dom_lo.x) && (i < dom_hi.x + self_stag[0]);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D)
+                    interior = interior && (j > dom_lo.y) &&
+                               (j < dom_hi.y + self_stag[1]);
+#endif
+#if defined(WARPX_DIM_3D)
+                    interior = interior && (k > dom_lo.z) &&
+                               (k < dom_hi.z + self_stag[2]);
+#endif
                     if (include_hyper && interior) {
                         Real btot_val = 0._rt;
                         if (has_B_dep) {
                             Real br_v = Interp(Br, Br_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                             Real bt_v = Interp(Bt, Bt_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                             Real bz_v = Interp(Bz, Bz_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                             if (Br_x) {
                                 br_v += Interp(Br_x, Br_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                                 bt_v += Interp(Bt_x, Bt_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                                 bz_v += Interp(Bz_x, Bz_stag, self_stag,
-                                               coarsen_iv, i, j, 0, 0);
+                                               coarsen_iv, i, j, k, 0);
                             }
                             btot_val = std::sqrt(br_v*br_v + bt_v*bt_v
                                                  + bz_v*bz_v);
                         }
 
+#if defined(WARPX_DIM_RZ)
                         using T_Algo = CylindricalYeeAlgorithm;
                         Real lap = 0._rt;
                         if (dcomp == 0) {
-                            lap = T_Algo::Dr_rDr_over_r(Jself, r, dr,
-                                      coefs_r, n_coefs_r, i, j, 0, 0)
-                                + T_Algo::Dzz(Jself, coefs_z, n_coefs_z,
-                                              i, j, 0, 0)
-                                - jv/(r*r);
+                            lap = T_Algo::Dr_rDr_over_r(Jself, r, dr, coefs_r,
+                                                        n_coefs_r, i, j, k, 0) +
+                                  T_Algo::Dzz(Jself, coefs_z, n_coefs_z, i, j,
+                                              k, 0) -
+                                  jv / (r * r);
                         } else if (dcomp == 1) {
                             if (r > 0.0_rt) {
                                 lap = T_Algo::Dr_rDr_over_r(Jself, r, dr,
-                                          coefs_r, n_coefs_r, i, j, 0, 0)
-                                    + T_Algo::Dzz(Jself, coefs_z,
-                                                  n_coefs_z, i, j, 0, 0)
-                                    - jv/(r*r);
+                                                            coefs_r, n_coefs_r,
+                                                            i, j, k, 0) +
+                                      T_Algo::Dzz(Jself, coefs_z, n_coefs_z, i,
+                                                  j, k, 0) -
+                                      jv / (r * r);
                             }
                         } else {
-                            lap = T_Algo::Dzz(Jself, coefs_z, n_coefs_z,
-                                              i, j, 0, 0);
+                            lap = T_Algo::Dzz(Jself, coefs_z, n_coefs_z, i, j,
+                                              k, 0);
                             if (r > 0.5_rt*dr) {
                                 lap += T_Algo::Dr_rDr_over_r(Jself, r, dr,
-                                           coefs_r, n_coefs_r, i, j, 0, 0);
+                                                             coefs_r, n_coefs_r,
+                                                             i, j, k, 0);
                             } else {
-                                lap += T_Algo::Drr(Jself, coefs_r,
-                                           n_coefs_r, i, j, 0, 0);
+                                lap += T_Algo::Drr(Jself, coefs_r, n_coefs_r, i,
+                                                   j, k, 0);
                             }
                         }
+#else
+                        // Cartesian component Laplacian, the stencil of
+                        // HybridPICSolveECartesian (absent directions
+                        // return 0).
+                        using T_Algo = CartesianYeeAlgorithm;
+                        const Real lap =
+                            T_Algo::Dxx(Jself, coefs_x, n_coefs_x, i, j, k) +
+                            T_Algo::Dyy(Jself, coefs_y, n_coefs_y, i, j, k) +
+                            T_Algo::Dzz(Jself, coefs_z, n_coefs_z, i, j, k);
+#endif
                         ph = -eta_h(rho_val, btot_val)*jv*lap*dV;
                     }
 
@@ -424,24 +520,97 @@ HybridDissipation::ComputeDiags (const int step)
             const auto q_arr = Qnu->const_array(mfi);
             const auto own = mask->const_array(mfi);
 
-            reduce_op.eval(box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
-                {
-                    if (own(i, j, 0) == 0) { return {0.0_rt}; }
-                    return {q_arr(i, j, 0) * vol(i, j)};
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                    if (own(i, j, k) == 0) {
+                        return {0.0_rt};
+                    }
+                    return {q_arr(i, j, k) * vol(i, j, k)};
                 });
         }
         p_nu = amrex::get<0>(reduce_data.value(reduce_op));
     }
 
+    // Booked hyper-resistive work. Like P_nu, NOT re-derived: the solver
+    // writes Q_H = J . E_H [W/m^3] (from the E_H it actually applied) to
+    // hybrid_qdsmc_hyper_heating_fp and this column integrates exactly that
+    // field. Under hyper_resistivity_curl_curl this is the only correct
+    // hyper-resistive power reading in the file.
+    amrex::Real p_eta_h_booked = 0.0_rt;
+    if (warpx.m_fields.has("hybrid_qdsmc_hyper_heating_fp", lev)) {
+        const amrex::MultiFab* Qh =
+            warpx.m_fields.get("hybrid_qdsmc_hyper_heating_fp", lev);
+        const QdsmcVolumeElement vol =
+            MakeQdsmcVolumeElement(geom, Qh->ixType());
+        const auto mask = amrex::OwnerMask(*Qh, geom.periodicity());
+
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (amrex::MFIter mfi(*Qh, amrex::TilingIfNotGPU()); mfi.isValid();
+             ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto q_arr = Qh->const_array(mfi);
+            const auto own = mask->const_array(mfi);
+
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                    if (own(i, j, k) == 0) {
+                        return {0.0_rt};
+                    }
+                    return {q_arr(i, j, k) * vol(i, j, k)};
+                });
+        }
+        p_eta_h_booked = amrex::get<0>(reduce_data.value(reduce_op));
+    }
+
+    // Viscous drag work J . E_visc, integrated from the solver's own nodal
+    // field exactly like P_nu and P_etaH_booked.
+    amrex::Real p_visc_work = 0.0_rt;
+    if (warpx.m_fields.has("hybrid_qdsmc_visc_work_fp", lev)) {
+        const amrex::MultiFab* Qw =
+            warpx.m_fields.get("hybrid_qdsmc_visc_work_fp", lev);
+        const QdsmcVolumeElement vol =
+            MakeQdsmcVolumeElement(geom, Qw->ixType());
+        const auto mask = amrex::OwnerMask(*Qw, geom.periodicity());
+
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (amrex::MFIter mfi(*Qw, amrex::TilingIfNotGPU()); mfi.isValid();
+             ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto q_arr = Qw->const_array(mfi);
+            const auto own = mask->const_array(mfi);
+
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                    if (own(i, j, k) == 0) {
+                        return {0.0_rt};
+                    }
+                    return {q_arr(i, j, k) * vol(i, j, k)};
+                });
+        }
+        p_visc_work = amrex::get<0>(reduce_data.value(reduce_op));
+    }
+
     amrex::ParallelDescriptor::ReduceRealSum(p_eta);
     amrex::ParallelDescriptor::ReduceRealSum(p_eta_h);
     amrex::ParallelDescriptor::ReduceRealSum(p_nu);
+    amrex::ParallelDescriptor::ReduceRealSum(p_eta_h_booked);
+    amrex::ParallelDescriptor::ReduceRealSum(p_visc_work);
 
     m_data[0] = p_eta;
     m_data[1] = p_eta_h;
     m_data[2] = p_eta + p_eta_h + p_nu;
     m_data[3] = p_nu;
+    m_data[6] = p_eta_h_booked;
+    m_data[7] = p_visc_work;
 
     // ---------------------------------------------------------------------
     // GYROVISCOSITY REQUIREMENT GATES. Diagnostics only: nothing below is
@@ -557,22 +726,23 @@ HybridDissipation::ComputeDiags (const int step)
             const auto uy = uys.const_array(mfi);
             const auto uz = uzs.const_array(mfi);
 
-            reduce_op.eval(box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
-                {
-                    const Real n_w = n_arr(i, j, 0);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> ReduceTuple {
+                    const Real n_w = n_arr(i, j, k);
                     if (n_w <= 0.0_rt) {
                         return {0.0_rt, 0.0_rt, 0.0_rt, 0.0_rt};
                     }
                     // proper velocity gamma*v back to v
-                    const Real u2 = ux(i, j, 0)*ux(i, j, 0)
-                                  + uy(i, j, 0)*uy(i, j, 0)
-                                  + uz(i, j, 0)*uz(i, j, 0);
+                    const Real u2 = ux(i, j, k) * ux(i, j, k) +
+                                    uy(i, j, k) * uy(i, j, k) +
+                                    uz(i, j, k) * uz(i, j, k);
                     const Real v2 = u2/(1.0_rt + u2*inv_c2);
-                    return {n_w*PhysConst::q_e*t_arr(i, j, 0), // Int n k_B T dV
-                            m_s*n_w,                           // Int rho_m dV
-                            m_s*n_w*v2,                        // Int rho_m u^2 dV
-                            q_s*n_w};                          // Int q_i n_i dV
+                    return {n_w * PhysConst::q_e *
+                                t_arr(i, j, k), // Int n k_B T dV
+                            m_s * n_w,          // Int rho_m dV
+                            m_s * n_w * v2,     // Int rho_m u^2 dV
+                            q_s * n_w};         // Int q_i n_i dV
                 });
         }
 
@@ -589,11 +759,15 @@ HybridDissipation::ComputeDiags (const int step)
     const QdsmcVolumeElement vol_cc =
         MakeQdsmcVolumeElement(geom, amrex::IndexType::TheCellType());
     amrex::Real dom_vol = 0.0_rt;
-    for (int i = dom_lo.x; i <= dom_hi.x; ++i)
-    {
+#if defined(WARPX_DIM_RZ)
+    for (int i = dom_lo.x; i <= dom_hi.x; ++i) {
         dom_vol += vol_cc(i, dom_lo.y);
     }
     dom_vol *= static_cast<amrex::Real>(dom_hi.y - dom_lo.y + 1);
+#else
+    dom_vol = vol_cc(dom_lo.x, dom_lo.y, dom_lo.z) *
+              static_cast<amrex::Real>(geom.Domain().numPts());
+#endif
 
     if (b2_bar > 0.0_rt && dom_vol > 0.0_rt && ion_sums[1] > 0.0_rt) {
         const amrex::Real p_i_bar = ion_sums[0]/dom_vol;    // <n_i k_B T_i> [Pa]

@@ -19,6 +19,7 @@
 
 #include "EBJBoundary.H"
 #include "ESolveBandedPC.H"
+#include "ElectronViscosityPoint.H"
 #include "ExternalVectorPotential.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -37,6 +38,8 @@
 #include <AMReX_DistributionMapping.H>
 
 #include <AMReX_GpuQualifiers.H>
+#include <AMReX_Periodicity.H>
+#include <AMReX_iMultiFab.H>
 
 #include <array>
 #include <cmath>
@@ -695,9 +698,188 @@ public:
     /** \brief Parameterized variant of QDSMCAddViscousHeating using the given
      *         charge density for the coefficient state (rho^{n+1/2} on the
      *         theta-implicit path), mirroring QDSMCAddJouleHeating.
+     *
+     * \param deposit false = evaluate and write the Q_nu diagnostic field
+     *        only, leave T_e alone (the work form of the viscous channel,
+     *        m_visc_heating_work, deposits J . E_visc instead and keeps
+     *        Q_nu as a measurement).
      */
-    void QDSMCAddViscousHeating (int lev, amrex::Real dt,
-                                 amrex::MultiFab const & rho) const;
+    void QDSMCAddViscousHeating (
+        int lev, amrex::Real dt, amrex::MultiFab const& rho,
+        bool deposit = true,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
+
+    /**
+     * \brief Nodal electron fluid velocity u_e = (J_i - J_plasma)/max(rho,
+     * rho_floor), 3 components, written into \c ue_nodal (which must carry one
+     * ghost layer) and exchanged across box seams / periodic faces.
+     *
+     * The single rebuild shared by the viscous heating kernel and the viscous
+     * stress precompute of the E-solve, so the two see one u_e. Takes the
+     * fields explicitly: the E-solve passes the ones it was handed, not the
+     * registered ones (only the current staggerings are read from the model).
+     */
+    void FillNodalElectronVelocity (
+        int lev, amrex::MultiFab& ue_nodal,
+        ablastr::fields::VectorField const& J_plasma,
+        ablastr::fields::VectorField const& J_ion, amrex::MultiFab const& rho,
+        amrex::Real rho_floor, amrex::Periodicity const& period) const;
+
+    /**
+     * \brief Nodal Braginskii viscous drag F = -div(Pi_e)/max(rho, rho_floor)
+     *        [V/m] for the drag term of Ohm's law (m_visc_in_ohms_law); the E
+     *        kernels average it onto the Yee edges.
+     *
+     * Pi_e is built from FillNodalElectronVelocity + electron_viscosity_point
+     * + braginskii_stress, i.e. from exactly the strain, field direction and
+     * capped/limited coefficients the heating kernel uses, so
+     * -Pi:grad u_e == Q_nu at every node; its divergence is the CENTRED nodal
+     * one over the SAME floored nodal rho that built u_e, and the node-to-edge
+     * average in the E kernels is the transpose of the edge-to-node average
+     * that built u_e from J. The chain is therefore the exact adjoint of the
+     * gradient chain and, with centred gradients (qdsmc_viscosity_limiter =
+     * none, enforced when the drag is on), Sum_edges J.E_visc = Sum_nodes Q_nu
+     * discretely for any rho and anisotropy -- the drag's action on the
+     * current is sign-definite. Zero wherever the heating kernel deposits
+     * nothing. \c F must have 3 components and one ghost layer; it is
+     * exchanged before return. Cartesian 3D and single-level axisymmetric RZ.
+     *
+     * \param lev      AMR level (geometry).
+     * \param F        output nodal drag field [V/m].
+     * \param J_plasma plasma current on the Yee edges (the E-solve's Jfield).
+     * \param J_ion    ion current on the Yee edges (the E-solve's Jifield).
+     * \param rho      charge density (the E-solve's rhofield).
+     * \param Bfield   magnetic field on the Yee faces (the E-solve's Bfield).
+     */
+    void
+    ComputeViscousDragNodal (int lev, amrex::MultiFab& F,
+                             ablastr::fields::VectorField const& J_plasma,
+                             ablastr::fields::VectorField const& J_ion,
+                             amrex::MultiFab const& rho,
+                             ablastr::fields::VectorField const& Bfield) const;
+
+    /** Freeze the ion-current input of viscous stress during an inner field
+     * solve. The segregated outer iteration refreshes it before each solve,
+     * so a pre-push correction never consumes a previous residual's current. */
+#if defined(WARPX_DIM_RZ)
+    ElectronViscosityRZEdges ViscosityRZEdges (int lev) const;
+#endif
+    void FreezeImplicitViscousCurrent () const;
+    /** Save midpoint T_e and B on device before source trials or endpoint
+     * field advancement overwrite them. Released after accepted booking. */
+    void CaptureImplicitDissipationCoefficients () const;
+    void ReleaseImplicitViscousStage () const;
+    mutable amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3>>
+        m_implicit_visc_current;
+    mutable amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3>>
+        m_implicit_visc_magnetic;
+    mutable amrex::Vector<std::unique_ptr<amrex::MultiFab>>
+        m_implicit_visc_temperature;
+    mutable bool m_use_implicit_visc_temperature = false;
+
+    /**
+     * \brief Viscous drag work J . E_visc at the source stage
+     *        (m_visc_in_ohms_law): one extra Ohm's-law evaluation into scratch
+     *        E with the EV_out mirror, then QDSMCDepositDragWork -- depositing
+     *        into T_e under m_visc_heating_work = work, measuring only under
+     *        strain. Writes the nodal diagnostic hybrid_qdsmc_visc_work_fp
+     *        and accumulates the visc_work_* class integrals. Safe to
+     *        re-enter on the theta path (fields overwritten, the class
+     *        integrals are accumulated by the caller's bracket sites only
+     *        through \c account).
+     *
+     * \param lev AMR level.  \param dt stage dt [s].  \param rho density for
+     *        the E-solve and the deposit.  \param account accumulate the
+     *        ledger integrals (false inside the theta residual).
+     */
+    void QDSMCAddViscousDragWork (
+        int lev, amrex::Real dt, amrex::MultiFab const& rho, bool account,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
+
+    /** Class-summed {bulk, band} volume integral [X] of a nodal density
+     *  field [X/m^3] under the energy-budget class masks (see
+     *  QDSMCClassEnergy): the analytic partner of the bracketed dU. */
+    [[nodiscard]] std::array<amrex::Real, 2>
+    QDSMCClassIntegral (int lev, amrex::MultiFab const& q) const;
+
+    /**
+     * \brief Booked hyper-resistive dissipation (hyper_resistivity_heating).
+     *
+     * Returns to the electrons the work the eta_H drag extracts from the
+     * current, Q_H = J_plasma . E_H [W/m^3], where E_H is the hyper-resistive
+     * field EXACTLY as the E-solve applies it: one extra Ohm's-law evaluation
+     * into scratch E with the EH_out mirror of
+     * FiniteDifferenceSolver::HybridPICSolveE (curl-curl or Laplacian form,
+     * EB masks, one-node-inside rule, rho/B interpolations -- all the
+     * solver's own). Drag and heating therefore share one stencil and
+     * balance by construction; globally Int Q_H dV = +Int eta_H |curl J|^2 dV
+     * (curl-curl) or +Int eta_H |grad J|^2 dV (Laplacian), the field energy
+     * Faraday removes. Pointwise Q_H is not sign-definite (it carries the
+     * divergence of the mechanical energy flux), see QDSMCDepositDragWork.
+     *
+     * Evaluated once per source stage from the CURRENT J_plasma with the
+     * stage dt -- first order in time, the same class of approximation as
+     * the Joule source (the B substeps integrate the drag exactly; the
+     * booking samples it). Safe to re-enter on the theta path: its
+     * diagnostic field hybrid_qdsmc_hyper_heating_fp is overwritten, not
+     * accumulated.
+     *
+     * \param lev AMR refinement level.
+     * \param dt  source-stage timestep [s] (the Strang callers pass dt/2).
+     */
+    void QDSMCAddHyperResistiveHeating (int lev, amrex::Real dt) const;
+
+    /** \brief Parameterized variant of QDSMCAddHyperResistiveHeating using
+     *         the given charge density for the E-solve and the deposit
+     *         (rho^{n+1/2} on the theta-implicit path). */
+    void QDSMCAddHyperResistiveHeating (
+        int lev, amrex::Real dt, amrex::MultiFab const& rho,
+        bool account = true,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
+
+    /**
+     * \brief Deposit the work J_plasma . E_drag of an Ohm's-law drag field
+     *        into T_e on the nodal grid (the shared booking kernel of the
+     *        hyper-resistive channel and of the viscous drag's `work` form).
+     *
+     * The edge products w_c = J_c E_c are formed on each component's own
+     * staggering and interpolated to the nodes (sum-conserving on a
+     * periodic Cartesian grid: the nodal integral of Q equals the edge
+     * integral of J . E to round-off), then
+     *   T_e += dt (gamma-1) Q / (n_e k_B)
+     * under the same gates as the other sources: rho > rho_floor, T_e > 0,
+     * one node inside every non-periodic domain face. Q is written
+     * (overwritten) to \c Qdiag for the reduced diagnostic.
+     *
+     * Pointwise Q can be NEGATIVE where the mechanical energy flux
+     * div(Pi . u_e) dominates the local dissipation (a smooth current
+     * riding on a large mean). A node the deposit would carry below the
+     * Te floor (qdsmc_conduction_Te_floor, or 0) is clamped there and the
+     * energy the clamp created is added to \c clamp_tally_J and printed on
+     * the ledger line as hyp_clamp -- a clamp that hides what it caught is
+     * the failure family this instrument exists to avoid.
+     *
+     * Heat capacity: with the density pedestal the ledger's state is
+     * U_e = 1.5 (n_e + n_ped) kB Te (QDSMCClassEnergy). \c pedestal_state =
+     * true converts the deposit with that n_eff, so the bracketed dU equals
+     * the deposited energy to round-off;
+     * false keeps the n_e-only conversion the Joule / relaxation / sink
+     * sources still use (their pedestal weighting awaits a ruling).
+     *
+     * \param lev   AMR refinement level.
+     * \param dt    source-stage timestep [s].
+     * \param rho   charge density supplying n_e for the deposit.
+     * \param Edrag the drag field on the E staggering (E_H, or E_visc).
+     * \param Qdiag nodal diagnostic field receiving Q [W/m^3].
+     * \param clamp_tally_J cumulative clamp energy [J] to add to.
+     * \param pedestal_state convert with n_e + n_ped (true) or n_e (false).
+     * \param deposit false = write Qdiag only, leave T_e alone.
+     */
+    void QDSMCDepositDragWork (
+        int lev, amrex::Real dt, amrex::MultiFab const& rho,
+        ablastr::fields::VectorField const& Edrag, amrex::MultiFab& Qdiag,
+        amrex::Real& clamp_tally_J, bool pedestal_state, bool deposit = true,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
 
     /**
      * \brief Add the electron-ion thermal-equilibration sink Q_ei to T_e.
@@ -2263,6 +2445,37 @@ public:
      * ledger's equivalent, measured the same way every other term here is --
      * as a bracketed dU, not as a re-summed analytic source. */
     mutable amrex::Real m_ebud_visc_bulk = 0.0, m_ebud_visc_band = 0.0;
+    /** Booked hyper-resistive work part of the source-stage dU (a
+     *  sub-account of src like the viscous heat; m_hyper_res_heating),
+     *  bracketed separately when the instrument is armed. This is the
+     *  energy the eta_H drag extracted from the current and returned to the
+     *  electrons -- measured as a bracketed dU, so a Te-floor clamp inside
+     *  the source shows up here as a shortfall against P_etaH_booked. */
+    mutable amrex::Real m_ebud_hyp_bulk = 0.0, m_ebud_hyp_band = 0.0;
+    /** Cumulative energy [J] the hyper-resistive booking could NOT deposit
+     *  because the pointwise work J . E_H was negative enough to take a node
+     *  below the Te floor (the source clamps there instead of cooling
+     *  through it; the clamp creates this much energy, so it is tallied and
+     *  printed, never hidden). Zero in every clean run. */
+    mutable amrex::Real m_hyp_clamp_J = 0.0;
+    /** Viscous drag in Ohm's law (m_visc_in_ohms_law): cumulative class
+     *  integrals [J] of the drag work J . E_visc (visc_work_*) and of the
+     *  strain heating Q_nu (visc_qnu_*), both measured analytically from the
+     *  kernels' own nodal fields times the stage dt, whichever of the two
+     *  the channel deposits (m_visc_heating_work). visc_bulk/_band stay the
+     *  bracketed dU of what was deposited. The per-step ratio of the two
+     *  increments is printed as visc_work_over_qnu. */
+    mutable amrex::Real m_ebud_visc_work_bulk = 0.0,
+                        m_ebud_visc_work_band = 0.0;
+    mutable amrex::Real m_ebud_visc_qnu_bulk = 0.0, m_ebud_visc_qnu_band = 0.0;
+    mutable amrex::Real m_visc_work_step = 0.0, m_visc_qnu_step = 0.0;
+    mutable int m_visc_ratio_step = -1;
+
+    /** Kernel parameters of the shared viscous point evaluation
+     *  (ElectronViscosityPoint.H) from the model inputs, for level \c lev. */
+    [[nodiscard]] ElectronViscosityParams ViscosityPointParams (int lev) const;
+    /** Clamp tally [J] of the work-form viscous deposit (see m_hyp_clamp_J). */
+    mutable amrex::Real m_visc_clamp_J = 0.0;
 
     /** Emit the energy_budget_J line. Single emitter shared by the pc and
      * theta-implicit paths so the two cannot drift apart in field order or
@@ -2539,6 +2752,42 @@ public:
      *  primitive from QdsmcFluxLimiters.H. Input:
      *  qdsmc_viscosity_limiter = none | mc. */
     int m_visc_limiter = 1;
+    /** Apply the Braginskii electron viscous STRESS in Ohm's law,
+     *  E_visc = -div(Pi_e)/(e n_eff), in the hyper-resistivity slot of the
+     *  Faraday E-solves (the push field excludes it, like eta_H, so the ions
+     *  never see it and the whole field-energy loss J . E_visc belongs to
+     *  the electrons). Pi_e is built on the nodal grid from the SAME u_e,
+     *  gradients and capped/limited coefficients as the heating kernel
+     *  (ElectronViscosityPoint.H; braginskii_stress), so -Pi:grad u_e equals
+     *  the booked Q_nu pointwise and globally Int J.E_visc = Int Q_nu
+     *  (+ Int Pi:grad u_i, the ion-strain work). This is what makes the
+     *  booked viscous heating consistent with the force work.
+     *  Implemented for Cartesian 3D and single-level m=0 RZ without EB;
+     *  other reduced geometries refuse at input. Requires qdsmc_viscosity_model
+     * != none. Default off = bit-identical. Input: qdsmc_viscosity_in_ohms_law.
+     */
+    bool m_visc_in_ohms_law = false;
+    /** What the viscous channel deposits into T_e:
+     *  true  = work (default since 2026-09-22): J . E_visc itself, exactly
+     *          the energy the field lost; not sign-definite pointwise
+     *          (Te-floor clamp + tally as for the hyper-resistive booking).
+     *  false = strain: Q_nu = -Pi:grad u_e, the positive-definite local
+     *          heating. NOT conserving in this model: with u_e = u_i - J/rho,
+     *          Int J.E_visc = Int Q_nu + Int Pi:grad u_i, and the ion-strain
+     *          term (the particle-noise shear of u_i) is paid by nobody
+     *          while the push field excludes E_visc.
+     *  In both modes the other quantity is still measured and printed
+     *  (visc_work_* / visc_qnu_* ledger columns, P_visc_work reduced-diag
+     *  column) so the strain-vs-work discrepancy is always visible.
+     *  Input: qdsmc_viscosity_heating = work | strain. */
+    bool m_visc_heating_work = true;
+    /** Edge taper density [m^-3] of the viscous coefficients (0 = off): a
+     *  C^1 smoothstep from 0 at n <= taper_n to 1 at n >= 2 taper_n on both
+     *  mu_par and mu_perp, so Q_nu and Pi scale together and the energy
+     *  identity is untouched. Removes the O(1) jump of Pi at the density
+     *  gate that otherwise makes div(Pi)/rho_floor the largest drag in the
+     *  run. Input: qdsmc_viscosity_taper_n. */
+    amrex::Real m_visc_taper_n = 0.0;
 
     /** Quiet Gauss--Hermite quadrature points per field-aligned direction
      *  (parallel, perpendicular), each in [2, 7]. npts = 2 is variance-exact
@@ -3284,8 +3533,8 @@ public:
     /** True when any resistive term is configured: a non-trivial global
      *  resistivity parser, per-species overlays, or hyper-resistivity. */
     [[nodiscard]] bool HasResistivity () const {
-        return (m_eta_expression != "0.0") || m_has_per_species_eta
-            || m_include_hyper_resistivity_term;
+        return (m_eta_expression != "0.0") || m_has_per_species_eta ||
+               m_include_hyper_resistivity_term || m_visc_in_ohms_law;
     }
 
     /** Per-species resistivity overlay (see Phys. Plasmas 31, 012902 (2024), Eq. 10).
@@ -3345,16 +3594,13 @@ public:
 
     /** Plasma hyper-resistivity eta_H [Ohm m^3].
      *
-     *  NUMERICAL STABILISER -- ITS DISSIPATION IS DELIBERATELY NOT BOOKED
-     *  AS HEATING. This is a standing decision, not an oversight, and it is
-     *  the reason the physical electron viscosity exists as a SEPARATE term
-     *  (m_visc_model, BraginskiiViscosity.H) rather than as a relabelling of
-     *  this one:
+     *  By default a NUMERICAL STABILISER whose dissipation is NOT booked as
+     *  heating (the legacy stance, still the default and bit-identical):
      *
-     *   - eta_H is the sledgehammer for unphysical modes. Its magnitude is
-     *     chosen for stability, not from any transport coefficient, so the
-     *     energy it removes is a numerical artefact with no claim on the
-     *     electron internal energy. Booking it would credit T_e for the
+     *   - eta_H is the sledgehammer for unphysical modes. When its magnitude
+     *     is chosen for stability rather than from a transport coefficient,
+     *     the energy it removes is a numerical artefact with no claim on the
+     *     electron internal energy, and booking it would credit T_e for the
      *     removal of modes the model never resolved.
      *   - The physical Braginskii electron viscosity has the SAME grad^2
      *     form on the current (u_e ~ -J/(e n_e)) and differs entirely in
@@ -3362,19 +3608,44 @@ public:
      *     stay explicitly apart -- a reader who sees only the form will
      *     conflate them.
      *
-     *  If you are here because P_etaH looks like uncounted energy: it is,
-     *  by design. Add or resize the physical viscosity instead; do not
-     *  route eta_H into the electron energy equation.
+     *  REVISED 2026-09-21 (Eric): the heating-only physical viscosity block
+     *  (m_visc_model) generated energy on the periodic column because it
+     *  booked Q_nu without applying the corresponding stress in Ohm's law.
+     *  The eta_H term is the one viscous-FORM drag the model applies, so
+     *  its channel can carry a PHYSICAL coefficient -- the Prandtl-capped
+     *  isotropic value eta_H,phys = m_e nu_cap/(e^2 n) = m_e nu_cap/(e rho)
+     *  -- provided the work it extracts from the current is returned to the
+     *  electrons. That is what m_hyper_res_heating does: with it on, the
+     *  drag (this term) and the heating (J . E_H, booked in
+     *  QDSMCAddHyperResistiveHeating) balance by construction, because both
+     *  are formed from the SAME E_H the E-solve applied (the EH_out mirror
+     *  of FiniteDifferenceSolver::HybridPICSolveE). The anisotropic
+     *  Braginskii stress in Ohm's law (m_visc_in_ohms_law) is the physical
+     *  successor of this isotropic stand-in.
      *
-     *  Its power is still REPORTED (never booked) in the HybridDissipation
-     *  reduced diag as the P_etaH column, kept separate from the physical
-     *  viscous column P_nu precisely so the two can never be confused.
+     *  Its power is REPORTED in the HybridDissipation reduced diag as the
+     *  P_etaH column (re-derived Laplacian form) and, when booked, as the
+     *  P_etaH_booked column (the solver's own E_H), kept separate from the
+     *  physical viscous column P_nu so the channels can never be confused.
      */
     std::string m_eta_h_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_hyper_resistivity_parser;
     amrex::ParserExecutor<2> m_eta_h;
     bool m_include_hyper_resistivity_term = false;
     bool m_hyper_resistivity_has_B_dependence = false;
+    /** Book the hyper-resistive dissipation J . E_H into the electron
+     *  energy equation (see the m_eta_h doc). The work is formed from the
+     *  E_H the E-solve actually applied (EH_out mirror), evaluated once per
+     *  source stage from the current J_plasma and deposited on the nodal Te
+     *  grid with the same density gate and one-node-inside rule as the
+     *  Joule and viscous sources; its own ledger columns hyp_bulk/hyp_band
+     *  and the reduced-diag column P_etaH_booked make it attributable. The
+     *  ions never see E_H (the push field is solved without it), so the
+     *  whole field-energy loss J . E_H belongs to the electrons. Requires
+     *  plasma_hyper_resistivity != 0 and solve_electron_energy_equation.
+     *  Default off = bit-identical legacy (eta_H dissipation unbooked).
+     *  Input: hyper_resistivity_heating = 0 | 1. */
+    bool m_hyper_res_heating = false;
     /** Apply the hyper-resistivity as the adjoint-paired curl-curl form
      *  E_H = +curl(eta_H curl J) instead of the component-wise vector
      *  Laplacian -eta_H lap J (cross-lane operator ruling: the two differ

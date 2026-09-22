@@ -1,0 +1,127 @@
+# Operator-identity, decay-rate and energy-balance test for the Braginskii
+# electron viscous DRAG in Ohm's law (hybrid_pic_model.qdsmc_viscosity_in_ohms_law = 1),
+# energy-balanced with the booked viscous heating.
+#
+# Same manufactured state as inputs_test_3d_ohm_solver_hyper_res_heating: a 3D
+# periodic box, B_z(x) = B0 + b1 cos(k x), cold ions at rest, so the plasma
+# current is the single mode J_y(x) = J0 sin(k x) and the electron fluid
+# velocity is u_e = -J/(e n0). Every other Ohm's-law term is off, so the
+# Faraday electric field is the viscous drag alone.
+#
+# ISOTROPIC arm (this file): parser model with nu_par = nu_perp = nu, no
+# limiter, no free-streaming cap. Then Pi = -mu W (mu = m_e n0 nu), and for
+# the divergence-free planar shear u_y(x) the drag reduces EXACTLY to a
+# hyper-resistivity with eta_eff = m_e nu/(e^2 n0):
+#     E_visc,y = eta_eff * kc^2 * J_y      (discrete symbol kc = sin(k dx)/dx of
+#                                          the centred nodal gradient, applied twice)
+# so the mode energy decays as exp(-2 gamma t), gamma = eta_eff kc^2 ky^2 / mu0
+# with ky = 2 sin(k dx/2)/dx the Yee curl symbol (T1: operator identity via
+# the discrete symbol; T3: decay rate). nu = 281.7 m^2/s puts eta_eff at
+# 1.0e-9 Ohm m^3, the value of the eta_H fixture, so the two arms compare
+# directly (they differ by the (kc/ky)^2 = cos^2(k dx/2) symbol ratio, 0.962
+# here, and both converge to eta k^4/mu0).
+#
+# T2: with qdsmc_viscosity_heating = strain (set explicitly here; the
+# default is work) the ledger books Q_nu = -Pi:grad u_e (visc_bulk) and
+# reports the drag work J . E_visc (visc_work_bulk); with = work (default)
+# it books the work itself. Both must close against the magnetic energy
+# Faraday removes; with ions at rest the two agree to round-off because the
+# drag is the exact adjoint of the centred gradient chain.
+#
+# COMPRESSIVE / 2D arm (diagonal legs of div Pi and a genuinely 2D
+# structure): pass
+#   warpx.Bz_external_grid_function(x,y,z)="0.1 + 0.005*cos(41.887902047863905*x)*cos(83.77580409572781*y)"
+#   warpx.const_dt=4.0e-9
+# so J_x(x,y) and J_y(x,y) are both nonzero with G_xx = -G_yy != 0;
+# analysis_viscous_drag.py --aniso checks the closure (no closed-form rate).
+#
+# ANISOTROPIC arm: pass
+#   warpx.Bx_external_grid_function(x,y,z)="0.0707106781186548"
+#   warpx.By_external_grid_function(x,y,z)="0.005*sin(41.887902047863905*x)"
+#   warpx.Bz_external_grid_function(x,y,z)="0.0707106781186548"
+#   hybrid_pic_model.qdsmc_nu_perp(n,Te,B)="0.2817"
+# so the current is J_z(x) and the field-aligned strain S = 2 b_x b_z G_xz is
+# nonzero (b tilted 45 deg); analysis_viscous_drag.py --aniso then checks the
+# strain/work/field closure only (no closed-form rate).
+
+max_step = 200
+
+amr.n_cell = 32 8 8
+amr.max_grid_size = 16
+amr.blocking_factor = 4
+amr.max_level = 0
+
+geometry.dims = 3
+geometry.prob_lo = 0.0    -0.0375 -0.0375
+geometry.prob_hi = 0.3     0.0375  0.0375
+
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+
+warpx.verbose = 0
+warpx.const_dt = 1.0e-7
+warpx.serialize_initial_conditions = 1
+warpx.use_filter = 0
+warpx.abort_on_warning_threshold = high
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = "0.0"
+warpx.By_external_grid_function(x,y,z) = "0.0"
+warpx.Bz_external_grid_function(x,y,z) = "0.1 + 0.005*cos(41.887902047863905*x)"
+
+hybrid_pic_model.elec_temp = 100.0
+hybrid_pic_model.n0_ref = 1.0e19
+hybrid_pic_model.gamma = 1.6666666666666667
+hybrid_pic_model.n_floor = 5.0e17
+hybrid_pic_model.include_hall_term = 0
+hybrid_pic_model.include_electron_pressure_term = 0
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = 0.0
+hybrid_pic_model.substeps = 10
+
+hybrid_pic_model.solve_electron_energy_equation = 1
+hybrid_pic_model.include_joule_heating = 0
+hybrid_pic_model.qdsmc_time_advance = pc
+hybrid_pic_model.qdsmc_energy_budget = 1
+hybrid_pic_model.joule_dropped_energy_print_interval = 1
+
+# The viscosity: parser coefficients, unlimited, centred gradients, IN OHM'S LAW.
+hybrid_pic_model.qdsmc_viscosity_model = parser
+hybrid_pic_model.qdsmc_nu_par(n,Te,B) = "281.7"
+hybrid_pic_model.qdsmc_nu_perp(n,Te,B) = "281.7"
+hybrid_pic_model.qdsmc_viscosity_flux_limit_factor = 0.0
+hybrid_pic_model.qdsmc_viscosity_limiter = none
+hybrid_pic_model.qdsmc_viscosity_in_ohms_law = 1
+hybrid_pic_model.qdsmc_viscosity_heating = strain
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = m_p
+ions.injection_style = NUniformPerCell
+ions.num_particles_per_cell_each_dim = 2 2 2
+ions.profile = constant
+ions.density = 1.0e19
+ions.momentum_distribution_type = constant
+ions.ux = 0.0
+ions.uy = 0.0
+ions.uz = 0.0
+
+warpx.reduced_diags_names = fe diss
+fe.type = FieldEnergy
+fe.intervals = 1
+fe.precision = 17
+diss.type = HybridDissipation
+diss.intervals = 1
+diss.precision = 17
+
+diagnostics.diags_names = diag1
+diag1.intervals = 200
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.fields_to_plot = Bx By Bz Ex Ey Ez jx jy jz rho Te

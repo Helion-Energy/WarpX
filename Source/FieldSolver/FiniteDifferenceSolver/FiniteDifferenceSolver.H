@@ -141,110 +141,138 @@ class FiniteDifferenceSolver
                          ablastr::fields::VectorField Efield,
                          amrex::Real dt );
 
-        /**
-          * \brief E-update in the hybrid PIC algorithm as described in
-          * Winske et al. (2003) Eq. 10.
-          * https://link.springer.com/chapter/10.1007/3-540-36530-3_8
-          *
-          * \param[out] Efield  vector of electric field MultiFabs updated at a given level
-          * \param[in] Jfield   vector of total plasma current MultiFabs at a given level
-          * \param[in] Jifield  vector of ion current density MultiFabs at a given level
-          * \param[in] Bfield   vector of magnetic field MultiFabs at a given level
-          * \param[in] rhofield scalar ion charge density Multifab at a given level
-          * \param[in] Pefield  scalar electron pressure MultiFab at a given level
-          * \param[in] eb_update_E indicate in which cell E should be updated (related to embedded boundaries)
-          * \param[in] lev  level number for the calculation
-          * \param[in] hybrid_model instance of the hybrid-PIC model
-          * \param[in] solve_for_Faraday boolean flag for whether the E-field is solved to be used in Faraday's equation
-          */
-        void HybridPICSolveE ( ablastr::fields::VectorField const& Efield,
-                               ablastr::fields::VectorField & Jfield,
-                               ablastr::fields::VectorField const& Jifield,
-                               ablastr::fields::VectorField const& Bfield,
-                               amrex::MultiFab const& rhofield,
-                               amrex::MultiFab const& Pefield,
-                               std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-                               int lev, HybridPICModel const* hybrid_model,
-                               bool solve_for_Faraday,
-                               bool include_resistivity );
+       /**
+        * \brief E-update in the hybrid PIC algorithm as described in
+        * Winske et al. (2003) Eq. 10.
+        * https://link.springer.com/chapter/10.1007/3-540-36530-3_8
+        *
+        * \param[out] Efield  vector of electric field MultiFabs updated at a
+        * given level
+        * \param[in] Jfield   vector of total plasma current MultiFabs at a
+        * given level
+        * \param[in] Jifield  vector of ion current density MultiFabs at a given
+        * level
+        * \param[in] Bfield   vector of magnetic field MultiFabs at a given
+        * level
+        * \param[in] rhofield scalar ion charge density Multifab at a given
+        * level
+        * \param[in] Pefield  scalar electron pressure MultiFab at a given level
+        * \param[in] eb_update_E indicate in which cell E should be updated
+        * (related to embedded boundaries)
+        * \param[in] lev  level number for the calculation
+        * \param[in] hybrid_model instance of the hybrid-PIC model
+        * \param[in] solve_for_Faraday boolean flag for whether the E-field is
+        * solved to be used in Faraday's equation
+        * \param[in] include_resistivity whether the eta J (and, with
+        * solve_for_Faraday, the eta_H) terms are assembled
+        * \param[out] EH_out optional: when non-null, the hyper-resistive field
+        * E_H alone (the eta_H term exactly as the kernels add it to E, on the E
+        *             staggering, zero on EB-masked points and wherever the term
+        * is not applied) is ALSO written here. This is the energy-booking hook
+        * for hybrid_pic_model.hyper_resistivity_heating: the work J . E_H the
+        *             drag extracts from the current is formed from this field
+        * by the caller, so booking and drag share one stencil by construction
+        * and cannot drift apart. nullptr (the default) is bit-identical legacy.
+        * \param[out] EV_out optional: the same mirror for the Braginskii
+        * viscous drag E_visc = -div(Pi_e)/(e n_eff)
+        * (hybrid_pic_model.qdsmc_viscosity_in_ohms_law), read by the viscous
+        * work booking.
+        */
+       void HybridPICSolveE (
+           ablastr::fields::VectorField const& Efield,
+           ablastr::fields::VectorField& Jfield,
+           ablastr::fields::VectorField const& Jifield,
+           ablastr::fields::VectorField const& Bfield,
+           amrex::MultiFab const& rhofield, amrex::MultiFab const& Pefield,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+           int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
+           bool include_resistivity,
+           ablastr::fields::VectorField const* EH_out = nullptr,
+           ablastr::fields::VectorField const* EV_out = nullptr);
 
-        /**
-          * \brief Calculation of total current using Ampere's law (without
-          * displacement current): J = (curl x B) / mu0.
-          *
-          * \param[out] Jfield  vector of current MultiFabs at a given level
-          * \param[in] Bfield   vector of magnetic field MultiFabs at a given level
-          * \param[in] eb_update_E indicate in which cell E should be updated (related to embedded boundaries)
-          * \param[in] lev  level number for the calculation
-          */
-        void CalculateCurrentAmpere (
-            ablastr::fields::VectorField& Jfield,
-            ablastr::fields::VectorField const& Bfield,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-            int lev );
+       /**
+        * \brief Calculation of total current using Ampere's law (without
+        * displacement current): J = (curl x B) / mu0.
+        *
+        * \param[out] Jfield  vector of current MultiFabs at a given level
+        * \param[in] Bfield   vector of magnetic field MultiFabs at a given
+        * level
+        * \param[in] eb_update_E indicate in which cell E should be updated
+        * (related to embedded boundaries)
+        * \param[in] lev  level number for the calculation
+        */
+       void CalculateCurrentAmpere (
+           ablastr::fields::VectorField& Jfield,
+           ablastr::fields::VectorField const& Bfield,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+           int lev);
 
-        /**
-          * \brief Calculation of B field from the vector potential A
-          * B = (curl x A) / mu0.
-          *
-          * \param[out] Bfield  vector of current MultiFabs at a given level
-          * \param[in] Afield   vector of magnetic field MultiFabs at a given level
-          * \param[in] eb_update_B  array indicating where the field should be updated with respect to the position of the embedded boundary
-          * \param[in] lev  level number for the calculation
-          */
-        void ComputeCurlA (
-            ablastr::fields::VectorField& Bfield,
-            ablastr::fields::VectorField const& Afield,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev ,
-            amrex::IntVect const& ngrow = amrex::IntVect::TheZeroVector() );
+       /**
+        * \brief Calculation of B field from the vector potential A
+        * B = (curl x A) / mu0.
+        *
+        * \param[out] Bfield  vector of current MultiFabs at a given level
+        * \param[in] Afield   vector of magnetic field MultiFabs at a given
+        * level
+        * \param[in] eb_update_B  array indicating where the field should be
+        * updated with respect to the position of the embedded boundary
+        * \param[in] lev  level number for the calculation
+        */
+       void ComputeCurlA (
+           ablastr::fields::VectorField& Bfield,
+           ablastr::fields::VectorField const& Afield,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_B,
+           int lev,
+           amrex::IntVect const& ngrow = amrex::IntVect::TheZeroVector());
 
-        /**
-          * \brief Calculation of the gradient of the given scalar field.
-          *
-          * \param[out] out_field  vector of output MultiFabs at a given level
-          * \param[in] in_field   vector of input MultiFabs at a given level
-          * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
-          * \param[in] lev  level number for the calculation
-          */
-        void ComputeGradient (
-            ablastr::fields::VectorField& out_field,
-            ablastr::fields::ScalarField const& in_field,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
-            int lev );
+       /**
+        * \brief Calculation of the gradient of the given scalar field.
+        *
+        * \param[out] out_field  vector of output MultiFabs at a given level
+        * \param[in] in_field   vector of input MultiFabs at a given level
+        * \param[in] eb_update  array indicating where the field should be
+        * updated with respect to the position of the embedded boundary
+        * \param[in] lev  level number for the calculation
+        */
+       void ComputeGradient (
+           ablastr::fields::VectorField& out_field,
+           ablastr::fields::ScalarField const& in_field,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update,
+           int lev);
 
-        /**
-          * \brief Calculation of the Laplacian of the given scalar field.
-          *
-          * \param[out] out_field  scalar output MultiFab at a given level
-          * \param[in] in_field   scalar input MultiFab at a given level
-          * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
-          * \param[in] lev  level number for the calculation
-          */
-        void ComputeLaplacian (
-            ablastr::fields::ScalarField& out_field,
-            ablastr::fields::ScalarField const& in_field,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
-            int lev );
+       /**
+        * \brief Calculation of the Laplacian of the given scalar field.
+        *
+        * \param[out] out_field  scalar output MultiFab at a given level
+        * \param[in] in_field   scalar input MultiFab at a given level
+        * \param[in] eb_update  array indicating where the field should be
+        * updated with respect to the position of the embedded boundary
+        * \param[in] lev  level number for the calculation
+        */
+       void ComputeLaplacian (
+           ablastr::fields::ScalarField& out_field,
+           ablastr::fields::ScalarField const& in_field,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update,
+           int lev);
 
-        /**
-          * \brief Calculation of the vector Laplacian of the given vector field.
-          *
-          * \param[out] out_field  vector of output MultiFabs at a given level
-          * \param[in] in_field   vector of input MultiFabs at a given level
-          * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
-          * \param[in] lev  level number for the calculation
-          */
-        void ComputeVectorLaplacian (
-            ablastr::fields::VectorField& out_field,
-            ablastr::fields::VectorField const& in_field,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
-            int lev );
+       /**
+        * \brief Calculation of the vector Laplacian of the given vector field.
+        *
+        * \param[out] out_field  vector of output MultiFabs at a given level
+        * \param[in] in_field   vector of input MultiFabs at a given level
+        * \param[in] eb_update  array indicating where the field should be
+        * updated with respect to the position of the embedded boundary
+        * \param[in] lev  level number for the calculation
+        */
+       void ComputeVectorLaplacian (
+           ablastr::fields::VectorField& out_field,
+           ablastr::fields::VectorField const& in_field,
+           std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update,
+           int lev);
 
-    private:
-
-        ElectromagneticSolverAlgo m_fdtd_algo;
-        ablastr::utils::enums::GridType m_grid_type;
+     private:
+       ElectromagneticSolverAlgo m_fdtd_algo;
+       ablastr::utils::enums::GridType m_grid_type;
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         amrex::Real m_dr, m_rmin;
@@ -305,18 +333,18 @@ class FiniteDifferenceSolver
             amrex::MultiFab& divE
         );
 
-        template<typename T_Algo>
+        template <typename T_Algo>
         void HybridPICSolveECylindrical (
             ablastr::fields::VectorField const& Efield,
             ablastr::fields::VectorField const& Jfield,
             ablastr::fields::VectorField const& Jifield,
             ablastr::fields::VectorField const& Bfield,
-            amrex::MultiFab const& rhofield,
-            amrex::MultiFab const& Pefield,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-            int lev, HybridPICModel const* hybrid_model,
-            bool solve_for_Faraday,
-                               bool include_resistivity );
+            amrex::MultiFab const& rhofield, amrex::MultiFab const& Pefield,
+            std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+            int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
+            bool include_resistivity,
+            ablastr::fields::VectorField const* EH_out,
+            ablastr::fields::VectorField const* EV_out);
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCylindrical (
@@ -525,18 +553,18 @@ class FiniteDifferenceSolver
                                    ablastr::fields::VectorField Efield,
                                    amrex::Real dt );
 
-        template<typename T_Algo>
+        template <typename T_Algo>
         void HybridPICSolveECartesian (
             ablastr::fields::VectorField const& Efield,
             ablastr::fields::VectorField const& Jfield,
             ablastr::fields::VectorField const& Jifield,
             ablastr::fields::VectorField const& Bfield,
-            amrex::MultiFab const& rhofield,
-            amrex::MultiFab const& Pefield,
-            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-            int lev, HybridPICModel const* hybrid_model,
-            bool solve_for_Faraday,
-                               bool include_resistivity );
+            amrex::MultiFab const& rhofield, amrex::MultiFab const& Pefield,
+            std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+            int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
+            bool include_resistivity,
+            ablastr::fields::VectorField const* EH_out,
+            ablastr::fields::VectorField const* EV_out);
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCartesian (

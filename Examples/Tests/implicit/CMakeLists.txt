@@ -676,3 +676,87 @@ if(TARGET lib_3d)
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     endforeach()
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_implicit_gather_rz test_implicit_gather_rz.cpp)
+    target_link_libraries(test_implicit_gather_rz PRIVATE lib_rz)
+    target_include_directories(test_implicit_gather_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_implicit_gather_rz)
+    endif()
+    foreach(endpoint IN ITEMS 0 1)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_implicit_gather_${endpoint})
+        add_test(NAME test_rz_implicit_gather_${endpoint}
+            COMMAND test_implicit_gather_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe
+                algo.field_gathering=momentum-conserving gather_test.endpoint=${endpoint})
+        set_tests_properties(test_rz_implicit_gather_${endpoint} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_implicit_gather_${endpoint}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+foreach(dimension IN ITEMS rz 3d)
+    if(TARGET lib_${dimension})
+        add_executable(test_viscous_work_${dimension} test_viscous_work.cpp)
+        target_link_libraries(test_viscous_work_${dimension} PRIVATE lib_${dimension})
+        target_include_directories(test_viscous_work_${dimension} PRIVATE ${WarpX_SOURCE_DIR}/Source)
+        if(WarpX_COMPUTE STREQUAL "CUDA")
+            setup_target_for_cuda_compilation(test_viscous_work_${dimension})
+        endif()
+        if(dimension STREQUAL "rz")
+            set(viscous_input inputs_test_rz_implicit_thermal)
+        else()
+            set(viscous_input inputs_test_3d_hybrid_pc)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_work_${dimension})
+        add_test(NAME test_${dimension}_viscous_work
+            COMMAND test_viscous_work_${dimension} ${CMAKE_CURRENT_SOURCE_DIR}/${viscous_input})
+        set_tests_properties(test_${dimension}_viscous_work PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_work_${dimension}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endif()
+endforeach()
+
+if(TARGET test_hybrid_pc_cartesian)
+    foreach(hall_case IN ITEMS nyquist oblique gradient)
+        if(hall_case STREQUAL "nyquist")
+            set(hall_mode "4 0 2")
+        else()
+            set(hall_mode "2 0 1")
+        endif()
+        if(hall_case STREQUAL "gradient")
+            set(hall_gradient 1)
+        else()
+            set(hall_gradient 0)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hall_mode_${hall_case})
+        add_test(NAME test_3d_hybrid_pc_${hall_case}
+            COMMAND test_hybrid_pc_cartesian ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_hybrid_pc
+                warpx.grid_type=staggered "hall_test.mode=${hall_mode}" hall_test.gradient=${hall_gradient})
+        set_tests_properties(test_3d_hybrid_pc_${hall_case} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hall_mode_${hall_case}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET test_viscous_work_rz)
+    foreach(viscous_boundary IN ITEMS periodic pec)
+        if(viscous_boundary STREQUAL "pec")
+            set(viscous_particle_boundary reflecting)
+        else()
+            set(viscous_particle_boundary periodic)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_rz_${viscous_boundary})
+        add_test(NAME test_rz_viscous_work_boundary_${viscous_boundary}
+            COMMAND test_viscous_work_rz ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                viscous_test.boundary_mode=1
+                "boundary.field_lo=none ${viscous_boundary}"
+                "boundary.field_hi=pec ${viscous_boundary}"
+                "boundary.particle_lo=none ${viscous_particle_boundary}"
+                "boundary.particle_hi=reflecting ${viscous_particle_boundary}")
+        set_tests_properties(test_rz_viscous_work_boundary_${viscous_boundary} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_rz_${viscous_boundary}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()

@@ -1,0 +1,112 @@
+# Energy-balance test for the BOOKED hyper-resistive dissipation of the
+# hybrid-PIC (Ohm's law) electron energy equation
+# (hybrid_pic_model.hyper_resistivity_heating = 1).
+#
+# A 3D periodic box holds a uniform guide field plus a single Fourier mode
+#
+#     B_z(x) = B0 + b1 cos(k x),   k = 2 pi n_wave / Lx,
+#
+# so that, with cold ions at rest (rho uniform to round-off, J_i = 0), the
+# plasma current is the single mode J_y(x) = -d_x B_z / mu0 = J0 sin(k x),
+# J0 = b1 k / mu0. Every other Ohm's-law term is off (no Hall term, no
+# electron pressure gradient, no resistivity), so the Faraday electric field
+# is the hyper-resistive drag E_H ALONE and the particle-push field is zero
+# (the ions stay at rest). Faraday's law then removes magnetic energy at
+# exactly the rate  -dU_B/dt = Int J . E_H dV, and the booked heating must
+# return that energy to the electrons:
+#
+#     dU_B + (hyp_bulk + hyp_band)  =  0      (up to time discretisation)
+#
+# where hyp_bulk/hyp_band are the ledger columns of the energy_budget_J line
+# (bracketed dU of the electron thermal energy around the booking) and
+# P_etaH_booked is the HybridDissipation column integrating the solver's own
+# J . E_H field. analysis_hyper_res_heating.py checks both closures and that
+# the Te-floor clamp tally stayed at zero.
+#
+# Run with hybrid_pic_model.hyper_resistivity_curl_curl = 1 as a second arm
+# to exercise the adjoint-paired form, and WITHOUT hyper_resistivity_heating
+# (key absent) as the bit-identity arm against a base binary.
+
+max_step = 200
+
+amr.n_cell = 32 8 8
+amr.max_grid_size = 16
+amr.blocking_factor = 4
+amr.max_level = 0
+
+geometry.dims = 3
+geometry.prob_lo = 0.0    -0.0375 -0.0375
+geometry.prob_hi = 0.3     0.0375  0.0375
+
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+
+warpx.verbose = 0
+warpx.const_dt = 1.0e-7
+warpx.serialize_initial_conditions = 1
+warpx.use_filter = 0
+warpx.abort_on_warning_threshold = high
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+# Initial field: guide field plus one cosine mode in x. div(B) = 0 exactly
+# (B_z depends on x only), so no cleaning is needed. k = 2 pi * 2 / 0.3.
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = "0.0"
+warpx.By_external_grid_function(x,y,z) = "0.0"
+warpx.Bz_external_grid_function(x,y,z) = "0.1 + 0.005*cos(41.887902047863905*x)"
+
+# Ohm's law: E_H is the only Faraday-side term; the push field is zero.
+hybrid_pic_model.elec_temp = 100.0
+hybrid_pic_model.n0_ref = 1.0e19
+hybrid_pic_model.gamma = 1.6666666666666667
+hybrid_pic_model.n_floor = 5.0e17
+hybrid_pic_model.include_hall_term = 0
+hybrid_pic_model.include_electron_pressure_term = 0
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = 1.0e-9
+hybrid_pic_model.substeps = 10
+
+# Electron energy equation with the booked hyper-resistive work and NOTHING
+# else: no Joule heating, no conduction, no e-i relaxation, no viscosity.
+hybrid_pic_model.solve_electron_energy_equation = 1
+hybrid_pic_model.include_joule_heating = 0
+hybrid_pic_model.qdsmc_time_advance = pc
+hybrid_pic_model.qdsmc_energy_budget = 1
+hybrid_pic_model.joule_dropped_energy_print_interval = 1
+hybrid_pic_model.hyper_resistivity_heating = 1
+
+# Cold ions on a regular sub-grid, at rest: rho is uniform to round-off and
+# J_i vanishes, so J_plasma = curl(B)/mu0 exactly.
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = m_p
+ions.injection_style = NUniformPerCell
+ions.num_particles_per_cell_each_dim = 2 2 2
+ions.profile = constant
+ions.density = 1.0e19
+ions.momentum_distribution_type = constant
+ions.ux = 0.0
+ions.uy = 0.0
+ions.uz = 0.0
+
+# Reduced diagnostics: the magnetic energy (closure partner of the booking)
+# and the dissipation powers with the booked column.
+warpx.reduced_diags_names = fe diss
+fe.type = FieldEnergy
+fe.intervals = 1
+fe.precision = 17
+diss.type = HybridDissipation
+diss.intervals = 1
+diss.precision = 17
+
+# Plotfile for the bit-identity arm (base vs new binary, key absent).
+diagnostics.diags_names = diag1
+diag1.intervals = 200
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.fields_to_plot = Bx By Bz Ex Ey Ez jx jy jz rho Te

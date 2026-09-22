@@ -1,0 +1,53 @@
+# RZ bit-identity fixture for the hyper-resistive E-solve kernels
+# (the EH_out mirror of hybrid_pic_model.hyper_resistivity_heating).
+#
+# Resistive + hyper-resistive vacuum relaxation of a prescribed toroidal
+# current ring (the open_bc_greens ring fixture with eta_H added, curl-curl
+# form, PEC wall). No particles, no energy equation: the hyper-resistive
+# kernels run every substep and the plotfile B must be identical to the bit
+# between a binary built before the EH_out change and one built after it,
+# with the key absent and with hyper_resistivity_heating = 0.
+
+max_step = 120
+
+amr.n_cell = 32 64
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 -1.0
+geometry.prob_hi = 1.0  1.0
+
+boundary.field_lo = none periodic
+boundary.field_hi = pec  periodic
+
+warpx.verbose = 0
+warpx.n_rz_azimuthal_modes = 1
+warpx.const_dt = 6.0e-3
+warpx.abort_on_warning_threshold = high
+
+algo.maxwell_solver = hybrid
+
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e12
+hybrid_pic_model.include_hall_term = 0
+hybrid_pic_model.include_electron_pressure_term = 0
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1.25663706212e-6
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = 2.0e-9
+hybrid_pic_model.hyper_resistivity_curl_curl = 1
+hybrid_pic_model.substeps = 20
+
+# Gaussian ring of azimuthal current at (r0, z0) = (0.4, 0), radius a = 0.1
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4)^2 + z^2)/0.1^2)"
+
+warpx.reduced_diags_names = fe
+fe.type = FieldEnergy
+fe.intervals = 1
+fe.precision = 17
+
+diagnostics.diags_names = diag1
+diag1.intervals = 120
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.fields_to_plot = Br Bt Bz Er Et Ez

@@ -21,6 +21,7 @@
 #   include "FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H"
 #endif
 #include "HybridPICModel/HybridPICModel.H"
+#include "HybridPICModel/QdsmcVolumeElement.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
 
@@ -484,30 +485,38 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
 }
 #endif
 
-
-void FiniteDifferenceSolver::HybridPICSolveE (
+void
+FiniteDifferenceSolver::HybridPICSolveE (
     ablastr::fields::VectorField const& Efield,
     ablastr::fields::VectorField& Jfield,
     ablastr::fields::VectorField const& Jifield,
-    ablastr::fields::VectorField const& Bfield,
-    amrex::MultiFab const& rhofield,
+    ablastr::fields::VectorField const& Bfield, amrex::MultiFab const& rhofield,
     amrex::MultiFab const& Pefield,
-    [[maybe_unused]]std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
-    int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday, const bool include_resistivity)
-{
+    [[maybe_unused]] std::array<std::unique_ptr<amrex::iMultiFab>, 3> const&
+        eb_update_E,
+    int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
+    const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
+    ablastr::fields::VectorField const* EV_out) {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
 
-        HybridPICSolveECylindrical <CylindricalYeeAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
-        );
+        HybridPICSolveECylindrical<CylindricalYeeAlgorithm>(
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
+            lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
+            EV_out);
 
 #elif defined(WARPX_DIM_RSPHERE)
 
+        // The spherical kernels carry no hyper-resistivity or viscous drag
+        // term, so there is nothing to mirror; a caller asking for it here
+        // has nothing to book.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            EH_out == nullptr && EV_out == nullptr,
+            "HybridPICSolveE: EH_out / EV_out (hyper_resistivity_heating, "
+            "qdsmc_viscosity_in_ohms_law) are not available in the spherical "
+            "geometry");
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
             lev, hybrid_model, solve_for_Faraday, include_resistivity
@@ -516,15 +525,15 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 #else
     if (WarpX::grid_type == GridType::Staggered)
     {
-        HybridPICSolveECartesian <CartesianYeeAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
-        );
+        HybridPICSolveECartesian<CartesianYeeAlgorithm>(
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
+            lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
+            EV_out);
     } else {
-        HybridPICSolveECartesian <CartesianNodalAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
-        );
+        HybridPICSolveECartesian<CartesianNodalAlgorithm>(
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
+            lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
+            EV_out);
     }
 #endif
     } else {
@@ -534,18 +543,18 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 }
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-template<typename T_Algo>
-void FiniteDifferenceSolver::HybridPICSolveECylindrical (
+template <typename T_Algo>
+void
+FiniteDifferenceSolver::HybridPICSolveECylindrical (
     ablastr::fields::VectorField const& Efield,
     ablastr::fields::VectorField const& Jfield,
     ablastr::fields::VectorField const& Jifield,
-    ablastr::fields::VectorField const& Bfield,
-    amrex::MultiFab const& rhofield,
+    ablastr::fields::VectorField const& Bfield, amrex::MultiFab const& rhofield,
     amrex::MultiFab const& Pefield,
-    std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
-    int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday, const bool include_resistivity )
-{
+    std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+    int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
+    const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
+    ablastr::fields::VectorField const* EV_out) {
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -911,6 +920,47 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
     }
 
+#if defined(WARPX_DIM_RZ)
+    bool const include_visc_drag =
+        hybrid_model->m_visc_in_ohms_law && include_resistivity;
+    auto const visc_edges = hybrid_model->ViscosityRZEdges(lev);
+    bool const write_ev = EV_out != nullptr;
+    if (write_ev) {
+        for (int c = 0; c < 3; ++c) {
+            (*EV_out)[c]->setVal(0.0_rt);
+        }
+    }
+    MultiFab visc_force;
+    if (include_visc_drag) {
+        visc_force.define(
+            amrex::convert(Efield[0]->boxArray(), IntVect::TheNodeVector()),
+            Efield[0]->DistributionMap(), 3, IntVect(1));
+        hybrid_model->ComputeViscousDragNodal(lev, visc_force, Jfield, Jifield,
+                                              rhofield, Bfield);
+    }
+    auto const visc_vn =
+        MakeQdsmcVolumeElement(WarpX::GetInstance().Geom(lev),
+                               amrex::IndexType(IntVect::TheNodeVector()));
+    auto const visc_vr = MakeQdsmcVolumeElement(WarpX::GetInstance().Geom(lev),
+                                                Efield[0]->ixType());
+    auto const visc_vz = MakeQdsmcVolumeElement(WarpX::GetInstance().Geom(lev),
+                                                Efield[2]->ixType());
+
+#else
+    amrex::ignore_unused(EV_out);
+#endif
+
+    // Hyper-resistive field mirror (hyper_resistivity_heating): zeroed here so
+    // that EB-masked points, the axis pin and the one-node-inside exclusions
+    // -- every early return or skipped branch below -- read as "no E_H
+    // applied", exactly what the booking must see there.
+    const bool write_eh = (EH_out != nullptr);
+    if (write_eh) {
+        for (int d = 0; d < 3; ++d) {
+            (*EH_out)[d]->setVal(0.0_rt);
+        }
+    }
+
     // Loop through the grids, and over the tiles within each grid again
     // for the Yee grid calculation of the E field
 #ifdef AMREX_USE_OMP
@@ -985,6 +1035,26 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             Kr_cc = Kr_mf.const_array(mfi);
             Kt_cc = Kt_mf.const_array(mfi);
             Kz_cc = Kz_mf.const_array(mfi);
+        }
+        // E_H mirror arrays (default-constructed and never indexed unless
+        // EH_out was passed -- the kernels gate the write on the Array4).
+#if defined(WARPX_DIM_RZ)
+        Array4<Real const> visc;
+        Array4<Real> ev_r, ev_t, ev_z;
+        if (include_visc_drag) {
+            visc = visc_force.const_array(mfi);
+        }
+        if (write_ev) {
+            ev_r = (*EV_out)[0]->array(mfi);
+            ev_t = (*EV_out)[1]->array(mfi);
+            ev_z = (*EV_out)[2]->array(mfi);
+        }
+#endif
+        Array4<Real> eh_r, eh_t, eh_z;
+        if (write_eh) {
+            eh_r = (*EH_out)[0]->array(mfi);
+            eh_t = (*EH_out)[1]->array(mfi);
+            eh_z = (*EH_out)[2]->array(mfi);
         }
 
         // Extract structures indicating where the fields
@@ -1152,23 +1222,44 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                         // r on cell-centered point (Jr is cell-centered in r)
                         const Real r = rmin + (i + 0.5_rt)*dr;
+                        // E_H is formed as one value, added (E += eh, with
+                        // eh = -X exact, so bit-identical to the former
+                        // E -= X) and mirrored to EH_out for the booking.
+                        Real eh = 0._rt;
                         if (use_hyper_cc) {
                             // Adjoint curl-curl form: E_H = +(curl K)_r
                             // = -dz K_theta; the one-node-inside box ends
                             // the operator off non-periodic walls.
                             if (hyper_cc_er_box.contains(
                                     amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
-                                Er(i, j, 0) -= T_Algo::DownwardDz(
-                                    Kt_cc, coefs_z, n_coefs_z, i, j, 0, 0);
+                                eh = -T_Algo::DownwardDz(Kt_cc, coefs_z,
+                                                         n_coefs_z, i, j, 0, 0);
                             }
                         } else {
                         auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
                             + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, 0, 0) - Jr(i, j, 0)/(r*r);
 
-                        Er(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jr;
+                        eh = -eta_h(rho_val, btot_val) * nabla2Jr;
+                        }
+                        Er(i, j, 0) += eh;
+                        if (eh_r) {
+                            eh_r(i, j, 0) = eh;
                         }
                     }
                 }
+
+#if defined(WARPX_DIM_RZ)
+                if (include_visc_drag && visc_edges.active(i, j, 0)) {
+                    Real const ev = 0.5_rt *
+                                    (visc_vn(i, j) * visc(i, j, 0, 0) +
+                                     visc_vn(i + 1, j) * visc(i + 1, j, 0, 0)) /
+                                    visc_vr(i, j);
+                    Er(i, j, 0) += ev;
+                    if (ev_r) {
+                        ev_r(i, j, 0) = ev;
+                    }
+                }
+#endif
 
                 if (include_external_fields && !cc_num_r) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
@@ -1306,6 +1397,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             btot_val = std::sqrt(br_val*br_val + bt_val*bt_val + bz_val*bz_val);
                         }
 
+                        // E_H as one value, added and mirrored (see Er).
+                        Real eh = 0._rt;
                         if (use_hyper_cc) {
                             // Adjoint curl-curl form: E_H = +(curl K)_theta
                             // = dz K_r - dr K_z (this branch runs off-axis
@@ -1314,9 +1407,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             // the operator off non-periodic walls.
                             if (hyper_cc_et_box.contains(
                                     amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
-                                Etheta(i, j, 0) +=
-                                    T_Algo::DownwardDz(Kr_cc, coefs_z, n_coefs_z, i, j, 0, 0)
-                                    - T_Algo::DownwardDr(Kz_cc, coefs_r, n_coefs_r, i, j, 0, 0);
+                                eh = T_Algo::DownwardDz(Kr_cc, coefs_z,
+                                                        n_coefs_z, i, j, 0, 0) -
+                                     T_Algo::DownwardDr(Kz_cc, coefs_r,
+                                                        n_coefs_r, i, j, 0, 0);
                             }
                         } else {
                         // Special handling of the hyper-resistivity term on axis to avoid division by zero
@@ -1327,10 +1421,24 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                 + T_Algo::Dzz(Jtheta, coefs_z, n_coefs_z, i, j, 0, 0) - Jtheta(i, j, 0)/(r*r);
                         }
 
-                        Etheta(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
+                        eh = -eta_h(rho_val, btot_val) * nabla2Jtheta;
+                        }
+                        Etheta(i, j, 0) += eh;
+                        if (eh_t) {
+                            eh_t(i, j, 0) = eh;
                         }
                     }
                 }
+
+#if defined(WARPX_DIM_RZ)
+                if (include_visc_drag && visc_edges.active(i, j, 1)) {
+                    Real const ev = visc(i, j, 0, 1);
+                    Etheta(i, j, 0) += ev;
+                    if (ev_t) {
+                        ev_t(i, j, 0) = ev;
+                    }
+                }
+#endif
 
                 if (include_external_fields && !cc_num) {
                     // curlcurl_form defers the (unconditional) E_ext_theta
@@ -1466,6 +1574,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // r on nodal point (Jz is nodal in r)
                         const Real r = rmin + i*dr;
 
+                        // E_H as one value, added and mirrored (see Er).
+                        Real eh = 0._rt;
                         if (use_hyper_cc) {
                             // Adjoint curl-curl form: E_H = +(curl K)_z
                             // = (1/r) dr (r K_theta), with the exact
@@ -1476,31 +1586,52 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             if (hyper_cc_ez_box.contains(
                                     amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
                                 if (r > 0.5_rt*dr) {
-                                    Ez(i, j, 0) += T_Algo::DownwardDrr_over_r(
-                                        Kt_cc, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
+                                    eh = T_Algo::DownwardDrr_over_r(
+                                        Kt_cc, r, dr, coefs_r, n_coefs_r, i, j,
+                                        0, 0);
                                 } else {
-                                    Ez(i, j, 0) += 4._rt * Kt_cc(i, j, 0) / dr;
+                                    eh = 4._rt * Kt_cc(i, j, 0) / dr;
                                 }
                             }
                         } else {
-                        auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, 0, 0);
-                        if (r > 0.5_rt*dr) {
-                            nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
-                        } else {
-                            // m = 0 regularity: lim_{r->0} (1/r) d_r(r d_r Jz)
-                            // = 2 d_rr Jz. NOTE: trajectories of eta_H runs
-                            // with on-axis current change relative to the
-                            // historical (factor-2-low) row; the exact
-                            // curl-curl path (hyper_resistivity_curlcurl)
-                            // has this limit by composition.
-                            nabla2Jz += 2.0_rt *
-                                T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
-                        }
+                            auto nabla2Jz =
+                                T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, 0, 0);
+                            if (r > 0.5_rt * dr) {
+                                nabla2Jz += T_Algo::Dr_rDr_over_r(
+                                    Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
+                            } else {
+                                // m = 0 regularity: lim_{r->0} (1/r) d_r(r d_r
+                                // Jz) = 2 d_rr Jz. NOTE: trajectories of eta_H
+                                // runs with on-axis current change relative to
+                                // the historical (factor-2-low) row; the exact
+                                // curl-curl path (hyper_resistivity_curlcurl)
+                                // has this limit by composition.
+                                nabla2Jz +=
+                                    2.0_rt * T_Algo::Drr(Jz, coefs_r, n_coefs_r,
+                                                         i, j, 0, 0);
+                            }
 
-                        Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                            eh = -eta_h(rho_val, btot_val) * nabla2Jz;
+                        }
+                        Ez(i, j, 0) += eh;
+                        if (eh_z) {
+                            eh_z(i, j, 0) = eh;
                         }
                     }
                 }
+
+#if defined(WARPX_DIM_RZ)
+                if (include_visc_drag && visc_edges.active(i, j, 2)) {
+                    Real const ev = 0.5_rt *
+                                    (visc_vn(i, j) * visc(i, j, 0, 2) +
+                                     visc_vn(i, j + 1) * visc(i, j + 1, 0, 2)) /
+                                    visc_vz(i, j);
+                    Ez(i, j, 0) += ev;
+                    if (ev_z) {
+                        ev_z(i, j, 0) = ev;
+                    }
+                }
+#endif
 
                 if (include_external_fields && !cc_num_z) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
@@ -1536,18 +1667,18 @@ void FiniteDifferenceSolver::HybridPICSolveESpherical (
 }
 #else
 
-template<typename T_Algo>
-void FiniteDifferenceSolver::HybridPICSolveECartesian (
+template <typename T_Algo>
+void
+FiniteDifferenceSolver::HybridPICSolveECartesian (
     ablastr::fields::VectorField const& Efield,
     ablastr::fields::VectorField const& Jfield,
     ablastr::fields::VectorField const& Jifield,
-    ablastr::fields::VectorField const& Bfield,
-    amrex::MultiFab const& rhofield,
+    ablastr::fields::VectorField const& Bfield, amrex::MultiFab const& rhofield,
     amrex::MultiFab const& Pefield,
-    std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
-    int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday, const bool include_resistivity )
-{
+    std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
+    int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
+    const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
+    ablastr::fields::VectorField const* EV_out) {
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
 
@@ -1767,6 +1898,46 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
     }
 
+    // Hyper-resistive field mirror (hyper_resistivity_heating): zeroed here so
+    // that EB-masked points and the one-node-inside exclusions -- every early
+    // return or skipped branch below -- read as "no E_H applied", exactly
+    // what the booking must see there.
+    const bool write_eh = (EH_out != nullptr);
+    if (write_eh) {
+        for (int d = 0; d < 3; ++d) {
+            (*EH_out)[d]->setVal(0.0_rt);
+        }
+    }
+
+    // Braginskii electron viscous DRAG (qdsmc_viscosity_in_ohms_law; see the
+    // m_visc_in_ohms_law member doc): E_visc = -div(Pi_e)/rho added in the
+    // Dissipative solves only (like eta_H, the push field excludes it). The
+    // nodal drag F = -div_c(Pi_e)/max(rho, rho_floor) is precomputed from the
+    // SAME u_e, strain and capped coefficients as the booked heating
+    // (ComputeViscousDragNodal: centred divergence over the floored nodal
+    // rho, one exchanged ghost layer); the kernels below AVERAGE it onto
+    // each Yee edge -- the transpose of the edge-to-node average that built
+    // u_e from J -- so the whole chain is the exact adjoint of the gradient
+    // chain and Sum J . E_visc = Sum Q_nu discretely. 3D only (asserted at
+    // input); the EV_out mirror feeds the work booking exactly as EH_out
+    // feeds the hyper-resistive one.
+    const bool include_visc_drag =
+        hybrid_model->m_visc_in_ohms_law && include_resistivity;
+    const bool write_ev = (EV_out != nullptr);
+    if (write_ev) {
+        for (int d = 0; d < 3; ++d) {
+            (*EV_out)[d]->setVal(0.0_rt);
+        }
+    }
+    MultiFab F_mf;
+    if (include_visc_drag) {
+        F_mf.define(amrex::convert(Efield[0]->boxArray(),
+                                   amrex::IntVect::TheNodeVector()),
+                    Efield[0]->DistributionMap(), 3, IntVect(1));
+        hybrid_model->ComputeViscousDragNodal(lev, F_mf, Jfield, Jifield,
+                                              rhofield, Bfield);
+    }
+
     // Loop through the grids, and over the tiles within each grid again
     // for the Yee grid calculation of the E field
 #ifdef AMREX_USE_OMP
@@ -1818,6 +1989,26 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             eHx = eH_mf[0]->const_array(mfi);
             eHy = eH_mf[1]->const_array(mfi);
             eHz = eH_mf[2]->const_array(mfi);
+        }
+        // E_H mirror arrays (default-constructed and never indexed unless
+        // EH_out was passed -- the kernels gate the write on the Array4).
+        Array4<Real> eh_x, eh_y, eh_z;
+        if (write_eh) {
+            eh_x = (*EH_out)[0]->array(mfi);
+            eh_y = (*EH_out)[1]->array(mfi);
+            eh_z = (*EH_out)[2]->array(mfi);
+        }
+        // Nodal viscous drag (3 comps) and the E_visc mirror arrays;
+        // default-constructed and never indexed when the drag is off.
+        Array4<Real const> F_a;
+        if (include_visc_drag) {
+            F_a = F_mf.const_array(mfi);
+        }
+        Array4<Real> ev_x, ev_y, ev_z;
+        if (write_ev) {
+            ev_x = (*EV_out)[0]->array(mfi);
+            ev_y = (*EV_out)[1]->array(mfi);
+            ev_z = (*EV_out)[2]->array(mfi);
         }
 
         // Extract structures indicating where the fields
@@ -1931,11 +2122,27 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
+                    // Mirror the exact applied dissipative field for energy
+                    // booking.
                     auto nabla2Jx = T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jx, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jx, coefs_z, n_coefs_z, i, j, k);
 
-                    Ex(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jx;
+                    Real const eh = -eta_h(rho_val, btot_val) * nabla2Jx;
+                    Ex(i, j, k) += eh;
+                    if (eh_x) {
+                        eh_x(i, j, k) = eh;
+                    }
+                }
+            }
+            if (include_visc_drag) {
+                // E_visc,x = node->edge average of the nodal drag F_x (the
+                // transpose of the edge->node average that built u_e).
+                const Real ev =
+                    Interp(F_a, nodal, Ex_stag, coarsen, i, j, k, 0);
+                Ex(i, j, k) += ev;
+                if (ev_x) {
+                    ev_x(i, j, k) = ev;
                 }
             }
 
@@ -2028,11 +2235,26 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
+                    // Mirror the exact applied dissipative field for energy
+                    // booking.
                     auto nabla2Jy = T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jy, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jy, coefs_z, n_coefs_z, i, j, k);
 
-                    Ey(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jy;
+                    Real const eh = -eta_h(rho_val, btot_val) * nabla2Jy;
+                    Ey(i, j, k) += eh;
+                    if (eh_y) {
+                        eh_y(i, j, k) = eh;
+                    }
+                }
+            }
+            if (include_visc_drag) {
+                // E_visc,y = node->edge average of F_y (see Ex).
+                const Real ev =
+                    Interp(F_a, nodal, Ey_stag, coarsen, i, j, k, 1);
+                Ey(i, j, k) += ev;
+                if (ev_y) {
+                    ev_y(i, j, k) = ev;
                 }
             }
 
@@ -2125,11 +2347,26 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
+                    // Mirror the exact applied dissipative field for energy
+                    // booking.
                     auto nabla2Jz = T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jz, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, k);
 
-                    Ez(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                    Real const eh = -eta_h(rho_val, btot_val) * nabla2Jz;
+                    Ez(i, j, k) += eh;
+                    if (eh_z) {
+                        eh_z(i, j, k) = eh;
+                    }
+                }
+            }
+            if (include_visc_drag) {
+                // E_visc,z = node->edge average of F_z (see Ex).
+                const Real ev =
+                    Interp(F_a, nodal, Ez_stag, coarsen, i, j, k, 2);
+                Ez(i, j, k) += ev;
+                if (ev_z) {
+                    ev_z(i, j, k) = ev;
                 }
             }
 

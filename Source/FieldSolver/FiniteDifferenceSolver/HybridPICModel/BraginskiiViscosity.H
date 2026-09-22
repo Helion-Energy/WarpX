@@ -29,11 +29,13 @@
  * on the current (because u_e ~ -J/(e n_e)), and they are NOT the same
  * thing. They are kept apart on purpose:
  *
- *   hyper-resistivity eta_H   NUMERICAL stabiliser for unphysical modes.
- *   (m_eta_h, Ohm's law)      Its magnitude is chosen for stability, not
- *                             from a transport coefficient. Its dissipation
- *                             is DELIBERATELY NOT booked as heating -- see
- *                             the m_eta_h declaration in HybridPICModel.H.
+ *   hyper-resistivity eta_H   By default a NUMERICAL stabiliser for
+ *   (m_eta_h, Ohm's law)      unphysical modes, magnitude chosen for
+ *                             stability, dissipation NOT booked. Since
+ *                             2026-09-21 it can instead carry a PHYSICAL
+ *                             isotropic coefficient with its work J . E_H
+ *                             booked (hyper_resistivity_heating = 1) --
+ *                             see the m_eta_h declaration in HybridPICModel.H.
  *
  *   electron viscosity        PHYSICAL Braginskii stress. Its coefficients
  *   (this file)               come from the collision time and the
@@ -42,8 +44,18 @@
  *                             own reduced-diagnostic column (P_nu).
  *
  * The two share a FORM and differ entirely in the COEFFICIENT. A reader who
- * sees only the form will conflate them; do not merge, do not fold one into
- * the other, and do not "fix" eta_H by booking it.
+ * sees only the form will conflate them; keep them as separate terms with
+ * separate inputs and separate columns.
+ *
+ * HEATING WITHOUT DRAG IS AN ENERGY SOURCE (Eric, 2026-09-21)
+ * -----------------------------------------------------------
+ * Booking Q_nu while applying no viscous stress in Ohm's law lets the
+ * current keep its energy while the electrons receive Q_nu: flown on the
+ * periodic column 2026-09-21 the heating-only block booked 177 kJ in 1.5 us.
+ * A booked viscous heating must be paired with the drag that pays for it,
+ * E_visc = -div(Pi_e)/(e n_e) in Ohm's law, so that globally
+ * Int J . E_visc dV = Int Q_nu dV (+ the ion-strain work Int Pi_e : grad u_i,
+ * zero for ions at rest). The heating-only mode is not to be flown again.
  *
  * WHY ANISOTROPIC, AND WHY THE PARALLEL CHANNEL IS FLUX-LIMITED
  * ------------------------------------------------------------
@@ -253,6 +265,80 @@ amrex::Real braginskii_viscous_heating (amrex::Real const mu_par,
         std::max(WddW - 1.5_rt * S * S, 0.0_rt);
 
     return 0.75_rt * mu_par * S * S + 0.5_rt * mu_perp * W_perp2;
+}
+
+/** Braginskii electron viscous STRESS tensor Pi [Pa], the momentum-equation
+ *  partner of braginskii_viscous_heating: built from the SAME strain and
+ *  coefficients so that, pointwise,
+ *
+ *      -Pi : grad u  ==  braginskii_viscous_heating(mu_par, mu_perp, G, S).
+ *
+ * Derivation. With W = G + G^T - (2/3) tr(G) I (symmetric, traceless) and
+ * the field-aligned projector P = bb - I/3 (symmetric, traceless,
+ * P:P = 2/3), Braginskii's dissipative stress at the parallel (eta_0) and
+ * cross-field (eta_1) coefficients is
+ *
+ *      Pi = -mu_perp W - (3/2) (mu_par - mu_perp) S P,      S = b.W.b .
+ *
+ * Contract with G. W:G = (1/2) W:W because W is symmetric and traceless (it
+ * kills the antisymmetric and isotropic parts of G); P:G = bGb - div u/3 =
+ * S/2 for the same reason. Hence
+ *
+ *      -Pi:G = (1/2) mu_perp W:W + (3/4) (mu_par - mu_perp) S^2
+ *            = (3/4) mu_par S^2 + (1/2) mu_perp (W:W - (3/2) S^2),
+ *
+ * exactly the heating function's two terms (W^perp:W^perp = W:W - (3/2) S^2
+ * by the orthogonal split of the file comment). At mu_par = mu_perp = mu
+ * this is the Navier-Stokes deviatoric stress Pi = -mu W. In Ohm's law the
+ * drag it produces is E_visc = -div(Pi)/(e n_e) (Braginskii sign: force on
+ * the electron fluid = -div Pi), and the work J . E_visc it extracts from
+ * the current equals Int Q_nu dV globally (plus the ion-strain work
+ * Int Pi : grad u_i, zero for ions at rest). The gyroviscous stress is
+ * omitted here as everywhere in this file (see the file comment).
+ *
+ * @param mu_par   parallel dynamic viscosity [Pa s] (capped and flux-limited
+ *                 exactly as passed to braginskii_viscous_heating)
+ * @param mu_perp  cross-field dynamic viscosity [Pa s]
+ * @param G        velocity gradient tensor G[i][j] = d u_j / d x_i [1/s]
+ * @param b        unit vector along B
+ * @param S        field-aligned strain from braginskii_strain_par(G, b)
+ * @param Pi       output, symmetric, packed as (xx, yy, zz, xy, xz, yz) */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+braginskii_stress (amrex::Real const mu_par, amrex::Real const mu_perp,
+                   amrex::Real const G[3][3], amrex::Real const b[3],
+                   amrex::Real const S, amrex::Real Pi[6]) {
+    using namespace amrex::literals;
+
+    amrex::Real div_u = 0.0_rt;
+    for (int i = 0; i < 3; ++i) {
+        div_u += G[i][i];
+    }
+    amrex::Real const two_thirds_div = (2.0_rt / 3.0_rt) * div_u;
+    amrex::Real const c_par = 1.5_rt * (mu_par - mu_perp) * S;
+
+    // (i, j) pairs of the packed layout (xx, yy, zz, xy, xz, yz).
+    constexpr int pi_i[6] = {0, 1, 2, 0, 0, 1};
+    constexpr int pi_j[6] = {0, 1, 2, 1, 2, 2};
+    for (int c = 0; c < 6; ++c) {
+        int const i = pi_i[c];
+        int const j = pi_j[c];
+        amrex::Real const delta = (i == j) ? 1.0_rt : 0.0_rt;
+        amrex::Real const W_ij = G[i][j] + G[j][i] - delta * two_thirds_div;
+        amrex::Real const P_ij = b[i] * b[j] - delta * (1.0_rt / 3.0_rt);
+        Pi[c] = -mu_perp * W_ij - c_par * P_ij;
+    }
+}
+
+/** -Pi : grad u for a packed symmetric stress (the heating the stress
+ *  implies); provided so a test or a diagnostic can assert the identity
+ *  with braginskii_viscous_heating at the same node. */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+braginskii_stress_power (amrex::Real const Pi[6], amrex::Real const G[3][3]) {
+    using namespace amrex::literals;
+    // Off-diagonal entries appear twice in the full contraction.
+    return -(Pi[0] * G[0][0] + Pi[1] * G[1][1] + Pi[2] * G[2][2] +
+             Pi[3] * (G[0][1] + G[1][0]) + Pi[4] * (G[0][2] + G[2][0]) +
+             Pi[5] * (G[1][2] + G[2][1]));
 }
 
 #endif // WARPX_BRAGINSKII_VISCOSITY_H_

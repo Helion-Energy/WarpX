@@ -190,16 +190,22 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
     // stage (see the member documentation in the header).
     // Temperature-dependent push and Ohm coefficients must share a frozen
     // thermal stage during every inner residual and Jacobian evaluation.
-    m_qdsmc_segregated_solve = m_hybrid_pic_model->m_resistivity_has_Te_dependence;
+    m_qdsmc_segregated_solve =
+        m_hybrid_pic_model->m_resistivity_has_Te_dependence ||
+        m_hybrid_pic_model->m_visc_in_ohms_law;
     pp.query("qdsmc_segregated_solve", m_qdsmc_segregated_solve);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !m_hybrid_pic_model->m_resistivity_has_Te_dependence || m_qdsmc_segregated_solve,
-        "Temperature-dependent implicit resistivity requires qdsmc_segregated_solve");
+        !(m_hybrid_pic_model->m_resistivity_has_Te_dependence ||
+          m_hybrid_pic_model->m_visc_in_ohms_law) ||
+            m_qdsmc_segregated_solve,
+        "Temperature-dependent implicit drag requires qdsmc_segregated_solve");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !(m_hybrid_pic_model->m_resistivity_has_Te_dependence ||
+          m_hybrid_pic_model->m_visc_in_ohms_law ||
           m_hybrid_pic_model->m_include_thermal_conduction) ||
             m_theta == 0.5_rt,
-        "Implicit live-temperature resistivity and split conduction require theta=0.5");
+        "Implicit live-temperature drag and split conduction require "
+        "theta=0.5");
     if (m_qdsmc_segregated_solve) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -611,6 +617,10 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // Update WarpX fields to t^{n+theta}
     UpdateWarpXFields( m_E, false, start_time );
     m_WarpX->reduced_diags->ComputeDiagsMidStep(a_step);
+
+    // Accepted-source booking must use the same midpoint temperature and
+    // magnetic direction as the force, before endpoint field extrapolation.
+    m_hybrid_pic_model->CaptureImplicitDissipationCoefficients();
 
     const amrex::Real new_time = start_time + m_dt;
 
@@ -1123,11 +1133,41 @@ ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_
             amrex::MultiFab::Copy(frozen, rho, rho.nComp() / 2, 0, 1, frozen.nGrowVect());
         }
     };
+    auto current_defect = [&] () {
+        amrex::Real defect = 0.0_rt;
+        amrex::Real reference = 1.e-30_rt;
+        if (m_hybrid_pic_model->m_visc_in_ohms_law) {
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                auto const live =
+                    m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
+                auto const plasma = m_WarpX->m_fields.get_alldirs(
+                    FieldType::hybrid_current_fp_plasma, lev);
+                for (int d = 0; d < 3; ++d) {
+                    auto const& frozen =
+                        *m_hybrid_pic_model->m_implicit_visc_current.at(lev)[d];
+                    amrex::MultiFab delta(frozen.boxArray(),
+                                          frozen.DistributionMap(), 1, 0);
+                    amrex::MultiFab::LinComb(delta, 1.0_rt, *live[d], 0,
+                                             -1.0_rt, frozen, 0, 0, 1, 0);
+                    defect = std::max(defect, delta.norminf(0));
+                    // Stress depends on J_i-J, so both currents set its scale.
+                    // Normalizing by J_i alone cannot converge when ions are
+                    // at rest and only floating-point push noise remains.
+                    reference =
+                        std::max({reference, live[d]->norminf(0),
+                                  frozen.norminf(0), plasma[d]->norminf(0)});
+                }
+            }
+        }
+        return defect / reference;
+    };
     int exit_status = 3;
     amrex::Real dPe_rel = std::numeric_limits<amrex::Real>::max();
     int outer = 0;
     for (; outer < m_qdsmc_outer_max_iterations; ++outer)
     {
+
+        m_hybrid_pic_model->FreezeImplicitViscousCurrent();
 
         // Inner solve: E^{n+theta} at frozen electron pressure. Warm-started
         // from the previous outer iterate (m_E carries through).
@@ -1170,14 +1210,16 @@ ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_
         dPe_rel = defect[0];
         amrex::Real const dTe_rel = defect[1];
 
+        amrex::Real const dJi_rel = current_defect();
         if (m_qdsmc_outer_verbose)
         {
             amrex::Print() << "QDSMC segregated: outer iteration = " << outer
                            << ", dPe/Pe = " << std::scientific << dPe_rel
                            << ", max relative dTe = " << dTe_rel
-                           << ", max relative drho = " << defect[2] << "\n";
+                           << ", max relative drho = " << defect[2]
+                           << ", relative dJi (viscous) = " << dJi_rel << "\n";
         }
-        dPe_rel = std::max({dPe_rel, dTe_rel, defect[2]});
+        dPe_rel = std::max({dPe_rel, dTe_rel, defect[2], dJi_rel});
         if (dPe_rel < m_qdsmc_outer_relative_tolerance)
         {
             // Grade the field equation with the newly emitted thermal stage.
@@ -1191,7 +1233,8 @@ ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_
             }
             m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, true);
             auto const final_defect = thermal_defect();
-            dPe_rel = std::max({final_defect[0], final_defect[1], final_defect[2]});
+            dPe_rel = std::max({final_defect[0], final_defect[1],
+                                final_defect[2], current_defect()});
             refresh_density();
             if ((final_norm == 0.0_rt || final_norm < field_target) &&
                 dPe_rel < m_qdsmc_outer_relative_tolerance)
