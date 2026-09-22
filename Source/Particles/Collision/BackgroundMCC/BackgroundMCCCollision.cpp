@@ -229,7 +229,8 @@ BackgroundMCCCollision::getDepletableBackgrounds () const
     return {background};
 }
 
-/** Calculate the maximum collision frequency using a fixed energy grid that
+/** Calculate the maximum collision frequency, from the reduced mass of the
+ *  projectile and background pair, using a fixed energy grid that
  *  ranges from 1e-4 to 5000 eV in 0.2 eV increments
  */
 amrex::ParticleReal
@@ -252,6 +253,11 @@ BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_p
         E_step = (energy_step < E_step) ? energy_step : E_step;
     }
 
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_background_mass > 0.0_prt,
+        "BackgroundMCC: the background mass must be set before nu_max is computed");
+    const amrex::ParticleReal reduced_mass =
+        m_mass1 * m_background_mass / (m_mass1 + m_background_mass);
+
     amrex::ParticleReal E = E_start;
     while(E < E_end){
         amrex::ParticleReal sigma_E = 0.0;
@@ -262,10 +268,16 @@ BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_p
             sigma_E += scattering_process.getCrossSection(E);
         }
 
-        // calculate collision frequency
+        // calculate collision frequency. E is the collision energy the cross
+        // sections are tabulated against, which getCollisionEnergy() computes
+        // in the center-of-mass frame, mu*v_rel^2/2, so v_rel follows from
+        // the reduced mass. Using the projectile mass instead underestimates
+        // nu_max by sqrt(1 + m1/M): negligible for electrons, but sqrt(2) for
+        // ions on a gas of their own mass, whose rate is then capped wherever
+        // the true frequency exceeds that underestimate.
         nu = (
               m_max_background_density
-              * std::sqrt(2.0_prt / m_mass1 * PhysConst::q_e)
+              * std::sqrt(2.0_prt / reduced_mass * PhysConst::q_e)
               * sigma_E * std::sqrt(E)
               );
         nu_max = std::max(nu_max, nu);
@@ -291,6 +303,20 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
 
     if (!init_flag) {
         m_mass1 = species1.getMass();
+
+        // Resolve the background mass first: get_nu_max needs it for the
+        // reduced mass.
+        // if an ionization process is included the secondary species mass
+        // is taken as the background mass
+        if (ionization_flag) {
+            m_background_mass = species2.getMass();
+        }
+        // if no neutral species mass was specified and ionization is not
+        // included assume that the collisions will be with neutrals of the
+        // same mass as the colliding species (as in ion-neutral collisions)
+        else if (m_background_mass == -1) {
+            m_background_mass = species1.getMass();
+        }
 
         // calculate maximum collision frequency without ionization
         m_nu_max = get_nu_max(m_scattering_processes);
@@ -323,16 +349,6 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
                           std::to_string(coll_n_ioniz) + " is > 0.1 and ionization probability is = " +
                           std::to_string(m_total_collision_prob_ioniz) + "\n");
             }
-
-            // if an ionization process is included the secondary species mass
-            // is taken as the background mass
-            m_background_mass = species2.getMass();
-        }
-        // if no neutral species mass was specified and ionization is not
-        // included assume that the collisions will be with neutrals of the
-        // same mass as the colliding species (as in ion-neutral collisions)
-        else if (m_background_mass == -1) {
-            m_background_mass = species1.getMass();
         }
 
         amrex::Print() << Utils::TextMsg::Info(
