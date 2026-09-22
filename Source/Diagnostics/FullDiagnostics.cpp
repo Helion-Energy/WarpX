@@ -482,6 +482,19 @@ FullDiagnostics::InitializeFieldFunctorsRZopenPMD (int lev)
             if (update_varnames) {
                 AddRZModesToOutputNames(std::string("rho"), ncomp);
             }
+        } else if ( m_varnames_fields[comp] == "rho_pedestal" ){
+            // Hybrid density pedestal q_e n_ped (hybrid_pic_model.density_pedestal);
+            // the 'rho' record stays the deposited density.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                warpx.m_fields.has("hybrid_rho_pedestal_fp", lev),
+                "The 'rho_pedestal' diagnostic output requires "
+                "hybrid_pic_model.density_pedestal = 1.");
+            m_all_field_functors[lev][comp] = std::make_unique<CellCenterFunctor>(
+                warpx.m_fields.get("hybrid_rho_pedestal_fp", lev),
+                lev, m_crse_ratio, false, ncomp);
+            if (update_varnames) {
+                AddRZModesToOutputNames(std::string("rho_pedestal"), ncomp);
+            }
         } else if ( m_varnames_fields[comp].starts_with("rho_")){
             // Initialize rho functor to dump rho per species
             m_all_field_functors[lev][comp] = std::make_unique<RhoFunctor>(lev, m_crse_ratio, true, m_rho_per_species_index[i],
@@ -951,6 +964,13 @@ FullDiagnostics::InitializeFieldFunctors (int lev)
         if ( m_varnames[comp] == "rho" ){
             // Initialize rho functor to dump total rho
             m_all_field_functors[lev][comp] = std::make_unique<RhoFunctor>(lev, m_crse_ratio, true);
+        } else if ( m_varnames[comp] == "rho_pedestal" ){
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                warpx.m_fields.has("hybrid_rho_pedestal_fp", lev),
+                "The 'rho_pedestal' diagnostic output requires "
+                "hybrid_pic_model.density_pedestal = 1.");
+            m_all_field_functors[lev][comp] = std::make_unique<CellCenterFunctor>(
+                warpx.m_fields.get("hybrid_rho_pedestal_fp", lev), lev, m_crse_ratio);
         } else if ( m_varnames[comp].starts_with("rho_")){
             // Initialize rho functor to dump rho per species
             m_all_field_functors[lev][comp] = std::make_unique<RhoFunctor>(lev, m_crse_ratio, true, m_rho_per_species_index[i]);

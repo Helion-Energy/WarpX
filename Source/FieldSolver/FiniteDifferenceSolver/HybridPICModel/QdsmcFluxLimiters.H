@@ -39,22 +39,68 @@
  * extrema -- a property face-value (NVD) bounds do not provide.
  */
 
+/** C-infinity min / max at dimensionless width w: (a + b -/+ sqrt((a - b)^2
+ *  + w^2))/2, exact asymptotes, corner inflation w/2 at a = b. */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+qdsmc_smooth_min (amrex::Real const a, amrex::Real const b, amrex::Real const w)
+{
+    using namespace amrex::literals;
+    return 0.5_rt * (a + b - std::sqrt((a - b) * (a - b) + w * w));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+qdsmc_smooth_max (amrex::Real const a, amrex::Real const b, amrex::Real const w)
+{
+    using namespace amrex::literals;
+    return 0.5_rt * (a + b + std::sqrt((a - b) * (a - b) + w * w));
+}
+
 /** SMART-limited (Gaskell--Lau 1988) face value for advective fluxes,
  *  in the normalized-variable frame of the local upwind triple
  *  (tUU = far upwind, tU = upwind, tD = downwind): QUICK where smooth,
  *  blended to bounded legs near extrema, 1st-order upwind outside
  *  [0, 1] -- monotone by construction. limiter = 0 returns unlimited
  *  QUICK (attribution control, can overshoot), 1 returns 1st-order
- *  upwind. */
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-amrex::Real qdsmc_fd_face_value (amrex::Real const tUU,
-                                 amrex::Real const tU,
-                                 amrex::Real const tD, int const limiter)
+ *  upwind, 2 the hard (piecewise-linear) SMART.
+ *
+ *  limiter = 5 ("ssmart") is the SMOOTHED SMART: the same curve in
+ *  Sweby form, psi(r) = max(0, min(2 r, 1/4 + 3/4 r, 4)) with
+ *  r = d_down/d_up the ratio of the donor cell's one-sided differences
+ *  (d_up = tU - tUU, d_down = tD - tU), every min/max rounded in ratio
+ *  space at dimensionless width w (qdsmc_smooth_min/max), so the face
+ *  value tU + d_up psi/2 is C-infinity in the data; the ratio is guarded
+ *  as d_up d_down/(d_up^2 + g^2), g = 1e-6 x the stencil's rms
+ *  magnitude (an all-zero stencil returns tU). This transcribes the MHD
+ *  solver's smart_slope_smooth (ThetaImplicitMHD_K.H) to
+ *  the hybrid face-value site; the hard SMART's NVD branches (3 phi,
+ *  3/8 + 3/4 phi, 1, phi outside [0, 1]) are exactly the Sweby legs
+ *  (4, 1/4 + 3/4 r, 2 r, 0) with phi = 1/(1 + r), so w -> 0 recovers
+ *  limiter 2 away from the kinks (r = 0.2, r = 5, r = 0). */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+qdsmc_fd_face_value (amrex::Real const tUU, amrex::Real const tU, amrex::Real const tD,
+                     int const limiter, amrex::Real const width = 0.01)
 {
     using namespace amrex::literals;
     if (limiter == 1) { return tU; }
     if (limiter == 0) {
         return 0.375_rt*tD + 0.75_rt*tU - 0.125_rt*tUU;   // QUICK
+    }
+    if (limiter == 5)
+    {
+        amrex::Real const d_up = tU - tUU;
+        amrex::Real const d_dn = tD - tU;
+        amrex::Real const g = 1.0e-6_rt * std::sqrt(tUU * tUU + tU * tU + tD * tD);
+        amrex::Real const den = d_up * d_up + g * g;
+        if (den <= 0.0_rt)
+        {
+            return tU;
+        }
+        amrex::Real const r = d_up * d_dn / den;
+        amrex::Real const psi = qdsmc_smooth_max(
+            qdsmc_smooth_min(qdsmc_smooth_min(2.0_rt * r, 0.25_rt + 0.75_rt * r, width), 4.0_rt,
+                             width),
+            0.0_rt, width);
+        return tU + 0.5_rt * d_up * psi;
     }
     amrex::Real const den = tD - tUU;
     if (den == 0.0_rt) { return tU; }

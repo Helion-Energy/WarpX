@@ -438,3 +438,102 @@ if(TARGET test_darwin_vacuum_recovery)
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     endif()
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_darwin_vacuum_recovery_rz test_darwin_vacuum_recovery_rz.cpp)
+    target_link_libraries(test_darwin_vacuum_recovery_rz PRIVATE lib_rz)
+    target_include_directories(test_darwin_vacuum_recovery_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_darwin_vacuum_recovery_rz)
+    endif()
+    foreach(grid IN ITEMS 8 32)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_${grid})
+        add_test(NAME test_rz_darwin_vacuum_recovery_${grid}
+            COMMAND test_darwin_vacuum_recovery_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_darwin_vacuum_recovery
+                amr.max_grid_size=${grid})
+        set_tests_properties(test_rz_darwin_vacuum_recovery_${grid} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_${grid}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_implicit_thermal_rz test_implicit_thermal_rz.cpp)
+    target_link_libraries(test_implicit_thermal_rz PRIVATE lib_rz)
+    target_include_directories(test_implicit_thermal_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_implicit_thermal_rz)
+    endif()
+    foreach(conduction IN ITEMS 0 1)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_thermal_${conduction})
+        add_test(NAME test_rz_implicit_thermal_${conduction}
+            COMMAND test_implicit_thermal_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                thermal_test.conduction=${conduction})
+        set_tests_properties(test_rz_implicit_thermal_${conduction} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_thermal_${conduction}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;WARPX_QDSMC_COND_STATS=1")
+    endforeach()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_implicit_stopping_rz test_implicit_stopping_rz.cpp)
+    target_link_libraries(test_implicit_stopping_rz PRIVATE lib_rz)
+    target_include_directories(test_implicit_stopping_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_implicit_stopping_rz)
+    endif()
+    foreach(filtered IN ITEMS 0 1)
+    foreach(pedestal IN ITEMS 0 1)
+        foreach(axial IN ITEMS periodic pec)
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_stopping_${pedestal}_${axial}_${filtered})
+            if(axial STREQUAL "periodic")
+                set(particle_axial periodic)
+            else()
+                set(particle_axial reflecting)
+            endif()
+            add_test(NAME test_rz_implicit_stopping_${pedestal}_${axial}_${filtered}
+                COMMAND test_implicit_stopping_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_stopping
+                    hybrid_pic_model.density_pedestal=${pedestal}
+                    warpx.use_filter=${filtered}
+                    "boundary.field_lo=none ${axial}" "boundary.field_hi=pec ${axial}"
+                    "boundary.particle_lo=none ${particle_axial}"
+                    "boundary.particle_hi=reflecting ${particle_axial}")
+            set_tests_properties(test_rz_implicit_stopping_${pedestal}_${axial}_${filtered} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_stopping_${pedestal}_${axial}_${filtered}
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+    endforeach()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_thermal_boundary_rz test_thermal_boundary_rz.cpp)
+    target_link_libraries(test_thermal_boundary_rz PRIVATE lib_rz)
+    target_include_directories(test_thermal_boundary_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_thermal_boundary_rz)
+    endif()
+    foreach(axial IN ITEMS periodic pec)
+        foreach(integrator IN ITEMS ssprk2 rkl2)
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_thermal_boundary_${axial}_${integrator})
+            if(axial STREQUAL "periodic")
+                set(particle_axial periodic)
+            else()
+                set(particle_axial reflecting)
+            endif()
+            add_test(NAME test_rz_thermal_boundary_${axial}_${integrator}
+                COMMAND test_thermal_boundary_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                    "boundary.field_lo=none ${axial}" "boundary.field_hi=pec ${axial}"
+                    "boundary.particle_lo=none ${particle_axial}"
+                    "boundary.particle_hi=reflecting ${particle_axial}"
+                    hybrid_pic_model.qdsmc_conduction_fd_time=${integrator})
+            set_tests_properties(test_rz_thermal_boundary_${axial}_${integrator} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_thermal_boundary_${axial}_${integrator}
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()

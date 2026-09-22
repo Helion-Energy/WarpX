@@ -106,7 +106,7 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
     for (int lev = 0; lev <= species.finestLevel(); ++lev) {
         ablastr::fields::VectorField Ve_fp = warpx.m_fields.get_alldirs("Ve_fp", lev);
         ablastr::fields::VectorField B_fp  = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
-        amrex::MultiFab const & rho_fp     = *warpx.m_fields.get(FieldType::rho_fp, lev);
+        amrex::MultiFab const& rho_fp = hybrid_model->GetStoppingChargeDensity(lev);
         amrex::MultiFab const & Te_fp      = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         amrex::MultiFab & stage            = hybrid_model->GetFastIonHeatingStaging(lev);
 

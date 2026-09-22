@@ -311,6 +311,17 @@ private:
     /** Previous outer iterate of the emitted electron pressure, for the
      *  outer convergence test (allocated on first use). */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_Pe_prev;
+    /** Common Ohm/push density argument, updated only by the thermal outer loop. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_rho_frozen;
+
+    /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
+     *  (from Efield_fp, which holds the transverse state at entry),
+     *  then B = B_static + curl A with boundary treatment. */
+    void DarwinUpdateA_B (amrex::Real a_thetadt, amrex::Real a_time, bool a_from_jacobian);
+
+  public:
+    // Public for nvcc: these functions enclose extended device lambdas.
+    void ApplyDarwinDisplacementCurrent (amrex::Real interval);
 
     /** Outer loop of the segregated solve: alternate {inner nonlinear solve
      *  at frozen Pe, one stage pass on the as-left converged grid state}
@@ -321,15 +332,7 @@ private:
      *  \return the inner solver's exit status, or -7 if the outer loop
      *          reached qdsmc_outer_max_iterations with
      *          qdsmc_outer_require_convergence set. */
-    int SolveSegregated ( amrex::Real start_time, int a_step );
-
-    /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
-     *  (from Efield_fp, which holds the transverse state at entry),
-     *  then B = B_static + curl A with boundary treatment. */
-    void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time,
-                           bool a_from_jacobian );
-
-public:
+    int SolveSegregated (amrex::Real start_time, int a_step, amrex::Real field_reference = 0.0);
 
     /** Unified external drive on the Darwin path: impose the (gauge-shifted)
      * external vector potential as the boundary value of the evolved A on

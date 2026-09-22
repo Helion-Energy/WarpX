@@ -1517,6 +1517,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
     }
     ParserExecutor<3> eta_exec{};
     ParserExecutor<2> etah_exec{};
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(has_eta && hybrid->m_resistivity_has_Te_dependence),
+        "This preconditioner does not yet evaluate temperature-dependent resistivity");
     if (has_eta) { eta_exec = hybrid->m_eta; }
     if (hyper_on) { etah_exec = hybrid->m_eta_h; }
     const RT time = this->m_time;

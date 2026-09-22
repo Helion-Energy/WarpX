@@ -437,6 +437,8 @@ public:
      */
     void CalculateElectronFluidVelocity () const;
     void CalculateElectronFluidVelocity (int lev) const;
+    void CalculateElectronFluidVelocity (int lev, amrex::MultiFab const& rho,
+                                         ablastr::fields::VectorField const& ion_current) const;
 
     /**
      * \brief Compute the per-species ion bulk velocity Vs = Js/rhos on the
@@ -660,8 +662,8 @@ public:
                                amrex::MultiFab * redirect_E) const;
 
     /**
-     * \brief PHYSICAL Braginskii electron viscous heating source (Thrust C
-     *        companion to the tensor conduction operator).
+     * \brief PHYSICAL Braginskii electron viscous heating source (companion
+     *        to the tensor conduction operator).
      *
      * Adds the anisotropic viscous dissipation of the electron fluid to T_e,
      *   T_e += dt (gamma-1) Q_nu / (n_e k_B),
@@ -823,7 +825,7 @@ public:
      *
      * Called from HybridPICEvolveFields when m_solve_electron_energy_equation is true.
      *
-     * Scheme dispatch (qdsmc_time_advance, Thrust-A bake-off):
+     * Scheme dispatch (qdsmc_time_advance):
      *   - euler (default, #6982-identical): forward-Euler push with
      *     V_e(J_i^{n-1/2}, B^n, rho^n), Lie sources after transport.
      *   - leapfrog: T_e lives at HALF-INTEGER times; this call advances
@@ -850,7 +852,7 @@ public:
      *        Called from ThetaImplicitHybrid::OneStep before the nonlinear
      *        solve.
      */
-    void QDSMCSaveImplicitStepStart () const;
+    void QDSMCSaveImplicitStepStart (amrex::Real dt, amrex::Real time) const;
 
     /**
      * \brief Theta-centered QDSMC electron-energy stage for the implicit
@@ -896,7 +898,7 @@ public:
      *        Called from ThetaImplicitHybrid::OneStep after
      *        FinishImplicitParticleUpdate.
      */
-    void QDSMCFinishImplicitStep (amrex::Real dt, amrex::Real theta) const;
+    void QDSMCFinishImplicitStep (amrex::Real dt, amrex::Real theta, amrex::Real time) const;
 
     /**
      * \brief Compute the per-species resistive overlay vector field added to
@@ -1865,7 +1867,7 @@ public:
     enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
     QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::PC;
 
-    /** Half-gradient-corrected QDSMC deposit (Thrust B / B1): markers carry
+    /** Half-gradient-corrected QDSMC deposit: markers carry
      *  limited MC slopes of their content and the scatter deposits
      *  w * (A + 1/2 G . (x_dest - x_p)). Conservation is exact (the
      *  correction sums to zero by the hat's first-moment property); the
@@ -1890,7 +1892,7 @@ public:
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
                                   bool fill_te_ghosts) const;
 
-    /** One Ito tensor-conduction substep on level lev over dt_c (Thrust C),
+    /** One Ito tensor-conduction substep on level lev over dt_c,
      *  operating on the energy density u = 3/2 n_e k_B T_e (NOT on the
      *  entropy K_e: conduction is not adiabatic, and mapping the Fourier
      *  flux into K-space drags in n-gradient corrections). Each owned node
@@ -1942,6 +1944,9 @@ public:
      *  symmetry, Vr = dr^2/8 for the axis node); z faces are metric-
      *  free. m = 0 fields only (b-hat is built from the m = 0 mode). */
     void QdsmcConductionOnceFD (int lev, amrex::Real dt_c, bool use_rho_new) const;
+    /** FD conduction with an explicit density and coefficient time. */
+    void QdsmcConductionOnceFDAtState (int lev, amrex::Real dt_c, bool use_rho_new,
+                                       amrex::MultiFab const& rho, amrex::Real time) const;
 
     /** Grid-transport arm of the energy-equation bake-off jig
      *  (qdsmc_transport_operator = grid): advances the entropy pair
@@ -2105,7 +2110,14 @@ public:
      * staging field. Runs inside ApplyQdsmcEnergySources after the energy
      * sink; on the twice-per-step source schemes the second call finds the
      * staging already zeroed and no-ops. */
-    void QDSMCApplyFastIonHeating (int lev) const;
+    void QDSMCApplyFastIonHeating (int lev, amrex::MultiFab const* rho_state = nullptr) const;
+
+    /** Freeze endpoint collision coefficients and consume stopping heat once,
+     * outside the implicit field/energy residual. Single-level grids only. */
+    void PrepareImplicitStopping (amrex::Real dt);
+    void FinishImplicitStopping ();
+    amrex::MultiFab const& GetStoppingChargeDensity (int lev) const;
+    bool m_implicit_stopping_active = false;
 
     /** Independent density gate for the Joule heating source [m^-3]: cells
      * with n_e <= max(joule_heating_n_min, n_floor) receive no Joule heat
@@ -2114,6 +2126,22 @@ public:
      * region without moving the solver floor. Default < 0 -> n_floor
      * (back-compat: gate inactive). */
     amrex::Real m_joule_heating_n_min = -1.0;
+
+    /** C^1 taper of the Joule heating gate to suppress pedestal heating.
+     *  Off (default): the hard gate above.
+     *  On: the heat AND the Te-threshold redirect energy staged to the ions
+     *  are multiplied by w(n) = smoothstep((n - n_g)/n_g), n_g =
+     *  max(joule_heating_n_min, n_floor): 0 at/below n_g, 1 at/above 2 n_g;
+     *  the withheld (1 - w) share goes to the heat_gate tally. Input:
+     *  joule_heating_taper. */
+    bool m_joule_heating_taper = false;
+
+    /** Thin-cell Joule attribution [J] (cells with n < 2 n_g): total
+     *  source and the part delivered to the ELECTRONS (after the taper, the
+     *  redirect and the gates). Accumulated only when a halo valve is
+     *  armed; printed as thin_joule_tot / thin_joule_e. */
+    mutable amrex::Real m_joule_thin_total_J = 0.0;
+    mutable amrex::Real m_joule_thin_e_J = 0.0;
 
     /** Graceful failure mode for Te runaways: abort with a clear message
      * when max(Te) exceeds this ceiling [eV] after the energy sources
@@ -2277,7 +2305,8 @@ public:
 
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */
-    std::array<amrex::Real, 2> QDSMCClassEnergy (int lev) const;
+    std::array<amrex::Real, 2> QDSMCClassEnergy (int lev,
+                                                 amrex::MultiFab const* rho_state = nullptr) const;
 
     /** Class-summed polytropic compression energy {bulk, band} [J] of the
      * current step's transport stage, from the pre-transport Te and the
@@ -2316,7 +2345,7 @@ public:
      * m_relaxation_excluded_species. */
     [[nodiscard]] bool IsRelaxationExcluded (std::string const & species_name) const;
 
-    /** Ito-process tensor thermal conduction on T_e (Thrust C):
+    /** Ito-process tensor thermal conduction on T_e:
      *   dU_e/dt += div(kappa grad T_e),
      *   kappa = kappa_par b b + kappa_perp (I - b b),  b = B/|B|,
      * applied as a split substep bracketing the entropy transport
@@ -2356,6 +2385,12 @@ public:
      *  C-infinity here. Off (0) is bit-identical to unset. Input:
      *  qdsmc_conduction_chi_max [m^2/s]. */
     amrex::Real m_cond_chi_max = 0.0;
+    /** Separate parallel diffusivity ceiling. When > 0 the
+     *  kappa_par parser is folded at 1.5 kB chi_par_max n and kappa_perp
+     *  at 1.5 kB chi_max n; <= 0 (default) = chi_max caps both, bit-
+     *  identical. The RKL2 stage count scales as sqrt(chi_par_max).
+     *  Input: qdsmc_conduction_chi_par_max [m^2/s]. */
+    amrex::Real m_cond_chi_par_max = -1.0;
     /** FD cross-flux transport reconstruction: 0 = none (unlimited QUICK,
      *  attribution control -- can overshoot), 1 = upwind1 (1st-order
      *  upwind, most diffusive), 2 = smart (Gaskell--Lau SMART, default:
@@ -2370,10 +2405,18 @@ public:
      *  inner, maximally diffusive bracket arm). The sh modes replace
      *  the pseudo-advection recast of the cross terms entirely (see
      *  QdsmcFluxLimiters.H) and are conduction-only: combining them
-     *  with qdsmc_transport_operator = grid aborts at parse. Input:
-     *  qdsmc_conduction_fd_limiter = none | upwind1 | smart | sh |
-     *  sh_minmod. */
+     *  with qdsmc_transport_operator = grid aborts at parse.
+     *  5 = ssmart (the SMART curve with its Sweby corners rounded in
+     *  ratio space at width qdsmc_conduction_fd_limiter_width, C-inf
+     *  in the data; the MHD lane's smart_smooth, see
+     *  QdsmcFluxLimiters.H). Input:
+     *  qdsmc_conduction_fd_limiter = none | upwind1 | smart | ssmart |
+     *  sh | sh_minmod. */
     int m_cond_fd_limiter = 2;
+    /** ssmart only: dimensionless rounding width of the Sweby corners
+     *  (0.01 = the MHD lane's reconstruction_kappa default). Input:
+     *  qdsmc_conduction_fd_limiter_width. */
+    amrex::Real m_cond_fd_limiter_width = 0.01;
     /** FD subcycle CFL fraction of the Gershgorin stability bound
      *  (sum_gh 2 |Xi_gh| dxi_g dxi_h, n-ratio weighted). Default 0.4:
      *  under SSP-RK2 the Nyquist amplification G = 1 + z + z^2/2 never
@@ -2662,7 +2705,7 @@ public:
      *  no intermediate reconstruction): the composed per-donor map is the
      *  bilinear corner image, so cross/corner transport is carried within
      *  a single branch remap. Fluxes remain face-local first-class
-     *  objects (Thrust D) computed by deterministic recomputation from
+     *  objects computed by deterministic recomputation from
      *  both neighbors (race-free, no atomics), so conservation stays
      *  telescoping-exact; each leg keeps the forward-donor fold rule
      *  (degenerate image = point mass, positivity unconditional). The
@@ -2670,7 +2713,7 @@ public:
      *  Input: qdsmc_advection_fluxform_unsplit. */
     bool m_adv_ff_unsplit = false;
 
-    /** Domain-face conduction BCs on T_e (Thrust D). Per grid dim and
+    /** Domain-face conduction BCs on T_e. Per grid dim and
      *  side: 0 = adiabatic (default; the fluxform wall faces already
      *  carry F = 0 = exact zero heat flux), 1 = isothermal (the
      *  boundary node row is a thermal bath pinned to the wall
@@ -2678,28 +2721,123 @@ public:
      *  bath re-emission; the exchanged energy is tallied), 2 = flux
      *  (a prescribed heat flux q_wall [W/m^2, positive = into the
      *  plasma] is injected into the boundary row each substep;
-     *  tallied). Only meaningful on non-periodic dims (asserted at
-     *  first use). Inputs (entries per grid dim):
-     *  qdsmc_conduction_bc_lo / _hi = adiabatic | isothermal | flux,
+     *  tallied), 3 = leg (Robin condition: the boundary node row is
+     *  set to the series-conductance temperature between the first
+     *  interior node and a conduction leg of length m_cond_leg_length
+     *  ending on a wall at m_cond_leg_Te_wall, see
+     *  ApplyQdsmcConductionLegBC; tallied in m_cond_leg_tally). Only
+     *  meaningful on non-periodic dims (asserted at first use). Inputs
+     *  (entries per grid dim):
+     *  qdsmc_conduction_bc_lo / _hi = adiabatic | isothermal | flux |
+     *  leg,
      *  qdsmc_conduction_bc_Te_lo / _hi = <eV>,
      *  qdsmc_conduction_bc_q_lo / _hi = <W/m^2>. */
     int m_cond_bc[AMREX_SPACEDIM][2] = {};
     amrex::Real m_cond_bc_Te[AMREX_SPACEDIM][2] = {};
     amrex::Real m_cond_bc_q[AMREX_SPACEDIM][2] = {};
 
+    /** Free-streaming cap on the isothermal domain-face pin (bc == 1).
+     *  0 (the default) keeps the Dirichlet reset: the whole boundary
+     *  node row is set to Te_wall after every accepted conduction
+     *  substep, a bath of infinite conductance. f > 0 bounds the energy
+     *  a boundary node may LOSE to the wall per substep dt_sub at
+     *  q_max A dt_sub, q_max = f n_e v_te kB Te with v_te =
+     *  sqrt(kB Te/m_e), both at the node's interior (pre-reset) state,
+     *  and lowers Te toward Te_wall by at most that much (never below
+     *  it); A/V uses the physical wall area and clipped nodal dual
+     *  volume, the same convention as the prescribed-flux BC. A wall hotter than the
+     *  node still pins it to Te_wall. The applied exchange is booked in
+     *  m_cond_wall_tally exactly as for the plain pin. Input:
+     *  qdsmc_conduction_wall_flux_limit. */
+    amrex::Real m_cond_wall_flux_limit = 0.0;
+
+    /** Form of the wall flux cap. Applies to the domain-face isothermal
+     *  pins and the FD EB isothermal ring pin.
+     *  0 = free_streaming: q_max = f n kB Te v_te.
+     *  1 = sonic: q_max =
+     *  f n kB Te c_s with c_s = sqrt(gamma kB Te / m_i) at the pre-pin
+     *  interior node, m_i = the first charged species' mass; the T_i term
+     *  of MHD's c_s^2 = (gamma_e kB Te + gamma_i kB Ti)/m_i is omitted
+     *  (T_i is not available inside the conduction operator), so at
+     *  T_i = T_e the hybrid sonic cap is 1/sqrt2 of MHD's.
+     *  Input: qdsmc_conduction_wall_flux_cap_form. */
+    int m_cond_wall_flux_cap_form = 0;
+
+    /** Independent flux cap factor of the FD EB isothermal ring pin:
+     *  default 0.1, f in units of v_te (or c_s
+     *  under the sonic form) at the pre-pin interior node, same semantics
+     *  as m_cond_wall_flux_limit, which stays the domain-face cap. 0 =
+     *  plain reset. Inert unless
+     *  qdsmc_conduction_eb_bc = isothermal. Input:
+     *  qdsmc_conduction_eb_flux_limit. */
+    amrex::Real m_cond_eb_flux_limit = 0.1;
+
+    /** Conduction-leg (Robin) domain-face BC, bc == 3: a 1D heat equation
+     *  along the field line to the divertor wall, in the zero-velocity
+     *  frame with no cross-field transport. Per boundary node the face is in series
+     *  with a leg of length L to a wall at T_wall: the face temperature
+     *  solving G_int (Te_1 - Te_f) = G_leg (Te_f - T_wall) is
+     *  Te_f = (G_int Te_1 + G_leg T_wall) / (G_int + G_leg), with
+     *  G_int = (A_inner/A_wall) kappa_face / dx, the interior-face
+     *  conductance (harmonic floored density x arithmetic chi from the
+     *  qdsmc_kappa_par parser; zero when the face is closed) and
+     *  G_leg = kappa_par(n_face, Te_f) / L, re-evaluated at the new Te_f
+     *  for m_cond_leg_iterations passes. Te_f is clamped at T_wall and
+     *  at the conduction Te floor. The row is advanced as a lumped
+     *  capacitor C_row = 1.5 kB n_effective V/A_wall between the conductances,
+     *  T(dt) = Te_f + (T0 - Te_f) exp(-dt (G_int + G_leg)/C_row): an open
+     *  face (dx^2/chi << dt) lands on the Robin pin Te_f, a CLOSED face
+     *  (G_int = 0 at a floored/frozen row) relaxes toward T_min at the
+     *  leg's own rate chi_leg A_wall/(L V),
+     *  instead of being pinned. ONE-SIDED like the MHD lane's
+     *  outflow_limited wall and halo relaxation outlet: the
+     *  leg engages only where the drain's source (Te_1 on an open face,
+     *  the row's own T0 on a closed one) exceeds max(T_wall, Te floor)
+     *  and only where the update lowers the row (a row below the series
+     *  value is left to the operator's interior flux); a colder source
+     *  keeps the legacy adiabatic face (no reset, no tally), so the
+     *  tally is monotone and the face flux G_int G_leg/(G_int + G_leg) (Te_1 -
+     *  T_wall) is continuous through zero. The hybrid hook runs outside
+     *  any Newton solve, so the hard rectifier replaces the MHD C^1
+     *  gate. The leg throttles itself, so the
+     *  domain-face cap m_cond_wall_flux_limit does NOT apply; the leg
+     *  has its own optional cap m_cond_leg_flux_limit (same form and
+     *  physical A/V convention as the pin cap, 0 = off). Knobs are shared
+     *  by every face typed 'leg'. Inputs: qdsmc_conduction_leg_length
+     *  [m], qdsmc_conduction_leg_Te_wall [eV], qdsmc_conduction_leg_
+     *  iterations, qdsmc_conduction_leg_flux_limit. */
+    amrex::Real m_cond_leg_length = 6.0;
+    amrex::Real m_cond_leg_Te_wall = 0.5;
+    int m_cond_leg_iterations = 2;
+    amrex::Real m_cond_leg_flux_limit = 0.0;
+
+    /** Ion mass used by the sonic wall cap: the first charged species. */
+    [[nodiscard]] amrex::Real WallCapIonMass () const;
+
     /** Cumulative wall-BC energy tallies per (grid dim, side 0=lo/
-     *  1=hi), in node-u units [J/m^3] summed over boundary nodes
-     *  (multiply by the node dual-cell volume for Joules; positive =
-     *  energy added to the plasma). In RZ each node's du is weighted
-     *  by 2 pi Vr/dr [J/m^2], the r-dependent part of the dual-cell
-     *  volume, so multiplying by dr dz gives Joules. The G4
-     *  budget-closure instrument; exposed to Python as
+     *  1=hi), normalized by the Cartesian cell volume. Each owned
+     *  boundary node contributes du times its clipped physical dual volume
+     *  divided by the Cartesian cell volume (including cylindrical measure
+     *  in RZ). Multiply the tally by the Cartesian cell volume for Joules;
+     *  positive means energy added to the plasma. Exposed to Python as
      *  warpx.get_qdsmc_wall_tally(dim, side). */
     mutable amrex::Real m_cond_wall_tally[AMREX_SPACEDIM][2] = {};
 
     amrex::Real GetQdsmcWallTally (int const dim, int const side) const
     {
         return m_cond_wall_tally[dim][side];
+    }
+
+    /** Cumulative conduction-leg BC energy tallies per (grid dim, side),
+     *  same units and sign convention as m_cond_wall_tally, kept apart
+     *  from it (ledger class wall_leg, not wall_pin). Exposed to Python
+     *  as warpx.get_qdsmc_leg_tally(dim, side). */
+    mutable amrex::Real m_cond_leg_tally[AMREX_SPACEDIM][2] = {};
+
+    amrex::Real
+    GetQdsmcLegTally (int const dim, int const side) const
+    {
+        return m_cond_leg_tally[dim][side];
     }
 
     /** Fluxform only: faces touching a floored node (n_e <= n_floor)
@@ -2713,17 +2851,25 @@ public:
      *  qdsmc_conduction_closed_floor_faces. */
     bool m_cond_closed_floor_faces = true;
 
-    /** Apply the Thrust-D domain-face conduction BCs (isothermal pin /
-     *  prescribed-flux injection) to the boundary node rows and
+    /** Apply the domain-face conduction BCs (isothermal pin /
+     *  prescribed-flux injection / conduction leg) to the boundary node rows and
      *  accumulate the wall tallies. Called at the end of every
      *  conduction substep, before the final T_e ghost fill, for all
      *  conduction forms. rho must be the same density paired with T_e
      *  in that substep. */
-    void ApplyQdsmcConductionWallBCs (int lev, amrex::Real dt_c,
-                                      amrex::MultiFab & Te,
-                                      amrex::MultiFab const & rho) const;
+    void ApplyQdsmcConductionWallBCs (int lev, amrex::Real dt_c, amrex::MultiFab& Te,
+                                      amrex::MultiFab const& rho, amrex::Real time,
+                                      bool only_uncapped_pins = false) const;
 
-    /** Embedded-boundary conduction BC (Thrust D EB leg, staircase
+    /** The conduction-leg (bc == 3) domain-face BC on face (dim d, side
+     *  s), see m_cond_leg_length: sets the boundary node row from the
+     *  first interior node and accumulates m_cond_leg_tally[d][s].
+     *  Dispatched from ApplyQdsmcConductionWallBCs; same call cadence
+     *  and rho pairing. */
+    void ApplyQdsmcConductionLegBC (int lev, int d, int s, amrex::Real dt_c, amrex::MultiFab& Te,
+                                    amrex::MultiFab const& rho, amrex::Real time) const;
+
+    /** Embedded-boundary conduction BC (staircase
      *  per-line form — deliberately NO boundary normals: level-set
      *  mirror normals are ill-posed at staircase corners (the covered-B
      *  fill campaign's div instability), while per-sweep-line 1D folds
@@ -2748,8 +2894,7 @@ public:
      *  isothermal, qdsmc_conduction_eb_Te(x,y,z). */
     int m_cond_eb_bc = 0;
 
-    /** Advection-marker EB handling (Thrust D, the E7-replacement at
-     *  embedded boundaries; dsmc-eb-reflection semantics at sub-cell
+    /** Advection-marker EB handling (specular reflection at sub-cell
      *  hop scale): markers homed at covered nodes (level set <= 0)
      *  never move — V_e inside the conductor is not physical — and
      *  fluid markers pushed into the conductor are specularly mirrored
@@ -2898,6 +3043,170 @@ public:
      *  Input: qdsmc_te_n_floor. */
     amrex::Real m_qdsmc_te_n_floor = 1.0;
 
+    /** Optional halo transport controls. All default off.
+     *
+     *  qdsmc_halo_unfreeze: today a node whose deposited marker weight is
+     *  at or below m_qdsmc_n_floor keeps its previous T_e, and the FD
+     *  conduction open set is n > m_qdsmc_n_floor with zero-flux faces
+     *  into the closed set. On, both gates drop to strict positivity: the
+     *  K -> T_e recovery runs wherever ANY marker weight was deposited (the
+     *  recovery is the deposited-weight mean of K, well defined for any
+     *  positive weight; a node with exactly zero deposit still keeps its
+     *  T_e), and the FD conduction open set is every node with n > 0.
+     *  Exactly-zero-density and EB-covered nodes stay closed (chi = 0,
+     *  faces zero-flux, T_e held). Heat capacity and chi of the newly open
+     *  nodes use the FLOORED density b_ne = max(n, m_qdsmc_n_floor) exactly
+     *  as before, so chi <= chi_max still holds there (the kappa cap is
+     *  1.5 kB chi_max n at that n) and the face conductance across the
+     *  density cliff is the harmonic one. The K <-> T_e positivity floor
+     *  m_qdsmc_te_n_floor is untouched. FD operator + marker transport only:
+     *  the SDE conduction path and the grid (fluxform) transport keep the
+     *  freeze. */
+    bool m_qdsmc_halo_unfreeze = false;
+
+    /** Additive density pedestal. Input: density_pedestal (default false).
+     *
+     *  A static, shaped pedestal density n_ped(x,y,z) [m^-3] is built once
+     *  (parser density_pedestal_profile(x,y,z); default the uniform value
+     *  n_floor) and every electron-fluid density the hybrid derives from the
+     *  deposit becomes
+     *      n_eff = max(n_dep + n_ped, floor_legacy)
+     *  in place of max(n_dep, floor_legacy). The max is the positivity
+     *  backstop only: wherever n_ped >= the legacy floor (everywhere for the
+     *  default uniform pedestal) it is inert and n_eff = n_dep + n_ped is
+     *  smooth in the deposit, so a single marker entering or leaving a
+     *  near-empty cell moves the Ohm's-law divisor, V_e, P_e and the QDSMC
+     *  heat capacity by its own weight instead of switching them between
+     *  the floored and the live branch (the "dust cell flicker").
+     *
+     *  Related theta-implicit MHD density transformations:
+     *  (i) implicit_mhd.halo_pedestal_fraction / RefreshHaloPedestal
+     *  rho_ped = f max(rho_peak, rho_ref),
+     *  realized by RAISING sub-pedestal fluid cells onto the pedestal state
+     *  and anchoring the drain gates at rho_ped -- the MHD's own equivalence
+     *  argument gives the additive
+     *  variable change in the original variable. The hybrid has no evolved
+     *  fluid density to raise, so the additive form is used directly and
+     *  needs no gate. (ii) implicit_mhd.advection_density_offset_fraction
+     *  (c5037a567, the reference code's subtract/advect/re-add): the
+     *  ADVECTIVE flux transports only the deviation above the offset and
+     *  "the background is not transported". The QDSMC analogue is the
+     *  K -> T_e recovery below: the markers transport only the deposited
+     *  part's energy and the pedestal part keeps its temperature. (iii) The
+     *  MHD raise skips the masked wall band (ImplicitMHDWallMask.H:124); here
+     *  n_ped = 0 inside the EB body (level set <= 0), optionally C^1-tapered
+     *  over density_pedestal_eb_taper_cells with the same smoothstep as the
+     *  MHD floor_outflow_limiter (= halo_valve_weight).
+     *
+     *  Sites (n_eff replaces the floored density): the Ohm's-law divisor of
+     *  the Hall + grad P_e terms (HybridPICSolveE, RZ and 3D), the elliptic
+     *  electron-inertia d_e^2 density, P_e = n_eff kB T_e (both emitters),
+     *  the QDSMC K <-> T_e conversion (InitializeKe, UpdateTe, SeedTeAdiabat),
+     *  the marker advection velocity V_e = -(J - J_i)/(e n_eff) (live in
+     *  every cell), the FD conduction capacity / chi / harmonic face density
+     *  and open set, the T_e shunt and pedestal-cap capacities, and the
+     *  class energy ledger u = 1.5 n_eff kB T_e. GATES KEEP THE DEPOSITED
+     *  DENSITY: the Holmstrom vacuum switch, the external-E subtraction, the
+     *  Joule / redirect / shunt / abort gates and eta(rho, J, t) -- the
+     *  pedestal carries no Hall, Ohmic or shunt physics of its own.
+     *
+     *  ENERGY EQUATION (the pedestal as a state): U_e = 1.5 n_eff kB T_e.
+     *  The freeze gate is off (w_floor = 0: any positive deposited weight
+     *  updates T_e; an exactly-zero deposit holds it) and the recovery is
+     *  the pedestal-weighted mean
+     *      T_e = (n_ped V T_old + w T_rec) / (n_ped V + w),
+     *  w = deposited marker weight [electrons], T_rec = the legacy
+     *  weight-mean recovery at n_eff: the marker-carried energy
+     *  1.5 kB w T_rec plus the pedestal's 1.5 kB n_ped V T_old, no energy
+     *  invented or dropped (an exact energy-weighted mean), and a tiny
+     *  deposit can nudge T_e only by its weight fraction -- the K -> T_e
+     *  blow-up at tiny weights is bounded by construction. The pedestal
+     *  electrons do no compression work (the MHD's "pedestal mass has no
+     *  reactive response of its own", halo source taper). Marker-less cells
+     *  keep their conducted value; the existing rectified pedestal cap
+     *  (qdsmc_te_pedestal_cap_ev) relaxes them when armed.
+     *  Every cell conducts (FD open set = n_eff > 0 and not EB-covered).
+     *  Inventory sum(n_ped dV) and U_ped(T_e0) are printed at boot. */
+    bool m_density_pedestal = false;
+    /** density_pedestal_profile(x,y,z) [m^-3]; empty = uniform n_floor. */
+    std::string m_density_pedestal_expression;
+    std::unique_ptr<amrex::Parser> m_density_pedestal_parser;
+    amrex::ParserExecutor<3> m_density_pedestal_profile;
+    /** density_pedestal_eb_taper_cells: 0 = hard exclusion inside the EB
+     *  body only (the MHD masked-band rule); > 0 = C^1 smoothstep of the
+     *  level-set distance over that many (largest) cells outside the wall. */
+    amrex::Real m_density_pedestal_eb_taper_cells = 0.0;
+    /** density_pedestal_track_floor (default false = bit-identical): keep the
+     *  pedestal SYNCHRONISED with the runtime density floor. A deck that moves
+     *  the engine floor during the run (through the python binding
+     *  set_hybrid_pic_density_floor, e.g. a floor held at a fraction of the
+     *  measured peak density) otherwise leaves the pedestal at the value it
+     *  was built with at t = 0, so the two references drift apart and
+     *  n_eff = n_dep + n_ped no longer sits on the floor the positivity
+     *  backstop uses. With this on, that setter marks the pedestal image
+     *  STALE and the next EnsureDensityPedestal refills it; because the refill
+     *  of an EMPTY density_pedestal_profile uses n_uniform = m_n_floor, the
+     *  refilled pedestal IS the new floor by construction (the EB exclusion
+     *  and taper are unchanged, and the inventory is retallied with it).
+     *  It therefore REQUIRES an empty density_pedestal_profile(x,y,z): a
+     *  parser image is a fixed spatial profile with no floor in it and cannot
+     *  follow, so that combination is refused at init instead of silently
+     *  ignored. */
+    bool m_density_pedestal_track_floor = false;
+    /** Set by AllocateLevelMFs (init, restart, regrid), and by the runtime
+     *  density-floor setter when density_pedestal_track_floor is on: the
+     *  pedestal field must be (re)filled before its next use. */
+    mutable bool m_density_pedestal_stale = true;
+    /** Pedestal electron inventory sum(n_ped dV) over all levels [electrons]. */
+    mutable amrex::Real m_density_pedestal_inventory = 0.0;
+
+    /** The pedestal charge-density field q_e n_ped on level lev, filled on
+     *  demand (nullptr when density_pedestal is off). Nodal like rho_fp. */
+    [[nodiscard]] amrex::MultiFab const* DensityPedestal (int lev) const;
+    /** (Re)fill the pedestal field on every level if stale. */
+    void EnsureDensityPedestal () const;
+    /** Evaluate the pedestal profile at the nodes of level lev, zero inside
+     *  the EB body, tapered per m_density_pedestal_eb_taper_cells. */
+    void FillDensityPedestal (int lev) const;
+
+    /** qdsmc_source_taper_n [m^-3] (< 0 = off): C^1 taper of the QDSMC
+     *  transport update (the advective + polytropic-compression work the
+     *  marker recovery carries) and of the Joule source in thin cells:
+     *  w(n) = smoothstep((n - n_t)/n_t), 0 at/below n_t, 1 at/above 2 n_t.
+     *  In QDSMCUpdateTe the recovered T_e is blended as T_old + w (T_rec -
+     *  T_old); the withheld energy 1.5 max(n, te_n_floor) kB (1 - w)(T_rec -
+     *  T_old) is booked in m_source_taper_J (positive = heating withheld).
+     *  Conduction and the e-i relaxation are NOT scaled. Explicit
+     *  (euler/leapfrog/pc) schemes only. */
+    amrex::Real m_qdsmc_source_taper_n = -1.0;
+    mutable amrex::Real m_source_taper_J = 0.0;
+
+    /** Rectified pedestal cap on T_e (the MHD temperature-cap form, hybrid
+     *  version): in cells below n_ped T_e may not exceed T_cap; the cap
+     *  fades with w(n) = 1 - smoothstep((n - n_ped)/n_ped) (1 at/below
+     *  n_ped, 0 at/above 2 n_ped); drain-only (only where T_e > T_cap);
+     *  exact decay T_e -= w (T_e - T_cap)(1 - exp(-rate dt)) per source
+     *  application, rate < 0 = pinned (hard cap). NOT a freeze: the cell
+     *  still updates and conducts. Removed energy is booked in
+     *  m_te_pedestal_J. T_cap = qdsmc_te_pedestal_cap_ev [eV] (< 0 = off)
+     *  and/or, with qdsmc_te_pedestal_image = 1, the MHD pedestal-STATE
+     *  image max(U_e)/(1.5 kB max(n)) over the live cells (n > 2 n_ped) --
+     *  the f-scaled image of the instantaneous peak of every block
+     *  whose temperature is the ratio of the peaks; when both
+     *  are set the smaller applies. qdsmc_te_pedestal_n defaults to
+     *  qdsmc_n_floor. */
+    amrex::Real m_qdsmc_te_pedestal_cap_eV = -1.0;
+    bool m_qdsmc_te_pedestal_image = false;
+    amrex::Real m_qdsmc_te_pedestal_n = -1.0;
+    amrex::Real m_qdsmc_te_pedestal_rate = -1.0;
+    mutable amrex::Real m_te_pedestal_J = 0.0;
+    /** Last applied cap [K] (image form updates it per application). */
+    mutable amrex::Real m_te_pedestal_cap_last_K = -1.0;
+
+    /** Apply the pedestal cap (see m_qdsmc_te_pedestal_cap_eV). Runs inside
+     *  ApplyQdsmcEnergySources after the ion-heating step. */
+    void QDSMCRelaxPedestalTe (int lev, amrex::Real dt_src) const;
+
     /** False until the adiabat T_e seed (SeedTeAdiabat, PR #7128) has run
      *  once. HybridPICInitializeRhoJandB executes at step == step_begin of
      *  EVERY Evolve() entry (each segmented PICMI sim.step()), and an
@@ -2938,6 +3247,12 @@ public:
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
+    /** Alternative plasma_resistivity(rho,J,Te,t), with live nodal Te in kelvin.
+     *  Requires the electron energy equation. The separate Joule parser retains
+     *  its legacy Te-in-eV convention. */
+    bool m_resistivity_has_Te_dependence = false;
+    amrex::ParserExecutor<4> m_eta_te;
+    [[nodiscard]] amrex::MultiFab const* ResistivityTe (int lev) const;
 
     /** False until the first AdvanceElectronEnergyQDSMC of the run has
      *  filled hybrid_current_fp_plasma. On later steps J_plasma is already

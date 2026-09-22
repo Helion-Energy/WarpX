@@ -97,7 +97,7 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
     if (m_vacuum_recovery) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_hybrid_pic_model->m_darwin_vacrec_relax_time == 0._rt,
@@ -181,9 +181,25 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_include_thermal_conduction || m_darwin ||
+            !m_hybrid_pic_model->m_add_external_fields,
+        "Implicit thermal conduction with external fields requires unified Darwin fields");
+
     // Segregated midpoint-iterated solve for the QDSMC electron-energy
     // stage (see the member documentation in the header).
+    // Temperature-dependent push and Ohm coefficients must share a frozen
+    // thermal stage during every inner residual and Jacobian evaluation.
+    m_qdsmc_segregated_solve = m_hybrid_pic_model->m_resistivity_has_Te_dependence;
     pp.query("qdsmc_segregated_solve", m_qdsmc_segregated_solve);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_resistivity_has_Te_dependence || m_qdsmc_segregated_solve,
+        "Temperature-dependent implicit resistivity requires qdsmc_segregated_solve");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(m_hybrid_pic_model->m_resistivity_has_Te_dependence ||
+          m_hybrid_pic_model->m_include_thermal_conduction) ||
+            m_theta == 0.5_rt,
+        "Implicit live-temperature resistivity and split conduction require theta=0.5");
     if (m_qdsmc_segregated_solve) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -200,8 +216,7 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
 
     pp.query("darwin_segregated_solve", m_darwin_segregated_solve);
     if (m_darwin_segregated_solve) {
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin && !m_qdsmc_segregated_solve,
-            "darwin_segregated_solve requires Darwin and the coupled energy stage");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin, "darwin_segregated_solve requires Darwin");
         pp.query("darwin_outer_max_iterations", m_darwin_outer_max_iterations);
         pp.query("darwin_outer_relative_tolerance", m_darwin_outer_rtol);
         pp.query("darwin_outer_absolute_tolerance", m_darwin_outer_atol);
@@ -531,7 +546,23 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_hybrid_pic_model->CalculatePlasmaCurrent(
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
             m_WarpX->GetEBUpdateEFlag());
-        m_hybrid_pic_model->QDSMCSaveImplicitStepStart();
+        m_hybrid_pic_model->QDSMCSaveImplicitStepStart(m_dt, start_time);
+        if (m_qdsmc_segregated_solve)
+        {
+            m_qdsmc_rho_frozen.resize(m_num_amr_levels);
+            for (int lev = 0; lev < m_num_amr_levels; ++lev)
+            {
+                auto const& rho = *m_WarpX->m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+                auto& frozen = m_qdsmc_rho_frozen[lev];
+                if (!frozen || frozen->boxArray() != rho.boxArray() ||
+                    frozen->DistributionMap() != rho.DistributionMap())
+                {
+                    frozen = std::make_unique<amrex::MultiFab>(
+                        rho.boxArray(), rho.DistributionMap(), 1, rho.nGrowVect());
+                }
+                amrex::MultiFab::Copy(*frozen, rho, 0, 0, 1, rho.nGrowVect());
+            }
+        }
     }
 
     if (m_circuit_native) {
@@ -609,7 +640,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // realization once with converged states, refresh Pe^{n+1}, and reset
     // the QDSMC markers.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
-        m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt, m_theta);
+        m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt, m_theta, new_time);
     } else if (!m_darwin) {
         // Closure path: re-evaluate Pe^{n+1} (and the diagnostic T_e
         // mirror) from a true end-of-step density deposit. The in-solve
@@ -657,24 +688,9 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
         m_WarpX->GetEBUpdateEFlag());
     if (strip_ext) { AddSplitExternalFields(1.0_rt); }
-    if (m_darwin) {
-        // Darwin retains the longitudinal displacement current in the
-        // plasma current, J = curl(B)/mu_0 - eps0 dE_L/dt (Hewett &
-        // Nielson 1978), same as the residual's J assembly. The
-        // end-of-step rate equals the theta-stage rate exactly (the
-        // extrapolation is linear): hybrid_E_long_fp holds E_L^{n+1}
-        // and hybrid_E_long_old_fp still holds E_L^n here.
-        using ablastr::fields::Direction;
-        amrex::Real const inv_dt = 1.0_rt / m_dt;
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab & Jp = *m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{dir}, lev);
-                amrex::MultiFab const & EL = *m_WarpX->m_fields.get("hybrid_E_long_fp", Direction{dir}, lev);
-                amrex::MultiFab const & EL_old = *m_WarpX->m_fields.get("hybrid_E_long_old_fp", Direction{dir}, lev);
-                amrex::MultiFab::Saxpy(Jp, -PhysConst::epsilon_0 * inv_dt, EL, 0, 0, Jp.nComp(), Jp.nGrowVect());
-                amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_dt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
-            }
-        }
+    if (m_darwin)
+    {
+        ApplyDarwinDisplacementCurrent(m_dt);
     }
 
     // Re-evaluated E finisher: overwrite the extrapolated E^{n+1} with the
@@ -758,6 +774,68 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     return exit_status;
 }
 
+void
+ThetaImplicitHybrid::ApplyDarwinDisplacementCurrent (amrex::Real interval)
+{
+    // Called only after Ampere rebuilds Jp. Both push correction and Ohm
+    // consume J = curl(B)/mu0 - epsilon0*dEL/dt at the same stage.
+    using ablastr::fields::Direction;
+    amrex::Real const inv_thetadt = 1.0_rt / interval;
+    for (int lev = 0; lev < m_num_amr_levels; ++lev)
+    {
+        for (int dir = 0; dir < 3; ++dir)
+        {
+            amrex::MultiFab& Jp =
+                *m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{dir}, lev);
+            amrex::MultiFab const& EL =
+                *m_WarpX->m_fields.get("hybrid_E_long_fp", Direction{dir}, lev);
+            amrex::MultiFab const& EL_old =
+                *m_WarpX->m_fields.get("hybrid_E_long_old_fp", Direction{dir}, lev);
+            amrex::MultiFab::Saxpy(Jp, -PhysConst::epsilon_0 * inv_thetadt, EL, 0, 0, Jp.nComp(),
+                                   Jp.nGrowVect());
+            amrex::MultiFab::Saxpy(Jp, PhysConst::epsilon_0 * inv_thetadt, EL_old, 0, 0, Jp.nComp(),
+                                   Jp.nGrowVect());
+        }
+    }
+    if (EB::enabled())
+    {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev)
+        {
+            auto current = m_WarpX->m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+            auto& flags = m_WarpX->GetEBUpdateEFlag()[lev];
+            if (m_hybrid_pic_model->m_use_conformal_eb &&
+                m_hybrid_pic_model->m_conformal_wall_conductor)
+            {
+                m_hybrid_pic_model->ZeroConductorEdges(current, flags, lev);
+            }
+            else
+            {
+                for (int d = 0; d < 3; ++d)
+                {
+                    for (amrex::MFIter mfi(*current[d], amrex::TilingIfNotGPU()); mfi.isValid();
+                         ++mfi)
+                    {
+                        auto const jp = current[d]->array(mfi);
+                        auto const open = flags[d]->const_array(mfi);
+                        amrex::ParallelFor(mfi.tilebox(),
+                                           [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                           {
+                                               if (!open(i, j, k))
+                                               {
+                                                   jp(i, j, k) = 0.0_rt;
+                                               }
+                                           });
+                    }
+                }
+            }
+            for (int d = 0; d < 3; ++d)
+            {
+                current[d]->FillBoundary(m_WarpX->Geom(lev).periodicity());
+            }
+        }
+    }
+}
+
 void ThetaImplicitHybrid::RefreshDarwinELong (amrex::Real theta_time)
 {
     ablastr::fields::MultiLevelScalarField rho_half_alias;
@@ -815,7 +893,18 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
                 << " residual=" << field_norm << " target=" << field_target << "\n";
         }
         int status = 3;
-        if (!(field_norm == 0.0_rt || field_norm < field_target)) {
+        if (m_qdsmc_segregated_solve)
+        {
+            // The thermal update is required even when the initial field
+            // residual already passes. E_L stays fixed throughout this solve.
+            status = SolveSegregated(start_time, a_step, field_reference);
+            if (status < 0)
+            {
+                return status;
+            }
+        }
+        else if (!(field_norm == 0.0_rt || field_norm < field_target))
+        {
             // E_L stays fixed for every Jv and line search in this solve.
             m_nlsolver->SetConvergenceReferenceNorm(field_reference);
             m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step);
@@ -908,8 +997,9 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
     return -8;
 }
 
-int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
-                                           const int          a_step )
+int
+ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_step,
+                                      amrex::Real field_reference)
 {
     BL_PROFILE("ThetaImplicitHybrid::SolveSegregated()");
 
@@ -939,32 +1029,45 @@ int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
     // with the accepted field state and QDSMCFinishImplicitStep completes
     // the characteristic unchanged; the O(tolerance) pressure-field
     // mismatch of the final pair is the explicit segregation error.
-    int exit_status = 0;
-    amrex::Real dPe_rel = std::numeric_limits<amrex::Real>::max();
-    int outer = 0;
-    for (; outer < m_qdsmc_outer_max_iterations; ++outer) {
-
-        // Inner solve: E^{n+theta} at frozen electron pressure. Warm-started
-        // from the previous outer iterate (m_E carries through).
-        m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
-        exit_status = m_nlsolver->GetExitStatus();
-        if (exit_status < 0) { return exit_status; }
-
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> previous_temperature(m_num_amr_levels);
+    for (int lev = 0; lev < m_num_amr_levels; ++lev)
+    {
+        auto const& Te = *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        previous_temperature[lev] =
+            std::make_unique<amrex::MultiFab>(Te.boxArray(), Te.DistributionMap(), Te.nComp(), 0);
+    }
+    WarpXSolverVec residual;
+    residual.Define(m_E);
+    amrex::Real field_rtol, field_atol;
+    int field_maxits;
+    m_nlsolver->GetSolverParams(field_rtol, field_atol, field_maxits);
+    amrex::ignore_unused(field_maxits);
+    auto residual_norm = [&] ()
+    {
+        ComputeRHS(residual, m_E, start_time, 0, false);
+        residual.increment(m_Eold, 1.0_rt);
+        residual.increment(m_E, -1.0_rt);
+        return residual.norm2();
+    };
+    auto capture_thermal = [&] ()
+    {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev)
+        {
             amrex::MultiFab const & Pe =
                 *m_WarpX->m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
             amrex::MultiFab::Copy(*m_qdsmc_Pe_prev[lev], Pe, 0, 0, Pe.nComp(),
                                   amrex::IntVect(0));
+            auto const& Te = *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+            amrex::MultiFab::Copy(*previous_temperature[lev], Te, 0, 0, Te.nComp(), 0);
         }
-
-        // One stage pass against the converged fields (re-entrant: restarts
-        // from the saved t^n state and re-solves the midpoint entropy
-        // transport; runs non-probe by construction, so the per-species
-        // source deposits refresh once per outer iteration).
-        m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, true);
-
-        dPe_rel = 0.0_rt;
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+    };
+    auto thermal_defect = [&] ()
+    {
+        amrex::Real dPe_rel = 0.0_rt;
+        amrex::Real dTe_rel = 0.0_rt;
+        amrex::Real drho_rel = 0.0_rt;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev)
+        {
             amrex::MultiFab const & Pe =
                 *m_WarpX->m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
             amrex::MultiFab & dPe = *m_qdsmc_Pe_prev[lev];
@@ -973,16 +1076,133 @@ int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
             amrex::Real const norm_dPe = dPe.norm2(0);
             dPe_rel = std::max(dPe_rel,
                 norm_dPe / std::max(norm_Pe, std::numeric_limits<amrex::Real>::min()));
+            auto const& Te = *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+            auto& diff = *previous_temperature[lev];
+            for (amrex::MFIter mfi(diff, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                auto const delta = diff.array(mfi);
+                auto const now = Te.const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                                   [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                   {
+                                       amrex::Real const old = delta(i, j, k);
+                                       delta(i, j, k) = std::abs(now(i, j, k) - old) /
+                                                        amrex::max(std::abs(now(i, j, k)),
+                                                                   std::abs(old), 1.0_rt);
+                                   });
+            }
+            dTe_rel = std::max(dTe_rel, diff.norminf());
+            auto const& rho = *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+            auto const& frozen = *m_qdsmc_rho_frozen[lev];
+            int const midpoint = rho.nComp() / 2;
+            amrex::Real const floor = PhysConst::q_e * m_hybrid_pic_model->m_n_floor;
+            for (amrex::MFIter mfi(diff, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                auto const delta = diff.array(mfi);
+                auto const now = rho.const_array(mfi);
+                auto const old = frozen.const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                                   [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                   {
+                                       delta(i, j, k) =
+                                           std::abs(now(i, j, k, midpoint) - old(i, j, k)) /
+                                           amrex::max(std::abs(now(i, j, k, midpoint)),
+                                                      std::abs(old(i, j, k)), floor, 1.e-100_rt);
+                                   });
+            }
+            drho_rel = std::max(drho_rel, diff.norminf());
+        }
+        return std::array<amrex::Real, 3>{dPe_rel, dTe_rel, drho_rel};
+    };
+    auto refresh_density = [&] ()
+    {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev)
+        {
+            auto const& rho = *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+            auto& frozen = *m_qdsmc_rho_frozen[lev];
+            amrex::MultiFab::Copy(frozen, rho, rho.nComp() / 2, 0, 1, frozen.nGrowVect());
+        }
+    };
+    int exit_status = 3;
+    amrex::Real dPe_rel = std::numeric_limits<amrex::Real>::max();
+    int outer = 0;
+    for (; outer < m_qdsmc_outer_max_iterations; ++outer)
+    {
+
+        // Inner solve: E^{n+theta} at frozen electron pressure. Warm-started
+        // from the previous outer iterate (m_E carries through).
+        amrex::Real const initial_norm = residual_norm();
+        if (!std::isfinite(initial_norm))
+        {
+            return -7;
+        }
+        if (field_reference == 0.0_rt)
+        {
+            field_reference = initial_norm;
+        }
+        amrex::Real const field_target = std::max(field_atol, field_rtol * field_reference);
+        if (!(initial_norm == 0.0_rt || initial_norm < field_target))
+        {
+            m_nlsolver->SetConvergenceReferenceNorm(field_reference);
+            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step);
+            m_nlsolver->SetConvergenceReferenceNorm(0.0_rt);
+            exit_status = m_nlsolver->GetExitStatus();
+            if (exit_status < 0)
+            {
+                return exit_status;
+            }
+            if (exit_status != 2 && exit_status != 3)
+            {
+                return -7;
+            }
         }
 
-        if (m_qdsmc_outer_verbose) {
+        capture_thermal();
+
+        // One stage pass against the converged fields (re-entrant: restarts
+        // from the saved t^n state and re-solves the midpoint entropy
+        // transport; runs non-probe by construction, so the per-species
+        // source deposits refresh once per outer iteration).
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, true);
+
+        auto const defect = thermal_defect();
+        refresh_density();
+        dPe_rel = defect[0];
+        amrex::Real const dTe_rel = defect[1];
+
+        if (m_qdsmc_outer_verbose)
+        {
             amrex::Print() << "QDSMC segregated: outer iteration = " << outer
-                           << ", dPe/Pe = " << std::scientific << dPe_rel << "\n";
+                           << ", dPe/Pe = " << std::scientific << dPe_rel
+                           << ", max relative dTe = " << dTe_rel
+                           << ", max relative drho = " << defect[2] << "\n";
         }
-        if (dPe_rel < m_qdsmc_outer_relative_tolerance) { break; }
+        dPe_rel = std::max({dPe_rel, dTe_rel, defect[2]});
+        if (dPe_rel < m_qdsmc_outer_relative_tolerance)
+        {
+            // Grade the field equation with the newly emitted thermal stage.
+            // This residual skips the energy advance; reconstruct it once
+            // afterwards so the finisher owns markers from these deposits.
+            capture_thermal();
+            amrex::Real const final_norm = residual_norm();
+            if (!std::isfinite(final_norm))
+            {
+                return -7;
+            }
+            m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, true);
+            auto const final_defect = thermal_defect();
+            dPe_rel = std::max({final_defect[0], final_defect[1], final_defect[2]});
+            refresh_density();
+            if ((final_norm == 0.0_rt || final_norm < field_target) &&
+                dPe_rel < m_qdsmc_outer_relative_tolerance)
+            {
+                break;
+            }
+        }
     }
 
-    if (dPe_rel >= m_qdsmc_outer_relative_tolerance) {
+    if (outer == m_qdsmc_outer_max_iterations || dPe_rel >= m_qdsmc_outer_relative_tolerance)
+    {
         std::stringstream convergenceMsg;
         convergenceMsg << "QDSMC segregated outer loop failed to converge after "
                        << outer << " iterations. Relative pressure change is "
@@ -990,7 +1210,10 @@ int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
                        << m_qdsmc_outer_relative_tolerance;
         ablastr::warn_manager::WMRecordWarning(
             "ThetaImplicitHybrid", convergenceMsg.str());
-        if (m_qdsmc_outer_require_convergence) { return -7; }
+        if (m_qdsmc_outer_require_convergence || m_darwin_segregated_solve)
+        {
+            return -7;
+        }
     }
 
     return exit_status;
@@ -1070,6 +1293,7 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
             m_hybrid_pic_model->CalculatePlasmaCurrent(
                 m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
                 m_WarpX->GetEBUpdateEFlag());
+            ApplyDarwinDisplacementCurrent(m_theta * m_dt);
         }
 
         ablastr::fields::MultiLevelVectorField E_fp =
@@ -1091,11 +1315,12 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
             }
             // Per-level solves: no callback fires inside residual
             // evaluations (see the RHS Ohm solve below).
-            m_hybrid_pic_model->HybridPICSolveE(
-                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
-                m_WarpX->GetEBUpdateEFlag()[lev], lev,
-                false,  // solve_for_Faraday (retain grad(Pe))
-                true    // include_resistivity
+            m_hybrid_pic_model->HybridPICSolveE(E_fp[lev], J_fp[lev], B_fp[lev],
+                                                m_qdsmc_segregated_solve ? *m_qdsmc_rho_frozen[lev]
+                                                                         : *rho_pre[lev],
+                                                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                                                false, // solve_for_Faraday (retain grad(Pe))
+                                                true   // include_resistivity
             );
             for (int dir = 0; dir < 3; ++dir) {
                 amrex::MultiFab & E_res = *m_WarpX->m_fields.get(
@@ -1104,10 +1329,11 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
                 amrex::MultiFab::Subtract(E_res, E, 0, 0, E.nComp(), E.nGrowVect());
             }
             m_hybrid_pic_model->HybridPICSolveE(
-                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
+                E_fp[lev], J_fp[lev], B_fp[lev],
+                m_qdsmc_segregated_solve ? *m_qdsmc_rho_frozen[lev] : *rho_pre[lev],
                 m_WarpX->GetEBUpdateEFlag()[lev], lev,
-                false,  // solve_for_Faraday (retain grad(Pe))
-                false   // include_resistivity: no-resistivity push field
+                false, // solve_for_Faraday (retain grad(Pe))
+                false  // include_resistivity: no-resistivity push field
             );
             for (int dir = 0; dir < 3; ++dir) {
                 amrex::MultiFab & E_push = *E_fp[lev][dir];
@@ -1177,22 +1403,9 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
     }
 
-    // Darwin: the total current retains the longitudinal displacement
-    // current, J = curl(B)/mu_0 - eps0 dE_L/dt, which preserves charge
-    // continuity of J_e (Hewett & Nielson 1978). The transverse
-    // displacement current is dropped -- that is the Darwin approximation.
-    if (m_darwin) {
-        using ablastr::fields::Direction;
-        amrex::Real const inv_thetadt = 1.0_rt / (m_theta * m_dt);
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab & Jp = *m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{dir}, lev);
-                amrex::MultiFab const & EL = *m_WarpX->m_fields.get("hybrid_E_long_fp", Direction{dir}, lev);
-                amrex::MultiFab const & EL_old = *m_WarpX->m_fields.get("hybrid_E_long_old_fp", Direction{dir}, lev);
-                amrex::MultiFab::Saxpy(Jp, -PhysConst::epsilon_0 * inv_thetadt, EL, 0, 0, Jp.nComp(), Jp.nGrowVect());
-                amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_thetadt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
-            }
-        }
+    if (m_darwin)
+    {
+        ApplyDarwinDisplacementCurrent(m_theta * m_dt);
     }
 
     // Circuit-in-the-residual coupling, darwin (unified-drive) branch:
@@ -1298,10 +1511,11 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // ImplicitSolver::OneStep completes (see WarpX::OneStep).
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         m_hybrid_pic_model->HybridPICSolveE(
-            Efield_fp[lev], current_fp[lev], Bfield_fp[lev], *rho_fp[lev],
+            Efield_fp[lev], current_fp[lev], Bfield_fp[lev],
+            m_qdsmc_segregated_solve ? *m_qdsmc_rho_frozen[lev] : *rho_fp[lev],
             m_WarpX->GetEBUpdateEFlag()[lev], lev,
-            false,  // solve_for_Faraday (retain grad(Pe))
-            true    // include_resistivity (retain eta*J for the B-update)
+            false, // solve_for_Faraday (retain grad(Pe))
+            true   // include_resistivity (retain eta*J for the B-update)
         );
     }
 
@@ -2152,42 +2366,85 @@ void ThetaImplicitHybrid::DarwinApplyABoundary ( amrex::Real a_time )
                     per[d] = period.isPeriodic(d) ? 1 : 0;
                 }
 
+#if defined(WARPX_DIM_RZ)
+                bool const on_axis = m_WarpX->Geom(lev).ProbLo(0) == 0.;
+#endif
                 amrex::ParallelFor(tb,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                {
-                    // Embedded conductors: hold A at the gauge zero inside
-                    // masked cells (frozen enclosed flux; the interior field
-                    // stays at B_static).
-                    if (use_eb && eb(i,j,k) == 0) {
-                        a(i,j,k) = 0.0_rt;
-                        return;
-                    }
-                    // Non-periodic domain boundaries: impose the external
-                    // vector potential on the boundary point and everything
-                    // beyond it.
-                    const int idx[3] = {i, j, k};
-                    bool on_boundary = false;
-                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                        if (per[d]) { continue; }
-                        if (idx[d] <= dlo[d] || idx[d] >= dhi[d]) { on_boundary = true; }
-                    }
-                    if (on_boundary) {
-                        // Clamp the imposed value to the domain edge:
-                        // ghosts continue the wall value rather than the
-                        // (growing) exterior vector potential, so the wall
-                        // ring carries no spurious curl sheet.
-                        int ic[3] = {i, j, k};
-                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                            if (per[d]) { continue; }
-                            ic[d] = amrex::Clamp(ic[d], dlo[d], dhi[d]);
-                        }
-                        a(i,j,k) = abc(ic[0], ic[1], ic[2]);
-                    }
-                });
+                                   [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                   {
+#if defined(WARPX_DIM_RZ)
+                                       if (on_axis && dir == 1 && i == 0)
+                                       {
+                                           a(i, j, k) = 0.;
+                                           return;
+                                       }
+#endif
+                                       // Embedded conductors: hold A at the gauge zero inside
+                                       // masked cells (frozen enclosed flux; the interior field
+                                       // stays at B_static).
+                                       if (use_eb && eb(i, j, k) == 0)
+                                       {
+                                           a(i, j, k) = 0.0_rt;
+                                           return;
+                                       }
+                                       // Non-periodic domain boundaries: impose the external
+                                       // vector potential on the boundary point and everything
+                                       // beyond it.
+                                       const int idx[3] = {i, j, k};
+                                       bool on_boundary = false;
+                                       for (int d = 0; d < AMREX_SPACEDIM; ++d)
+                                       {
+                                           if (per[d])
+                                           {
+                                               continue;
+                                           }
+                                           bool lower = idx[d] <= dlo[d];
+#if defined(WARPX_DIM_RZ)
+                                           if (d == 0 && on_axis)
+                                           {
+                                               lower = false;
+                                           }
+#endif
+                                           if (lower || idx[d] >= dhi[d])
+                                           {
+                                               on_boundary = true;
+                                           }
+                                       }
+                                       if (on_boundary)
+                                       {
+                                           // Clamp the imposed value to the domain edge:
+                                           // ghosts continue the wall value rather than the
+                                           // (growing) exterior vector potential, so the wall
+                                           // ring carries no spurious curl sheet.
+                                           int ic[3] = {i, j, k};
+                                           for (int d = 0; d < AMREX_SPACEDIM; ++d)
+                                           {
+                                               if (per[d])
+                                               {
+                                                   continue;
+                                               }
+#if defined(WARPX_DIM_RZ)
+                                               if (d == 0 && on_axis && ic[d] < dlo[d])
+                                               {
+                                                   continue;
+                                               }
+#endif
+                                               ic[d] = amrex::Clamp(ic[d], dlo[d], dhi[d]);
+                                           }
+                                           a(i, j, k) = abc(ic[0], ic[1], ic[2]);
+                                       }
+                                   });
             }
             A.FillBoundary(m_WarpX->Geom(lev).periodicity());
 
         }
+#if defined(WARPX_DIM_RZ)
+        if (m_WarpX->Geom(lev).ProbLo(0) == 0.)
+        {
+            auto A = m_WarpX->m_fields.get_alldirs("hybrid_A_fp", lev);
+            m_WarpX->ApplyFieldBoundaryOnAxis(A[0], A[1], A[2], lev);
+        }
+#endif
     }
     amrex::ignore_unused(NODE);
 }
@@ -2248,9 +2505,9 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 m_vacuum_recovery_half ? (1.0_rt - m_theta) * m_dt
                                        : m_dt);
             DarwinApplyABoundary(end_time);
-            // Recover the endpoint transverse electric field spatially in 3D.
+            // Recover the endpoint transverse electric field spatially in 3D/RZ.
             // The implicit current and theta-stage updates are unchanged.
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
             auto const& endpoint = m_E.getArrayVec()[0];
             auto const& accepted = m_Eold.getArrayVec()[0];
             RecoverDarwinVacuumE(*m_WarpX, *m_hybrid_pic_model,

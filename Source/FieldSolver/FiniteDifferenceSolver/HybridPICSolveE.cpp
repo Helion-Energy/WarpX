@@ -559,6 +559,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    const auto eta_te = hybrid_model->m_eta_te;
+    const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
+    amrex::MultiFab const* const te_mf = hybrid_model->ResistivityTe(lev);
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
@@ -638,6 +641,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
+    // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
+    // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
+    // and eta(rho, J, t) keep the deposited rho.
+    amrex::MultiFab const* const rho_ped_mf = hybrid_model->DensityPedestal(lev);
+    const bool use_pedestal = (rho_ped_mf != nullptr);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -938,6 +947,16 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             eiCC = hybrid_model->m_ei_curlcurl_theta->const_array(mfi);
         }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
+        Array4<Real const> rho_ped;
+        if (rho_ped_mf)
+        {
+            rho_ped = rho_ped_mf->const_array(mfi);
+        }
+        Array4<Real const> te_K;
+        if (te_mf)
+        {
+            te_K = te_mf->const_array(mfi);
+        }
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
         Array4<Real> const& Btheta = Bfield[1]->array(mfi);
@@ -1053,7 +1072,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                    const auto rho_val_limited =
+                        HybridSmoothFloor(rho_val + (use_pedestal ? Interp(rho_ped, nodal, Er_stag,
+                                                                           coarsen, i, j, 0, 0)
+                                                                  : 0.0_rt),
+                                          rho_floor, floor_w);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
                     // Conductor-wall stack, gate-on-raw / divide-by-floored:
@@ -1099,7 +1122,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    Er(i, j, 0) +=
+                        (eta_has_Te
+                             ? eta_te(rho_val, jtot_val,
+                                      Interp(te_K, nodal, Er_stag, coarsen, i, j, 0, 0), t_new)
+                             : eta(rho_val, jtot_val, t_new)) *
+                        Jr(i, j, 0);
                     // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
@@ -1197,7 +1225,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
                     && (!holmstrom_axis_confined || r < holmstrom_axis_r)) {
                     Etheta(i, j, 0) = 0._rt;
-                } else {
+                }
+                else
+                {
                     // Get the gradient of the electron pressure
                     // -> d/dt = 0 for m = 0
                     const auto grad_Pe = 0.0_rt;
@@ -1206,7 +1236,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                    const auto rho_val_limited = HybridSmoothFloor(
+                        rho_val + (use_pedestal
+                                       ? Interp(rho_ped, nodal, Etheta_stag, coarsen, i, j, 0, 0)
+                                       : 0.0_rt),
+                        rho_floor, floor_w);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
                     // Conductor-wall stack, gate-on-raw / divide-by-floored
@@ -1246,7 +1280,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    Etheta(i, j, 0) +=
+                        (eta_has_Te
+                             ? eta_te(rho_val, jtot_val,
+                                      Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
+                             : eta(rho_val, jtot_val, t_new)) *
+                        Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
@@ -1354,7 +1393,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                    const auto rho_val_limited =
+                        HybridSmoothFloor(rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ez_stag,
+                                                                           coarsen, i, j, 0, 0)
+                                                                  : 0.0_rt),
+                                          rho_floor, floor_w);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                     // Conductor-wall stack, gate-on-raw / divide-by-floored
@@ -1394,7 +1437,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    Ez(i, j, 0) +=
+                        (eta_has_Te
+                             ? eta_te(rho_val, jtot_val,
+                                      Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
+                             : eta(rho_val, jtot_val, t_new)) *
+                        Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
@@ -1507,6 +1555,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    const auto eta_te = hybrid_model->m_eta_te;
+    const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
+    amrex::MultiFab const* const te_mf = hybrid_model->ResistivityTe(lev);
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
@@ -1566,6 +1617,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
+    // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
+    // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
+    // and eta(rho, J, t) keep the deposited rho.
+    amrex::MultiFab const* const rho_ped_mf = hybrid_model->DensityPedestal(lev);
+    const bool use_pedestal = (rho_ped_mf != nullptr);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -1733,6 +1790,16 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
+        Array4<Real const> rho_ped;
+        if (rho_ped_mf)
+        {
+            rho_ped = rho_ped_mf->const_array(mfi);
+        }
+        Array4<Real const> te_K;
+        if (te_mf)
+        {
+            te_K = te_mf->const_array(mfi);
+        }
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real> const& Bx = Bfield[0]->array(mfi);
         Array4<Real> const& By = Bfield[1]->array(mfi);
@@ -1806,7 +1873,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                const auto rho_val_limited = HybridSmoothFloor(
+                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ex_stag, coarsen, i, j, k, 0)
+                                            : 0.0_rt),
+                    rho_floor, floor_w);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1836,7 +1906,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
+                Ex(i, j, k) +=
+                    (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                         Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
+                                : eta(rho_val, jtot_val, t_new)) *
+                    Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
@@ -1897,7 +1971,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                const auto rho_val_limited = HybridSmoothFloor(
+                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ey_stag, coarsen, i, j, k, 0)
+                                            : 0.0_rt),
+                    rho_floor, floor_w);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1927,7 +2004,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
+                Ey(i, j, k) +=
+                    (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                         Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
+                                : eta(rho_val, jtot_val, t_new)) *
+                    Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
@@ -1987,7 +2068,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
+                const auto rho_val_limited = HybridSmoothFloor(
+                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ez_stag, coarsen, i, j, k, 0)
+                                            : 0.0_rt),
+                    rho_floor, floor_w);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -2017,7 +2101,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
+                Ez(i, j, k) +=
+                    (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                         Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
+                                : eta(rho_val, jtot_val, t_new)) *
+                    Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {

@@ -284,7 +284,16 @@ WarpX::Evolve (int numsteps)
 
         if (m_implicit_solver) {
             ExecutePythonCallback("beforecollisions");
+            bool const stopping = m_hybrid_pic_model && m_hybrid_pic_model->m_has_electron_stopping;
+            if (stopping)
+            {
+                m_hybrid_pic_model->PrepareImplicitStopping(dt[0]);
+            }
             mypc->doCollisions(step, cur_time, dt[0]);
+            if (stopping)
+            {
+                m_hybrid_pic_model->FinishImplicitStopping();
+            }
             ExecutePythonCallback("aftercollisions");
         }
 

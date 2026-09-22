@@ -320,6 +320,9 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
         !m_etah0_set && (hybrid != nullptr) && hybrid->m_include_hyper_resistivity_term;
     ParserExecutor<3> eta_exec{};
     ParserExecutor<2> etah_exec{};
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(eta_from_parser && hybrid->m_resistivity_has_Te_dependence),
+        "This preconditioner does not yet evaluate temperature-dependent resistivity");
     if (eta_from_parser)  { eta_exec  = hybrid->m_eta; }
     if (etah_from_parser) { etah_exec = hybrid->m_eta_h; }
     const RT eta0_const = m_eta0;

@@ -10,6 +10,7 @@
 
 #include <AMReX_ParallelReduce.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_Reduce.H>
 #include <AMReX_iMultiFab.H>
 
 #include <ablastr/profiler/ProfilerWrapper.H>
@@ -17,7 +18,7 @@
 #include <cmath>
 #include <memory>
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
 namespace
 {
 using Field = amrex::Array<amrex::MultiFab, 3>;
@@ -63,6 +64,12 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         geom.isAllPeriodic() || hybrid.m_add_external_fields || has_eb,
         "Spatial vacuum electric recovery requires periodic boundaries or the "
         "Darwin A boundary pin");
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::n_rz_azimuthal_modes == 1,
+                                     "Spatial RZ recovery supports only the axisymmetric mode");
+    bool const axis = geom.ProbLo(0) == 0.;
+    bool const flux_only = hybrid.m_darwin_vacuum_recovery_components == "flux";
+#endif
     auto const e = warpx.m_fields.get_alldirs(FieldType::Efield_fp, 0);
     auto const b = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, 0);
     auto const el = warpx.m_fields.get_alldirs("hybrid_E_long_fp", 0);
@@ -82,7 +89,7 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     amrex::Array<amrex::iMultiFab, 3> mask;
     amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> owner;
     amrex::Real diagonal = 0.;
-    for (int d = 0; d < 3; ++d)
+    for (int d = 0; d < AMREX_SPACEDIM; ++d)
     {
         diagonal += 4. / (geom.CellSize(d) * geom.CellSize(d));
     }
@@ -93,7 +100,11 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
                          ? 2
                          : (hybrid.m_darwin_vacuum_recovery_mask == "transition" ? 1 : 0);
     auto const periodic = geom.periodicity();
-    amrex::GpuArray<int, 3> per{geom.isPeriodic(0), geom.isPeriodic(1), geom.isPeriodic(2)};
+    amrex::GpuArray<int, 3> per{1, 1, 1};
+    for (int c = 0; c < AMREX_SPACEDIM; ++c)
+    {
+        per[c] = geom.isPeriodic(c);
+    }
     for (int d = 0; d < 3; ++d)
     {
         auto const ba = e[d]->boxArray();
@@ -127,21 +138,38 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
                                {
                                    int p[3]{i, j, k};
                                    int q[3]{i, j, k};
+#if defined(WARPX_DIM_RZ)
+                                   q[0] += d == 0;
+                                   q[1] += d == 2;
+#else
                                    q[d]++;
+#endif
                                    amrex::Real const density =
                                        .5 * (r(i, j, k) + r(q[0], q[1], q[2]));
-                                   bool const vacuum =
-                                       mode == 2 || (mode == 0 && density < floor) ||
-                                       (mode == 1 && density > 0. && density < floor);
+                                   bool vacuum = mode == 2 || (mode == 0 && density < floor) ||
+                                                 (mode == 1 && density > 0. && density < floor);
+#if defined(WARPX_DIM_RZ)
+                                   vacuum = vacuum && (!flux_only || d == 1);
+#endif
                                    bool wall = false;
-                                   for (int c = 0; c < 3; ++c)
+                                   for (int c = 0; c < AMREX_SPACEDIM; ++c)
                                    {
-                                       if (!per[c] && (p[c] <= lo[c] || p[c] >= hi[c]))
+                                       bool low_wall = p[c] <= lo[c];
+#if defined(WARPX_DIM_RZ)
+                                       if (c == 0 && axis)
+                                       {
+                                           low_wall = false;
+                                       }
+#endif
+                                       if (!per[c] && (low_wall || p[c] >= hi[c]))
                                        {
                                            wall = true;
                                        }
                                    }
-                                   bool const conductor = flag && flag(i, j, k) == 0;
+                                   bool conductor = flag && flag(i, j, k) == 0;
+#if defined(WARPX_DIM_RZ)
+                                   conductor = conductor || (axis && d == 1 && i == 0);
+#endif
                                    m(i, j, k) = vacuum && !wall && !conductor;
                                    dst(i, j, k) = vacuum ? old(i, j, k) : end(i, j, k);
                                    if (wall)
@@ -156,12 +184,43 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         }
         base[d].OverrideSync(periodic);
     }
+    // Cylindrical dual-volume weights make the native curl pair adjoint.
+    // Divide all weights by dr^2: the axis Ez weight is then 1/8.
+    auto component_dot =
+        [&] (amrex::MultiFab const& x, amrex::MultiFab const& y, amrex::iMultiFab const& own)
+    {
+#if defined(WARPX_DIM_RZ)
+        amrex::Real const r0 = geom.ProbLo(0) / geom.CellSize(0);
+        bool const node = x.ixType().nodeCentered(0);
+        amrex::ReduceOps<amrex::ReduceOpSum> op;
+        amrex::ReduceData<amrex::Real> data(op);
+        using Tuple = decltype(data)::Type;
+        for (amrex::MFIter mfi(x); mfi.isValid(); ++mfi)
+        {
+            auto const a = x.const_array(mfi), b = y.const_array(mfi);
+            auto const o = own.const_array(mfi);
+            op.eval(mfi.validbox(), data,
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple
+                    {
+                        amrex::Real weight = r0 + i + (node ? 0. : .5);
+                        if (axis && node && i == 0)
+                        {
+                            weight = .125;
+                        }
+                        return {o(i, j, k) ? weight * a(i, j, k) * b(i, j, k) : 0.};
+                    });
+        }
+        return amrex::get<0>(data.value(op));
+#else
+        return amrex::MultiFab::Dot(own, x, 0, y, 0, 1, 0, true);
+#endif
+    };
     auto dot = [&] (Field const& x, Field const& y)
     {
         amrex::Real v = 0.;
         for (int d = 0; d < 3; ++d)
         {
-            v += amrex::MultiFab::Dot(*owner[d], x[d], 0, y[d], 0, 1, 0, true);
+            v += component_dot(x[d], y[d], *owner[d]);
         }
         amrex::ParallelAllReduce::Sum(v, amrex::ParallelContext::CommunicatorSub());
         return v;
@@ -177,6 +236,12 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
             curl[d].setVal(0.);
             current[d].setVal(0.);
         }
+#if defined(WARPX_DIM_RZ)
+        if (axis)
+        {
+            warpx.ApplyFieldBoundaryOnAxis(&input[0], &input[1], &input[2], 0);
+        }
+#endif
         auto cv = view(curl), iv = view(input), jv = view(current);
         warpx.get_pointer_fdtd_solver_fp(0)->ComputeCurlA(cv, iv, warpx.GetEBUpdateBFlag()[0], 0);
         for (auto& f : curl)
@@ -184,6 +249,12 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
             f.OverrideSync(periodic);
             f.FillBoundary(periodic);
         }
+#if defined(WARPX_DIM_RZ)
+        if (axis)
+        {
+            warpx.ApplyFieldBoundaryOnAxis(&curl[0], &curl[1], &curl[2], 0);
+        }
+#endif
         warpx.get_pointer_fdtd_solver_fp(0)->CalculateCurrentAmpere(jv, cv,
                                                                     warpx.GetEBUpdateEFlag()[0], 0);
         for (int d = 0; d < 3; ++d)
@@ -228,7 +299,7 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         for (int d = 0; d < 3; ++d)
         {
             auto const own = curl[d].OwnerMask(periodic);
-            energy += amrex::MultiFab::Dot(*own, curl[d], 0, curl[d], 0, 1, 0, true) / diagonal;
+            energy += component_dot(curl[d], curl[d], *own) / diagonal;
         }
         amrex::ParallelAllReduce::Sum(energy, amrex::ParallelContext::CommunicatorSub());
         apply(kv, v);
@@ -319,6 +390,26 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         amrex::MultiFab::Copy(input[d], *endpoint[d], 0, 0, 1, 0);
         input[d].OverrideSync(periodic);
         input[d].FillBoundary(periodic);
+#if defined(WARPX_DIM_RZ)
+        // Fill each component here; all positive-r source values are already available.
+        if (axis)
+        {
+            bool const node = input[d].ixType().nodeCentered(0);
+            amrex::Real const sign = d == 2 ? 1. : -1.;
+            for (amrex::MFIter mfi(input[d]); mfi.isValid(); ++mfi)
+            {
+                auto box = mfi.fabbox();
+                if (box.smallEnd(0) >= 0)
+                {
+                    continue;
+                }
+                box.setBig(0, -1);
+                auto a = input[d].array(mfi);
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+                                   { a(i, j, k) = sign * a(-i - (node ? 0 : 1), j, k); });
+            }
+        }
+#endif
         amrex::MultiFab::Copy(*e[d], input[d], 0, 0, 1, e[d]->nGrowVect());
         // Match the existing all-component boundary pin and continue its value
         // through physical guards.
@@ -333,9 +424,13 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
                                {
                                    int p[3]{i, j, k};
                                    bool outside = false;
-                                   for (int c = 0; c < 3; ++c)
+                                   for (int c = 0; c < AMREX_SPACEDIM; ++c)
                                    {
-                                       if (!per[c] && (p[c] < lo[c] || p[c] > hi[c]))
+                                       if (!per[c] && (
+#if defined(WARPX_DIM_RZ)
+                                                          !(c == 0 && axis && p[c] < lo[c]) &&
+#endif
+                                                          (p[c] < lo[c] || p[c] > hi[c])))
                                        {
                                            p[c] = amrex::Clamp(p[c], lo[c], hi[c]);
                                            outside = true;
@@ -358,6 +453,6 @@ void
 RecoverDarwinVacuumE (WarpX&, HybridPICModel&, ablastr::fields::VectorField const&,
                       ablastr::fields::VectorField const&, amrex::Real, amrex::Real)
 {
-    WARPX_ABORT_WITH_MESSAGE("Spatial vacuum electric recovery requires 3D");
+    WARPX_ABORT_WITH_MESSAGE("Spatial vacuum electric recovery requires 3D or RZ");
 }
 #endif

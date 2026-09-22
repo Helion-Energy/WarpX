@@ -3234,6 +3234,18 @@ Details about the collision models can be found in the :ref:`theory section <mul
       ``background_stopping`` with ``background_type = ions``). For a species pushed with
       ``<species>.do_subcycled_push`` the drag is still applied once per global time step
       (the exponential update is unconditionally stable at any :math:`\nu_s \Delta t`).
+
+      With ``theta_implicit_hybrid``, stopping is applied once after the accepted
+      particle advance and boundary processing. Fresh endpoint charge and ion current
+      are deposited into separate scratch fields, and electron velocity is rebuilt
+      from that background and the delivered plasma current. Collisions retain their
+      configured order, so fusion may create alphas before stopping. Staged heat is
+      consumed once, including pedestal heat capacity, followed by uncapped fixed-wall
+      pins and pressure refresh. This is an endpoint Lie split; it does not claim
+      second-order collision coupling. Collision updates never run in nonlinear
+      residual or Jacobian evaluations. The implicit path requires a single level,
+      fixed grid distribution and no current centering. Use the ordinary implicit
+      pusher for fast ions: explicit subcycled pushing is unsupported there.
     - ``bremsstrahlung`` for slowing of electrons due to Bremsstrahlung collisions with ions.
       This uses the cross sections as given by `Seltzer and Berger <https://doi.org/10.1016/0092-640X(86)90014-8>`__.
     - ``inverse_bremsstrahlung`` for inverse bremstrahlung absorption of photons from the collisions of electrons and ions.
@@ -4159,6 +4171,25 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma resistivity in :math:`\Omega m`.
 
+.. pp:param:: hybrid_pic_model.plasma_resistivity(rho,J,Te,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Alternative, electron-temperature-dependent form of the plasma resistivity (:math:`\Omega m`), mutually
+    exclusive with :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)` (giving both aborts). The expression
+    may depend on the total charge density ``rho`` (:math:`C/m^3`), the plasma-current magnitude ``J``
+    (:math:`A/m^2`), the LIVE electron temperature ``Te`` of the QDSMC electron energy equation in **kelvin**
+    (SI; the storage unit of the ``Te`` field -- no unit conversion is applied to it; write ``Te*kb/q_e`` in
+    the expression where eV is wanted, e.g. a Spitzer form ``rC*max(Te*kb/q_e,Te_min)**(-1.5)``) and the time
+    ``t`` (s). Requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation` (aborts otherwise). ``Te``
+    lives on the nodal grid and is interpolated to each E-component staggering exactly as ``rho`` is; every
+    consumer of the resistivity -- the Ohm's-law E solve, the Joule-heating source when
+    :pp:param:`hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)` is unset, the ``hybrid_resistive_drag``
+    collision operator and the ``HybridDissipation`` reduced diagnostic -- evaluates this form. When this key
+    is absent the 3-argument form is used and every code path is unchanged. NOTE the unit difference to
+    :pp:param:`hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)`, whose ``Te`` argument is in eV
+    (legacy); a boot line ``[hybrid] plasma_resistivity: ...`` states which form is active and the ``Te`` unit.
+
 .. pp:param:: hybrid_pic_model.plasma_hyper_resistivity(rho,B)
     :type: ``float`` or ``str``
     :default: ``0``
@@ -4229,7 +4260,11 @@ Maxwell solver: kinetic-fluid hybrid
     second-order midpoint characteristic push for the entropy markers) and the electron temperature is
     converged together with the electric field by nonlinear elimination (or through the segregated
     outer iteration, see :pp:param:`implicit_evolve.qdsmc_segregated_solve`). The Picard nonlinear
-    solver is recommended for this configuration. The stochastic ion-heating realization of the
+    solver can be used for the monolithic configuration. Live-temperature resistivity requires the
+    segregated solve described below. Finite-difference conduction is split into two accepted-step
+    half advances at ``theta = 0.5``: before saving the thermal entry state and after endpoint source
+    recovery. It does not run inside residuals or Jacobian probes. With external fields, this conduction
+    path requires unified Darwin fields. The stochastic ion-heating realization of the
     electron-ion energy exchange is applied once per step after the nonlinear solve. The Te-threshold
     Joule redirect (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities
     are not yet supported with the implicit scheme.
@@ -4244,18 +4279,20 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: implicit_evolve.qdsmc_segregated_solve
     :type: ``bool``
-    :default: ``false``
+    :default: ``true`` with live-temperature resistivity, otherwise ``false``
     :optional:
 
     If ``algo.evolve_scheme = theta_implicit_hybrid`` and
     :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, solve the coupled field/electron-energy
     system in segregated midpoint-iterated form: the nonlinear solver converges the field system with the
-    electron pressure frozen, then one re-entrant QDSMC stage pass re-solves the midpoint entropy transport
-    against the converged fields, and an outer loop iterates the pair to joint self-consistency (measured on
-    the relative change of the emitted electron pressure between outer iterations). The converged coupled
+    electron pressure, temperature and Ohm-law density frozen, then one re-entrant QDSMC stage pass
+    re-solves the midpoint entropy transport against the converged fields. An outer loop converges
+    pressure, temperature, midpoint density and the field residual together. The converged coupled
     state is the same as the default (monolithic) form up to the solver tolerances; the segregated form keeps
     the marker gather/push/deposit chain out of Jacobian-vector products, line-search trials, and Picard
-    sweeps of the field solve.
+    sweeps of the field solve. Four-argument live-temperature resistivity requires this option and
+    ``theta = 0.5``; explicitly disabling it is rejected. With segregated Darwin enabled, the thermal
+    loop runs inside each fixed-longitudinal-field solve.
 
 .. pp:param:: implicit_evolve.qdsmc_outer_max_iterations
     :type: ``integer``
@@ -4269,8 +4306,10 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``1.e-6``
     :optional:
 
-    Outer convergence tolerance of the segregated solve: the relative :math:`L_2` change of the emitted
-    electron pressure between consecutive outer iterations.
+    Outer convergence tolerance of the segregated solve: the relative :math:`L_2` pressure change,
+    maximum pointwise relative temperature change (normalized by at least 1 K), and maximum pointwise
+    relative density change (normalized by at least the density floor). Acceptance also checks the
+    updated field residual and reconstructs and rechecks the final thermal stage.
 
 .. pp:param:: implicit_evolve.qdsmc_outer_require_convergence
     :type: ``bool``
@@ -4285,7 +4324,7 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    Print the per-step outer-iteration history (relative pressure change) of the segregated solve.
+    Print the per-step pressure, temperature, density and field convergence history of the segregated solve.
 
 .. pp:param:: implicit_evolve.external_field_iteration
     :type: ``bool``
@@ -4415,8 +4454,158 @@ Maxwell solver: kinetic-fluid hybrid
     deposited marker weight is at or below this value are skipped and keep their previous electron temperature
     (guarding the division by the deposited weight in cells no QDSMC marker reached). It also gates the
     conduction open set. The density floor used in the :math:`K_e \leftrightarrow T_e` conversion itself is
-    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`.
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`. Both gates drop to strict positivity under
+    :pp:param:`hybrid_pic_model.qdsmc_halo_unfreeze`.
     Defaults to :pp:param:`hybrid_pic_model.n_floor`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_halo_unfreeze
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Unfreeze the halo of the electron-energy equation. Off: nodes whose deposited marker weight is at or
+    below :pp:param:`hybrid_pic_model.qdsmc_n_floor` keep their previous :math:`T_e`, and the finite-difference
+    conduction open set is :math:`n > \texttt{qdsmc\_n\_floor}` with zero-flux faces into the closed set (the
+    frozen halo is a perfect insulator). On: the :math:`K_e \rightarrow T_e` recovery runs wherever any marker
+    weight was deposited (the recovery is the weight-mean of the deposited entropy, well defined for any
+    positive weight; a node with exactly zero deposit still keeps its :math:`T_e`), and the conduction open set is
+    every node with :math:`n > 0`. Exactly-zero-density and EB-covered nodes stay closed (:math:`\chi = 0`,
+    zero-flux faces, :math:`T_e` held). The heat capacity and :math:`\chi` of the newly open nodes use the floored
+    density :math:`\max(n, \texttt{qdsmc\_n\_floor})` exactly as before, so
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max` still bounds :math:`\chi` there (the
+    :math:`\kappa` cap is :math:`1.5 k_B \chi_\max n` at that density) and the face conductance across the density
+    cliff is the harmonic one; the sub-floor halo is therefore a conducting reservoir of capacity
+    :math:`1.5\,\texttt{qdsmc\_n\_floor}\,k_B` per volume. The positivity floor
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor` is untouched. Applies to the FD conduction operator and the
+    marker transport only; the SDE conduction path and the grid (fluxform) transport keep the freeze.
+
+.. pp:param:: hybrid_pic_model.qdsmc_source_taper_n
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Optional :math:`C^1` taper, in :math:`m^{-3}`, of the QDSMC transport update (the advective and
+    polytropic-compression work the marker recovery carries) and of the Joule source in thin cells:
+    :math:`w(n) = \mathrm{smoothstep}((n - n_t)/n_t)`, 0 at or below :math:`n_t`, 1 at or above :math:`2 n_t`.
+    The recovered temperature is blended as :math:`T_\mathrm{old} + w (T_\mathrm{rec} - T_\mathrm{old})` and the
+    Joule heat (and redirect stage) is multiplied by :math:`w`; the withheld transport energy
+    :math:`1.5 \max(n, \texttt{qdsmc\_te\_n\_floor}) k_B (1 - w)(T_\mathrm{rec} - T_\mathrm{old})` is booked in the
+    dropped-energy print as ``source_taper`` (positive = heating withheld), the withheld Joule share in
+    ``heat_gate``. Conduction and the electron-ion relaxation are not scaled. Explicit time-advance schemes only.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_cap_ev
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Rectified pedestal cap on :math:`T_e` [eV] in thin cells (the hybrid form of the MHD temperature pedestal
+    energy relaxation): in cells below :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_n` the temperature may not
+    exceed the cap; the cap fades with :math:`w(n) = 1 - \mathrm{smoothstep}((n - n_\mathrm{ped})/n_\mathrm{ped})`
+    (1 at or below :math:`n_\mathrm{ped}`, 0 at or above :math:`2 n_\mathrm{ped}`); drain-only (only where
+    :math:`T_e > T_\mathrm{cap}`); exact decay :math:`T_e \mathrel{-}= w (T_e - T_\mathrm{cap})(1 - e^{-\nu \Delta t})`
+    per source application with :math:`\nu` = :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_rate` (default
+    pinned = a hard cap). This is a blow-off valve, not a freeze: the cell still updates and conducts. The removed
+    energy :math:`1.5 \max(n, \texttt{qdsmc\_te\_n\_floor}) k_B \Delta T` is booked as ``te_pedestal`` in the
+    dropped-energy print (with the cap actually applied as ``te_pedestal_cap_eV``).
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_image
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Use the MHD lane's pedestal-STATE image as the cap: :math:`T_\mathrm{cap} = \max(U_e)/(1.5 k_B \max n)` over
+    the live cells (:math:`n > 2 n_\mathrm{ped}`, so the capped halo never defines its own cap) -- the
+    :math:`f`-scaled image of the instantaneous peak of every block whose temperature is the ratio of the peaks.
+    Combined with :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_cap_ev` the smaller cap applies.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_n
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.qdsmc_n_floor`
+    :optional:
+
+    Pedestal density :math:`n_\mathrm{ped}` [:math:`m^{-3}`] of the cap: full at or below it, off at or above
+    :math:`2 n_\mathrm{ped}`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_te_pedestal_rate
+    :type: ``float``
+    :default: ``-1`` (pinned)
+    :optional:
+
+    Relaxation rate [1/s] of the pedestal cap; negative = pinned (full relaxation per source application, a
+    hard cap).
+
+.. pp:param:: hybrid_pic_model.density_pedestal
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Density pedestal as a **change of variables**. A static, shaped pedestal density
+    :math:`n_\mathrm{ped}(x,y,z)` (:pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)`, default the
+    uniform :pp:param:`hybrid_pic_model.n_floor`) is ADDED to the deposited density wherever the hybrid
+    derives an electron-fluid density: :math:`n_\mathrm{eff} = \max(n + n_\mathrm{ped}, n_\mathrm{floor})`
+    replaces :math:`\max(n, n_\mathrm{floor})` in the Ohm's-law divisor of the Hall and :math:`\nabla P_e`
+    terms, the elliptic electron-inertia :math:`d_e^2`, :math:`P_e = n_\mathrm{eff} k_B T_e`, the QDSMC
+    :math:`K_e \leftrightarrow T_e` conversion, the marker advection velocity :math:`V_e = -(J - J_i)/(e
+    n_\mathrm{eff})` (live in every cell), the FD conduction capacity / :math:`\chi` / harmonic face density and
+    open set, the :math:`T_e` shunt and pedestal-cap capacities, and the class energy ledger. The ``max`` is a
+    positivity backstop only (inert wherever :math:`n_\mathrm{ped}` is at or above the legacy floor, i.e.
+    everywhere for the default pedestal outside the embedded-boundary body). GATES KEEP THE DEPOSITED DENSITY:
+    the Holmstrom vacuum switch, the external-E subtraction, the Joule, redirect, shunt and abort gates and
+    ``plasma_resistivity(rho,J,t)`` -- the pedestal carries no Hall, Ohmic or shunt physics.
+
+    Energy equation: the pedestal is a STATE, :math:`U_e = 1.5\, n_\mathrm{eff} k_B T_e`. The deposited-weight
+    freeze gate is off (:pp:param:`hybrid_pic_model.qdsmc_halo_unfreeze` is implied) and the :math:`K_e
+    \rightarrow T_e` recovery is the pedestal-weighted mean :math:`T_e = (n_\mathrm{ped} V\, T_\mathrm{old} + w\,
+    T_\mathrm{rec})/(n_\mathrm{ped} V + w)` with :math:`w` the deposited marker weight: the markers transport only
+    the deposited part's energy, the pedestal part keeps its temperature (the MHD lane's offset-density rule,
+    "the background is not transported"), no energy is invented or dropped, and a tiny deposit can move
+    :math:`T_e` only by its weight fraction. Marker-less cells keep their conducted value;
+    :pp:param:`hybrid_pic_model.qdsmc_te_pedestal_cap_ev` relaxes them when armed. Inside the embedded-boundary
+    body :math:`n_\mathrm{ped} = 0` (the MHD masked-band rule), optionally tapered with
+    :pp:param:`hybrid_pic_model.density_pedestal_eb_taper_cells`. The ``rho`` diagnostic stays the deposited
+    density; ``rho_pedestal`` dumps :math:`q_e n_\mathrm{ped}`. Prints ``[hybrid] density pedestal: ON`` with the
+    inventory :math:`\sum n_\mathrm{ped}\, dV` at startup. Off (the default) is bit-identical.
+
+    Mirrors the theta-implicit MHD lane's ``implicit_mhd.halo_pedestal_fraction`` (pedestal state raised onto
+    once per step, drain gates anchored at it) and ``implicit_mhd.advection_density_offset_fraction`` (the
+    subtract/advect/re-add change of variables); the hybrid has no evolved fluid density to raise, so the
+    additive form is used directly and needs no gate.
+
+.. pp:param:: hybrid_pic_model.density_pedestal_profile(x,y,z)
+    :type: ``string``
+    :default: uniform :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Pedestal density profile [:math:`m^{-3}`], evaluated once at the nodes (RZ: ``x`` = r, ``y`` = 0, ``z``);
+    rebuilt on restart and regrid.
+
+.. pp:param:: hybrid_pic_model.density_pedestal_eb_taper_cells
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    ``0``: the pedestal is zero inside the embedded-boundary body only (level set :math:`\le 0`). ``> 0``:
+    additionally a :math:`C^1` smoothstep of the level-set distance over that many (largest) cells outside the
+    wall, the MHD ``floor_outflow_limiter`` form.
+
+.. pp:param:: hybrid_pic_model.density_pedestal_track_floor
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Keep the pedestal **synchronised with the runtime density floor**. The pedestal is otherwise static: it is
+    built once from :pp:param:`hybrid_pic_model.n_floor` at startup and rebuilt only on restart and regrid, so a
+    run whose python layer moves the floor with ``set_hybrid_pic_density_floor`` (e.g. a floor held at a fixed
+    fraction of the measured peak density) drifts apart from its own pedestal. With this on, that setter marks the
+    pedestal image stale and it is refilled before its next use; because an empty
+    :pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)` fills the pedestal with the uniform
+    :pp:param:`hybrid_pic_model.n_floor`, the refilled pedestal *is* the new floor
+    (:math:`n_\mathrm{ped} = n_\mathrm{floor}`), with the embedded-boundary exclusion and taper unchanged and
+    the inventory :math:`\sum n_\mathrm{ped}\, dV` retallied. Requires
+    :pp:param:`hybrid_pic_model.density_pedestal` = ``1`` and an EMPTY
+    :pp:param:`hybrid_pic_model.density_pedestal_profile(x,y,z)`: a parser image is a fixed spatial profile that
+    carries no floor to follow, and the combination is refused at startup rather than silently ignored. Prints
+    ``[hybrid] density pedestal track_floor:`` at startup. Off (the default) is bit-identical.
 
 .. pp:param:: hybrid_pic_model.qdsmc_te_n_floor
     :type: ``float``
@@ -4439,6 +4628,107 @@ Maxwell solver: kinetic-fluid hybrid
     Defaults to :pp:param:`hybrid_pic_model.n_floor`, so a deck that does not set it is bit-for-bit
     unchanged.
 
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_chi_par_max
+    :type: ``float``
+    :default: ``-1`` (= ``qdsmc_conduction_chi_max`` on both directions)
+    :optional:
+
+    Separate ceiling, in :math:`m^2/s`, on the PARALLEL conduction diffusivity: when set the
+    ``qdsmc_kappa_par`` parser is folded at :math:`1.5 k_B \chi_{\parallel,\max} n` and ``qdsmc_kappa_perp`` at
+    :math:`1.5 k_B \chi_\max n` (:pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max`, which must be set). The MHD
+    lane's ``conduction_chi_par_max_halo`` analogue: the parallel drain of a hot halo along open field lines must not be
+    throttled by the ceiling meant for the perpendicular direction. The RKL2 stage count scales as
+    :math:`\sqrt{\chi_{\parallel,\max}}`.
+
+
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_length
+    :type: ``float``
+    :default: ``6.0``
+    :optional:
+
+    Length :math:`L` in m of the conduction leg of the ``leg`` domain-face conduction boundary condition
+    (``hybrid_pic_model.qdsmc_conduction_bc_lo`` / ``_hi`` entry = ``leg``; the other values are ``adiabatic``,
+    ``isothermal`` and ``flux``). An exhaust face whose field lines do not end on the domain boundary is
+    given a resistive drop to the wall instead of a bath: a 1D heat equation along the field line, in the
+    zero-velocity frame (no advective term at the face) and with no cross-field transport, connects the face
+    to a divertor wall at :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_Te_wall` a distance :math:`L`
+    away, :math:`q = -\kappa_\parallel \nabla T_e \approx \kappa_\parallel (T_e - T_\mathrm{wall})/L`.
+    Per boundary node the interior face and the leg are two conductances in series, so the boundary row is
+    set to the temperature at which the face flux equals the leg flux,
+
+    .. math::
+
+        G_\mathrm{int}\,(T_1 - T_f) = G_\mathrm{leg}\,(T_f - T_\mathrm{wall}) \quad\Rightarrow\quad
+        T_f = \frac{G_\mathrm{int}\,T_1 + G_\mathrm{leg}\,T_\mathrm{wall}}{G_\mathrm{int} + G_\mathrm{leg}},
+
+    with :math:`T_1` the first node inward of the face, :math:`G_\mathrm{int} = \kappa_\mathrm{face}/\Delta x`
+    the finite-difference operator's own conductance of that face (the harmonic mean of the floored densities
+    times the arithmetic mean of :math:`\kappa_\parallel/(1.5 n_e k_B)` from the ``qdsmc_kappa_par`` parser at
+    the two nodes; zero when the face is closed by the density floor), and
+    :math:`G_\mathrm{leg} = \kappa_\parallel(n_f, T_f)/L` from the same parser at the face node's floored
+    density. :math:`T_f` is re-evaluated :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_iterations` times
+    (the conductances depend on it through :math:`\kappa_\parallel \propto T_e^{5/2}`) and clamped at
+    :math:`T_\mathrm{wall}` and at ``qdsmc_conduction_Te_floor``. The boundary row is advanced as a lumped
+    capacitor :math:`C = 1.5 n_f k_B V/A_\mathrm{wall}` between the two conductances,
+    using the physical nodal dual volume and wall-face area. At a planar nodal face
+    :math:`V/A_\mathrm{wall} = \Delta x/2`. Radial RZ conductance additionally uses
+    :math:`G_\mathrm{int} = (\kappa_\mathrm{face}/\Delta r)
+    A_\mathrm{inner}/A_\mathrm{wall}`. Density and heat capacity include any stationary
+    pedestal, consistently with the FD operator. Thus
+    :math:`T(\Delta t) = T_f + (T_0 - T_f)\,e^{-\Delta t (G_\mathrm{int} + G_\mathrm{leg})/C}`: an open
+    face (:math:`\Delta x^2/\chi \ll \Delta t`) lands on :math:`T_f`, while a face closed by the density
+    floor (:math:`G_\mathrm{int} = 0`, a frozen row) relaxes toward :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`
+    at the leg's own rate :math:`\chi_\mathrm{leg} A_\mathrm{wall}/(L V)` instead of being pinned. The operator's last
+    face then carries :math:`q = G_\mathrm{int}(T_1 - T_f)` into the row, so the drain regulates itself: a
+    hotter interior raises :math:`T_f` and the flux, a longer or colder leg lowers both. The condition is
+    one-sided, as the MHD lane's ``outflow_limited`` wall and halo relaxation outlet are: it engages only
+    where the drain's source (:math:`T_1` on an open face, the row's own :math:`T_0` on a closed one) exceeds
+    :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})` and only where the update lowers the row (a row below the
+    series value, e.g. rewritten by the transport half, is left to the operator's interior flux instead of being
+    lifted); a colder source keeps the legacy adiabatic face (no reset, no tally). The tally is therefore
+    monotone (a pure drain) and the face flux
+    :math:`G_\mathrm{int} G_\mathrm{leg}/(G_\mathrm{int} + G_\mathrm{leg})\,(T_1 - T_\mathrm{wall})` passes
+    continuously through zero. Applied where the isothermal pin is
+    applied (after every accepted conduction substep, or per RKL2 stage / super-step following
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_rkl2_post_step`). The exchange is booked in a tally of its
+    own and printed as ``wall_leg`` next to ``wall_pin`` on the ``[qdsmc] step N joule_dropped_J:`` line
+    (same sign, weighted by the physical dual volume divided by the product of cell sizes), followed by
+    ``wall_leg_J`` = the same tally in Joules (times the product of cell sizes: :math:`\Delta r\,\Delta z` in RZ,
+    the product of the cell sizes in Cartesian); both tokens appear only when a ``leg`` face is armed. Python:
+    ``warpx.get_qdsmc_leg_tally(dim, side)``. Boot line ``[qdsmc] conduction z_hi BC: LEG (L = 6 m,
+    T_wall = 0.5 eV, iterations 2)``. The domain-face cap
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit` does not apply to ``leg`` faces. The knobs
+    are shared by every face typed ``leg``. A flux-tube mapping of :math:`L` is a follow-up; the default is a
+    fixed 6 m.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_Te_wall
+    :type: ``float``
+    :default: ``0.5``
+    :optional:
+
+    Wall temperature :math:`T_\mathrm{wall}` in eV at the far end of the conduction leg
+    (:pp:param:`hybrid_pic_model.qdsmc_conduction_leg_length`); converted to the electron-temperature field's
+    kelvin at the point of use.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_iterations
+    :type: ``int``
+    :default: ``2``
+    :optional:
+
+    Number of fixed-point passes of the leg face temperature :math:`T_f`, the conductances re-evaluated at the
+    new :math:`T_f` each pass (:pp:param:`hybrid_pic_model.qdsmc_conduction_leg_length`).
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_flux_limit
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Optional cap factor :math:`f` on the energy a ``leg`` boundary node may lose per substep, with the form
+    (free-streaming or sonic, :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form`) and the
+    :math:`A/V = 1/\Delta x` convention of :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit`, which
+    itself never applies to ``leg`` faces (the leg throttles itself). ``0`` = no cap.
+
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_flux_budget
     :type: ``bool``
     :default: ``0``
@@ -4458,6 +4748,57 @@ Maxwell solver: kinetic-fluid hybrid
     over-drain that makes the floor fire repeatedly; it is not a per-stage positivity proof. Requires
     :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` to be positive. Costs one extra pass and two
     ghost exchanges per right-hand-side evaluation. With the bound inactive the result is unchanged.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form
+    :type: ``str``
+    :default: ``free_streaming``
+    :optional:
+
+    Speed in the wall flux cap :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit`: ``free_streaming`` =
+    :math:`q_\max = f n_e k_B T_e v_{te}` (the legacy form); ``sonic`` = the MHD lane's sheath form
+    :math:`q_\max = f n_e k_B T_e c_s`, :math:`c_s = \sqrt{\gamma k_B T_e / m_i}` at the pre-pin interior node with
+    :math:`m_i` the first charged species' mass (the ion-temperature term of the MHD sound speed is omitted, so at
+    :math:`T_i = T_e` this cap is :math:`1/\sqrt{2}` of the MHD one).
+    Applies to the domain-face pins and the FD EB ring pin alike.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_eb_flux_limit
+    :type: ``float``
+    :default: ``0.1``
+    :optional:
+
+    Flux cap factor of the finite-difference embedded-boundary isothermal ring pin
+    (``qdsmc_conduction_eb_bc = isothermal``), with the semantics and form of
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit` (the domain-face factor, which stays separate: the
+    sheath value ~0.1 at the wall, free streaming 1 at the exhaust face). A ring node has no normal, so the dual-cell face
+    is taken as the largest cell size (the strongest-cap choice). ``0`` = plain reset of the ring (the earlier behaviour).
+    Inert unless the EB conduction BC is isothermal.
+
+.. pp:param:: hybrid_pic_model.qdsmc_conduction_wall_flux_limit
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Flux cap on the ``isothermal`` conduction boundary conditions of BOTH wall families: the domain-face pins
+    (``hybrid_pic_model.qdsmc_conduction_bc_lo`` / ``_hi`` = ``isothermal`` with the wall temperature from
+    ``qdsmc_conduction_bc_Te_lo`` / ``_hi`` in eV); the embedded-boundary isothermal ring pin has its own factor
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_eb_flux_limit` with the same form. The cap speed is set by
+    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form`. At ``0`` the boundary node row is reset to the wall
+    temperature after every accepted conduction substep: a bath of infinite conductance whose drain along every
+    field line ending on the wall is set by the interior conduction alone. With a positive factor :math:`f` the
+    energy a boundary node may lose to the wall in a substep :math:`\Delta t_s` is bounded by the free-streaming
+    heat flux through its dual-cell face, :math:`q_\max A \Delta t_s` with
+    :math:`q_\max = f\, n_e v_{te} k_B T_e` and :math:`v_{te} = \sqrt{k_B T_e / m_e}`, both evaluated at the node's
+    interior (pre-reset) state; the node temperature is lowered by at most that much toward the wall temperature
+    and never below it. A wall hotter than the node still pins it to the wall temperature. :math:`f = 1` is the
+    kinetic free-streaming bound; a sheath-limited wall corresponds to :math:`f` of order the electron sheath
+    transmission factor. The ``flux`` boundary type is unaffected.
+
+    The applied exchange is booked in the per-wall tallies exactly as for the plain reset. Their sum is printed as
+    ``wall_pin`` on the ``[qdsmc] step N joule_dropped_J:`` line (cadence
+    ``hybrid_pic_model.joule_dropped_energy_print_interval``, armed whenever any domain-face conduction BC is
+    set), as stored: node-u units summed over boundary nodes (RZ weighted by :math:`2\pi r/\Delta r`, so
+    multiply by :math:`\Delta r \Delta z` for joules; Cartesian: multiply by the node dual-cell volume),
+    positive = into the plasma.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
@@ -4537,6 +4878,19 @@ Maxwell solver: kinetic-fluid hybrid
     below :math:`\max(\texttt{joule\_heating\_n\_min}, n_\mathrm{floor})` receive no Joule heat, and the
     declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
     physical-resistivity region without moving the solver floor.
+
+.. pp:param:: hybrid_pic_model.joule_heating_taper
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Make the Joule heating gate a :math:`C^1` taper instead of a hard cutoff (no Ohmic heating of the
+    pedestal): the heat, and the Te-threshold redirect energy staged to the ions, are multiplied by
+    :math:`w(n) = \mathrm{smoothstep}((n - n_g)/n_g)` with :math:`n_g = \max(\texttt{joule\_heating\_n\_min},
+    n_\mathrm{floor})`: 0 at or below :math:`n_g`, 1 at or above :math:`2 n_g`. The withheld share goes to the
+    ``heat_gate`` tally. When any halo valve is armed the dropped-energy print also carries the thin-cell
+    (:math:`n < 2 n_g`) attribution ``thin_joule_tot`` / ``thin_joule_e`` (total Joule source there and the part
+    delivered to the electrons).
 
 .. pp:param:: hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t)
     :type: ``float`` or ``str``
@@ -4836,41 +5190,28 @@ Maxwell solver: kinetic-fluid hybrid
          - none
          - No brackets and no print at all; the knob is accepted but the instrument does nothing.
        * - theta-implicit
-         - ``src``, ``visc``
-         - Bracketed once per step at converged state in ``QDSMCFinishImplicitStep``. ``adv``,
-           ``comp`` and ``cond`` read zero and are *not* measured: conduction does not run on this
-           path, and a transport bracket there would have to measure against the provisional
-           :math:`T_e` that the end-of-step recovery discards. The brackets are deliberately kept out
-           of the residual evaluation, which the nonlinear solver calls once per iteration *and* once
-           per Jacobian probe — bracketing there would make every channel scale with the iteration
-           count rather than with the physics.
+         - ``src``, ``visc``, ``cond``, ``stopping``
+         - Sources are bracketed once at the accepted endpoint. FD conduction is
+           bracketed in two half steps; endpoint stopping and its fixed-wall exchange
+           are booked after collisions. ``visc`` and ``stopping`` are source sub-accounts.
+           ``adv`` and ``comp`` remain unmeasured. The brackets are outside residual
+           and Jacobian evaluations and therefore do not scale with solver iterations.
 
     .. note::
 
-       **RZ values changed.** These channels previously weighted each node by
-       :math:`\prod_d \Delta x_d = \Delta r\,\Delta z`, omitting the cylindrical :math:`2\pi r`
-       Jacobian, so in RZ they were integrals of :math:`u\,dr\,dz` reported in joules. They now use the
-       true volume element — shared with the ``HybridDissipation`` diagnostic via
-       ``QdsmcVolumeElement.H`` — including the on-axis nodal ring weighted at its volume centroid
-       :math:`r = \Delta r/8`. The same correction applies to the cumulative audit tallies (dropped
-       Joule energy, declined sink and stopping heat, ``Te`` shunt, contamination).
+       Energy integrals and ``HybridDissipation`` use the shared physical dual-cell
+       volume in ``QdsmcVolumeElement.H``. Nodal cells are clipped at every nonperiodic
+       domain face. In RZ this includes the axis disk :math:`[0,\Delta r/2]` and the
+       outer half ring; periodic images are deduplicated. The same volume is used by
+       FD conduction, stopping heat, wall/leg tallies and their stability bounds.
+       Cartesian nodal boundary cells also carry half widths in each physical face
+       direction. Interior cell-centered volumes are unchanged.
 
-       **Every RZ budget or tally number produced before this change is wrong by a factor of**
-       :math:`2\pi\langle r\rangle_u`, the energy-weighted mean radius. It is profile dependent, and
-       its *direction* depends on machine size: below one for
-       :math:`\langle r\rangle_u < 1/2\pi \approx 0.159` m (old numbers read too high), above one past
-       that (old numbers read too low). Measured on a production-like geometry
-       (:math:`r \in [0, 0.2]` m, :math:`z \in [-2, 2]` m, near-flat radial profile): **0.539**,
-       against the flat-profile reference :math:`\pi r_\mathrm{max} = 0.628` — historical numbers on
-       that geometry read 1.85x too high. Cartesian 1D/2D/3D are unaffected and bit-identical.
-
-       With the volume element corrected the budget and the ``HybridDissipation`` diagnostic became
-       comparable for the first time: two independent routes to the viscous dissipation, one
-       integrating an analytic source density over the domain, the other differencing the class-summed
-       thermal energy across a stage bracket. Measured agreement between ``visc_bulk + visc_band`` and
-       :math:`\int P_\nu\,dt` is **4.1e-4** on the test fixture and **1.6e-3** on the production-like
-       geometry; the residual is the intra-step sampling offset, since Strang applies the source twice
-       per step while the diagnostic field retains only the last call's rate.
+       Historical ledgers first omitted the RZ Jacobian and later still used full
+       cells at physical nodal faces. Those boundary contributions are not comparable
+       to the corrected physical-volume tally. Bulk/band class energy excludes raw
+       ion densities below the solver floor; it is not a full-domain energy measure
+       when pedestal or halo conduction crosses that class boundary.
 
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
@@ -5071,9 +5412,9 @@ Maxwell solver: kinetic-fluid hybrid
     including Jacobian probes and line searches. Then recompute the longitudinal
     constraint and repeat until the field equation and constraint both converge.
     This removes dependence of the particle push on the previous residual
-    evaluation's longitudinal field. Requires ``hybrid_pic_model.darwin`` and
-    cannot be combined with ``qdsmc_segregated_solve``; the coupled electron-energy
-    stage remains available.
+    evaluation's longitudinal field. Requires ``hybrid_pic_model.darwin``. When combined with
+    ``qdsmc_segregated_solve``, the thermal and density outer iteration converges inside each
+    fixed-longitudinal-field solve; thermal convergence is required before Darwin acceptance.
 
     The outer controls are ``implicit_evolve.darwin_outer_max_iterations`` (20),
     ``darwin_outer_relative_tolerance`` (1e-8),
@@ -5346,7 +5687,7 @@ Maxwell solver: kinetic-fluid hybrid
     empty mask reduces to the exact identity. Supported in 2D, 3D and RZ (:math:`m = 0`),
     single level.
 
-    In 3D, the final electric recovery solves the native spatial curl-curl
+    In 3D and axisymmetric RZ, the final electric recovery solves the native spatial curl-curl
     equation with the endpoint plasma trace and current external-field slope.
     Its correction starts from zero relative to the accepted vacuum electric
     field, preserving the curl null modes (local charge and enclosed flux).
@@ -5357,10 +5698,16 @@ Maxwell solver: kinetic-fluid hybrid
 
     The endpoint uses unpreconditioned conjugate gradients; arbitrary
     preconditioning can change the preserved electric null modes even when the
-    spatial residual converges. This supports a single Cartesian level and the
+    spatial residual converges. This supports a single Cartesian or axisymmetric RZ level and the
     native EB update masks; conformal cut-cell metrics are not supported.
+    RZ uses the cylindrical dual-volume inner product, including the axis
+    axial-edge weight, and regular axis parity. With ``components = flux``,
+    only the azimuthal electric field is recovered; the poloidal components
+    retain their endpoint stage values. The existing RZ all-component
+    magnetic recovery remains subject to its axis limitation; use ``flux``
+    for coupled RZ advances.
 
-    The 3D endpoint solve requires instantaneous magnetic recovery
+    The 3D and RZ endpoint solves require instantaneous magnetic recovery
     (``darwin_vacuum_recovery_relaxation_time = 0``). Nonperiodic domains require
     the existing Darwin vector-potential boundary pin, activated by external
     fields or embedded-boundary update flags. Unsupported combinations fail

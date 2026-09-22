@@ -313,10 +313,26 @@ void init_WarpX (py::module& m)
         )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
-                wx.get_pointer_HybridPICModel()->m_n_floor = n_floor;
+                auto * const model = wx.get_pointer_HybridPICModel();
+                model->m_n_floor = n_floor;
+                // hybrid_pic_model.density_pedestal_track_floor: keep the
+                // density pedestal on the floor the deck just set. Marking
+                // the image stale is enough -- the next
+                // EnsureDensityPedestal refills it, and the refill of an
+                // empty density_pedestal_profile uses n_uniform = m_n_floor
+                // (an empty profile is required by the input's init assert),
+                // so the new pedestal IS the new floor and the inventory is
+                // retallied with it. Off by default: the pedestal then stays
+                // static at its boot value, as before.
+                if (model->m_density_pedestal_track_floor) {
+                    model->m_density_pedestal_stale = true;
+                }
             },
             py::arg("n_floor"),
-            "Sets the density floor to use in the hybrid solver."
+            "Sets the density floor to use in the hybrid solver. When "
+            "hybrid_pic_model.density_pedestal_track_floor = 1 this also "
+            "rebuilds the density pedestal on the new floor, so the two "
+            "stay synchronised for the rest of the run."
         )
         .def("get_hybrid_pic_density_floor",
             [](WarpX& wx) {
@@ -355,6 +371,16 @@ void init_WarpX (py::module& m)
             "domain face (dim, side: 0=lo, 1=hi), in node-u units "
             "[J/m^3] summed over boundary nodes (positive = energy "
             "added to the plasma)."
+        )
+        .def("get_qdsmc_leg_tally",
+            [](WarpX& wx, int dim, int side) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcLegTally(dim, side);
+            },
+            py::arg("dim"), py::arg("side"),
+            "Cumulative QDSMC conduction-leg BC energy tally for the "
+            "domain face (dim, side: 0=lo, 1=hi), same units and sign "
+            "as get_qdsmc_wall_tally (ledger class wall_leg)."
         )
         .def("get_qdsmc_eb_tally",
             [](WarpX& wx) {

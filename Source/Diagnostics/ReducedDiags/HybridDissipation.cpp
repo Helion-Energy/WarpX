@@ -79,7 +79,7 @@ namespace
                 [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
                 {
                     if (own(i, j, 0) == 0) { return {0.0_rt, 0.0_rt}; }
-                    const Real dV = vol(i);
+                    const Real dV = vol(i, j);
                     Real fv = f(i, j, 0);
                     if (f_add) { fv += f_add(i, j, 0); }
                     return {fv*fv*dV, dV};
@@ -146,6 +146,12 @@ HybridDissipation::ComputeDiags (const int step)
 
     constexpr int lev = 0;
     const auto eta = hybrid->m_eta;
+    // ETATE: 4-argument resistivity -- Te [K] interpolated from the nodal Te
+    // grid to this component's staggering, mirroring the solver kernels so
+    // P_eta integrates the eta the solver applied.
+    const auto eta_te = hybrid->m_eta_te;
+    const bool eta_has_Te = hybrid->m_resistivity_has_Te_dependence;
+    const amrex::MultiFab* te_mf = hybrid->ResistivityTe(lev);
     const auto eta_h = hybrid->m_eta_h;
     const bool has_J_dep = hybrid->m_resistivity_has_J_dependence;
     const bool has_B_dep = hybrid->m_hyper_resistivity_has_B_dependence;
@@ -265,6 +271,8 @@ HybridDissipation::ComputeDiags (const int step)
             const auto Jt = J[1]->const_array(mfi);
             const auto Jz = J[2]->const_array(mfi);
             const auto rho_arr = rho->const_array(mfi);
+            const auto te_arr =
+                (te_mf != nullptr) ? te_mf->const_array(mfi) : amrex::Array4<const Real>{};
             const auto Br = B[0]->const_array(mfi);
             const auto Bt = B[1]->const_array(mfi);
             const auto Bz = B[2]->const_array(mfi);
@@ -316,9 +324,15 @@ HybridDissipation::ComputeDiags (const int step)
                     // -- that is what makes the two ledgers comparable.
                     const Real r = nodal_r ? (rmin + i*dr)
                                            : (rmin + (i + 0.5_rt)*dr);
-                    const Real dV = vol(i);
+                    const Real dV = vol(i, j);
 
-                    const Real pe = eta(rho_val, jtot_val, t_new)*jv*jv*dV;
+                    const Real eta_val =
+                        eta_has_Te
+                            ? eta_te(rho_val, jtot_val,
+                                     Interp(te_arr, nodal_iv, self_stag, coarsen_iv, i, j, 0, 0),
+                                     t_new)
+                            : eta(rho_val, jtot_val, t_new);
+                    const Real pe = eta_val * jv * jv * dV;
 
                     Real ph = 0._rt;
                     const bool interior =
@@ -414,7 +428,7 @@ HybridDissipation::ComputeDiags (const int step)
                 [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
                 {
                     if (own(i, j, 0) == 0) { return {0.0_rt}; }
-                    return {q_arr(i, j, 0) * vol(i)};
+                    return {q_arr(i, j, 0) * vol(i, j)};
                 });
         }
         p_nu = amrex::get<0>(reduce_data.value(reduce_op));
@@ -575,7 +589,10 @@ HybridDissipation::ComputeDiags (const int step)
     const QdsmcVolumeElement vol_cc =
         MakeQdsmcVolumeElement(geom, amrex::IndexType::TheCellType());
     amrex::Real dom_vol = 0.0_rt;
-    for (int i = dom_lo.x; i <= dom_hi.x; ++i) { dom_vol += vol_cc(i); }
+    for (int i = dom_lo.x; i <= dom_hi.x; ++i)
+    {
+        dom_vol += vol_cc(i, dom_lo.y);
+    }
     dom_vol *= static_cast<amrex::Real>(dom_hi.y - dom_lo.y + 1);
 
     if (b2_bar > 0.0_rt && dom_vol > 0.0_rt && ion_sums[1] > 0.0_rt) {
