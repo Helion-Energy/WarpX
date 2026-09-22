@@ -2501,9 +2501,17 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
             // solve; the end application covers the remaining
             // (1 - theta)*dt so the configured tau is the effective
             // response time in both cadences.
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
+            // The stage correction defines a preconditioned fixed-point
+            // residual. At the endpoint one application of that global inverse
+            // followed by a mask is not a vacuum projection: it can amplify
+            // interface errors. Solve the actual constrained native operator.
+            RecoverDarwinVacuumA(*m_WarpX, *m_hybrid_pic_model,
+                m_WarpX->m_fields.get_alldirs("hybrid_A_fp", 0));
+#else
             m_hybrid_pic_model->ComputeVacuumARecovery(false,
-                m_vacuum_recovery_half ? (1.0_rt - m_theta) * m_dt
-                                       : m_dt);
+                m_vacuum_recovery_half ? (1.0_rt - m_theta) * m_dt : m_dt);
+#endif
             DarwinApplyABoundary(end_time);
             // Recover the endpoint transverse electric field spatially in 3D/RZ.
             // The implicit current and theta-stage updates are unchanged.

@@ -19,7 +19,15 @@ class HybridPICModel;
  */
 void RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid,
                            ablastr::fields::VectorField const& endpoint,
-                           ablastr::fields::VectorField const& accepted, amrex::Real time,
-                           amrex::Real dt);
+                           ablastr::fields::VectorField const& accepted,
+                           amrex::Real time, amrex::Real dt);
+
+/** Project endpoint A onto the masked native curl-curl vacuum constraint.
+ * The incoming plasma and gauge-shifted boundary trace stays fixed. The
+ * zero-start correction preserves A's null modes and never changes E/EL or
+ * current/history registers. The caller repins A and reconstructs B afterward.
+ */
+void RecoverDarwinVacuumA (WarpX& warpx, HybridPICModel& hybrid,
+                           ablastr::fields::VectorField const& endpoint);
 
 #endif

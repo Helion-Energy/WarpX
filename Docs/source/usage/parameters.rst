@@ -5687,7 +5687,17 @@ Maxwell solver: kinetic-fluid hybrid
     empty mask reduces to the exact identity. Supported in 2D, 3D and RZ (:math:`m = 0`),
     single level.
 
-    In 3D and axisymmetric RZ, the final electric recovery solves the native spatial curl-curl
+    In 3D and axisymmetric RZ, the endpoint magnetic recovery solves the actual
+    masked native curl-curl system, holding the incoming plasma and boundary
+    vector potential fixed. Its zero-start correction preserves the incoming
+    vector potential's null modes. The global Poisson correction remains an
+    iteration operator inside the theta-stage nonlinear residual; applying that
+    global inverse once and masking afterward is not an endpoint projection
+    and can amplify interface errors. Endpoint magnetic recovery changes no
+    electric or electron-current/history register; the solver then reconstructs
+    the delivered magnetic field from the recovered vector potential.
+
+    The final electric recovery solves the native spatial curl-curl
     equation with the endpoint plasma trace and current external-field slope.
     Its correction starts from zero relative to the accepted vacuum electric
     field, preserving the curl null modes (local charge and enclosed flux).
@@ -5734,8 +5744,15 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``2000``
     :optional:
 
-    Maximum endpoint electric CG iterations. Failure to satisfy the recomputed
-    true residual stops the run.
+    Maximum endpoint magnetic and electric CG iterations. Failure to satisfy
+    the recomputed true residual stops the run. The magnetic solve uses
+    ``darwin_vacuum_recovery_relative_tolerance`` and
+    ``darwin_vacuum_recovery_absolute_tolerance`` (converted from raw Laplacian
+    units by the same operator normalization), with a roundoff floor of
+    64 machine epsilons times the weighted norm of its active input components
+    (only the toroidal component for axisymmetric ``flux`` recovery).
+    This prevents repeated projections from requiring a tolerance below the
+    native operator's cancellation error.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_e_check_operator
     :type: ``bool``
@@ -5814,7 +5831,9 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``poisson``
     :optional:
 
-    Iteration operator for the vacuum correction. ``poisson`` (default) interpolates
+    Iteration operator for the theta-stage vacuum correction. In 3D and RZ,
+    the endpoint always uses the constrained native spatial solve described
+    above. ``poisson`` (default) interpolates
     the native edge curl-curl defect to nodes, solves a component nodal Poisson
     problem, and interpolates back. Those transfers can lose edge modes, so a zero
     nodal correction does not by itself certify a zero native edge current near an EB.

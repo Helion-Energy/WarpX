@@ -15,8 +15,11 @@
 
 #include <ablastr/profiler/ProfilerWrapper.H>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
+
 
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
 namespace
@@ -30,9 +33,10 @@ view (Field& v)
 }
 } // namespace
 
-void
-RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint,
-                      View const& accepted, amrex::Real time, amrex::Real dt)
+static void
+RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint,
+                          View const& accepted, amrex::Real time, amrex::Real dt,
+                          bool magnetic)
 {
     ABLASTR_PROFILE("RecoverDarwinVacuumE()");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::grid_type == GridType::Staggered,
@@ -54,6 +58,13 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     pp.query("darwin_vacuum_e_absolute_tolerance", atol);
     pp.query("darwin_vacuum_e_max_iterations", max_iterations);
     pp.query("darwin_vacuum_e_check_operator", check_operator);
+    if (magnetic)
+    {
+        rtol = hybrid.m_darwin_vacrec_rtol;
+        atol = hybrid.m_darwin_vacrec_atol;
+        // A native Krylov solve can require more iterations than the previous
+        // global multigrid correction. Share the endpoint spatial solve budget.
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(rtol) && std::isfinite(atol) && rtol > 0. &&
                                          atol >= 0. && max_iterations > 0,
                                      "Invalid spatial vacuum electric recovery solver parameters");
@@ -81,7 +92,7 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     auto const& rho = hybrid.m_darwin_vacuum_recovery_frozen_mask
                           ? *warpx.m_fields.get("hybrid_rho_vacmask_fp", 0)
                           : *warpx.m_fields.get(FieldType::rho_fp, 0);
-    if (hybrid.m_add_external_fields)
+    if (!magnetic && hybrid.m_add_external_fields)
     {
         hybrid.m_external_vector_potential->UpdateHybridExternalFields(time, dt);
     }
@@ -92,6 +103,12 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     for (int d = 0; d < AMREX_SPACEDIM; ++d)
     {
         diagonal += 4. / (geom.CellSize(d) * geom.CellSize(d));
+    }
+    if (magnetic)
+    {
+        // The existing magnetic absolute tolerance is in raw Laplacian units.
+        // Preserve its meaning when applying the normalized native operator.
+        atol /= diagonal;
     }
     amrex::Real const scale = PhysConst::mu0 / diagonal;
     amrex::Real const floor =
@@ -171,8 +188,8 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
                                    conductor = conductor || (axis && d == 1 && i == 0);
 #endif
                                    m(i, j, k) = vacuum && !wall && !conductor;
-                                   dst(i, j, k) = vacuum ? old(i, j, k) : end(i, j, k);
-                                   if (wall)
+                                   dst(i, j, k) = (!magnetic && vacuum) ? old(i, j, k) : end(i, j, k);
+                                   if (wall && !magnetic)
                                    {
                                        dst(i, j, k) = drive ? drive(i, j, k) : 0.;
                                    }
@@ -322,11 +339,37 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         amrex::MultiFab::Copy(direction[d], residual[d], 0, 0, 1, 0);
     }
     // With K = I_V C^T C I_V, zero-start unpreconditioned CG keeps every
-    // correction in range(K). It therefore preserves all accepted electric
-    // null modes, including local charge, component fluxes and periodic means.
-    // An arbitrary preconditioner would invalidate that selection principle.
+    // correction in range(K). It preserves the baseline's null modes (accepted
+    // electric modes or extrapolated endpoint A modes). Fixed plasma and wall
+    // values never enter the correction space. A global inverse followed by
+    // masking is not this projection and can amplify the interface defect.
+    // An arbitrary preconditioner would invalidate the null-mode selection.
     amrex::Real rr = dot(residual, residual), initial = std::sqrt(rr);
-    amrex::Real const target = std::max(atol, rtol * initial);
+    // A has no universal dimensional absolute floor. Stop at the native
+    // operator's roundoff scale when an already projected field is revisited;
+    // otherwise a second projection would demand a tolerance below cancellation
+    // error. This bound scales with the actual field, not a fixed unit value.
+    amrex::Real reference_norm = 0.;
+    if (magnetic)
+    {
+#if defined(WARPX_DIM_RZ)
+        if (flux_only)
+        {
+            // The axisymmetric toroidal block does not depend on Ar or Az.
+            // Large unchanged poloidal fields must not loosen this solve.
+            reference_norm = component_dot(base[1], base[1], *owner[1]);
+            amrex::ParallelAllReduce::Sum(reference_norm,
+                                         amrex::ParallelContext::CommunicatorSub());
+        }
+        else
+#endif
+        {
+            reference_norm = dot(base, base);
+        }
+    }
+    amrex::Real const roundoff =
+        64. * std::numeric_limits<amrex::Real>::epsilon() * std::sqrt(reference_norm);
+    amrex::Real const target = std::max({atol, rtol * initial, roundoff});
     amrex::Real truth = initial;
     int iter = 0;
     while (truth > target && iter < max_iterations)
@@ -378,7 +421,7 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
         }
         rr = next;
     }
-    amrex::Print() << "SPATIAL_RECOVERY iterations=" << iter << " initial=" << initial
+    amrex::Print() << (magnetic ? "SPATIAL_A_RECOVERY iterations=" : "SPATIAL_RECOVERY iterations=") << iter << " initial=" << initial
                    << " residual=" << truth << " target=" << target << "\n";
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(truth <= target, "Spatial vacuum recovery did not converge "
                                                       "to its true residual tolerance");
@@ -386,6 +429,13 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     {
         amrex::MultiFab::LinComb(*endpoint[d], 1., base[d], 0, 1., delta[d], 0, 0, 1, 0);
         endpoint[d]->OverrideSync(periodic);
+        if (magnetic)
+        {
+            // The caller restores A's gauge-shifted boundary pin and guards,
+            // then reconstructs B. Do not touch E, EL, Aold or Je here.
+            endpoint[d]->FillBoundary(periodic);
+            continue;
+        }
         input[d].setVal(0.);
         amrex::MultiFab::Copy(input[d], *endpoint[d], 0, 0, 1, 0);
         input[d].OverrideSync(periodic);
@@ -448,6 +498,21 @@ RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint
     }
 }
 
+void
+RecoverDarwinVacuumE (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint,
+                      View const& accepted, amrex::Real time, amrex::Real dt)
+{
+    RecoverDarwinVacuumField(warpx, hybrid, endpoint, accepted, time, dt, false);
+}
+
+void
+RecoverDarwinVacuumA (WarpX& warpx, HybridPICModel& hybrid, View const& endpoint)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid.m_darwin_vacrec_relax_time == 0.,
+        "Spatial endpoint magnetic recovery requires instantaneous recovery");
+    RecoverDarwinVacuumField(warpx, hybrid, endpoint, endpoint, 0., 0., true);
+}
+
 #else
 void
 RecoverDarwinVacuumE (WarpX&, HybridPICModel&, ablastr::fields::VectorField const&,
@@ -455,4 +520,10 @@ RecoverDarwinVacuumE (WarpX&, HybridPICModel&, ablastr::fields::VectorField cons
 {
     WARPX_ABORT_WITH_MESSAGE("Spatial vacuum electric recovery requires 3D or RZ");
 }
+void
+RecoverDarwinVacuumA (WarpX&, HybridPICModel&, ablastr::fields::VectorField const&)
+{
+    WARPX_ABORT_WITH_MESSAGE("Spatial vacuum magnetic recovery requires 3D or RZ");
+}
+
 #endif

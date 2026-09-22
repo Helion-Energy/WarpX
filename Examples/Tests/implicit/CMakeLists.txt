@@ -541,7 +541,7 @@ endif()
 # The default prescribed-drive recovery must expose the same map to full
 # residuals and Jacobian probes. The frozen arm verifies test sensitivity.
 if(TARGET lib_rz)
-    foreach(fixture IN ITEMS recovery_probe implicit_density)
+    foreach(fixture IN ITEMS recovery_probe implicit_density recovery_projection)
         add_executable(test_${fixture}_rz test_${fixture}_rz.cpp)
         target_link_libraries(test_${fixture}_rz PRIVATE lib_rz)
         target_include_directories(test_${fixture}_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
@@ -559,6 +559,29 @@ if(TARGET lib_rz)
                 TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
         endforeach()
     endforeach()
+    foreach(control IN ITEMS large_poloidal axial_wall)
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_projection_${control})
+        if(control STREQUAL "large_poloidal")
+            set(projection_options projection_test.poloidal_scale=1.e20)
+        else()
+            set(projection_options "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting")
+        endif()
+        add_test(NAME test_rz_recovery_projection_${control}
+            COMMAND test_recovery_projection_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe ${projection_options})
+        set_tests_properties(test_rz_recovery_projection_${control} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_projection_${control}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_projection_legacy)
+    add_test(NAME test_rz_recovery_projection_legacy
+        COMMAND test_recovery_projection_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_recovery_probe
+            projection_test.legacy=1)
+    set_tests_properties(test_rz_recovery_projection_legacy PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_projection_legacy
+        TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rz_recovery_probe_frozen)
     add_test(NAME test_rz_recovery_probe_frozen
         COMMAND test_recovery_probe_rz

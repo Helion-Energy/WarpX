@@ -1,6 +1,7 @@
 /* Copyright 2026 The WarpX Community
  * This file is part of WarpX. License: BSD-3-Clause-LBNL
  */
+#include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "FieldSolver/ImplicitSolvers/DarwinVacuumERecovery.H"
 #include "Initialization/WarpXInit.H"
@@ -10,6 +11,7 @@
 #include <AMReX_Reduce.H>
 
 #include <cmath>
+
 
 // A nodal plateau encloses the plasma and conductor. Its edge gradient has
 // support only in vacuum: its pairing with E measures enclosed electric flux.
@@ -155,6 +157,144 @@ main (int argc, char** argv)
             amrex::Print() << "RECOVERY_REGISTER dir=" << d << " error=" << error << "\n";
             AMREX_ALWAYS_ASSERT(error < 1.e-9);
         }
+        // The same constrained native operator projects endpoint A, using
+        // A's incoming trace rather than the external electric slope.
+        auto av = simulation.m_fields.get_alldirs("hybrid_A_fp", 0);
+        auto bv = simulation.m_fields.get_alldirs(
+            warpx::fields::FieldType::Bfield_fp, 0);
+        auto jv = simulation.m_fields.get_alldirs("hybrid_J_vac_fp", 0);
+        amrex::Array<amrex::MultiFab, 3> initial_a, first_a, protected_e;
+        for (int d = 0; d < 3; ++d) {
+            for (auto* snapshot : {&initial_a, &first_a, &protected_e}) {
+                (*snapshot)[d].define(av[d]->boxArray(),
+                                      av[d]->DistributionMap(), 1, 0);
+            }
+            auto const* flag = EB::enabled()
+                                   ? simulation.GetEBUpdateEFlag()[0][d].get()
+                                   : nullptr;
+            for (amrex::MFIter mfi(*av[d]); mfi.isValid(); ++mfi) {
+                auto a = av[d]->array(mfi);
+                auto f =
+                    flag ? flag->const_array(mfi) : amrex::Array4<int const>{};
+                amrex::ParallelFor(
+                    mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                        a(i, j, k) =
+                            f && f(i, j, k) == 0
+                                ? 0.
+                                : .1 * (d + 1) +
+                                      .03 * std::sin(.37 * (i + 3 * j + 7 * k +
+                                                            11 * d));
+                    });
+            }
+            av[d]->OverrideSync(periodic);
+            amrex::MultiFab::Copy(initial_a[d], *av[d], 0, 0, 1, 0);
+            amrex::MultiFab::Copy(protected_e[d], *fields[d], 0, 0, 1, 0);
+        }
+        bool const global_vacuum =
+            hybrid.m_darwin_vacuum_recovery_mask == "global";
+        auto current_norm = [&] () {
+            for (int d = 0; d < 3; ++d) {
+                av[d]->setBndry(0.);
+                av[d]->FillBoundary(periodic);
+            }
+            simulation.get_pointer_fdtd_solver_fp(0)->ComputeCurlA(
+                bv, av, simulation.GetEBUpdateBFlag()[0], 0);
+            for (int d = 0; d < 3; ++d) {
+                bv[d]->setBndry(0.);
+                bv[d]->OverrideSync(periodic);
+                bv[d]->FillBoundary(periodic);
+            }
+            simulation.get_pointer_fdtd_solver_fp(0)->CalculateCurrentAmpere(
+                jv, bv, simulation.GetEBUpdateEFlag()[0], 0);
+            amrex::Real result = 0.;
+            for (int d = 0; d < 3; ++d) {
+                auto const domain =
+                    amrex::convert(geom.Domain(), av[d]->ixType());
+                auto const lo = domain.smallEnd(), hi = domain.bigEnd();
+                amrex::GpuArray<int, 3> per{
+                    geom.isPeriodic(0), geom.isPeriodic(1), geom.isPeriodic(2)};
+                auto const* flag =
+                    EB::enabled() ? simulation.GetEBUpdateEFlag()[0][d].get()
+                                  : nullptr;
+                amrex::Real const floor =
+                    PhysConst::q_e * hybrid.m_n_floor *
+                    hybrid.m_darwin_vacuum_recovery_density_fraction;
+                for (amrex::MFIter mfi(difference[d]); mfi.isValid(); ++mfi) {
+                    auto out = difference[d].array(mfi);
+                    auto cur = jv[d]->const_array(mfi),
+                         r = rho.const_array(mfi);
+                    auto f = flag ? flag->const_array(mfi)
+                                  : amrex::Array4<int const>{};
+                    amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(
+                                                           int i, int j,
+                                                           int k) {
+                        int q[3]{i, j, k};
+                        ++q[d];
+                        int p[3]{i, j, k};
+                        bool free =
+                            (global_vacuum ||
+                             .5 * (r(i, j, k) + r(q[0], q[1], q[2])) < floor) &&
+                            !(f && f(i, j, k) == 0);
+                        for (int c = 0; c < 3; ++c) {
+                            if (!per[c] && (p[c] <= lo[c] || p[c] >= hi[c])) {
+                                free = false;
+                            }
+                        }
+                        out(i, j, k) = free ? cur(i, j, k) : 0.;
+                    });
+                }
+                result = std::max(result, difference[d].norminf());
+            }
+            return result;
+        };
+        amrex::Real const initial_current = current_norm();
+        RecoverDarwinVacuumA(simulation, hybrid, av);
+        amrex::Real const final_current = current_norm();
+        AMREX_ALWAYS_ASSERT(initial_current > 0. &&
+                            final_current < 1.e-9 * initial_current);
+        for (int d = 0; d < 3; ++d) {
+            amrex::MultiFab::Copy(first_a[d], *av[d], 0, 0, 1, 0);
+        }
+        RecoverDarwinVacuumA(simulation, hybrid, av);
+        for (int d = 0; d < 3; ++d) {
+            amrex::MultiFab::LinComb(difference[d], 1., *av[d], 0, -1.,
+                                     first_a[d], 0, 0, 1, 0);
+            AMREX_ALWAYS_ASSERT(difference[d].norminf() < 1.e-10);
+            amrex::MultiFab::Subtract(protected_e[d], *fields[d], 0, 0, 1, 0);
+            AMREX_ALWAYS_ASSERT(protected_e[d].norminf() == 0.);
+            auto const domain = amrex::convert(geom.Domain(), av[d]->ixType());
+            auto const lo = domain.smallEnd(), hi = domain.bigEnd();
+            amrex::GpuArray<int, 3> per{geom.isPeriodic(0), geom.isPeriodic(1),
+                                        geom.isPeriodic(2)};
+            amrex::Real const floor =
+                PhysConst::q_e * hybrid.m_n_floor *
+                hybrid.m_darwin_vacuum_recovery_density_fraction;
+            for (amrex::MFIter mfi(difference[d]); mfi.isValid(); ++mfi) {
+                auto out = difference[d].array(mfi);
+                auto a = av[d]->const_array(mfi),
+                     before = initial_a[d].const_array(mfi),
+                     r = rho.const_array(mfi);
+                amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(
+                                                       int i, int j, int k) {
+                    int q[3]{i, j, k};
+                    ++q[d];
+                    int p[3]{i, j, k};
+                    bool fixed =
+                        !global_vacuum &&
+                        .5 * (r(i, j, k) + r(q[0], q[1], q[2])) >= floor;
+                    for (int c = 0; c < 3; ++c) {
+                        if (!per[c] && (p[c] <= lo[c] || p[c] >= hi[c])) {
+                            fixed = true;
+                        }
+                    }
+                    out(i, j, k) = fixed ? a(i, j, k) - before(i, j, k) : 0.;
+                });
+            }
+            AMREX_ALWAYS_ASSERT(difference[d].norminf() == 0.);
+        }
+        amrex::Print() << "SPATIAL_A_3D current_ratio="
+                       << final_current / initial_current
+                       << " idempotence_and_fixed_trace=PASS\n";
         amrex::Print() << "SPATIAL_RECOVERY_TEST_PASS\n";
         WarpX::Finalize();
     }
