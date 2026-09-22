@@ -34,7 +34,8 @@ public:
     BackgroundMCCCollision ( BackgroundMCCCollision&& )                  = delete;
     BackgroundMCCCollision& operator= ( BackgroundMCCCollision&& )       = delete;
 
-    [[nodiscard]] amrex::ParticleReal get_nu_max (amrex::Vector<ScatteringProcess> const& mcc_processes) const;
+    [[nodiscard]] amrex::ParticleReal get_nu_max (amrex::Vector<ScatteringProcess> const& mcc_processes,
+                                                  amrex::ParticleReal speed_mass) const;
 
     /** Perform the collisions
      *
