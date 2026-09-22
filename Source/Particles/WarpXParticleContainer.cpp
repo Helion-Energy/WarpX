@@ -984,9 +984,14 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
 
     if (d_position_error_count) {
         amrex::Gpu::streamSynchronize();
-        if ((*d_position_error_count)[0] > 0) {
+        // The counter lives in device memory, so it must be copied back rather
+        // than subscripted on the host (that dereferences a device pointer).
+        int h_position_error_count = 0;
+        amrex::Gpu::dtoh_memcpy(&h_position_error_count, d_position_error_count->dataPtr(),
+                                sizeof(int));
+        if (h_position_error_count > 0) {
             amrex::Abort("Implicit current deposition: Particle position exceeds the permitted range for " +
-                         std::to_string((*d_position_error_count)[0]) + " particle(s).");
+                         std::to_string(h_position_error_count) + " particle(s).");
         }
     }
 

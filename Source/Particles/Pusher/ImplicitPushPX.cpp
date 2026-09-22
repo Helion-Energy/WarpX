@@ -696,9 +696,14 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     });
 
     amrex::Gpu::streamSynchronize();
-    if (d_position_error_count[0] > 0) {
+    // d_position_error_count lives in device memory, so it must be copied back
+    // rather than subscripted on the host (that dereferences a device pointer).
+    int h_position_error_count = 0;
+    amrex::Gpu::dtoh_memcpy(&h_position_error_count, d_position_error_count.dataPtr(),
+                            sizeof(int));
+    if (h_position_error_count > 0) {
         amrex::Abort("Implicit particle position exceeds the permitted range for " +
-                     std::to_string(d_position_error_count[0]) + " particle(s).");
+                     std::to_string(h_position_error_count) + " particle(s).");
     }
 
     // Setup for handling the unconverged particles. A list of their indices is
@@ -1306,9 +1311,14 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
     amrex::Gpu::streamSynchronize();
 
     // Check for errors after kernel launch
-    if (d_position_error_count[0] > 0) {
+    // d_position_error_count lives in device memory, so it must be copied back
+    // rather than subscripted on the host (that dereferences a device pointer).
+    int h_position_error_count = 0;
+    amrex::Gpu::dtoh_memcpy(&h_position_error_count, d_position_error_count.dataPtr(),
+                            sizeof(int));
+    if (h_position_error_count > 0) {
         amrex::Abort("Implicit suborbit particle position exceeds the permitted range for " +
-                     std::to_string(d_position_error_count[0]) + " particle(s).");
+                     std::to_string(h_position_error_count) + " particle(s).");
     }
     ParticleUtils::CheckGridCrossingErrors(d_error_x, d_error_y, d_error_z, max_grid_crossings);
 }
