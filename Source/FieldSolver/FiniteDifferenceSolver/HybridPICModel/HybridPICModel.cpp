@@ -69,6 +69,15 @@ QdsmcFaceName (int const d, int const s)
 #endif
     return std::string(ax[d]) + ((s == 0) ? "_lo" : "_hi");
 }
+#if defined(WARPX_DIM_RZ)
+// CUDA extended lambdas cannot capture a function-local class type.
+struct ViscousWorkRZStencil {
+    amrex::GpuArray<amrex::GpuArray<int, 2>, 2> inner{};
+    amrex::GpuArray<amrex::GpuArray<int, 2>, 6> outer{};
+    int ninner = 0;
+    int nouter = 0;
+};
+#endif
 } // namespace
 using warpx::fields::FieldType;
 
@@ -10024,13 +10033,7 @@ HybridPICModel::QDSMCDepositDragWork (
     // is eligible, use their immediate neighbours: this is precisely the
     // support from which the centred stress divergence can reach the edge.
     // Entropy markers and the force operator are not modified.
-    struct WorkStencil {
-        amrex::GpuArray<amrex::GpuArray<int, 2>, 2> inner{};
-        amrex::GpuArray<amrex::GpuArray<int, 2>, 6> outer{};
-        int ninner = 0;
-        int nouter = 0;
-    };
-    amrex::GpuArray<WorkStencil, 3> stencils{};
+    amrex::GpuArray<ViscousWorkRZStencil, 3> stencils{};
     for (int c = 0; c < 3; ++c) {
         auto& st = stencils[c];
         st.inner[0] = {0, 0};
