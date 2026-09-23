@@ -10009,32 +10009,92 @@ HybridPICModel::QDSMCDepositDragWork (
     ablastr::fields::VectorField const J_plasma =
         warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
 
+#if !defined(WARPX_DIM_RZ)
     amrex::GpuArray<int, 3> const& Jx_stag = Jx_IndexType;
     amrex::GpuArray<int, 3> const& Jy_stag = Jy_IndexType;
     amrex::GpuArray<int, 3> const& Jz_stag = Jz_IndexType;
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
     amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
+#endif
 
 #if defined(WARPX_DIM_RZ)
     auto const vn = MakeQdsmcVolumeElement(warpx.Geom(lev), Te.ixType());
-    auto const vr =
-        MakeQdsmcVolumeElement(warpx.Geom(lev), J_plasma[0]->ixType());
-    auto const vz =
-        MakeQdsmcVolumeElement(warpx.Geom(lev), J_plasma[2]->ixType());
+    // Preserve each physical edge's work when one or both receiving nodes
+    // lie below the source floor. Prefer its original endpoints. If neither
+    // is eligible, use their immediate neighbours: this is precisely the
+    // support from which the centred stress divergence can reach the edge.
+    // Entropy markers and the force operator are not modified.
+    struct WorkStencil {
+        amrex::GpuArray<amrex::GpuArray<int, 2>, 2> inner{};
+        amrex::GpuArray<amrex::GpuArray<int, 2>, 6> outer{};
+        int ninner = 0;
+        int nouter = 0;
+    };
+    amrex::GpuArray<WorkStencil, 3> stencils{};
+    for (int c = 0; c < 3; ++c) {
+        auto& st = stencils[c];
+        st.inner[0] = {0, 0};
+        st.ninner = c == 1 ? 1 : 2;
+        if (c == 1) {
+            st.outer[0] = {-1, 0}; st.outer[1] = {1, 0};
+            st.outer[2] = {0, -1}; st.outer[3] = {0, 1};
+            st.nouter = 4;
+        } else {
+            int const d = c == 0 ? 0 : 1;
+            st.inner[1][d] = 1;
+            st.outer[0][d] = -1; st.outer[1][d] = 2;
+            for (int endpoint = 0; endpoint < 2; ++endpoint) {
+                for (int side = 0; side < 2; ++side) {
+                    auto& offset = st.outer[2 + 2*endpoint + side];
+                    offset[d] = endpoint;
+                    offset[1-d] = side == 0 ? -1 : 1;
+                }
+            }
+            st.nouter = 6;
+        }
+    }
+    // Freeze eligibility before changing Te. Reading a live temperature
+    // while neighbouring cells deposit heat would introduce a GPU race.
+    amrex::MultiFab eligible(Te.boxArray(), Te.DistributionMap(), 1, 2);
+    eligible.setVal(0.0_rt);
+    auto const source_floor = PhysConst::q_e * m_n_floor;
+    for (amrex::MFIter mfi(eligible); mfi.isValid(); ++mfi) {
+        auto const dst = eligible.array(mfi);
+        auto const r = rho.const_array(mfi);
+        auto const t = Te.const_array(mfi);
+        auto const capacity =
+            (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
+        amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+            dst(i,j,k) = r(i,j,k) > source_floor && t(i,j,k) > 0.0_rt &&
+                         capacity(i,j,k) > 0.0_rt && std::isfinite(t(i,j,k)) &&
+                         std::isfinite(capacity(i,j,k)) ? 1.0_rt : 0.0_rt;
+        });
+    }
+    eligible.FillBoundary(period);
 #endif
 
     // ---- Stage 1: edge work densities w_c = J_c E_c on each component's
     // own staggering ----
     // Product first, interpolation second: interpolating the edge PRODUCT to
     // the nodes conserves the sum (each edge value is split in halves onto
-    // its end nodes), so the nodal integral of Q equals the edge integral
-    // of J . E to round-off on a periodic Cartesian grid. Interpolating J
+    // its end nodes on fully active cells), so the nodal integral of Q
+    // equals the edge integral of J . E. RZ stores volume-integrated shares
+    // and renormalizes them over eligible receivers near the source mask.
+    // Interpolating J
     // and E separately and multiplying at the node would not. One ghost
     // layer, exchanged so the nodal stencil can read across box seams.
     std::array<amrex::MultiFab, 3> W;
     for (int d = 0; d < 3; ++d) {
+#if defined(WARPX_DIM_RZ)
+        // Channels: endpoint shares, neighbour shares, unassignable work.
+        W[d].define(J_plasma[d]->boxArray(), J_plasma[d]->DistributionMap(), 3, 2);
+        auto const edge_volume =
+            MakeQdsmcVolumeElement(warpx.Geom(lev), J_plasma[d]->ixType());
+        auto const stencil = stencils[d];
+#else
         W[d].define(J_plasma[d]->boxArray(), J_plasma[d]->DistributionMap(), 1,
                     amrex::IntVect(1));
+#endif
         W[d].setVal(0.0_rt);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -10046,12 +10106,44 @@ HybridPICModel::QDSMCDepositDragWork (
                 J_plasma[d]->const_array(mfi);
             amrex::Array4<amrex::Real const> const& e =
                 Edrag[d]->const_array(mfi);
+#if defined(WARPX_DIM_RZ)
+            auto const mask = eligible.const_array(mfi);
+#endif
             amrex::ParallelFor(mfi.tilebox(),
                                [=] AMREX_GPU_DEVICE(int i, int jj, int k) {
-                                   w(i, jj, k) = j(i, jj, k) * e(i, jj, k);
-                               });
+#if defined(WARPX_DIM_RZ)
+                amrex::Real const power = edge_volume(i,jj,k)*j(i,jj,k)*e(i,jj,k);
+                amrex::Real count = 0.0_rt;
+                for (int n = 0; n < stencil.ninner; ++n) {
+                    auto const offset = stencil.inner[n];
+                    count += mask(i+offset[0], jj+offset[1], k);
+                }
+                if (count > 0.0_rt) {
+                    w(i,jj,k,0) = power/count;
+                } else {
+                    for (int n = 0; n < stencil.nouter; ++n) {
+                        auto const offset = stencil.outer[n];
+                        count += mask(i+offset[0], jj+offset[1], k);
+                    }
+                    if (count > 0.0_rt) {
+                        w(i,jj,k,1) = power/count;
+                    } else {
+                        w(i,jj,k,2) = std::abs(power);
+                    }
+                }
+#else
+                w(i, jj, k) = j(i, jj, k) * e(i, jj, k);
+#endif
+            });
         }
         W[d].FillBoundary(period);
+#if defined(WARPX_DIM_RZ)
+        // A changed source/capacity mask must never silently discard work.
+        // Absolute power prevents cancellation from hiding orphaned edges.
+        amrex::Real const orphan_power = W[d].sum_unique(2, false, period);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(orphan_power == 0.0_rt,
+            "RZ viscous work has no eligible heat receiver within its stress stencil");
+#endif
     }
 
     // ---- Stage 2: nodal deposit ----
@@ -10064,6 +10156,7 @@ HybridPICModel::QDSMCDepositDragWork (
     // else zero (a negative temperature is never admissible).
     amrex::Real const te_min_K = m_cond_te_floor * K_per_eV;
 
+#if !defined(WARPX_DIM_RZ)
     amrex::Box const& domain = warpx.Geom(lev).Domain();
     amrex::IntVect const dom_lo = domain.smallEnd();
     amrex::IntVect const dom_hi = domain.bigEnd();
@@ -10075,6 +10168,7 @@ HybridPICModel::QDSMCDepositDragWork (
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
         shrink[d] = period.isPeriodic(d) ? 0 : 1;
     }
+#endif
 
     // Clamp energy [J/m^3] per node, reduced below into the tally.
     amrex::MultiFab clamp_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
@@ -10104,8 +10198,8 @@ HybridPICModel::QDSMCDepositDragWork (
 
         amrex::ParallelFor(
             mfi.tilebox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
-                amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
 #if !defined(WARPX_DIM_RZ)
+                amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
                 for (int d = 0; d < AMREX_SPACEDIM; ++d) {
                     if (iv[d] < dom_lo[d] + shrink[d] ||
                         iv[d] > dom_hi[d] + 1 - shrink[d]) {
@@ -10120,27 +10214,28 @@ HybridPICModel::QDSMCDepositDragWork (
                 if (rho_val <= rho_floor) {
                     return;
                 }
-                amrex::Real const n_e = rho_val / PhysConst::q_e;
                 amrex::Real const Te_K = Te_arr(i, j, k);
                 if (Te_K <= 0.0_rt) {
                     return;
                 }
 
 #if defined(WARPX_DIM_RZ)
-                Real wr = 0.0_rt, wz = 0.0_rt;
-                if (i > dom_lo[0]) {
-                    wr += vr(i - 1, j) * Wx(i - 1, j, 0);
+                amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> const
+                    edge_work{Wx, Wy, Wz};
+                amrex::Real power = 0.0_rt;
+                for (int c = 0; c < 3; ++c) {
+                    auto const st = stencils[c];
+                    auto const ew = edge_work[c];
+                    for (int n = 0; n < st.ninner; ++n) {
+                        auto const offset = st.inner[n];
+                        power += ew(i-offset[0], j-offset[1], k, 0);
+                    }
+                    for (int n = 0; n < st.nouter; ++n) {
+                        auto const offset = st.outer[n];
+                        power += ew(i-offset[0], j-offset[1], k, 1);
+                    }
                 }
-                if (i <= dom_hi[0]) {
-                    wr += vr(i, j) * Wx(i, j, 0);
-                }
-                if (!shrink[1] || j > dom_lo[1]) {
-                    wz += vz(i, j - 1) * Wz(i, j - 1, 0);
-                }
-                if (!shrink[1] || j <= dom_hi[1]) {
-                    wz += vz(i, j) * Wz(i, j, 0);
-                }
-                Real const Q = 0.5_rt * (wr + wz) / vn(i, j) + Wy(i, j, 0);
+                amrex::Real const Q = power/vn(i,j,k);
 #else
                 amrex::Real const Q =
                     Interp(Wx, Jx_stag, nodal, coarsen, i, j, k, 0)
@@ -10277,10 +10372,12 @@ HybridPICModel::FillNodalElectronVelocity (
                                             current(Jix, Jpx, i, j, 0)) /
                                            rho_val;
                 ue(i, j, 0, 1) = current(Jiy, Jpy, i, j, 1) / rho_val;
-                ue(i, j, 0, 2) = 0.5_rt *
-                                 (current(Jiz, Jpz, i, j - 1, 2) +
-                                  current(Jiz, Jpz, i, j, 2)) /
-                                 rho_val;
+                ue(i, j, 0, 2) = edges.nodal_active(i, j, 2)
+                                     ? 0.5_rt *
+                                           (current(Jiz, Jpz, i, j - 1, 2) +
+                                            current(Jiz, Jpz, i, j, 2)) /
+                                           rho_val
+                                     : 0.0_rt;
                 return;
             }
 #endif
@@ -10314,6 +10411,10 @@ HybridPICModel::ViscosityRZEdges (int const lev) const {
             WarpX::field_boundary_lo[d] == FieldBoundaryType::PEC;
         result.pec_hi[d] =
             WarpX::field_boundary_hi[d] == FieldBoundaryType::PEC;
+        result.pmc_lo[d] =
+            WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC;
+        result.pmc_hi[d] =
+            WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC;
     }
     return result;
 }
@@ -10398,15 +10499,16 @@ HybridPICModel::ComputeViscousDragNodal (
         "RZ viscous drag requires one level, m=0, Yee staggering, an axis at "
         "r=0 and no EB");
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-        auto const supported = [] (FieldBoundaryType const bc) {
+        auto const supported = [d] (FieldBoundaryType const bc) {
             return bc == FieldBoundaryType::PEC ||
                    bc == FieldBoundaryType::Periodic ||
-                   bc == FieldBoundaryType::None;
+                   bc == FieldBoundaryType::None ||
+                   (d == 1 && bc == FieldBoundaryType::PMC);
         };
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             supported(WarpX::field_boundary_lo[d]) &&
                 supported(WarpX::field_boundary_hi[d]),
-            "RZ viscous drag supports PEC walls, periodic faces and the axis");
+            "RZ viscous drag supports PEC walls, periodic faces, axial PMC and the axis");
     }
 #endif
     amrex::Periodicity const& period = warpx.Geom(lev).periodicity();
@@ -10509,6 +10611,7 @@ HybridPICModel::ComputeViscousDragNodal (
 #if defined(WARPX_DIM_RZ)
     auto const volume = MakeQdsmcVolumeElement(warpx.Geom(lev), F.ixType());
     auto const r0 = warpx.Geom(lev).ProbLo(0);
+    auto const edges = ViscosityRZEdges(lev);
 #endif
     F.setVal(0.0_rt);
 #ifdef AMREX_USE_OMP
@@ -10580,7 +10683,11 @@ HybridPICModel::ComputeViscousDragNodal (
                                   +(weighted(i,j+1,2)-weighted(i,j-1,2))/(2.0_rt*dx[1]))/v;
                 F_arr(i,j,0,0) = r > 0.0_rt ? -(div_r-P(i,j,0,1)/r)*inv_rho : 0.0_rt;
                 F_arr(i,j,0,1) = r > 0.0_rt ? -(div_t+P(i,j,0,3)/r)*inv_rho : 0.0_rt;
-                F_arr(i,j,0,2) = -div_z*inv_rho;
+                // Transpose of the PMC normal-velocity projection in
+                // FillNodalElectronVelocity. It is diagonal and commutes
+                // with the cylindrical nodal volume and density weights.
+                F_arr(i,j,0,2) = edges.nodal_active(i, j, 2)
+                                     ? -div_z*inv_rho : 0.0_rt;
                 for (int c = 0; c < 3; ++c) {
                     if (!std::isfinite(F_arr(i,j,0,c))) { F_arr(i,j,0,c) = 0.0_rt; }
                 }

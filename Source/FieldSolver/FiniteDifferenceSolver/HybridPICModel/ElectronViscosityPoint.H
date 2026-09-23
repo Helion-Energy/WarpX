@@ -58,6 +58,20 @@
  * fixed tangential PEC rows are not degrees of freedom of that pair. */
 struct ElectronViscosityRZEdges {
     amrex::GpuArray<int, 2> lo{}, hi{}, periodic{}, pec_lo{}, pec_hi{};
+    amrex::GpuArray<int, 2> pmc_lo{}, pmc_hi{};
+
+    /** PMC normal current has an odd image across the boundary face.
+     * Its nodal average is therefore zero at that face. Apply this same
+     * diagonal projection to the nodal force before the weighted transpose
+     * returns it to physical Yee edges; otherwise boundary work is created.
+     * Only axial PMC is enabled by the host-side boundary guard. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE bool
+    nodal_active (int const i, int const j, int const component) const {
+        amrex::ignore_unused(i);
+        return !(component == 2 &&
+                 ((pmc_lo[1] && j == lo[1]) ||
+                  (pmc_hi[1] && j == hi[1] + 1)));
+    }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE bool
     active (int const i, int const j, int const component) const {

@@ -741,9 +741,11 @@ if(TARGET test_hybrid_pc_cartesian)
 endif()
 
 if(TARGET test_viscous_work_rz)
-    foreach(viscous_boundary IN ITEMS periodic pec)
+    foreach(viscous_boundary IN ITEMS periodic pec pmc)
         if(viscous_boundary STREQUAL "pec")
             set(viscous_particle_boundary reflecting)
+        elseif(viscous_boundary STREQUAL "pmc")
+            set(viscous_particle_boundary absorbing)
         else()
             set(viscous_particle_boundary periodic)
         endif()
@@ -758,5 +760,103 @@ if(TARGET test_viscous_work_rz)
         set_tests_properties(test_rz_viscous_work_boundary_${viscous_boundary} PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_rz_${viscous_boundary}
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+# Exercise each axial PMC projection independently, with the other end PEC.
+if(TARGET test_viscous_work_rz)
+    foreach(pmc_end IN ITEMS lo hi)
+        if(pmc_end STREQUAL "lo")
+            set(viscous_field_lo pmc)
+            set(viscous_field_hi pec)
+        else()
+            set(viscous_field_lo pec)
+            set(viscous_field_hi pmc)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_rz_pmc_${pmc_end})
+        add_test(NAME test_rz_viscous_work_boundary_pmc_${pmc_end}
+            COMMAND test_viscous_work_rz ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                viscous_test.boundary_mode=1
+                "boundary.field_lo=none ${viscous_field_lo}"
+                "boundary.field_hi=pec ${viscous_field_hi}"
+                "boundary.particle_lo=none absorbing"
+                "boundary.particle_hi=reflecting absorbing")
+        set_tests_properties(test_rz_viscous_work_boundary_pmc_${pmc_end} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/viscous_rz_pmc_${pmc_end}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+# Closed-field energy balance exercises every cylindrical current component.
+if(TARGET lib_rz)
+    add_executable(test_viscous_decay_rz test_viscous_decay_rz.cpp)
+    target_link_libraries(test_viscous_decay_rz PRIVATE lib_rz)
+    target_include_directories(test_viscous_decay_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_viscous_decay_rz)
+    endif()
+    foreach(boundary IN ITEMS periodic pmc)
+        if(boundary STREQUAL "periodic")
+            set(particle_boundary periodic)
+        else()
+            set(particle_boundary absorbing)
+        endif()
+        foreach(refinement IN ITEMS 1 2)
+            if(refinement EQUAL 1)
+                set(decay_steps 20)
+                set(decay_dt 1.e-10)
+            else()
+                set(decay_steps 40)
+                set(decay_dt 5.e-11)
+            endif()
+            set(test_name test_rz_viscous_decay_${boundary}_${refinement})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            add_test(NAME ${test_name}
+                COMMAND test_viscous_decay_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_viscous_decay
+                    viscous_decay.steps=${decay_steps} warpx.const_dt=${decay_dt}
+                    "boundary.field_lo=none ${boundary}"
+                    "boundary.field_hi=pec ${boundary}"
+                    "boundary.particle_lo=none ${particle_boundary}"
+                    "boundary.particle_hi=reflecting ${particle_boundary}")
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()
+
+# A density trough crosses the source floor at a decomposition seam.
+if(TARGET test_viscous_decay_rz)
+    foreach(boundary IN ITEMS periodic pmc)
+        if(boundary STREQUAL "periodic")
+            set(particle_boundary periodic)
+        else()
+            set(particle_boundary absorbing)
+        endif()
+        foreach(refinement IN ITEMS 1 2)
+            if(refinement EQUAL 1)
+                set(decay_steps 20)
+                set(decay_dt 1.e-10)
+            else()
+                set(decay_steps 40)
+                set(decay_dt 5.e-11)
+            endif()
+            set(test_name test_rz_viscous_decay_mask_${boundary}_${refinement})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            add_test(NAME ${test_name}
+                COMMAND test_viscous_decay_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_viscous_decay
+                    viscous_decay.steps=${decay_steps} warpx.const_dt=${decay_dt}
+                    "boundary.field_lo=none ${boundary}"
+                    "boundary.field_hi=pec ${boundary}"
+                    "boundary.particle_lo=none ${particle_boundary}"
+                    "boundary.particle_hi=reflecting ${particle_boundary}"
+                    ions.profile=parse_density_function
+                    "ions.density_function(x,y,z)=1.e19*(0.01+0.99*0.5*(1+cos(20.943951023931955*x)))")
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
     endforeach()
 endif()
