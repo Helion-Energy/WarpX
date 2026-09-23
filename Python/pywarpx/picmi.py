@@ -3251,7 +3251,7 @@ class MCCCollisions(CollisionBase):
         description="The temperature of the background. An string expression as a function of (x, y, z, t) can be used."
     )
     scattering_processes: dict[str, dict[str, Species | int | float | str]] = Field(
-        description="The scattering process to use and any needed information"
+        description="The scattering process to use and any needed information. Each entry of a process's dictionary is written as ``<collision>.<process>_<key>``, so any per-process input parameter can be given here, e.g. ``cross_section``, ``energy``, ``scattering_angle_model``, ``scattering_anisotropy``, and for ``ionization`` also ``energy_sharing``, ``opal_w`` and ``secondary_angle_model``."
     )
     background_mass: float | None = Field(
         default=None,

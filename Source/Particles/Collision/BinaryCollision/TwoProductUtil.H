@@ -8,6 +8,7 @@
 #ifndef WARPX_TWO_PRODUCT_UTIL_H
 #define WARPX_TWO_PRODUCT_UTIL_H
 
+#include "Particles/Collision/ScatteringAngle.H"
 #include "Utils/ParticleUtils.H"
 #include "Utils/ScatteringUtils.H"
 #include "Utils/TextMsg.H"
@@ -51,6 +52,8 @@ namespace {
      * @param[in] anisotropic_coefficients table of energy-dependent anisotropic coefficients
      * @param[out] energy_range_status per-event status: -1 below, 0 within, 1 above
      * @param[in] engine the random engine (used to calculate the angle of emission of the products)
+     * @param[in] anisotropy the Okhrimovskyy anisotropy parameter xi at this collision's energy;
+     *            only read with ScatteringAngleModel::Okhrimovskyy, where 0 is isotropic
      */
     AMREX_GPU_HOST_DEVICE AMREX_INLINE
     void TwoProductComputeProductMomenta (
@@ -74,7 +77,8 @@ namespace {
                             ScatteringAngleModel scattering_angle_model,
                             ScatteringUtils::AnisotropicCoefficientTable const& anisotropic_coefficients,
                             int* const energy_range_status,
-                            const amrex::RandomEngine& engine )
+                            const amrex::RandomEngine& engine,
+                            const amrex::ParticleReal anisotropy = 0 )
     {
         using namespace amrex::literals;
         using namespace amrex::Math;
@@ -216,7 +220,16 @@ namespace {
         // If the incident direction is undefined, fall back to isotropic scattering.
         const auto local_scattering_angle_model = has_incident_direction ? scattering_angle_model : ScatteringAngleModel::Isotropic;
         const amrex::ParticleReal phi = 2.0_prt * MathConst::pi * amrex::Random(engine);
-        const amrex::ParticleReal costh = ParticleUtils::getRandomCosTheta(engine, local_scattering_angle_model, anisotropic_coefficients, E_kin_star_eV, energy_range_status);
+        // Okhrimovskyy (background MCC only) draws cos(chi) from the screened-Coulomb
+        // distribution with the caller's anisotropy xi, after the same azimuth draw as
+        // the other models; xi == 0 is isotropic. The other models are sampled by
+        // getRandomCosTheta, which does not know Okhrimovskyy.
+        const amrex::ParticleReal costh =
+            (local_scattering_angle_model == ScatteringAngleModel::Okhrimovskyy)
+            ? static_cast<amrex::ParticleReal>(ScatteringAngle::sampleOkhrimovskyyCosChi(
+                  static_cast<double>(anisotropy), static_cast<double>(amrex::Random(engine))))
+            : ParticleUtils::getRandomCosTheta(engine, local_scattering_angle_model,
+                  anisotropic_coefficients, E_kin_star_eV, energy_range_status);
         ParticleUtils::rotateVector(n1x_star_out, n1y_star_out, n1z_star_out, phi, costh);
 
         // Scale the scattered direction to the outgoing COM momentum magnitude.

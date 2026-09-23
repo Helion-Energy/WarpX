@@ -201,6 +201,7 @@ AMREX_ENUM(ScatteringAngleModel,
            Backward,   /**< Scattering angle is pi, i.e., products have the opposite direction of the incident particle in the center of mass frame */
            Isotropic,  /**< Scattering angle is random, i.e., products are scattered isotropically in the center of mass frame */
            Legendre, /**< Scattering angle is sampled from a Legendre expansion */
+           Okhrimovskyy,  /**< Scattering angle drawn from the screened-Coulomb distribution of Okhrimovskyy et al., Phys. Rev. E 65, 037402 (2002), with a tabulated, energy-dependent anisotropy parameter */
            Default = Isotropic  /**< Isotropic */
 );
 

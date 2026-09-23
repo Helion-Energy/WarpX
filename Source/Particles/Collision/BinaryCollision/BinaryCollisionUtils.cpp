@@ -157,8 +157,16 @@ namespace BinaryCollisionUtils{
             scattering_angle_error_msg += scattering_process;
             scattering_angle_error_msg += "_scattering_angle_model = legendre is not supported for DSMC/MCC collisions.";
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scattering_angle_model != ScatteringAngleModel::Legendre, scattering_angle_error_msg);
+
+            // The Okhrimovskyy model takes its energy-dependent anisotropy parameter from a
+            // table, read like the cross section.
+            std::string anisotropy_file;
+            pp_collision_name.query(scattering_process + "_scattering_anisotropy",
+                                    anisotropy_file);
+
             scattering_processes.push_back(ScatteringProcess(
-                scattering_process, cross_section_file, energy, scattering_angle_model));
+                scattering_process, cross_section_file, energy, scattering_angle_model,
+                anisotropy_file));
         }
 
         return scattering_processes;
