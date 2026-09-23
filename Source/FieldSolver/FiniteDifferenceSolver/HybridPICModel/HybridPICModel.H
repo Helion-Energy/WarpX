@@ -2110,14 +2110,14 @@ public:
      *  co-derivative fluxes are centered (2nd order compact / 4th order
      *  C-interpolated A-stencil node fluxes); cross-derivative fluxes are
      *  recast as advective fluxes F = v* T_face with the fictitious face
-     *  velocity v* = Xi_gh (d_h T)/T_face (Du Toit et al., CPC 228 (2018)
-     *  61) and T_face reconstructed by the SMART monotonicity limiter --
-     *  the limited operator satisfies a discrete maximum principle, so
-     *  conduction cannot create new T_e extrema even where b-hat is noise
-     *  (the reconnection-null blowup class). Subcycled with SSP-RK2 stages
-     *  (a convex combination of forward-Euler stages -- monotone at the
-     *  same CFL, time error O(dt_sub^2) ~ O(dx^4)) to the Gershgorin
-     *  stability bound inside the same Strang half-steps; the
+     *  coefficient v* = Xi_gh (d_h T)/T_face (Du Toit et al., CPC 228
+     *  (2018) 61). Because the RHS is +div(F), reconstruction uses the
+     *  advective direction -v*. Hard SMART bounds face values; this alone
+     *  does not prove a maximum principle for the full FD4 operator or for
+     *  non-SSP time integration. Finite-width smoothed limiters can also
+     *  violate the hard limiter's face bounds. The selected explicit
+     *  integrator uses the Gershgorin stability bound inside the same
+     *  Strang half-steps; the
      *  kappa parsers, free-streaming limiter, iso_B blend, closed floor
      *  faces and wall BCs/tallies are shared with the SDE path. No hop
      *  cap and no vacuum fast front (neither concept applies).

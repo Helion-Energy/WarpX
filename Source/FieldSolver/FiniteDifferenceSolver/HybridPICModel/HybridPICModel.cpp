@@ -13893,7 +13893,11 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
                         amrex::Real const v = raw / Tf;
                         int uu[3];
                         amrex::Real tU, tD;
-                        if (v > 0.0_rt) {
+                        // F is +Xi*grad(T), and the temperature RHS is
+                        // +div(F): the equivalent advective velocity is
+                        // -v. Thus positive F takes its donor from m1.
+                        // Selecting along +v would downwind this term.
+                        if (v < 0.0_rt) {
                             tU = Tat(m0); tD = Tat(m1);
                             shift(m0, g, -1, uu);
                         } else {
