@@ -8,6 +8,7 @@
 #ifndef WARPX_TWO_PRODUCT_UTIL_H
 #define WARPX_TWO_PRODUCT_UTIL_H
 
+#include "Particles/Collision/ScatteringAngle.H"
 #include "Utils/ParticleUtils.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
@@ -48,6 +49,8 @@ namespace {
      * @param[in] E_reaction energy liberated during the reaction
      * @param[in] scattering_angle_model the scattering angle distribution to use
      * @param[in] engine the random engine (used to calculate the angle of emission of the products)
+     * @param[in] anisotropy the Okhrimovskyy anisotropy parameter xi at this collision's energy;
+     *            only read with ScatteringAngleModel::Okhrimovskyy, where 0 is isotropic
      */
     AMREX_GPU_HOST_DEVICE AMREX_INLINE
     void TwoProductComputeProductMomenta (
@@ -69,7 +72,8 @@ namespace {
                             const amrex::ParticleReal& m2_out,
                             const amrex::ParticleReal& E_reaction,
                             ScatteringAngleModel scattering_angle_model,
-                            const amrex::RandomEngine& engine )
+                            const amrex::RandomEngine& engine,
+                            const amrex::ParticleReal anisotropy = 0 )
     {
         using namespace amrex::literals;
         using namespace amrex::Math;
@@ -178,9 +182,11 @@ namespace {
                                              engine);
         }
         else if (scattering_angle_model == ScatteringAngleModel::Forward ||
-                 scattering_angle_model == ScatteringAngleModel::Backward) {
+                 scattering_angle_model == ScatteringAngleModel::Backward ||
+                 scattering_angle_model == ScatteringAngleModel::Okhrimovskyy) {
             // Forward scattering: the products have the same direction as the incident particle in the center of mass frame
             // Backward scattering: the products have the opposite direction of the incident particle in the center of mass frame
+            // Okhrimovskyy: the products are scattered through a random angle about the incident direction in the center of mass frame
             double p1x_star_in_d;
             double p1y_star_in_d;
             double p1z_star_in_d;
@@ -203,23 +209,36 @@ namespace {
             }
             const double p1_star_in_d = std::sqrt(p1x_star_in_d*p1x_star_in_d + p1y_star_in_d*p1y_star_in_d + p1z_star_in_d*p1z_star_in_d);
 
-            // Momentum of the first product in the center of mass frame:
-            // same (forward) or opposite (backward) direction as the incident, scaled to have
-            // the magnitude sqrt(p_star_f_sq)
-            const double sign_d = (scattering_angle_model == ScatteringAngleModel::Backward) ? -1.0 : 1.0;
-            if (p1_star_in_d > std::numeric_limits<double>::min())
+            if (scattering_angle_model == ScatteringAngleModel::Okhrimovskyy)
             {
-                const double scaling_d = sign_d*p_star_f_d/p1_star_in_d;
-                px_star_out = static_cast<amrex::ParticleReal>(p1x_star_in_d * scaling_d);
-                py_star_out = static_cast<amrex::ParticleReal>(p1y_star_in_d * scaling_d);
-                pz_star_out = static_cast<amrex::ParticleReal>(p1z_star_in_d * scaling_d);
+                // Scatter about the incident direction. This falls back to exactly the
+                // isotropic draw when xi == 0, and when the incident direction is undefined.
+                px_star_out = static_cast<amrex::ParticleReal>(p1x_star_in_d);
+                py_star_out = static_cast<amrex::ParticleReal>(p1y_star_in_d);
+                pz_star_out = static_cast<amrex::ParticleReal>(p1z_star_in_d);
+                ScatteringAngle::ScatterVelocityOkhrimovskyy(px_star_out, py_star_out, pz_star_out,
+                    static_cast<amrex::ParticleReal>(p_star_f_d), anisotropy, engine);
             }
             else
             {
-                // Incident direction is undefined in the COM frame; fall back to an
-                // isotropic direction while conserving the outgoing COM momentum magnitude.
-                ParticleUtils::RandomizeVelocity(px_star_out, py_star_out, pz_star_out,
-                    static_cast<amrex::ParticleReal>(p_star_f_d), engine);
+                // Momentum of the first product in the center of mass frame:
+                // same (forward) or opposite (backward) direction as the incident, scaled to have
+                // the magnitude sqrt(p_star_f_sq)
+                const double sign_d = (scattering_angle_model == ScatteringAngleModel::Backward) ? -1.0 : 1.0;
+                if (p1_star_in_d > std::numeric_limits<double>::min())
+                {
+                    const double scaling_d = sign_d*p_star_f_d/p1_star_in_d;
+                    px_star_out = static_cast<amrex::ParticleReal>(p1x_star_in_d * scaling_d);
+                    py_star_out = static_cast<amrex::ParticleReal>(p1y_star_in_d * scaling_d);
+                    pz_star_out = static_cast<amrex::ParticleReal>(p1z_star_in_d * scaling_d);
+                }
+                else
+                {
+                    // Incident direction is undefined in the COM frame; fall back to an
+                    // isotropic direction while conserving the outgoing COM momentum magnitude.
+                    ParticleUtils::RandomizeVelocity(px_star_out, py_star_out, pz_star_out,
+                        static_cast<amrex::ParticleReal>(p_star_f_d), engine);
+                }
             }
         }
 

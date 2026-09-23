@@ -150,8 +150,15 @@ namespace BinaryCollisionUtils{
             pp_collision_name.query_enum_case_insensitive(
                 scattering_process + "_scattering_angle_model", scattering_angle_model);
 
+            // The Okhrimovskyy model takes its energy-dependent anisotropy parameter from a
+            // table, read like the cross section.
+            std::string anisotropy_file;
+            pp_collision_name.query(scattering_process + "_scattering_anisotropy",
+                                    anisotropy_file);
+
             scattering_processes.push_back(ScatteringProcess(
-                scattering_process, cross_section_file, energy, scattering_angle_model));
+                scattering_process, cross_section_file, energy, scattering_angle_model,
+                anisotropy_file));
         }
 
         return scattering_processes;

@@ -129,6 +129,8 @@ private:
      *  the energy left after ionization equally between the two outgoing
      *  electrons, which reproduces the historical behaviour exactly. */
     double m_ionization_opal_w = 0;
+    /** Set the ionization-ejected electron's direction by free kinematics */
+    bool m_ionization_secondary_free_kinematics = false;
 
     amrex::Parser m_background_density_parser;
     amrex::Parser m_background_temperature_parser;

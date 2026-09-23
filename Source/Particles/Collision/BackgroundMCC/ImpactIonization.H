@@ -8,6 +8,7 @@
 #define WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_
 
 #include "MCCBackgroundDensity.H"
+#include "Particles/Collision/ScatteringAngle.H"
 #include "Particles/Collision/ScatteringProcess.H"
 
 #include "Particles/Algorithms/KineticEnergy.H"
@@ -139,10 +140,16 @@ public:
     * ensure accurate energy calculations (otherwise errors occur with single
     * or mixed precision builds of WarpX).
     *
+    * @param[in] mcc_process the ScatteringProcess of the ionization, whose anisotropy
+                 table (if any) sets the deflection of the incident electron
     * @param[in] energy_cost energy cost of ionization
     * @param[in] opal_w the Opal energy sharing parameter, w, in eV. When zero
                  the energy left after ionization is split equally between the
                  two outgoing electrons instead.
+    * @param[in] secondary_free_kinematics if true, the ejected electron's direction is
+                 set from the incident electron's deflection by the free kinematics of
+                 Magboltz (transverse momentum balanced between the two electrons);
+                 otherwise it is isotropic
     * @param[in] mass1 mass of the colliding species
     * @param[in] sqrt_kb_m value of sqrt(kB/m), where kB is Boltzmann's constant
                  and m is the background neutral mass
@@ -151,10 +158,13 @@ public:
     * @param[in] t the current simulation time
     */
     ImpactIonizationTransformFunc(
-        amrex::ParticleReal energy_cost, double opal_w, double mass1,
-        amrex::ParticleReal sqrt_kb_m,
+        ScatteringProcess const& mcc_process,
+        amrex::ParticleReal energy_cost, double opal_w, bool secondary_free_kinematics,
+        double mass1, amrex::ParticleReal sqrt_kb_m,
         amrex::ParserExecutor<4> const& T_a_func, amrex::Real t
-    ) :  m_energy_cost(energy_cost), m_opal_w(opal_w), m_mass1(mass1),
+    ) :  m_mcc_process(mcc_process.executor()),
+         m_energy_cost(energy_cost), m_opal_w(opal_w),
+         m_secondary_free_kinematics(secondary_free_kinematics), m_mass1(mass1),
          m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t) { }
 
     /**
@@ -237,9 +247,52 @@ public:
         const amrex::ParticleReal up_eject =
             sqrt(E_out_eject * (E_out_eject + 2.0_prt*mc2) / c2) / m_mass1;
 
-        // isotropically scatter electrons
-        ParticleUtils::RandomizeVelocity(ux, uy, uz, up_scat, engine);
-        ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up_eject, engine);
+        // The anisotropy at the incident energy (the energy its cross section is tabulated
+        // against). Without a table it is zero, i.e. isotropic.
+        const auto xi = m_mcc_process.getAnisotropy(static_cast<ParticleReal>(E_coll));
+
+        const auto ux_d = static_cast<double>(ux);
+        const auto uy_d = static_cast<double>(uy);
+        const auto uz_d = static_cast<double>(uz);
+        const double u_norm = std::sqrt(ux_d*ux_d + uy_d*uy_d + uz_d*uz_d);
+        if (m_secondary_free_kinematics && u_norm > 0.0) {
+            // Free kinematics, as in Magboltz (MONTEFTT): draw the incident electron's
+            // deflection (cos_p, phi) about its incident direction n, then put the ejected
+            // electron at the azimuth phi + pi with p_eject sin(theta_s) = p_scat sin(theta_p),
+            // so the transverse momenta of the two electrons cancel and the ion takes only
+            // longitudinal momentum. Magboltz writes the ratio as sqrt(E_scat/E_eject), which
+            // is the momentum ratio non-relativistically. As in Magboltz, sin(theta_s) is
+            // clamped at 1 (the balance is then not exact), and the ejected electron is put
+            // in the same hemisphere as the incident one.
+            const double nx = ux_d/u_norm;
+            const double ny = uy_d/u_norm;
+            const double nz = uz_d/u_norm;
+            double cos_p, phi;
+            ScatteringAngle::drawOkhrimovskyyAngles(xi, engine, cos_p, phi);
+            const double sin_p = std::sqrt(amrex::max(1.0 - cos_p*cos_p, 0.0));
+            const auto up_scat_d = static_cast<double>(up_scat);
+            const auto up_eject_d = static_cast<double>(up_eject);
+            const double sin_s = (up_eject_d > 0.0)
+                ? amrex::min(sin_p * up_scat_d / up_eject_d, 1.0) : 1.0;
+            const double cos_s = std::copysign(
+                std::sqrt(amrex::max(1.0 - sin_s*sin_s, 0.0)), cos_p);
+
+            double dir_x, dir_y, dir_z;
+            ScatteringAngle::rotateAboutDirection(nx, ny, nz, cos_p, phi, dir_x, dir_y, dir_z);
+            ux = static_cast<ParticleReal>(dir_x * up_scat_d);
+            uy = static_cast<ParticleReal>(dir_y * up_scat_d);
+            uz = static_cast<ParticleReal>(dir_z * up_scat_d);
+            ScatteringAngle::rotateAboutDirection(nx, ny, nz, cos_s, phi + MathConst::pi,
+                                                  dir_x, dir_y, dir_z);
+            e_ux = static_cast<ParticleReal>(dir_x * up_eject_d);
+            e_uy = static_cast<ParticleReal>(dir_y * up_eject_d);
+            e_uz = static_cast<ParticleReal>(dir_z * up_eject_d);
+        } else {
+            // Deflect the incident electron about its own direction; xi = 0 is exactly the
+            // isotropic draw. The ejected electron is emitted isotropically.
+            ScatteringAngle::ScatterVelocityOkhrimovskyy(ux, uy, uz, up_scat, xi, engine);
+            ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up_eject, engine);
+        }
 
         // get velocities for the ion from a Maxwellian distribution
         i_ux = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
@@ -248,9 +301,12 @@ public:
     }
 
 private:
+    ScatteringProcess::Executor m_mcc_process;
     amrex::ParticleReal m_energy_cost;
     /** Opal energy sharing parameter in eV; zero selects equal sharing */
     double m_opal_w;
+    /** Set the ejected electron's direction by free kinematics rather than isotropically */
+    bool m_secondary_free_kinematics;
     double m_mass1;
     amrex::ParticleReal m_sqrt_kb_m;
     amrex::ParserExecutor<4> m_T_a_func;

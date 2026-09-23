@@ -36,6 +36,13 @@ DSMCFunc::DSMCFunc (
     for (const auto& process : m_scattering_processes) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(process.type() != ScatteringProcessType::INVALID,
                                         "Cannot add an unknown scattering process type");
+        // DSMC does not yet pass the pair's collision energy to the momentum update, so the
+        // energy-dependent anisotropy could not be looked up; refuse rather than scatter
+        // isotropically in its place.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            process.scatteringAngleModel() != ScatteringAngleModel::Okhrimovskyy,
+            "The okhrimovskyy scattering angle model is only supported by background_mcc, "
+            "not by dsmc (collision " + collision_name + ").");
 
         if (process.type() == ScatteringProcessType::IONIZATION || process.type() == ScatteringProcessType::TWOPRODUCT_REACTION) {
             // Only one ionization process is currently supported as part of a given

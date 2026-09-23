@@ -1,0 +1,169 @@
+# Okhrimovskyy anisotropic scattering for background MCC.
+#
+# Three cold, monoenergetic electron beams moving along +z each collide with
+# their own neutral background, and the direction every collided electron
+# leaves in is compared with the distribution it is drawn from:
+#
+# - beam_exc undergoes excitation, whose anisotropy is tabulated against
+#   energy (xi = 0.2 at 0 eV rising linearly to 0.8 at 400 eV, so 0.5 at the
+#   200 eV beam energy). It exercises the center-of-mass path and the table
+#   interpolation. The background is made very heavy so that the
+#   center-of-mass frame is the lab frame to within m_e/M ~ 5e-7, and the
+#   scattering angle can be read directly off the lab momentum.
+# - beam_ion undergoes ionization with xi = -0.5 (backward-peaked), which
+#   exercises the deflection of the incident electron and a negative xi. The
+#   ejected electron must stay isotropic. Opal energy sharing makes the ejected
+#   electron always the slower of the two, so the analysis can tell them
+#   apart by energy alone.
+# - beam_fk undergoes ionization with xi = 0.5 and the ejected electron's
+#   direction set by the free kinematics of Magboltz: azimuth opposite to the
+#   incident electron's, and transverse momentum balanced between the two
+#   (sin(theta_s) clamped at 1). The two electrons of an event are paired by
+#   their energies, which sum exactly to E0 - E_loss.
+#
+# Nothing but the collisions changes an electron's momentum: the fields are
+# not evolved, the domain is periodic and the backgrounds are at 0 K. The
+# cross section is nonzero only from 190 to 210 eV and each process costs
+# 20 eV, so no electron can collide twice and every collided electron was
+# scattered exactly once, out of the +z direction.
+
+my_constants.n_gas = 1.0e18     # m^-3, neutral fill
+my_constants.n_elec = 1.0e16    # m^-3, electrons per beam
+my_constants.E_elec = 200.0     # eV, initial electron energy
+my_constants.v_elec = sqrt(2.0*E_elec*q_e/m_e)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+# Ten steps at an 8% collision probability each collide a little over half
+# of each beam.
+max_step = 10
+amr.n_cell = 64
+amr.max_level = 0
+amr.blocking_factor = 8
+amr.max_grid_size = 32
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = 0.1
+
+#################################
+###### Boundary Condition #######
+#################################
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 1
+warpx.const_dt = 1.0e-10
+warpx.use_filter = 0
+
+# Do not evolve the E and B fields, so that only the collisions change the
+# electron momenta
+algo.maxwell_solver = none
+
+algo.particle_shape = 1
+
+#################################
+############ PLASMA #############
+#################################
+particles.species_names = beam_exc beam_ion beam_fk ions ions_fk
+
+beam_exc.species_type = electron
+beam_exc.injection_style = nuniformpercell
+beam_exc.num_particles_per_cell_each_dim = 200
+beam_exc.profile = constant
+beam_exc.density = n_elec
+beam_exc.momentum_distribution_type = constant
+beam_exc.ux = 0.0
+beam_exc.uy = 0.0
+beam_exc.uz = v_elec/clight
+
+beam_ion.species_type = electron
+beam_ion.injection_style = nuniformpercell
+beam_ion.num_particles_per_cell_each_dim = 200
+beam_ion.profile = constant
+beam_ion.density = n_elec
+beam_ion.momentum_distribution_type = constant
+beam_ion.ux = 0.0
+beam_ion.uy = 0.0
+beam_ion.uz = v_elec/clight
+
+beam_fk.species_type = electron
+beam_fk.injection_style = nuniformpercell
+beam_fk.num_particles_per_cell_each_dim = 200
+beam_fk.profile = constant
+beam_fk.density = n_elec
+beam_fk.momentum_distribution_type = constant
+beam_fk.ux = 0.0
+beam_fk.uy = 0.0
+beam_fk.uz = v_elec/clight
+
+# Ionization product; starts empty, so the number of ions present is the
+# number of ionization events.
+ions.mass = m_p
+ions.charge = q_e
+ions.injection_style = none
+
+ions_fk.mass = m_p
+ions_fk.charge = q_e
+ions_fk.injection_style = none
+
+#################################
+############ COLLISION ##########
+#################################
+collisions.collision_names = coll_exc coll_ion coll_fk
+
+coll_exc.type = background_mcc
+coll_exc.species = beam_exc
+coll_exc.background_density = n_gas
+coll_exc.background_temperature = 0.0
+coll_exc.background_mass = 1000.0*m_p
+coll_exc.scattering_processes = excitation1
+coll_exc.excitation1_energy = 20.0
+coll_exc.excitation1_cross_section = ../../../Examples/Tests/mcc_okhrimovskyy/collision_window.dat
+coll_exc.excitation1_scattering_angle_model = okhrimovskyy
+coll_exc.excitation1_scattering_anisotropy = ../../../Examples/Tests/mcc_okhrimovskyy/anisotropy_linear.dat
+
+coll_ion.type = background_mcc
+coll_ion.species = beam_ion
+coll_ion.background_density = n_gas
+coll_ion.background_temperature = 0.0
+coll_ion.scattering_processes = ionization
+coll_ion.ionization_energy = 20.0
+coll_ion.ionization_cross_section = ../../../Examples/Tests/mcc_okhrimovskyy/collision_window.dat
+coll_ion.ionization_species = ions
+coll_ion.ionization_energy_sharing = opal
+coll_ion.ionization_opal_w = 10.0
+coll_ion.ionization_scattering_angle_model = okhrimovskyy
+coll_ion.ionization_scattering_anisotropy = ../../../Examples/Tests/mcc_okhrimovskyy/anisotropy_backward.dat
+
+# A wider Opal width than coll_ion, so that more ejected electrons are fast
+# enough to escape the sin(theta_s) clamp and test the exact balance.
+coll_fk.type = background_mcc
+coll_fk.species = beam_fk
+coll_fk.background_density = n_gas
+coll_fk.background_temperature = 0.0
+coll_fk.scattering_processes = ionization
+coll_fk.ionization_energy = 20.0
+coll_fk.ionization_cross_section = ../../../Examples/Tests/mcc_okhrimovskyy/collision_window.dat
+coll_fk.ionization_species = ions_fk
+coll_fk.ionization_energy_sharing = opal
+coll_fk.ionization_opal_w = 40.0
+coll_fk.ionization_scattering_angle_model = okhrimovskyy
+coll_fk.ionization_scattering_anisotropy = ../../../Examples/Tests/mcc_okhrimovskyy/anisotropy_linear.dat
+coll_fk.ionization_secondary_angle_model = free_kinematics
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+diagnostics.diags_names = diag1
+
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = openpmd
+diag1.fields_to_plot = none
+diag1.species = beam_exc beam_ion beam_fk ions ions_fk

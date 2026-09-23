@@ -183,6 +183,33 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
             }
             amrex::Print() << "\n";
 
+            // The incident electron is deflected by the process's angle model; the ejected
+            // electron is always emitted isotropically. Forward and backward have no meaning
+            // for a three-body final state and were never applied here, so refuse them
+            // rather than run isotropic under a name that says otherwise.
+            const auto angle_model = process.scatteringAngleModel();
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                angle_model == ScatteringAngleModel::Isotropic ||
+                angle_model == ScatteringAngleModel::Okhrimovskyy,
+                collision_name + ".ionization_scattering_angle_model must be either "
+                "'isotropic' or 'okhrimovskyy'."
+            );
+            // The ejected electron's direction: isotropic (the default, which leaves the
+            // random stream as it was), or the free kinematics of Magboltz, which ties it
+            // to the incident electron's deflection.
+            std::string secondary_angle = "isotropic";
+            pp_collision_name.query("ionization_secondary_angle_model", secondary_angle);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                secondary_angle == "isotropic" || secondary_angle == "free_kinematics",
+                collision_name + ".ionization_secondary_angle_model must be either "
+                "'isotropic' or 'free_kinematics'."
+            );
+            m_ionization_secondary_free_kinematics = (secondary_angle == "free_kinematics");
+            amrex::Print() << "  " << collision_name << " ionization angle models: incident "
+                           << (angle_model == ScatteringAngleModel::Okhrimovskyy
+                               ? "okhrimovskyy" : "isotropic")
+                           << ", ejected " << secondary_angle << "\n";
+
             m_ionization_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
@@ -508,6 +535,10 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   // is computed as the second product but discarded.
                                   amrex::ParticleReal u1x_out, u1y_out, u1z_out;
                                   amrex::ParticleReal u2x_out, u2y_out, u2z_out;
+                                  // The anisotropy is tabulated against the same collision
+                                  // energy as the cross section, and is zero without a table.
+                                  const amrex::ParticleReal xi = scattering_process.getAnisotropy(
+                                      static_cast<amrex::ParticleReal>(E_coll));
                                   TwoProductComputeProductMomenta(
                                       ux[ip], uy[ip], uz[ip], m,
                                       ua_x, ua_y, ua_z, M,
@@ -517,7 +548,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       // TwoProductComputeProductMomenta expects the *released* energy here, hence
                                       // the negative sign; the energy penalty is also converted from eV to Joules.
                                       scattering_process.m_scattering_angle_model,
-                                      engine);
+                                      engine, xi);
 
                                   // update projectile velocity with new components in labframe
                                   // (the background-gas recoil u2*_out is discarded)
@@ -572,8 +603,10 @@ void BackgroundMCCCollision::doBackgroundIonization
                                                        );
 
         auto Transform = ImpactIonizationTransformFunc(
+                                                       m_ionization_processes[0],
                                                        m_ionization_processes[0].getEnergyPenalty(),
                                                        m_ionization_opal_w,
+                                                       m_ionization_secondary_free_kinematics,
                                                        m_mass1, sqrt_kb_m, m_background_temperature_func, t
                                                        );
 

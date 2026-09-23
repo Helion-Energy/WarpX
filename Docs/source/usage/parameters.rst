@@ -3277,16 +3277,45 @@ Details about the collision models can be found in the :ref:`theory section <mul
     :optional:
 
     Only for ``dsmc`` and ``background_mcc``, and only for ``elasticX``, ``excitationX``,
-    ``charge_exchange`` and ``twoproduct_reaction``.
+    ``charge_exchange`` and ``twoproduct_reaction``, as well as ``ionization`` with ``background_mcc``.
     The model used to determine the scattering angle of the products
-    in the center-of-mass frame. The possible values are ``isotropic``, ``forward`` and ``backward``.
-    The default is ``isotropic`` for ``elasticX`` and ``excitationX``, and ``forward`` for
-    ``charge_exchange`` and ``twoproduct_reaction``.
+    in the center-of-mass frame. The possible values are ``isotropic``, ``forward``, ``backward``
+    and ``okhrimovskyy``.
+    The default is ``isotropic`` for ``elasticX``, ``excitationX`` and ``ionization``, and ``forward``
+    for ``charge_exchange`` and ``twoproduct_reaction``.
     With ``isotropic``, the scattering angle is drawn from an isotropic distribution.
     With ``forward``, the scattering angle is set to zero, i.e. the products keep the same direction
     as the incident particle (in the center of mass frame).
     With ``backward``, the scattering angle is set to :math:`\pi`, i.e. the products are emitted in
     the opposite direction of the incident particle (in the center of mass frame).
+    With ``okhrimovskyy`` (``background_mcc`` only), the scattering angle :math:`\chi` about the
+    incident direction is drawn from the screened-Coulomb distribution of :cite:t:`param-Okhrimovskyy2002`,
+    :math:`\mathrm{d}\sigma/\mathrm{d}\Omega \propto 1/(1 - \xi\cos\chi)^2`, by the closed-form inversion
+    :math:`\cos\chi = 1 - 2R(1 - \xi)/(1 + \xi(1 - 2R))` of one uniform deviate :math:`R`. The
+    anisotropy :math:`\xi(E)` is read from
+    :pp:param:`<collision_name>.<scattering_process>_scattering_anisotropy`, which is then required.
+    :math:`\xi = 0` is isotropic (and reproduces ``isotropic`` exactly, random stream included),
+    :math:`\xi \to 1` forward-peaked and :math:`\xi < 0` backward-peaked.
+
+    For ``ionization`` the model sets the deflection of the incident electron, and only
+    ``isotropic`` and ``okhrimovskyy`` are allowed; the direction of the ejected electron is
+    set separately, by :pp:param:`<collision_name>.ionization_secondary_angle_model`.
+
+    Note that an anisotropic elastic model changes which cross section is appropriate: a
+    momentum-transfer cross section is only consistent with isotropic scattering, while
+    anisotropic scattering needs the total (integral) elastic cross section.
+
+.. pp:param:: <collision_name>.<scattering_process>_scattering_anisotropy
+    :type: ``string``
+    :optional:
+
+    Only for ``background_mcc``, and required with (and only allowed with)
+    ``<collision_name>.<scattering_process>_scattering_angle_model = okhrimovskyy``.
+    Path to a file tabulating the Okhrimovskyy anisotropy parameter :math:`\xi` against energy.
+    The file has exactly 2 columns, the energy in eV (strictly increasing, at least two rows) and
+    :math:`\xi`, with :math:`-1 < \xi < 1`. It is indexed by the same collision energy as the
+    cross section, linearly interpolated, and held at its first (last) value below (above) the
+    tabulated range.
 
 .. pp:param:: <collision_name>.ionization_species
     :type: ``float``
@@ -3294,6 +3323,27 @@ Details about the collision models can be found in the :ref:`theory section <mul
     Only for ``background_mcc``. If the scattering process is ``ionization`` the
     produced species must also be given. For example if argon properties is used
     for the background gas, a species of argon ions should be specified here.
+
+.. pp:param:: <collision_name>.ionization_secondary_angle_model
+    :type: ``string``
+    :default: ``isotropic``
+    :optional:
+
+    Only for ``background_mcc`` with the ``ionization`` scattering process. How the direction of
+    the ejected electron is set. The possible values are ``isotropic`` and ``free_kinematics``.
+
+    With ``isotropic``, the ejected electron is emitted isotropically, independently of the
+    incident electron. This leaves existing results and the random stream unchanged.
+
+    With ``free_kinematics``, the direction follows the free kinematics used by Magboltz: the
+    ejected electron is emitted at the azimuth opposite to the incident electron's deflection,
+    with :math:`p_s \sin\theta_s = p_1 \sin\theta_1` so that the transverse momenta of the two
+    electrons cancel and the ion takes only longitudinal momentum, and in the same hemisphere
+    (forward or backward) as the incident electron. Angles are measured from the incident
+    direction, and :math:`\sin\theta_s` is clamped at 1, where the balance is then not exact.
+    The incident electron's deflection is still drawn from
+    :pp:param:`<collision_name>.<scattering_process>_scattering_angle_model` (``isotropic`` then
+    meaning isotropic about the incident direction).
 
 .. pp:param:: <collision_name>.ionization_energy_sharing
     :type: ``string``

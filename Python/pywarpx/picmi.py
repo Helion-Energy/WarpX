@@ -3322,7 +3322,11 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         The temperature of the background. An string expression as a function of (x, y, z, t) can be used.
 
     scattering_processes: dictionary
-        The scattering process to use and any needed information
+        The scattering process to use and any needed information. Each entry of a
+        process's dictionary is written as ``<collision>.<process>_<key>``, so any
+        per-process input parameter can be given here, e.g. ``cross_section``,
+        ``energy``, ``scattering_angle_model``, ``scattering_anisotropy``, and for
+        ``ionization`` also ``energy_sharing``, ``opal_w`` and ``secondary_angle_model``.
 
     background_mass: float, optional
         The mass of the background particle. If not supplied, the default depends
