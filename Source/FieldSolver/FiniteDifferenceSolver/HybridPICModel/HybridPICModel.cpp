@@ -535,6 +535,50 @@ void HybridPICModel::ReadParameters ()
             "the 1D radial geometries.");
 #endif
     }
+    // Electron inertia in elliptic form -- an independent path from the
+    // Je-form above (see the member documentation in HybridPICModel.H and
+    // the derivation in ElectronInertiaElliptic.H).
+    pp_hybrid.query("include_electron_inertia_elliptic",
+                    m_include_electron_inertia_elliptic);
+    if (m_include_electron_inertia_elliptic) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_esolve_tensor && !m_esolve_curlcurl,
+            "The explicit elliptic inertia correction requires e_form; "
+            "tensor_form and curlcurl_form already include inertia.");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_include_electron_inertia,
+            "hybrid_pic_model.include_electron_inertia and "
+            "hybrid_pic_model.include_electron_inertia_elliptic are two "
+            "different discretizations of the same physical term and cannot "
+            "be enabled together: the Je-form adds an explicit inertial "
+            "field built from a time-lagged electron current, while the "
+            "elliptic form folds the same term into the operator solved for "
+            "E. Enabling both would count the inertia twice.");
+        utils::parser::queryWithParser(
+            pp_hybrid, "electron_inertia_relative_tolerance",
+            m_electron_inertia_rtol);
+        utils::parser::queryWithParser(
+            pp_hybrid, "electron_inertia_max_iterations",
+            m_electron_inertia_max_iters);
+        pp_hybrid.query("electron_inertia_verbosity",
+                        m_electron_inertia_verbose);
+        pp_hybrid.query("electron_inertia_warm_start",
+                        m_electron_inertia_warm_start);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_electron_inertia_rtol > 0.0 && m_electron_inertia_max_iters > 0,
+            "hybrid_pic_model.electron_inertia_relative_tolerance must be "
+            "positive and electron_inertia_max_iterations must be >= 1.");
+        // The operator coefficient d_e^2 = m_e / (mu0 e max(rho, q_e n_floor))
+        // is bounded only by the floor: with n_floor = 0 it is unbounded
+        // wherever the density vanishes and the solve cannot stay finite.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_n_floor > 0.0_rt,
+            "hybrid_pic_model.include_electron_inertia_elliptic = 1 requires "
+            "a positive hybrid_pic_model.n_floor: the inertia coefficient "
+            "d_e^2 = m_e/(mu0 e max(rho, q_e n_floor)) is unbounded where the "
+            "density vanishes otherwise.");
+    }
+
     if (m_esolve_curlcurl) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_include_electron_inertia && m_electron_inertia_djedt_only
@@ -3017,6 +3061,10 @@ void HybridPICModel::HybridPICSolveE (
             eb_update_E[lev], lev, solve_for_Faraday, include_resistivity
         );
     }
+    // The particle-gather solve is the final E update of this step.
+    if (!solve_for_Faraday && m_inertia_elliptic) {
+        m_inertia_elliptic->ReportAndResetStats(m_substeps);
+    }
     // Allow execution of Python callback after E-field push
     ExecutePythonCallback("afterEpush");
 }
@@ -3396,6 +3444,48 @@ void HybridPICModel::HybridPICSolveE (
 
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
+
+    // Electron inertia, elliptic form. The field assembled above is the
+    // inertialess Ohm's law; it becomes the right-hand side of
+    //     E + d_e^2 curl(curl E) = E_inertialess
+    // and the corrected E replaces it in place, so every downstream consumer
+    // (Faraday, the particle gather, diagnostics) sees the inertial field
+    // without knowing this step happened. The boundary pass above runs
+    // first, so the right-hand side already satisfies the physical boundary
+    // conditions and the correction only has to satisfy their homogeneous
+    // form; it is repeated afterwards to leave E exactly boundary-consistent.
+    if (m_include_electron_inertia_elliptic) {
+        if (!m_inertia_elliptic) {
+            m_inertia_elliptic = std::make_unique<ElectronInertiaElliptic>();
+            m_inertia_elliptic->m_rtol = m_electron_inertia_rtol;
+            m_inertia_elliptic->m_max_iter = m_electron_inertia_max_iters;
+            m_inertia_elliptic->m_verbose = m_electron_inertia_verbose;
+            m_inertia_elliptic->m_warm_start = m_electron_inertia_warm_start;
+            m_inertia_elliptic->Define(Efield, lev);
+        }
+        if (amrex::MultiFab const * const ped_mf = DensityPedestal(lev)) {
+            // Density pedestal: d_e^2 = m_e/(mu0 e max(rho + rho_ped, floor)).
+            amrex::MultiFab rho_eff(rhofield.boxArray(), rhofield.DistributionMap(),
+                                    1, rhofield.nGrowVect());
+            amrex::MultiFab::Copy(rho_eff, rhofield, 0, 0, 1, rhofield.nGrowVect());
+            amrex::MultiFab::Add(rho_eff, *ped_mf, 0, 0, 1, rhofield.nGrowVect());
+            m_inertia_elliptic->PrepareCoefficients(
+                rho_eff, PhysConst::q_e * m_n_floor, lev);
+        } else {
+            m_inertia_elliptic->PrepareCoefficients(
+                rhofield, PhysConst::q_e * m_n_floor, lev);
+        }
+        // The E rows the stair-case EB freezes (eb_update_E == 0, skipped by
+        // the Ohm's-law solve above) are not unknowns of the elliptic
+        // system; hand the flags over so the solve projects them out.
+        std::array<amrex::iMultiFab const*, 3> eb_mask = {nullptr, nullptr, nullptr};
+        if (EB::enabled()) {
+            for (int d = 0; d < 3; ++d) { eb_mask[d] = eb_update_E[d].get(); }
+        }
+        m_inertia_elliptic->SetEBUpdateMask(eb_mask);
+        m_inertia_elliptic->Solve(Efield, lev);
+        warpx.ApplyEfieldBoundary(lev, patch_type, time);
+    }
 
     // Conformal wall, constitutive PEC: the Ohm E is algebraic in B, so the
     // wall condition is imposed directly -- E = 0 on every covered and cut
@@ -10198,9 +10288,15 @@ HybridPICModel::QDSMCDepositDragWork (
         amrex::Array4<amrex::Real const> const& Wx = W[0].const_array(mfi);
         amrex::Array4<amrex::Real const> const& Wy = W[1].const_array(mfi);
         amrex::Array4<amrex::Real const> const& Wz = W[2].const_array(mfi);
+#if defined(WARPX_DIM_RZ)
+        auto const receiver = eligible.const_array(mfi);
+#endif
 
         amrex::ParallelFor(
             mfi.tilebox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+#if defined(WARPX_DIM_RZ)
+                if (receiver(i,j,k) == 0.0_rt) { return; }
+#endif
 #if !defined(WARPX_DIM_RZ)
                 amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
                 for (int d = 0; d < AMREX_SPACEDIM; ++d) {

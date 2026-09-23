@@ -860,3 +860,41 @@ if(TARGET test_viscous_decay_rz)
         endforeach()
     endforeach()
 endif()
+
+# Matched inertia-plus-drag energy balance with frozen ions and density.
+if(TARGET test_viscous_decay_rz)
+    foreach(boundary IN ITEMS periodic pmc)
+        if(boundary STREQUAL "periodic")
+            set(particle_boundary periodic)
+        else()
+            set(particle_boundary absorbing)
+        endif()
+        foreach(refinement IN ITEMS 1 2)
+            if(refinement EQUAL 1)
+                set(decay_steps 20)
+                set(decay_dt 1.e-10)
+            else()
+                set(decay_steps 40)
+                set(decay_dt 5.e-11)
+            endif()
+            set(test_name test_rz_viscous_decay_inertia_${boundary}_${refinement})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            add_test(NAME ${test_name}
+                COMMAND test_viscous_decay_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_viscous_decay
+                    viscous_decay.steps=${decay_steps} warpx.const_dt=${decay_dt}
+                    "boundary.field_lo=none ${boundary}"
+                    "boundary.field_hi=pec ${boundary}"
+                    "boundary.particle_lo=none ${particle_boundary}"
+                    "boundary.particle_hi=reflecting ${particle_boundary}"
+                    viscous_decay.include_inertia_energy=1
+                    hybrid_pic_model.include_electron_inertia_elliptic=1
+                    hybrid_pic_model.electron_inertia_relative_tolerance=1.e-10
+                    ions.profile=parse_density_function
+                    "ions.density_function(x,y,z)=1.e19*(0.01+0.99*0.5*(1+cos(20.943951023931955*x)))")
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()
