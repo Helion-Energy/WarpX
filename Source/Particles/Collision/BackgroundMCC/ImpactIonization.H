@@ -44,7 +44,9 @@ public:
     * ensure accurate energy calculations (otherwise errors occur with single
     * or mixed precision builds of WarpX).
     *
-    * @param[in] mcc_process an ScatteringProcess object associated with the ionization
+    * @param[in] processes executors of the ionization channels, whose cross sections
+                 are summed
+    * @param[in] process_count number of ionization channels
     * @param[in] mass colliding particle's mass (could also assume electron)
     * @param[in] total_collision_prob total probability for a collision to occur
     * @param[in] nu_max maximum collision frequency
@@ -52,12 +54,13 @@ public:
                  particle position
     */
     ImpactIonizationFilterFunc(
-        ScatteringProcess const& mcc_process,
+        ScatteringProcess::Executor const* processes,
+        int const process_count,
         double const mass,
         amrex::ParticleReal const total_collision_prob,
         amrex::ParticleReal const nu_max,
         MCCBackgroundDensity const& n_a
-    ) : m_mcc_process(mcc_process.executor()), m_mass(mass),
+    ) : m_processes(processes), m_process_count(process_count), m_mass(mass),
         m_total_collision_prob(total_collision_prob),
         m_nu_max(nu_max), m_n_a(n_a) { }
 
@@ -100,8 +103,11 @@ public:
         constexpr auto eV = PhysConst::q_e;
         E_coll = Algorithms::KineticEnergy<double>(ux, uy, uz, static_cast<amrex::ParticleReal>(m_mass))/eV;
 
-        // get collision cross-section
-        const ParticleReal sigma_E = m_mcc_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
+        // total ionization cross-section over the channels
+        ParticleReal sigma_E = 0;
+        for (int k = 0; k < m_process_count; k++) {
+            sigma_E += m_processes[k].getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
+        }
 
         // calculate normalized collision frequency
         const ParticleReal u_coll2 = ux*ux + uy*uy + uz*uz;
@@ -112,7 +118,8 @@ public:
     }
 
 private:
-    ScatteringProcess::Executor m_mcc_process;
+    ScatteringProcess::Executor const* m_processes;
+    int m_process_count;
     double m_mass;
     amrex::ParticleReal m_total_collision_prob = 0;
     amrex::ParticleReal m_nu_max;
@@ -140,9 +147,11 @@ public:
     * ensure accurate energy calculations (otherwise errors occur with single
     * or mixed precision builds of WarpX).
     *
-    * @param[in] mcc_process the ScatteringProcess of the ionization, whose anisotropy
-                 table (if any) sets the deflection of the incident electron
-    * @param[in] energy_cost energy cost of ionization
+    * @param[in] processes executors of the ionization channels. Each event is given one
+                 channel, drawn in proportion to its cross section at the incident energy;
+                 that channel's energy cost is paid and its anisotropy table (if any) sets
+                 the deflection of the incident electron
+    * @param[in] process_count number of ionization channels
     * @param[in] opal_w the Opal energy sharing parameter, w, in eV. When zero
                  the energy left after ionization is split equally between the
                  two outgoing electrons instead.
@@ -158,12 +167,11 @@ public:
     * @param[in] t the current simulation time
     */
     ImpactIonizationTransformFunc(
-        ScatteringProcess const& mcc_process,
-        amrex::ParticleReal energy_cost, double opal_w, bool secondary_free_kinematics,
+        ScatteringProcess::Executor const* processes, int process_count,
+        double opal_w, bool secondary_free_kinematics,
         double mass1, amrex::ParticleReal sqrt_kb_m,
         amrex::ParserExecutor<4> const& T_a_func, amrex::Real t
-    ) :  m_mcc_process(mcc_process.executor()),
-         m_energy_cost(energy_cost), m_opal_w(opal_w),
+    ) :  m_processes(processes), m_process_count(process_count), m_opal_w(opal_w),
          m_secondary_free_kinematics(secondary_free_kinematics), m_mass1(mass1),
          m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t) { }
 
@@ -216,10 +224,34 @@ public:
         // calculate kinetic energy
         constexpr auto eV = PhysConst::q_e;
         E_coll = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass1)/eV;
+        const auto E_coll_prt = static_cast<ParticleReal>(E_coll);
+
+        // Pick the channel. The filter accepted this electron with probability proportional
+        // to the summed cross section at this same energy (the electron is unchanged since),
+        // so drawing channel i with probability sigma_i/sigma_total samples it exactly. A
+        // single channel draws nothing, leaving the random stream as it was.
+        int channel = 0;
+        if (m_process_count > 1) {
+            ParticleReal sigma_total = 0;
+            for (int i = 0; i < m_process_count; i++) {
+                sigma_total += m_processes[i].getCrossSection(E_coll_prt);
+            }
+            const ParticleReal target = Random(engine) * sigma_total;
+            ParticleReal cumulative = 0;
+            for (int i = 0; i < m_process_count; i++) {
+                const ParticleReal sigma_i = m_processes[i].getCrossSection(E_coll_prt);
+                if (sigma_i <= 0) { continue; }
+                // The last open channel takes any rounding at the top of the range.
+                channel = i;
+                cumulative += sigma_i;
+                if (target < cumulative) { break; }
+            }
+        }
+        auto const& process = m_processes[channel];
 
         // Share the energy left after paying the ionization cost between the
         // incident electron and the one it ejects.
-        const double E_avail = E_coll - m_energy_cost;
+        const double E_avail = E_coll - process.m_energy_penalty;
         double E_eject;
         if (m_opal_w > 0.0) {
             // Opal, Peterson & Beaty, J. Chem. Phys. 55, 4100 (1971) measured
@@ -249,7 +281,7 @@ public:
 
         // The anisotropy at the incident energy (the energy its cross section is tabulated
         // against). Without a table it is zero, i.e. isotropic.
-        const auto xi = m_mcc_process.getAnisotropy(static_cast<ParticleReal>(E_coll));
+        const auto xi = process.getAnisotropy(E_coll_prt);
 
         const auto ux_d = static_cast<double>(ux);
         const auto uy_d = static_cast<double>(uy);
@@ -301,8 +333,8 @@ public:
     }
 
 private:
-    ScatteringProcess::Executor m_mcc_process;
-    amrex::ParticleReal m_energy_cost;
+    ScatteringProcess::Executor const* m_processes;
+    int m_process_count;
     /** Opal energy sharing parameter in eV; zero selects equal sharing */
     double m_opal_w;
     /** Set the ejected electron's direction by free kinematics rather than isotropically */

@@ -148,7 +148,10 @@ ScatteringProcess::parseProcessType(const std::string& scattering_process)
         return ScatteringProcessType::CHARGE_EXCHANGE;
     } else if (scattering_process == "two_product_reaction") {
         return ScatteringProcessType::TWOPRODUCT_REACTION;
-    } else if (scattering_process == "ionization") {
+    } else if (scattering_process == "ionization" ||
+               scattering_process.rfind("ionization_", 0) == 0) {
+        // `ionization_<name>` adds further ionization channels beside `ionization`, e.g.
+        // one per product vibrational level; background MCC samples among them.
         return ScatteringProcessType::IONIZATION;
     } else if (scattering_process.find("excitation") != std::string::npos) {
         return ScatteringProcessType::EXCITATION;

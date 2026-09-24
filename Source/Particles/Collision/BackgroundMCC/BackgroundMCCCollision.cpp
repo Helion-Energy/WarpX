@@ -141,79 +141,88 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(process.type() != ScatteringProcessType::INVALID,
                                          "Cannot add an unknown scattering process type");
 
-        // if the scattering process is ionization get the secondary species
-        // only one ionization process is supported, the vector
-        // m_ionization_processes is only used to make it simple to calculate
-        // the maximum collision frequency with the same function used for
-        // particle conserving processes
+        // Ionization channels are sampled in their own pass. Several may be given
+        // (`ionization` and `ionization_<name>`): they share the product species, the
+        // energy sharing and the ejected electron's angle model, read once at the collision
+        // level, while each keeps its own cross section, energy cost and incident angle
+        // model. The pass picks each event's channel in proportion to its cross section.
         if (process.type() == ScatteringProcessType::IONIZATION) {
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!ionization_flag,
-                                             "Background MCC only supports a single ionization process");
-            ionization_flag = true;
+            if (!ionization_flag) {
+                ionization_flag = true;
 
-            std::string secondary_species;
-            pp_collision_name.get("ionization_species", secondary_species);
-            m_species_names.push_back(secondary_species);
+                std::string secondary_species;
+                pp_collision_name.get("ionization_species", secondary_species);
+                m_species_names.push_back(secondary_species);
 
-            // How the energy left after paying the ionization cost is shared
-            // between the incident electron and the one it ejects. The
-            // default splits it equally, which is what MCC has always done.
-            std::string energy_sharing = "equal";
-            pp_collision_name.query("ionization_energy_sharing", energy_sharing);
-            if (energy_sharing == "opal") {
-                utils::parser::getWithParser(
-                    pp_collision_name, "ionization_opal_w", m_ionization_opal_w);
+                // How the energy left after paying the ionization cost is shared
+                // between the incident electron and the one it ejects. The
+                // default splits it equally, which is what MCC has always done.
+                std::string energy_sharing = "equal";
+                pp_collision_name.query("ionization_energy_sharing", energy_sharing);
+                if (energy_sharing == "opal") {
+                    utils::parser::getWithParser(
+                        pp_collision_name, "ionization_opal_w", m_ionization_opal_w);
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        (m_ionization_opal_w > 0),
+                        collision_name + ".ionization_opal_w must be greater than 0."
+                    );
+                } else {
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        (energy_sharing == "equal"),
+                        collision_name + ".ionization_energy_sharing must be either "
+                        "'equal' or 'opal'."
+                    );
+                }
+                // Printed so that a run's log shows which model was actually
+                // read: a build without this parameter ignores it silently.
+                amrex::Print() << "  " << collision_name
+                               << " ionization energy sharing: " << energy_sharing;
+                if (energy_sharing == "opal") {
+                    amrex::Print() << " (w = " << m_ionization_opal_w << " eV)";
+                }
+                amrex::Print() << "\n";
+
+                // The ejected electron's direction: isotropic (the default, which leaves the
+                // random stream as it was), or the free kinematics of Magboltz, which ties it
+                // to the incident electron's deflection.
+                std::string secondary_angle = "isotropic";
+                pp_collision_name.query("ionization_secondary_angle_model", secondary_angle);
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                    (m_ionization_opal_w > 0),
-                    collision_name + ".ionization_opal_w must be greater than 0."
+                    secondary_angle == "isotropic" || secondary_angle == "free_kinematics",
+                    collision_name + ".ionization_secondary_angle_model must be either "
+                    "'isotropic' or 'free_kinematics'."
                 );
-            } else {
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                    (energy_sharing == "equal"),
-                    collision_name + ".ionization_energy_sharing must be either "
-                    "'equal' or 'opal'."
-                );
+                m_ionization_secondary_free_kinematics = (secondary_angle == "free_kinematics");
+                const bool incident_okh =
+                    process.scatteringAngleModel() == ScatteringAngleModel::Okhrimovskyy;
+                amrex::Print() << "  " << collision_name << " ionization angle models: incident "
+                               << (incident_okh ? "okhrimovskyy" : "isotropic")
+                               << ", ejected " << secondary_angle << "\n";
             }
-            // Printed so that a run's log shows which model was actually
-            // read: a build without this parameter ignores it silently.
-            amrex::Print() << "  " << collision_name
-                           << " ionization energy sharing: " << energy_sharing;
-            if (energy_sharing == "opal") {
-                amrex::Print() << " (w = " << m_ionization_opal_w << " eV)";
-            }
-            amrex::Print() << "\n";
 
-            // The incident electron is deflected by the process's angle model; the ejected
-            // electron is always emitted isotropically. Forward and backward have no meaning
-            // for a three-body final state and were never applied here, so refuse them
-            // rather than run isotropic under a name that says otherwise.
+            // The incident electron is deflected by the channel's angle model. Forward and
+            // backward have no meaning for a three-body final state and were never applied
+            // here, so refuse them rather than run isotropic under a name that says otherwise.
             const auto angle_model = process.scatteringAngleModel();
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 angle_model == ScatteringAngleModel::Isotropic ||
                 angle_model == ScatteringAngleModel::Okhrimovskyy,
-                collision_name + ".ionization_scattering_angle_model must be either "
-                "'isotropic' or 'okhrimovskyy'."
+                collision_name + ": the scattering_angle_model of an ionization process must "
+                "be either 'isotropic' or 'okhrimovskyy'."
             );
-            // The ejected electron's direction: isotropic (the default, which leaves the
-            // random stream as it was), or the free kinematics of Magboltz, which ties it
-            // to the incident electron's deflection.
-            std::string secondary_angle = "isotropic";
-            pp_collision_name.query("ionization_secondary_angle_model", secondary_angle);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                secondary_angle == "isotropic" || secondary_angle == "free_kinematics",
-                collision_name + ".ionization_secondary_angle_model must be either "
-                "'isotropic' or 'free_kinematics'."
-            );
-            m_ionization_secondary_free_kinematics = (secondary_angle == "free_kinematics");
-            amrex::Print() << "  " << collision_name << " ionization angle models: incident "
-                           << (angle_model == ScatteringAngleModel::Okhrimovskyy
-                               ? "okhrimovskyy" : "isotropic")
-                           << ", ejected " << secondary_angle << "\n";
 
             m_ionization_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
         }
+    }
+    if (m_ionization_processes.size() > 1) {
+        amrex::Print() << "  " << collision_name << " ionization channels: "
+                       << m_ionization_processes.size() << ", energy costs";
+        for (auto const& p : m_ionization_processes) {
+            amrex::Print() << " " << p.getEnergyPenalty();
+        }
+        amrex::Print() << " eV\n";
     }
 
 #ifdef AMREX_USE_GPU
@@ -575,6 +584,8 @@ void BackgroundMCCCollision::doBackgroundIonization
     const auto CopyIon = copy_factory_ion.getSmartCopy();
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
+    auto const* const ionization_processes = m_ionization_processes_exe.data();
+    auto const process_count = static_cast<int>(m_ionization_processes_exe.size());
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -596,15 +607,14 @@ void BackgroundMCCCollision::doBackgroundIonization
         // The density accessor, and so the filter that uses it, is per-tile
         // once the background lives on the mesh.
         const auto Filter = ImpactIonizationFilterFunc(
-                                                       m_ionization_processes[0],
+                                                       ionization_processes, process_count,
                                                        m_mass1, m_total_collision_prob_ioniz,
                                                        m_nu_max_ioniz,
                                                        getBackgroundDensity(pti, lev, t)
                                                        );
 
         auto Transform = ImpactIonizationTransformFunc(
-                                                       m_ionization_processes[0],
-                                                       m_ionization_processes[0].getEnergyPenalty(),
+                                                       ionization_processes, process_count,
                                                        m_ionization_opal_w,
                                                        m_ionization_secondary_free_kinematics,
                                                        m_mass1, sqrt_kb_m, m_background_temperature_func, t
