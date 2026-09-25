@@ -12,10 +12,14 @@
 
 #include <AMReX_DenseBins.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_GpuBuffer.H>
+#include <AMReX_GpuContainers.H>
 #include <AMReX_Particles.H>
 #include <AMReX_Math.H>
 
 #include <AMReX_BaseFwd.H>
+
+#include <array>
 
 namespace ParticleUtils {
 
@@ -669,30 +673,21 @@ namespace ParticleUtils {
     }
 
     /**
-     * \brief Check for grid crossing errors after Villasenor deposition and abort if any found
+     * \brief Check for grid crossing errors after Villasenor mass matrix deposition and abort if any found
      *
-     * \param d_error_x  Device vector containing x-direction error count
-     * \param d_error_y  Device vector containing y-direction error count
-     * \param d_error_z  Device vector containing z-direction error count
+     * \param grid_crossing_error_count  Buffer containing three error counts in x, y, z order
      * \param max_grid_crossings  Maximum allowed crossings per direction
      */
     AMREX_INLINE
-    void CheckGridCrossingErrors (const amrex::Gpu::DeviceVector<int>& d_error_x,
-                                  const amrex::Gpu::DeviceVector<int>& d_error_y,
-                                  const amrex::Gpu::DeviceVector<int>& d_error_z,
+    void CheckGridCrossingErrors (amrex::Gpu::Buffer<int>& grid_crossing_error_count,
                                   const int max_grid_crossings)
     {
-        // These counters live in device memory, so they must be copied back
-        // rather than subscripted on the host.
-        int h_error_x = 0;
-        int h_error_y = 0;
-        int h_error_z = 0;
-        amrex::Gpu::dtoh_memcpy(&h_error_x, d_error_x.dataPtr(), sizeof(int));
-        amrex::Gpu::dtoh_memcpy(&h_error_y, d_error_y.dataPtr(), sizeof(int));
-        amrex::Gpu::dtoh_memcpy(&h_error_z, d_error_z.dataPtr(), sizeof(int));
-
+        const int* h_errors = grid_crossing_error_count.copyToHost();
+        const int h_error_x = h_errors[0];
+        const int h_error_y = h_errors[1];
+        const int h_error_z = h_errors[2];
         if (h_error_x > 0 || h_error_y > 0 || h_error_z > 0) {
-            std::string error_msg = "Villasenor deposition error: particles exceeded max_grid_crossings.\n";
+            std::string error_msg = "Villasenor mass matrix deposition error: particles exceeded max_grid_crossings.\n";
             if (h_error_x > 0) {
                 error_msg += "  X-direction: " + std::to_string(h_error_x) + " particles\n";
             }

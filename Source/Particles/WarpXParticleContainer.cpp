@@ -44,6 +44,7 @@
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuAllocators.H>
 #include <AMReX_GpuAtomic.H>
+#include <AMReX_GpuBuffer.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_GpuControl.H>
 #include <AMReX_GpuDevice.H>
@@ -77,6 +78,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <optional>
 #include <string>
 
@@ -515,10 +517,10 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
         tilebox = amrex::coarsen(pti.tilebox(),ref_ratio);
     }
 
-    std::optional<amrex::Gpu::DeviceVector<int>> d_position_error_count;
+    std::optional<amrex::Gpu::Buffer<int>> position_error_count;
     amrex::Dim3 implicit_nodal_lo{};
     amrex::Dim3 implicit_nodal_hi{};
-    int* position_error_count = nullptr;
+    int* position_error_count_ptr = nullptr;
     const ParticleReal* xp_n_data = nullptr;
     const ParticleReal* yp_n_data = nullptr;
     const ParticleReal* zp_n_data = nullptr;
@@ -532,10 +534,10 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
         Box nodal_position_box = amrex::surroundingNodes(tilebox);
         nodal_position_box.grow(WarpX::particle_max_grid_crossings);
 
-        d_position_error_count.emplace(1, 0);
+        position_error_count.emplace(std::initializer_list<int>{0});
         implicit_nodal_lo = amrex::lbound(nodal_position_box);
         implicit_nodal_hi = amrex::ubound(nodal_position_box);
-        position_error_count = d_position_error_count->dataPtr();
+        position_error_count_ptr = position_error_count->data();
 
 #if !defined(WARPX_DIM_1D_Z)
         xp_n_data = pti.GetAttribs("x_n").dataPtr() + offset;
@@ -783,7 +785,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 2){
                     doChargeConservingDepositionShapeNImplicit<2>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -792,7 +794,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 3){
                     doChargeConservingDepositionShapeNImplicit<3>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -801,7 +803,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 4){
                     doChargeConservingDepositionShapeNImplicit<4>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -810,7 +812,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 }
             }
         } else if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Villasenor) {
@@ -823,7 +825,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 2){
                     doVillasenorDepositionShapeNImplicit<2>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -832,7 +834,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 3){
                     doVillasenorDepositionShapeNImplicit<3>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -841,7 +843,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 4){
                     doVillasenorDepositionShapeNImplicit<4>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -850,7 +852,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 }
             }
             else {
@@ -946,7 +948,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         ion_lev,
                         jx_fab, jy_fab, jz_fab, np_to_deposit, dinv,
                         xyzmin, lo, q, WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 2){
                     doDepositionShapeNImplicit<2>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -956,7 +958,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         ion_lev,
                         jx_fab, jy_fab, jz_fab, np_to_deposit, dinv,
                         xyzmin, lo, q, WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 3){
                     doDepositionShapeNImplicit<3>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -966,7 +968,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         ion_lev,
                         jx_fab, jy_fab, jz_fab, np_to_deposit, dinv,
                         xyzmin, lo, q, WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 } else if (WarpX::nox == 4){
                     doDepositionShapeNImplicit<4>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -976,19 +978,14 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         ion_lev,
                         jx_fab, jy_fab, jz_fab, np_to_deposit, dinv,
                         xyzmin, lo, q, WarpX::n_rz_azimuthal_modes,
-                        implicit_nodal_lo, implicit_nodal_hi, position_error_count);
+                        implicit_nodal_lo, implicit_nodal_hi, position_error_count_ptr);
                 }
             }
         }
     }
 
-    if (d_position_error_count) {
-        amrex::Gpu::streamSynchronize();
-        // The counter lives in device memory, so it must be copied back rather
-        // than subscripted on the host (that dereferences a device pointer).
-        int h_position_error_count = 0;
-        amrex::Gpu::dtoh_memcpy(&h_position_error_count, d_position_error_count->dataPtr(),
-                                sizeof(int));
+    if (position_error_count) {
+        const int h_position_error_count = *position_error_count->copyToHost();
         if (h_position_error_count > 0) {
             amrex::Abort("Implicit current deposition: Particle position exceeds the permitted range for " +
                          std::to_string(h_position_error_count) + " particle(s).");

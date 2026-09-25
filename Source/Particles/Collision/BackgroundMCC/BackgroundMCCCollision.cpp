@@ -265,12 +265,16 @@ BackgroundMCCCollision::getDepletableBackgrounds () const
     return {background};
 }
 
-/** Calculate the maximum collision frequency, from the reduced mass of the
- *  projectile and background pair, using a fixed energy grid that
+/** Calculate the maximum collision frequency using a fixed energy grid that
  *  ranges from 1e-4 to 5000 eV in 0.2 eV increments
+ *
+ *  @param[in] mcc_processes the processes whose summed frequency is bounded
+ *  @param[in] speed_mass the mass m with which the kernel's collision energy E
+ *             and speed v are related, E = m*v^2/2
  */
 amrex::ParticleReal
-BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_processes) const
+BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_processes,
+                                   amrex::ParticleReal speed_mass) const
 {
     using namespace amrex::literals;
     amrex::ParticleReal nu, nu_max = 0.0;
@@ -289,10 +293,8 @@ BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_p
         E_step = (energy_step < E_step) ? energy_step : E_step;
     }
 
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_background_mass > 0.0_prt,
-        "BackgroundMCC: the background mass must be set before nu_max is computed");
-    const amrex::ParticleReal reduced_mass =
-        m_mass1 * m_background_mass / (m_mass1 + m_background_mass);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(speed_mass > 0.0_prt,
+        "BackgroundMCC: nu_max needs a positive mass");
 
     amrex::ParticleReal E = E_start;
     while(E < E_end){
@@ -304,16 +306,10 @@ BackgroundMCCCollision::get_nu_max(amrex::Vector<ScatteringProcess> const& mcc_p
             sigma_E += scattering_process.getCrossSection(E);
         }
 
-        // calculate collision frequency. E is the collision energy the cross
-        // sections are tabulated against, which getCollisionEnergy() computes
-        // in the center-of-mass frame, mu*v_rel^2/2, so v_rel follows from
-        // the reduced mass. Using the projectile mass instead underestimates
-        // nu_max by sqrt(1 + m1/M): negligible for electrons, but sqrt(2) for
-        // ions on a gas of their own mass, whose rate is then capped wherever
-        // the true frequency exceeds that underestimate.
+        // calculate collision frequency
         nu = (
               m_max_background_density
-              * std::sqrt(2.0_prt / reduced_mass * PhysConst::q_e)
+              * std::sqrt(2.0_prt / speed_mass * PhysConst::q_e)
               * sigma_E * std::sqrt(E)
               );
         nu_max = std::max(nu_max, nu);
@@ -354,8 +350,16 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
             m_background_mass = species1.getMass();
         }
 
-        // calculate maximum collision frequency without ionization
-        m_nu_max = get_nu_max(m_scattering_processes);
+        // calculate maximum collision frequency without ionization. The
+        // scattering kernel looks cross sections up at getCollisionEnergy(),
+        // the center-of-mass energy mu*v_rel^2/2, and weights them by v_rel,
+        // so the majorant must use the reduced mass. The projectile mass
+        // underestimates it by sqrt(1 + m1/M): negligible for electrons, but
+        // sqrt(2) for ions on a gas of their own mass, whose rate is then
+        // capped wherever the true frequency exceeds that underestimate.
+        const amrex::ParticleReal reduced_mass =
+            m_mass1 * m_background_mass / (m_mass1 + m_background_mass);
+        m_nu_max = get_nu_max(m_scattering_processes, reduced_mass);
 
         // calculate total collision probability
         auto coll_n = m_nu_max * dt;
@@ -372,8 +376,11 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
         }
 
         if (ionization_flag) {
-            // calculate maximum collision frequency for ionization
-            m_nu_max_ioniz = get_nu_max(m_ionization_processes);
+            // calculate maximum collision frequency for ionization. The
+            // ionization filter (ImpactIonizationFilterFunc) uses the
+            // projectile's own lab-frame kinetic energy and speed, so here
+            // the projectile mass is the consistent one.
+            m_nu_max_ioniz = get_nu_max(m_ionization_processes, m_mass1);
 
             // calculate total ionization probability
             auto coll_n_ioniz = m_nu_max_ioniz * dt;
