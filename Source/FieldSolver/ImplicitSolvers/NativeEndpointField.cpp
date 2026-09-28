@@ -1675,6 +1675,28 @@ AMREX_GPU_HOST_DEVICE Real CurrentMagnitude(Arrays const& a,int c,int i,int j,Re
      Mul(Up(std::abs(r+.5*dr)),CurlMagnitude(a,1,i,j,dr,dz)),
      Mul(Up(std::abs(r-.5*dr)),CurlMagnitude(a,1,i-1,j,dr,dz))));
 }
+// Keep the launch outside the private origin factory: NVCC extended-device
+// lambdas require an enclosing free function or publicly accessible method.
+void FillAcceptedOriginRows (amrex::iMultiFab& free, MF& bound, View const& A,
+    MF const& current, MF const& ion, MF const& electron, MF const& displacement,
+    int c, int wall, Real dr, Real dz, NativeCurrentTolerance tolerance)
+{
+    for (amrex::MFIter it(free); it.isValid(); ++it) {
+        Arrays potential{};
+        for (int d=0; d<3; ++d) { potential[d]=A[d]->const_array(it); }
+        auto out=free.array(it);
+        auto limit=bound.array(it);
+        auto cf=current.const_array(it), ji=ion.const_array(it),
+             je=electron.const_array(it), dd=displacement.const_array(it);
+        amrex::ParallelFor(it.validbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            out(i,j,k)=!((c!=0&&i==wall)||(c==1&&i==0));
+            if (out(i,j,k)) {
+                limit(i,j,k)=tolerance.Bound(Mul(Gamma(128),Add(CurrentMagnitude(potential,c,i,j,dr,dz),
+                    Sum4(Abs(cf(i,j,k)),Abs(ji(i,j,k)),Abs(je(i,j,k)),Abs(dd(i,j,k))))));
+            }
+        });
+    }
+}
 #endif
 bool All(bool ready){amrex::ParallelDescriptor::ReduceBoolAnd(ready);return ready;}
 }
@@ -2134,7 +2156,7 @@ std::shared_ptr<NativeEndpointAmpereOrigin const> NativeOwnedEndpointAmpere::Ret
 std::shared_ptr<NativeEndpointAmpereOrigin const> NativeEndpointAmpereOrigin::CaptureAccepted(
  WarpX& sim,Real time,std::uint64_t epoch,std::uint64_t generation) {
  using namespace owned_ampere_detail;
-#if !defined(WARPX_DIM_RZ) || defined(AMREX_USE_GPU)
+#if !defined(WARPX_DIM_RZ)
  amrex::ignore_unused(sim,time,epoch,generation);return {};
 #else
  // In this periodic RZ/axis/PEC scope, Joint's P union V is exactly every
@@ -2171,17 +2193,8 @@ std::shared_ptr<NativeEndpointAmpereOrigin const> NativeEndpointAmpereOrigin::Ca
  Real const dr=sim.Geom(0).CellSize(0),dz=sim.Geom(0).CellSize(1);
  for(int c=0;c<3;++c){
   p->free[c].define(J[c]->boxArray(),J[c]->DistributionMap(),1,0);p->free[c].setVal(0);
-  for(amrex::MFIter it(p->free[c]);it.isValid();++it){
-   Arrays potential{};for(int d=0;d<3;++d)potential[d]=A[d]->const_array(it);
-   auto out=p->free[c].array(it);int const wall=sim.Geom(0).Domain().bigEnd(0)+1;
-   auto limit=p->bound[c].array(it);auto cf=p->current[c].const_array(it),ji=p->ion[c].const_array(it),
-       je=J[c]->const_array(it),dd=D[c]->const_array(it);
-   amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){
-    out(i,j,k)=!((c!=0&&i==wall)||(c==1&&i==0));
-    if(out(i,j,k))limit(i,j,k)=tolerance.Bound(Mul(Gamma(128),Add(CurrentMagnitude(potential,c,i,j,dr,dz),
-        Sum4(Abs(cf(i,j,k)),Abs(ji(i,j,k)),Abs(je(i,j,k)),Abs(dd(i,j,k))))));
-   });
-  }
+  FillAcceptedOriginRows(p->free[c],p->bound[c],A,p->current[c],p->ion[c],*J[c],*D[c],
+      c,sim.Geom(0).Domain().bigEnd(0)+1,dr,dz,tolerance);
  }
  p->available=true;
  auto origin=std::shared_ptr<NativeEndpointAmpereOrigin const>(new NativeEndpointAmpereOrigin(std::move(p)));

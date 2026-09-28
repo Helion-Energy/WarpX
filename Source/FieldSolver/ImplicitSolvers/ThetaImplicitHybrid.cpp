@@ -594,7 +594,7 @@ bool NativeAcceptedStepCandidate::CaptureStoppingMaterialSource(
     if(!endpoint||!cancellable)return false;
     auto& state=*m_impl;auto& sim=*state.simulation;auto& model=*sim.get_pointer_HybridPICModel();
     bool supported=false;
-#if defined(WARPX_DIM_RZ) && !defined(AMREX_USE_GPU)
+#if defined(WARPX_DIM_RZ)
     supported=state.MaterialSourcePhase()&&(!state.symmetric||state.material_symmetric)&&!state.stopping&&!state.circuit&&
         !state.material_owner&&!state.material_source&&state.solver->m_native_endpoint_pair_requested&&
         state.solver->m_native_endpoint_pair_accept_requested&&
@@ -609,6 +609,9 @@ bool NativeAcceptedStepCandidate::CaptureStoppingMaterialSource(
         std::isfinite(options.coulomb_log)&&options.coulomb_log>0.&&
         std::isfinite(options.proper_speed_cap)&&options.proper_speed_cap>0.&&
         options.proper_speed_cap<.01*PhysConst::c;
+#if defined(AMREX_USE_GPU)
+    supported=supported&&warpx::darwin::NativeEndpointCudaQualificationSelected(sim);
+#endif
 #endif
     amrex::ParallelDescriptor::ReduceBoolAnd(supported);
     if(!supported)return false;
@@ -1233,7 +1236,8 @@ NativeStepCandidateResult AdvanceNativeStepCandidate(
     supported=!symmetric_source || (material_symmetric?material_scope:
         (solver->m_native_stopping_certificate&&solver->NativeStoppingCertificateScopeSupported()&&solver->m_theta==.5));
 #if defined(AMREX_USE_GPU)
-    supported=supported&&!material_symmetric;
+    supported=supported&&(!material_symmetric||
+        warpx::darwin::NativeEndpointCudaQualificationSelected(simulation));
 #endif
     amrex::ParallelDescriptor::ReduceBoolAnd(supported);
     if(!supported) { result.reason="Symmetric source requires the initialized midpoint producer scope";return result; }

@@ -21,9 +21,13 @@ electron heating, field work and represented endpoint current before publishing
 the accepted state. Unsupported configurations reject rather than silently use
 a different source update.
 
-This composition is currently guarded to precise CPU RZ, one level, periodic
-axial boundaries, radial PEC, shape-three momentum-conserving gather and
-Esirkepov deposition. Its complete combination with CUDA, mass matrices,
+This composition is currently guarded to precise CPU RZ or the opt-in
+`WarpX_NATIVE_PAIRED_PRECISE_CUDA` endpoint capability, one level, periodic axial
+boundaries, radial PEC, shape-three momentum-conserving gather and Esirkepov
+deposition. Ordinary GPU builds reject the material-source path. The precise
+CUDA path requires ordinary-application validation as well as its arithmetic
+build checks; a small weak-source pilot does not qualify large sources or
+production performance. The complete combination with mass matrices,
 nonperiodic ends, a native circuit or restart is not yet qualified. Separate
 operator or source-free tests of those features do not qualify their combination
 with the material source. Embedded boundaries and mesh refinement are outside

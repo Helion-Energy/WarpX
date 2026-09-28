@@ -7,12 +7,20 @@
 
 #include <limits>
 
+namespace
+{
+    struct Case
+    {
+        amrex::Real absolute, error, roundoff;
+        bool accepted;
+    };
+}
+
 int main (int argc, char* argv[])
 {
     amrex::Initialize(argc, argv);
     {
         using Real = amrex::Real;
-        struct Case { Real absolute, error, roundoff; bool accepted; };
         Real const inf = std::numeric_limits<Real>::infinity();
         Real const nan = std::numeric_limits<Real>::quiet_NaN();
         // Recorded rejected-source operands, plus errors on either side of

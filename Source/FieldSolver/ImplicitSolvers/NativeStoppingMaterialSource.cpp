@@ -2,6 +2,7 @@
 #include "NativeStoppingMaterialSource.H"
 #include "NativeStoppingThetaRegistration.H"
 #include "NativePairedDarwinFields.H"
+#include "NativeEndpointArithmetic.H"
 #include "NativePECPlasma.H"
 #include "DarwinInitialRateSchur.H"
 #include "DarwinABoundary.H"
@@ -230,9 +231,18 @@ bool NativeStoppingMaterialSource::Capture(){
     p.captured=true;p.failure.clear();return true;
 }
 bool NativeStoppingMaterialSource::Impl::Initialize(){
-#if !defined(WARPX_DIM_RZ) || defined(AMREX_USE_GPU)
-    return Fail("transition source prototype requires CPU RZ");
+#if !defined(WARPX_DIM_RZ)
+    return Fail("transition source prototype requires RZ");
 #else
+#if defined(AMREX_USE_GPU)
+    // Admit only the existing audited precise CUDA endpoint capability. The
+    // source keeps particle and field state on device; scalar ledger reductions
+    // remain collective. Ordinary CUDA/HIP/SYCL builds still reject this path.
+    if (!All(warpx::darwin::NativeEndpointArithmeticSupported() &&
+             warpx::darwin::NativeEndpointCudaQualificationSelected(sim))) {
+        return Fail("transition source requires the precise CUDA endpoint capability");
+    }
+#endif
     auto const& o=options.thermal.nonlinear;
     bool valid=options.thermal.initial_guess==NativeStoppingThermalOptions::InitialGuess::Zero&&
         !options.thermal.analytic_temperature_column&&!o.use_preconditioner&&!o.adaptive_forcing&&
@@ -859,9 +869,13 @@ bool NativeStoppingMaterialSource::CheckAcceptance(NativeStoppingSourcePublicati
     return true;
 }
 bool NativeStoppingMaterialSource::Impl::AcceptanceWork(NativeStoppingSourceAcceptance& result){
-#if !defined(WARPX_DIM_RZ) || defined(AMREX_USE_GPU)
+#if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(result);return false;
 #else
+#if defined(AMREX_USE_GPU)
+    if (!All(warpx::darwin::NativeEndpointArithmeticSupported() &&
+             warpx::darwin::NativeEndpointCudaQualificationSelected(sim))) return false;
+#endif
     result.ready=false;result.includes_field=!AcceptedOrigin();result.field=field_work;result.field_current=field_current;
     auto const& f=field_work;auto const& l=work.physical;auto const& metric=work.carry.moving_metric;
     bool valid=AcceptedOrigin()?(!f.available&&!metric.available):

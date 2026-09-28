@@ -2415,8 +2415,14 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             {"ssprk2 (monotone embedded 2(1), SSP)",
              "rkf45 (Fehlberg 4(5), NOT SSP)",
              "rkl2 (Runge-Kutta-Legendre super-time-stepping)"};
-        amrex::Print() << "[qdsmc] conduction fd integrator: "
-            << fdt_names[m_cond_fd_time] << "\n";
+        if (UsesEulerianElectronEnergy()) {
+            amrex::Print() << "[hybrid] conduction fd time advance: implicit "
+                          << warpx::thermal::ElectronEnergyModeName(m_electron_energy_mode)
+                          << "\n";
+        } else {
+            amrex::Print() << "[qdsmc] conduction fd integrator: "
+                          << fdt_names[m_cond_fd_time] << "\n";
+        }
     }
     if (m_solve_electron_energy_equation)
     {
