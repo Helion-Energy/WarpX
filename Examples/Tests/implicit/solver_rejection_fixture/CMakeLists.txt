@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.24)
+project(WarpXSolverRejectionFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+enable_testing()
+add_executable(test_solver_rejection test_solver_rejection.cpp)
+target_link_libraries(test_solver_rejection PRIVATE AMReX::amrex)
+target_compile_features(test_solver_rejection PRIVATE cxx_std_20)
+target_include_directories(test_solver_rejection PRIVATE ${WARPX_SOURCE}/Source)
+foreach(box IN ITEMS 4 64)
+    foreach(failure IN ITEMS rhs action preconditioner overflow)
+        add_test(NAME solver_rejection_${failure}_box${box}
+            COMMAND test_solver_rejection test.failure=${failure} test.box=${box})
+        set_tests_properties(solver_rejection_${failure}_box${box}
+            PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endforeach()

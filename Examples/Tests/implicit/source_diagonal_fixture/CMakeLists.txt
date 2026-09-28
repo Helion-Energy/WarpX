@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.24)
+project(WarpXSourceDiagonalFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(THERMAL_MOMENTS_SOURCE_DIR "${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers" CACHE PATH "Separately qualified KineticThermalMoments sources")
+if(NOT EXISTS "${THERMAL_MOMENTS_SOURCE_DIR}/KineticThermalMoments.cpp")
+ message(FATAL_ERROR "Provide the delivered native moment adapter source directory")
+endif()
+enable_testing()
+add_executable(test_source_diagonal test_source_diagonal.cpp
+ ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/EulerianSourceDiagonal.cpp
+ ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/EulerianThermalSources.cpp
+ ${THERMAL_MOMENTS_SOURCE_DIR}/KineticThermalMoments.cpp)
+target_link_libraries(test_source_diagonal PRIVATE AMReX::amrex)
+target_compile_features(test_source_diagonal PRIVATE cxx_std_20)
+target_include_directories(test_source_diagonal PRIVATE ${WARPX_SOURCE}/Source ${THERMAL_MOMENTS_SOURCE_DIR})
+target_compile_definitions(test_source_diagonal PRIVATE WARPX_DIM_RZ WARPX_ZINDEX=1)
+target_compile_options(test_source_diagonal PRIVATE -Wall -Wextra -Werror=return-type)
+foreach(case IN ITEMS analytic basis gates kink clip purity invalid kelvin rawfloor)
+ foreach(box IN ITEMS 4 64)
+  foreach(periodic IN ITEMS 0 1)
+   add_test(NAME diagonal_${case}_box${box}_periodic${periodic}
+    COMMAND test_source_diagonal test.case=${case} test.max_grid_size=${box} test.periodic=${periodic})
+   set_tests_properties(diagonal_${case}_box${box}_periodic${periodic} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+  endforeach()
+ endforeach()
+endforeach()

@@ -18,12 +18,12 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
     const int ncl = (a_ncomp < 0) ? a.nComp() : a_ncomp;
     const int sc = a_scomp;
 
-    if (m_has_pec_wall) {
+    if (m_has_wall) {
         const Box dom = amrex::convert(m_geom[a_lev].Domain(),
                                        a.boxArray().ixType());
         for (int d = 0; d < AMREX_SPACEDIM; d++) {
             for (int side = 0; side < 2; side++) {
-                if (!m_wall_pec[d][side]) { continue; }
+                if (!m_wall_pec[d][side] && !m_wall_pmc[d][side]) { continue; }
                 // wall NODE index: the staggered containers are
                 // cell-indexed, so the hi-side wall plane sits one past
                 // the cell bigEnd
@@ -35,6 +35,12 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
                 const int cls = static_cast<int>(a_cls);
                 const int dd = d;
                 const bool stag = m_staggered;
+                // PMC (Neumann): the residual applies the dual parity rules,
+                // so the normal/tangential roles swap for every vector class
+                const bool pmc = m_wall_pmc[d][side];
+                // PEC wall node whose normal E the residual takes from the interior:
+                // its column is dead in the preconditioner too
+                const bool pec_normal_dead = m_pec_normal_from_interior && m_wall_pec[d][side];
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -52,7 +58,8 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
                             // are scalars
                             const bool scalar =
                                 (cls == 4/*Coef*/) && (n >= 3);
-                            const bool is_norm = !scalar && (n == nc);
+                            // effective "normal" role: swapped at PMC faces
+                            const bool is_norm = !scalar && ((n == nc) != pmc);
                             if (stag) {
                                 // Yee: components NODAL along dd (wall-
                                 // tangential E/J, wall-normal B) carry a
@@ -104,7 +111,7 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
                                 // (identity rows / dead columns), BField
                                 // zeroes the normal component
                                 if (cls == 0/*EField*/ && !scalar
-                                    && !is_norm) { v(i,j,k,n) = 0.0_rt; }
+                                    && (!is_norm || pec_normal_dead)) { v(i,j,k,n) = 0.0_rt; }
                                 if (cls == 1/*BField*/ && is_norm) {
                                     v(i,j,k,n) = 0.0_rt;
                                 }
@@ -163,7 +170,10 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
                                                         : (n != 0);
                     }
                     if (i == w) {
-                        if (cls == 0/*EField*/ && n == 1) {
+                        // the Ohm solve zeroes E_theta on the axis on both
+                        // grids and E_r there on the collocated grid (odd
+                        // component with an axis DOF)
+                        if (cls == 0/*EField*/ && (n == 1 || (n == 0 && !stag))) {
                             v(i,j,k,n) = 0.0_rt;
                         }
                         return;
@@ -177,14 +187,19 @@ void HybridPICPC<T,Ops>::ApplyDomainClosure ( MF& a, int a_lev,
     }
 #endif
 
-    // EB (staircase): zero covered/frozen nodes so no stencil emits or
-    // receives contributions there (the residual's masked Ohm solves skip
-    // those locations). Fine level only; masked up to the flag's guards.
-    // Exception: the pair's local W-hat scale (Coef comp 14) is a strictly
-    // positive SCALING, divided by in the joint block -- zeroing it at
-    // covered nodes makes 1/sW = inf there (NaN poisoning that the
-    // level-0-only closure cannot clean off the coarse levels).
-    if (a_lev == 0 && m_eb_flag != nullptr) {
+    // EB (staircase): zero covered/frozen nodes of the E-, J- and
+    // coefficient-like objects (the residual's masked Ohm and Ampere kernels
+    // skip those locations; the coefficient row mask comp 15 becomes 0 there
+    // and makes the covered rows identity on every level). The first-curl
+    // delta-B (BField) is NOT zeroed: the residual's Faraday update is not
+    // EB-masked, so the covered delta-B, built from the uncovered E
+    // neighbours, is read by the wall-adjacent Ampere stencils. Fine level
+    // only; masked up to the flag's guards. Exception: the pair's local
+    // W-hat scale (Coef comp 14) is a strictly positive SCALING, divided by
+    // in the joint block -- zeroing it at covered nodes makes 1/sW = inf
+    // there (NaN poisoning that the level-0-only closure cannot clean off
+    // the coarse levels).
+    if (a_lev == 0 && m_eb_flag != nullptr && a_cls != ClosureClass::BField) {
         amrex::IntVect ngm = a.nGrowVect();
         ngm.min(m_eb_flag->nGrowVect());
         const bool is_coef = (a_cls == ClosureClass::Coef);
@@ -212,17 +227,27 @@ void HybridPICPC<T,Ops>::OverrideIdentityRows ( T& a_out, const T& a_in ) const
 
     for (int d = 0; d < AMREX_SPACEDIM; d++) {
         for (int side = 0; side < 2; side++) {
-            // PEC faces: exact identity tangential rows (both grids).
-            // Staggered hi-side zero-extension faces: the nodal wall
-            // plane is an unmodeled ghost plane of the cell-indexed
-            // container -- the preconditioner would return zero there
-            // (a singular preconditioner); make those rows identity.
+            // PEC faces: exact identity tangential rows (both grids); PMC
+            // faces: exact identity normal row (the residual zeroes the
+            // normal E on the wall). Staggered hi-side zero-extension
+            // faces: the nodal wall plane is an unmodeled ghost plane of
+            // the cell-indexed container -- the preconditioner would
+            // return zero there (a singular preconditioner); make those
+            // rows identity.
             const bool open_stag = m_staggered && (side == 1)
                 && m_wall_open[d][side];
-            if (!m_wall_pec[d][side] && !open_stag) { continue; }
+            const bool pmc = m_wall_pmc[d][side];
+            if (!m_wall_pec[d][side] && !pmc && !open_stag) { continue; }
             const int nc = m_dim2comp[d];
+            // PEC wall node whose normal E the residual takes from the interior
+            // (hybrid_pic_model.pec_normal_E_from_interior): identity row as well
+            const bool pec_normal_identity = m_pec_normal_from_interior && m_wall_pec[d][side];
             for (int n = 0; n < 3; n++) {
-                if (n == nc) { continue; }  // tangential rows only
+                // tangential rows at PEC / open faces, the normal row at PMC (and at
+                // PEC with the interior normal-E closure)
+                const bool normal_row = (n == nc);
+                const bool take = pmc ? normal_row : (!normal_row || pec_normal_identity);
+                if (!take) { continue; }
                 MF& o = *a_out.getArrayVec()[0][n];
                 const MF& s = *a_in.getArrayVec()[0][n];
                 // wall plane in this component's own staggering (the
@@ -250,25 +275,29 @@ void HybridPICPC<T,Ops>::OverrideIdentityRows ( T& a_out, const T& a_in ) const
     }
 
 #if defined(WARPX_DIM_RZ)
-    // E_theta on the axis is fixed to zero by the Ohm solve: identity row
+    // E_theta on the axis (both grids) and E_r on the axis (collocated grid,
+    // where E_r has an axis DOF) are fixed to zero by the Ohm solve: identity rows
     if (m_has_axis) {
-        const Box adom = amrex::convert(m_geom[0].Domain(),
-            a_out.getArrayVec()[0][1]->boxArray().ixType());
-        Box plane = adom;
-        plane.setBig(0, adom.smallEnd(0));
-        MF& o = *a_out.getArrayVec()[0][1];
-        const MF& si = *a_in.getArrayVec()[0][1];
+        for (int c = 0; c < 2; ++c) {
+            if (c == 0 && m_staggered) { continue; }
+            const Box adom = amrex::convert(m_geom[0].Domain(),
+                a_out.getArrayVec()[0][c]->boxArray().ixType());
+            Box plane = adom;
+            plane.setBig(0, adom.smallEnd(0));
+            MF& o = *a_out.getArrayVec()[0][c];
+            const MF& si = *a_in.getArrayVec()[0][c];
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-        for (MFIter mfi(o, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-            const Box bx = mfi.tilebox() & plane;
-            if (bx.isEmpty()) { continue; }
-            Array4<Real> const& ov = o.array(mfi);
-            Array4<const Real> const& sv = si.const_array(mfi);
-            amrex::ParallelFor(bx,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                { ov(i,j,k) = sv(i,j,k); });
+            for (MFIter mfi(o, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box bx = mfi.tilebox() & plane;
+                if (bx.isEmpty()) { continue; }
+                Array4<Real> const& ov = o.array(mfi);
+                Array4<const Real> const& sv = si.const_array(mfi);
+                amrex::ParallelFor(bx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    { ov(i,j,k) = sv(i,j,k); });
+            }
         }
     }
 #endif

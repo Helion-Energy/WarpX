@@ -1,6 +1,8 @@
 /* Copyright 2026 The WarpX Community
  * This file is part of WarpX. License: BSD-3-Clause-LBNL
  */
+#include "FieldSolver/ImplicitSolvers/DarwinRZGreenSolver.H"
+
 #include <AMReX.H>
 #include <AMReX_Gpu.H>
 #include <AMReX_MLEBNodeFDLaplacian.H>
@@ -13,15 +15,20 @@
 #include <iomanip>
 
 namespace {
-AMREX_GPU_HOST_DEVICE amrex::Real
-field (int i, int j, int nr, int nz, amrex::Real amplitude) {
-    if (i <= 0 || i >= nr || j <= 0 || j >= nz) {
+AMREX_GPU_HOST_DEVICE amrex::Real field (int i, int j, int nr, int nz, amrex::Real amplitude,
+                                         bool pmc_lo, bool pmc_hi)
+{
+    if (i <= 0 || i >= nr || (j <= 0 && !pmc_lo) || (j >= nz && !pmc_hi))
+    {
         return 0.;
     }
     amrex::Real const r = static_cast<amrex::Real>(i) / nr;
     amrex::Real const z = static_cast<amrex::Real>(j) / nz;
     constexpr amrex::Real pi = 3.14159265358979323846;
-    return amplitude * r * (1. - r * r) * std::sin(pi * z) *
+    amrex::Real const axial =
+        pmc_lo && pmc_hi ? 1. + .3 * std::cos(pi * z) + .1 * std::cos(pi * j)
+                         : (pmc_lo ? std::cos(.5 * pi * z) : std::sin((pmc_hi ? .5 : 1.) * pi * z));
+    return amplitude * r * (1. - r * r) * axial *
            (1. + .2 * std::cos(8. * pi * r) * std::cos(6. * pi * z));
 }
 } // namespace
@@ -32,6 +39,7 @@ main (int argc, char** argv) {
     {
         int nr = 32, nz = 160, grid = 32, repeats = 3, max_semi = 2;
         amrex::Real aspect = 5.;
+        bool greens = false, pmc_lo = false, pmc_hi = false;
         amrex::ParmParse pp("mg_test");
         pp.query("nr", nr);
         pp.query("nz", nz);
@@ -39,6 +47,9 @@ main (int argc, char** argv) {
         pp.query("repeats", repeats);
         pp.query("max_semi", max_semi);
         pp.query("aspect", aspect);
+        pp.query("greens", greens);
+        pp.query("pmc_lo", pmc_lo);
+        pp.query("pmc_hi", pmc_hi);
         AMREX_ALWAYS_ASSERT(nr >= 8 && nz >= 8 && repeats > 0);
         amrex::Box domain(amrex::IntVect(0, 0), amrex::IntVect(nr - 1, nz - 1));
         amrex::Real const dr = .2 / nr, dz = aspect * dr;
@@ -53,29 +64,33 @@ main (int argc, char** argv) {
         amrex::MultiFab axial(nodes, dm, 1, 0), actual(nodes, dm, 1, 0);
         amrex::MultiFab solution(nodes, dm, 1, 1), error(nodes, dm, 1, 0);
         amrex::MultiFab reference(nodes, dm, 1, 0);
+        amrex::MultiFab green_solution(nodes, dm, 1, 1);
+        std::unique_ptr<DarwinRZGreenSolver> green;
+        if (greens)
+        {
+            green = std::make_unique<DarwinRZGreenSolver>(geom, pmc_lo, pmc_hi);
+        }
         for (int masked = 0; masked <= 1; ++masked) {
             // This source uses an independently assembled five-point stencil.
             // The vacuum mask limits the source, not the inverse domain.
             for (amrex::MFIter mfi(exact); mfi.isValid(); ++mfi) {
                 auto a = exact.array(mfi);
-                amrex::ParallelFor(mfi.fabbox(),
-                                   [=] AMREX_GPU_DEVICE(int i, int j, int k) {
-                                       a(i, j, k) = field(i, j, nr, nz, 1.);
-                                   });
+                amrex::ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                   { a(i, j, k) = field(i, j, nr, nz, 1., pmc_lo, pmc_hi); });
                 auto b = rhs.array(mfi), zonly = axial.array(mfi);
                 amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(
                                                        int i, int j, int k) {
                     amrex::Real value = 0., without_radial = 0.;
-                    if (i > 0 && i < nr && j > 0 && j < nz) {
-                        amrex::Real const r = i * dr,
-                                          u = field(i, j, nr, nz, 1.);
+                    if (i > 0 && i < nr && (j > 0 || pmc_lo) && (j < nz || pmc_hi))
+                    {
+                        amrex::Real const r = i * dr, u = field(i, j, nr, nz, 1., pmc_lo, pmc_hi);
                         amrex::Real const radial =
-                            ((r + .5 * dr) * field(i + 1, j, nr, nz, 1.) +
-                             (r - .5 * dr) * field(i - 1, j, nr, nz, 1.) -
+                            ((r + .5 * dr) * field(i + 1, j, nr, nz, 1., pmc_lo, pmc_hi) +
+                             (r - .5 * dr) * field(i - 1, j, nr, nz, 1., pmc_lo, pmc_hi) -
                              2. * r * u) /
                             (r * dr * dr);
-                        without_radial = (field(i, j + 1, nr, nz, 1.) - 2. * u +
-                                          field(i, j - 1, nr, nz, 1.)) /
+                        without_radial = (field(i, j + 1, nr, nz, 1., pmc_lo, pmc_hi) - 2. * u +
+                                          field(i, j - 1, nr, nz, 1., pmc_lo, pmc_hi)) /
                                              (dz * dz) -
                                          u / (r * r);
                         value = radial + without_radial;
@@ -100,10 +115,11 @@ main (int argc, char** argv) {
                 // Preparation restores the legacy zero radial sigma to one.
                 linop.setSigma({0., 1.});
                 linop.setAlpha(1.);
-                linop.setDomainBC({amrex::LinOpBCType::Neumann,
-                                   amrex::LinOpBCType::Dirichlet},
-                                  {amrex::LinOpBCType::Dirichlet,
-                                   amrex::LinOpBCType::Dirichlet});
+                linop.setDomainBC(
+                    {amrex::LinOpBCType::Neumann,
+                     pmc_lo ? amrex::LinOpBCType::Neumann : amrex::LinOpBCType::Dirichlet},
+                    {amrex::LinOpBCType::Dirichlet,
+                     pmc_hi ? amrex::LinOpBCType::Neumann : amrex::LinOpBCType::Dirichlet});
                 linop.prepareForSolve();
                 linop.apply(0, 0, actual, exact,
                             amrex::MLLinOp::BCMode::Homogeneous,
@@ -159,6 +175,46 @@ main (int argc, char** argv) {
                         error.norminf() / source.norminf();
                     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(residual < 1.1e-12,
                                                      "true residual failed");
+                    if (green) {
+                        amrex::Gpu::streamSynchronize();
+                        amrex::Real const green_start = amrex::second();
+                        green->Solve(green_solution, source);
+                        amrex::Gpu::streamSynchronize();
+                        amrex::Real const green_time = amrex::second() - green_start;
+                        linop.apply(0, 0, actual, green_solution,
+                            amrex::MLLinOp::BCMode::Homogeneous,
+                            amrex::MLLinOp::StateMode::Solution);
+                        amrex::MultiFab::LinComb(error, 1., actual, 0, -1., source,
+                                                0, 0, 1, 0);
+                        amrex::Real const green_residual = error.norminf() / source.norminf();
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(green_residual < 1.1e-12,
+                                                        "Green inverse true residual failed");
+                        amrex::MultiFab::LinComb(error, 1., green_solution, 0, -1., solution,
+                                                0, 0, 1, 0);
+                        amrex::Real const green_error = error.norminf() / solution.norminf();
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(green_error < 1.e-9,
+                                                        "Green and multigrid inverses differ");
+                        amrex::Print() << std::setprecision(12)
+                            << "GREEN_BENCH nr=" << nr << " nz=" << nz << " grid=" << grid
+                            << " masked=" << masked << " semi=" << semi << " repeat=" << rep
+                            << " solve_seconds=" << green_time << " residual=" << green_residual
+                            << " relative_map_error=" << green_error << "\n";
+                        for (amrex::MFIter mfi(error); mfi.isValid(); ++mfi) {
+                            auto const e = error.array(mfi);
+                            auto const u = green_solution.const_array(mfi);
+                            amrex::ParallelFor(mfi.validbox(),
+                                               [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                               {
+                                                   e(i, j, k) = i == 0 || i == nr ||
+                                                                        (j == 0 && !pmc_lo) ||
+                                                                        (j == nz && !pmc_hi)
+                                                                    ? u(i, j, k)
+                                                                    : 0.;
+                                               });
+                        }
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(error.norminf() == 0.,
+                                                        "Green inverse changes fixed trace");
+                    }
                     amrex::Real solution_error = 0.;
                     if (!masked) {
                         amrex::Real const scale = std::pow(1.001, rep);
@@ -189,14 +245,15 @@ main (int argc, char** argv) {
                     for (amrex::MFIter mfi(error); mfi.isValid(); ++mfi) {
                         auto const e = error.array(mfi);
                         auto const u = solution.const_array(mfi);
-                        amrex::ParallelFor(
-                            mfi.validbox(),
-                            [=] AMREX_GPU_DEVICE(int i, int j, int k) {
-                                e(i, j, k) =
-                                    (i == 0 || i == nr || j == 0 || j == nz)
-                                        ? u(i, j, k)
-                                        : 0.;
-                            });
+                        amrex::ParallelFor(mfi.validbox(),
+                                           [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                                           {
+                                               e(i, j, k) =
+                                                   (i == 0 || i == nr || (j == 0 && !pmc_lo) ||
+                                                    (j == nz && !pmc_hi))
+                                                       ? u(i, j, k)
+                                                       : 0.;
+                                           });
                     }
                     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(error.norminf() == 0.,
                                                      "fixed boundary changed");
@@ -213,6 +270,12 @@ main (int argc, char** argv) {
                         << " solution_error=" << solution_error << "\n";
                 }
             }
+        }
+        if (green) {
+            rhs.setVal(0.);
+            green->Solve(green_solution, rhs);
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(green_solution.norminf() == 0.,
+                                             "Green inverse reuses a stale source");
         }
     }
     amrex::Finalize();

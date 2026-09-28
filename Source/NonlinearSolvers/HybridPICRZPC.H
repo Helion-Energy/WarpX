@@ -68,6 +68,7 @@ class HybridPICRZPC : public Preconditioner<T, Ops> {
         pp.query("sigma_w", op.sigma_w);
         pp.query("pair_whistler_defect", op.whistler_defect);
         pp.query("verbose", op.verbose);
+        pp.query("rz_block_symbol", op.rz_block_symbol);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             inner_max >= 0 && inner_max <= 63 && inner_rtol > 0. &&
                 inner_rtol < 1. && vcycles > 0 && floor >= 4 && op.sigma > 0. &&
@@ -150,6 +151,7 @@ class HybridPICRZPC : public Preconditioner<T, Ops> {
         bool const eta_j = h->m_resistivity_has_J_dependence,
                    hyper_b = h->m_hyper_resistivity_has_B_dependence;
         bool const has_eta = h->m_eta_expression != "0.0";
+        auto const end_region = h->EndRegion(0);
         auto const eta = h->m_eta;
         auto const eta_h = h->m_eta_h;
         auto const eta_te = h->m_eta_te;
@@ -299,7 +301,9 @@ class HybridPICRZPC : public Preconditioner<T, Ops> {
                     if (conductor && raw <= 0.) {
                         gate = 0.;
                     }
-                    RT const ir = den > 0. ? gate / den : 0.;
+                    RT const end_weight = end_region.Weight(i,j,k,dest);
+                    RT const force_weight = end_region.holmstrom ? 1.-end_weight : 1.;
+                    RT const ir = den > 0. ? gate * force_weight / den : 0.;
                     v(i, j, k, HybridPICRZOperator::Hall) =
                         hall ? theta_dt * ir / PhysConst::mu0 : 0.;
                     v(i, j, k, HybridPICRZOperator::InvRho) = ir;
@@ -311,6 +315,8 @@ class HybridPICRZPC : public Preconditioner<T, Ops> {
                                                        time)
                                               : eta(raw, jmag, time))
                                 : 0.;
+                    v(i, j, k, HybridPICRZOperator::Eta) +=
+                        theta_dt / PhysConst::mu0 * end_region.resistivity * end_weight;
                     v(i, j, k, HybridPICRZOperator::Hyper) =
                         hyper ? theta_dt / PhysConst::mu0 *
                                     eta_h(raw, hyper_b ? bm : 0.)

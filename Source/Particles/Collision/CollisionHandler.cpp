@@ -130,6 +130,14 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
 void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc)
 {
 
+#ifndef WARPX_QED
+    // An empty collision stage must preserve the particle state. In curvilinear
+    // geometries the frame rotation below otherwise changes momenta through
+    // roundoff even though no collision acts. Keep explicit auxiliary work and
+    // the QED virtual-photon path under their existing execution rules.
+    if (allcollisions.empty() && !m_use_global_debye_length) { return; }
+#endif
+
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     /* In RZ and RCYLINDER geometry, macroparticles can collide with other macroparticles
      * in the same *cylindrical* cell, or in RSPHERE the same *spherical* shell.

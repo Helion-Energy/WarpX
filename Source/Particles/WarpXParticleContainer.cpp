@@ -8,8 +8,10 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "WarpXParticleContainer.H"
+#include <AMReX_ParticleIO.H>
 
 #include "ablastr/particles/DepositCharge.H"
+#include "Particles/Deposition/EsirkepovMassMatrices.H"
 #include "Deposition/ChargeDeposition.H"
 #include "Deposition/CurrentDeposition.H"
 #include "Deposition/VarianceAccumulationBuffer.H"
@@ -158,6 +160,54 @@ WarpXParticleContainer::WarpXParticleContainer (AmrCore* amr_core, int ispecies,
     m_boundary_conditions.BuildReflectionModelParsers();
 
     pp_particles.query("crop_on_PEC_boundary", m_crop_on_PEC_boundary);
+}
+
+void
+WarpXParticleContainer::RedistributeAllAttributes (
+    bool local, amrex::IntVect const& max_cells)
+{
+    // Both copies finish before any mutation. SetParticleSize only recomputes
+    // native component counts and packet sizes; restoration does not allocate.
+    struct RestoreCommunication {
+        WarpXParticleContainer& owner;
+        amrex::Vector<int> real, integer;
+        ~RestoreCommunication () noexcept {
+            owner.h_redistribute_real_comp.swap(real);
+            owner.h_redistribute_int_comp.swap(integer);
+            owner.SetParticleSize();
+        }
+    } restore{*this, h_redistribute_real_comp, h_redistribute_int_comp};
+
+    std::fill(h_redistribute_real_comp.begin(), h_redistribute_real_comp.end(), 1);
+    std::fill(h_redistribute_int_comp.begin(), h_redistribute_int_comp.end(), 1);
+    SetParticleSize();
+    if (local) {
+        Base::Redistribute(/*lev_min=*/0, /*lev_max=*/0, /*nGrow=*/amrex::IntVect(0),
+                           /*local=*/true, /*max_cells_moved=*/max_cells);
+    } else {
+        Base::Redistribute();
+    }
+}
+
+void
+WarpXParticleContainer::RestartAllAttributes (
+    std::string const& directory, std::string const& name)
+{
+    struct RestoreCommunication {
+        WarpXParticleContainer& owner;
+        amrex::Vector<int> real, integer;
+        ~RestoreCommunication () noexcept {
+            owner.h_redistribute_real_comp.swap(real);
+            owner.h_redistribute_int_comp.swap(integer);
+            owner.SetParticleSize();
+        }
+    } restore{*this, h_redistribute_real_comp, h_redistribute_int_comp};
+    std::fill(h_redistribute_real_comp.begin(), h_redistribute_real_comp.end(), 1);
+    std::fill(h_redistribute_int_comp.begin(), h_redistribute_int_comp.end(), 1);
+    SetParticleSize();
+    // AMReX redistributes from its file layout before returning. Enabling
+    // attributes only in a later redistribution would already be too late.
+    Base::Restart(directory, name);
 }
 
 void
@@ -712,6 +762,11 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
 #else
                 const ParticleReal* zp_n_data = nullptr;
 #endif
+                amrex::GpuArray<ParticleReal const*,3> const chord={
+                    pti.GetAttribs("esirkepov_chord_x").dataPtr()+offset,
+                    pti.GetAttribs("esirkepov_chord_y").dataPtr()+offset,
+                    pti.GetAttribs("esirkepov_chord_z").dataPtr()+offset};
+                int const* const chord_valid=pti.GetiAttribs("esirkepov_chord_valid").dataPtr()+offset;
                 auto& uxp_n = pti.GetAttribs("ux_n");
                 auto& uyp_n = pti.GetAttribs("uy_n");
                 auto& uzp_n = pti.GetAttribs("uz_n");
@@ -722,7 +777,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp_n.dataPtr() + offset, uyp_n.dataPtr() + offset, uzp_n.dataPtr() + offset,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
-                        WarpX::n_rz_azimuthal_modes);
+                        WarpX::n_rz_azimuthal_modes,chord,chord_valid);
                 } else if (WarpX::nox == 2){
                     doChargeConservingDepositionShapeNImplicit<2>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -730,7 +785,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp_n.dataPtr() + offset, uyp_n.dataPtr() + offset, uzp_n.dataPtr() + offset,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
-                        WarpX::n_rz_azimuthal_modes);
+                        WarpX::n_rz_azimuthal_modes,chord,chord_valid);
                 } else if (WarpX::nox == 3){
                     doChargeConservingDepositionShapeNImplicit<3>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -738,7 +793,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp_n.dataPtr() + offset, uyp_n.dataPtr() + offset, uzp_n.dataPtr() + offset,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
-                        WarpX::n_rz_azimuthal_modes);
+                        WarpX::n_rz_azimuthal_modes,chord,chord_valid);
                 } else if (WarpX::nox == 4){
                     doChargeConservingDepositionShapeNImplicit<4>(
                         xp_n_data, yp_n_data, zp_n_data,
@@ -746,7 +801,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         uxp_n.dataPtr() + offset, uyp_n.dataPtr() + offset, uzp_n.dataPtr() + offset,
                         uxp.dataPtr() + offset, uyp.dataPtr() + offset, uzp.dataPtr() + offset, ion_lev,
                         jx_arr, jy_arr, jz_arr, np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, q,
-                        WarpX::n_rz_azimuthal_modes);
+                        WarpX::n_rz_azimuthal_modes,chord,chord_valid);
                 }
             }
         } else if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Villasenor) {
@@ -975,7 +1030,7 @@ WarpXParticleContainer::DepositMassMatrices (WarpXParIter& pti, const RealVector
     if (np_to_deposit == 0) { return; }
 
     // If user decides not to deposit
-    if (do_not_deposit) { return; }
+    if (do_not_deposit || getCharge() == 0.0) { return; }
 
     // Number of guard cells for local deposition of J
     const WarpX& warpx = WarpX::GetInstance();
@@ -1128,9 +1183,8 @@ WarpXParticleContainer::DepositMassMatrices (WarpXParIter& pti, const RealVector
         domain_double[idim][1] = static_cast<double>(domain_box.bigEnd(idim) - tilebox.smallEnd(idim));
     }
 
-    if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Esirkepov ||
-        WarpX::current_deposition_algo == CurrentDepositionAlgo::Vay) {
-        WARPX_ABORT_WITH_MESSAGE("mass matrices cannot be used with Esirkepov or Vay depositions.");
+    if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Vay) {
+        WARPX_ABORT_WITH_MESSAGE("mass matrices cannot be used with Vay deposition.");
     }
     if (WarpX::grid_type == GridType::Collocated) {
         WARPX_ABORT_WITH_MESSAGE("mass matrices cannot be used with a collocated grid.");
@@ -1292,6 +1346,36 @@ WarpXParticleContainer::DepositMassMatrices (WarpXParIter& pti, const RealVector
                     np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping, lo, qs, mass);
         }
 
+    } else if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Esirkepov) {
+#if defined(WARPX_DIM_RZ)
+        AMREX_ALWAYS_ASSERT(full_mass_matrices && nsuborbits == nullptr);
+        AMREX_ALWAYS_ASSERT(WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving);
+        AMREX_ALWAYS_ASSERT(!do_field_ionization && !m_crop_on_PEC_boundary);
+        AMREX_ALWAYS_ASSERT(getExternalEB.isNoOp() &&
+                            Bx_ext == 0.0 && By_ext == 0.0 && Bz_ext == 0.0);
+        int const width = static_cast<int>(std::sqrt(Sxx->nComp()));
+        AMREX_ALWAYS_ASSERT(width*width == Sxx->nComp());
+        amrex::GpuArray<amrex::Array4<amrex::Real>,9> const matrices{
+            Sxx_arr,Sxy_arr,Sxz_arr,Syx_arr,Syy_arr,Syz_arr,Szx_arr,Szy_arr,Szz_arr};
+        amrex::GpuArray<amrex::Array4<amrex::Real const>,3> const magnetic{
+            Bx_arr,By_arr,Bz_arr};
+        amrex::GpuArray<amrex::IndexType,3> const types{Bx_type,By_type,Bz_type};
+        auto dispatch = [&]<int Order>() {
+            esirkepov_mm::Deposit<Order>(GetPosition,
+                pti.GetAttribs("x_n").dataPtr()+offset,
+                pti.GetAttribs("y_n").dataPtr()+offset,
+                pti.GetAttribs("z_n").dataPtr()+offset,wp.dataPtr()+offset,
+                uxp_n.dataPtr()+offset,uyp_n.dataPtr()+offset,uzp_n.dataPtr()+offset,
+                uxp.dataPtr()+offset,uyp.dataPtr()+offset,uzp.dataPtr()+offset,
+                matrices,magnetic,types,np_to_deposit,width,dt,dinv,xyzmin,lo,qs,mass);
+        };
+        if (WarpX::nox == 2) { dispatch.template operator()<2>(); }
+        else if (WarpX::nox == 3) { dispatch.template operator()<3>(); }
+        else if (WarpX::nox == 4) { dispatch.template operator()<4>(); }
+        else { WARPX_ABORT_WITH_MESSAGE("Esirkepov MM requires particle_shape>=2"); }
+#else
+        WARPX_ABORT_WITH_MESSAGE("Esirkepov mass matrices currently support RZ only");
+#endif
     } else { // Direct deposition
 
         // Note that Sij types are the same as Ji

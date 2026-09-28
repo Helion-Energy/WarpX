@@ -201,9 +201,124 @@ WarpX::SpectralSourceFreeFieldAdvance (amrex::Real start_time)
     amrex::MultiFab::Copy(*(current_fp[2]), j2, 0, 0, current_fp[2]->nComp(), current_fp[2]->nGrowVect());
 }
 
+namespace {
+warpx::implicit::ParticleStartView
+ParticleStart (WarpXParIter const& pti) {
+    warpx::implicit::ParticleStartView s;
+#if !defined(WARPX_DIM_1D_Z)
+    s.position[0] = pti.GetAttribs("x_n").dataPtr();
+#endif
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) ||                          \
+    defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    s.position[1] = pti.GetAttribs("y_n").dataPtr();
+#endif
+#if !defined(WARPX_DIM_RCYLINDER)
+    s.position[2] = pti.GetAttribs("z_n").dataPtr();
+#endif
+    s.momentum = {pti.GetAttribs("ux_n").dataPtr(),
+                  pti.GetAttribs("uy_n").dataPtr(),
+                  pti.GetAttribs("uz_n").dataPtr()};
+    return s;
+}
+} // namespace
+
 void
-WarpX::SaveParticlesAtImplicitStepStart ( )
-{
+WarpX::DiscardSavedImplicitParticleState () {
+    if (!m_implicit_particle_rollback_valid &&
+        m_implicit_particle_rollback.empty()) {
+        return;
+    }
+    amrex::Gpu::synchronize();
+    m_implicit_particle_rollback.clear();
+    m_implicit_particle_rollback_valid = false;
+}
+
+void
+WarpX::RestoreParticlesAtImplicitStepStart () {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_implicit_particle_rollback_valid,
+        "Particle rollback requires SaveParticlesAtImplicitStepStart(true)");
+    // Snapshot/restore are transaction boundaries across all particle streams.
+    amrex::Gpu::synchronize();
+    int valid = 1, species = 0;
+    std::size_t tiles = 0;
+    for (auto const& pc : *mypc) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            for (WarpXParIter pti(*pc, lev); pti.isValid(); ++pti) {
+                auto const key = std::array<int, 4>{species, lev, pti.index(),
+                                                    pti.LocalTileIndex()};
+                auto const it = m_implicit_particle_rollback.find(key);
+                auto const* nsub = pc->HasiAttrib("nsuborbits")
+                                       ? pti.GetiAttribs("nsuborbits").dataPtr()
+                                       : nullptr;
+                if (it == m_implicit_particle_rollback.end() ||
+                    !it->second.Matches(
+                        pti.numParticles(),
+                        pti.GetStructOfArrays().GetIdCPUData().data(),
+                        ParticleStart(pti), nsub)) {
+                    valid = 0;
+                }
+                ++tiles;
+            }
+        }
+        ++species;
+    }
+    if (tiles != m_implicit_particle_rollback.size()) {
+        valid = 0;
+    }
+    amrex::ParallelDescriptor::ReduceIntMin(valid);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        valid, "Implicit particle rollback identity/topology changed; restore "
+               "before boundary actions or redistribution");
+    species = 0;
+    for (auto const& pc : *mypc) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            for (WarpXParIter pti(*pc, lev); pti.isValid(); ++pti) {
+                auto const key = std::array<int, 4>{species, lev, pti.index(),
+                                                    pti.LocalTileIndex()};
+                auto* nsub = pc->HasiAttrib("nsuborbits")
+                                 ? pti.GetiAttribs("nsuborbits").dataPtr()
+                                 : nullptr;
+                m_implicit_particle_rollback.at(key).Restore(
+                    SetParticlePosition(pti),
+                    {pti.GetAttribs(PIdx::ux).dataPtr(),
+                     pti.GetAttribs(PIdx::uy).dataPtr(),
+                     pti.GetAttribs(PIdx::uz).dataPtr()},
+                    nsub);
+            }
+        }
+        ++species;
+    }
+    // The same fixed start can be restored again until discarded or recaptured.
+    amrex::Gpu::synchronize();
+}
+
+void
+WarpX::SaveParticlesAtImplicitStepStart (bool const capture_rollback) {
+    DiscardSavedImplicitParticleState();
+    if (capture_rollback) {
+        amrex::Gpu::synchronize();
+        int species = 0;
+        for (auto const& pc : *mypc) {
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (WarpXParIter pti(*pc, lev); pti.isValid(); ++pti) {
+                    auto const key = std::array<int, 4>{
+                        species, lev, pti.index(), pti.LocalTileIndex()};
+                    auto const* nsub =
+                        pc->HasiAttrib("nsuborbits")
+                            ? pti.GetiAttribs("nsuborbits").dataPtr()
+                            : nullptr;
+                    m_implicit_particle_rollback[key].Capture(
+                        pti.numParticles(),
+                        pti.GetStructOfArrays().GetIdCPUData().data(),
+                        GetParticlePosition(pti), ParticleStart(pti), nsub);
+                }
+            }
+            ++species;
+        }
+        amrex::Gpu::synchronize();
+    }
+
     // The implicit advance routines require the particle velocity
     // and position values at the beginning of the step to compute the
     // time-centered position and velocity needed for the implicit stencil.
@@ -244,12 +359,14 @@ WarpX::SaveParticlesAtImplicitStepStart ( )
                 // Check if nsuborbits is present, and if so it is set to 1
                 int *nsuborbits = (pc->HasiAttrib("nsuborbits") ? pti.GetiAttribs("nsuborbits").dataPtr() : nullptr);
 
+                int* chord_valid=pti.GetiAttribs("esirkepov_chord_valid").dataPtr();
                 const long np = pti.numParticles();
 
                 amrex::ParallelFor( np, [=] AMREX_GPU_DEVICE (long ip)
                 {
                     amrex::ParticleReal xp, yp, zp;
                     getPosition(ip, xp, yp, zp);
+                    chord_valid[ip]=0;
 
 #if !defined(WARPX_DIM_1D_Z)
                     x_n[ip] = xp;
@@ -278,6 +395,10 @@ WarpX::SaveParticlesAtImplicitStepStart ( )
 
     }
 
+    if (capture_rollback) {
+        amrex::Gpu::synchronize();
+        m_implicit_particle_rollback_valid = true;
+    }
 }
 
 void

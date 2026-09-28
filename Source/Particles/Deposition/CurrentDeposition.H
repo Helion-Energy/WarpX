@@ -9,6 +9,7 @@
 #define WARPX_CURRENTDEPOSITION_H_
 
 #include "Particles/Deposition/SharedDepositionUtils.H"
+#include "Particles/Deposition/EsirkepovShapeDifference.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/Pusher/UpdatePosition.H"
 #include "Particles/ShapeFactors.H"
@@ -806,6 +807,24 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
             double const z_old = z_new - dt*dinv.z*uzp[ip]*gaminv;
 #endif
 
+            // Preserve the physical chord before subtraction of absolute
+            // endpoints. This is the same ballistic orbit used above.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+            double const dcx=dt*uxp[ip]*gaminv,dcy=dt*uyp[ip]*gaminv;
+            double const dx_shape=(rp_new+rp_old>0.)
+                ? (dcx*(2.*xp_old+dcx)+dcy*(2.*yp_old+dcy))/(rp_new+rp_old)*dinv.x : 0.;
+#elif defined(WARPX_DIM_RSPHERE)
+            double const dx_shape=x_new-x_old;
+#elif !defined(WARPX_DIM_1D_Z)
+            double const dx_shape=dt*dinv.x*uxp[ip]*gaminv;
+#endif
+#if defined(WARPX_DIM_3D)
+            double const dy_shape=dt*dinv.y*uyp[ip]*gaminv;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+            double const dz_shape=dt*dinv.z*uzp[ip]*gaminv;
+#endif
+
             // Check whether the particle is close to the EB at the old and new position
             bool reduce_shape_old, reduce_shape_new;
 #ifdef AMREX_USE_CUDA
@@ -961,7 +980,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                 for (int j=djl; j<=depos_order+2-dju; j++) {
                     amrex::Real sdxi = 0._rt;
                     for (int i=dil; i<=depos_order+1-diu; i++) {
-                        sdxi += wq*invdtd.x*(sx_old[i] - sx_new[i])*(
+                        sdxi += wq*invdtd.x*((reduce_shape_old || reduce_shape_new) ? sx_old[i] - sx_new[i] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape))*(
                             one_third*(sy_new[j]*sz_new[k] + sy_old[j]*sz_old[k])
                            +one_sixth*(sy_new[j]*sz_old[k] + sy_old[j]*sz_new[k]));
                         amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdxi);
@@ -972,7 +991,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                 for (int i=dil; i<=depos_order+2-diu; i++) {
                     amrex::Real sdyj = 0._rt;
                     for (int j=djl; j<=depos_order+1-dju; j++) {
-                        sdyj += wq*invdtd.y*(sy_old[j] - sy_new[j])*(
+                        sdyj += wq*invdtd.y*((reduce_shape_old || reduce_shape_new) ? sy_old[j] - sy_new[j] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(y_old,y_new,j_old,j_new,j_new-1+j,sy_old[j],sy_new[j],dy_shape))*(
                             one_third*(sx_new[i]*sz_new[k] + sx_old[i]*sz_old[k])
                            +one_sixth*(sx_new[i]*sz_old[k] + sx_old[i]*sz_new[k]));
                         amrex::Gpu::Atomic::AddNoRet( &Jy_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdyj);
@@ -983,7 +1002,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                 for (int i=dil; i<=depos_order+2-diu; i++) {
                     amrex::Real sdzk = 0._rt;
                     for (int k=dkl; k<=depos_order+1-dku; k++) {
-                        sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k])*(
+                        sdzk += wq*invdtd.z*((reduce_shape_old || reduce_shape_new) ? sz_old[k] - sz_new[k] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape))*(
                             one_third*(sx_new[i]*sy_new[j] + sx_old[i]*sy_old[j])
                            +one_sixth*(sx_new[i]*sy_old[j] + sx_old[i]*sy_new[j]));
                         amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdzk);
@@ -996,7 +1015,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
             for (int k=dkl; k<=depos_order+2-dku; k++) {
                 amrex::Real sdxi = 0._rt;
                 for (int i=dil; i<=depos_order+1-diu; i++) {
-                    sdxi += wq*invdtd.x*(sx_old[i] - sx_new[i])*0.5_rt*(sz_new[k] + sz_old[k]);
+                    sdxi += wq*invdtd.x*((reduce_shape_old || reduce_shape_new) ? sx_old[i] - sx_new[i] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape))*0.5_rt*(sz_new[k] + sz_old[k]);
                     amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, lo.y+k_new-1+k, 0, 0), sdxi);
 #if defined(WARPX_DIM_RZ)
                     Complex xy_mid = xy_mid0; // Throughout the following loop, xy_mid takes the value e^{i m theta}
@@ -1040,7 +1059,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
             for (int i=dil; i<=depos_order+2-diu; i++) {
                 Real sdzk = 0._rt;
                 for (int k=dkl; k<=depos_order+1-dku; k++) {
-                    sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k])*0.5_rt*(sx_new[i] + sx_old[i]);
+                    sdzk += wq*invdtd.z*((reduce_shape_old || reduce_shape_new) ? sz_old[k] - sz_new[k] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape))*0.5_rt*(sx_new[i] + sx_old[i]);
                     amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+i_new-1+i, lo.y+k_new-1+k, 0, 0), sdzk);
 #if defined(WARPX_DIM_RZ)
                     Complex xy_mid = xy_mid0; // Throughout the following loop, xy_mid takes the value e^{i m theta}
@@ -1066,7 +1085,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
             }
             amrex::Real sdzk = 0._rt;
             for (int k=dkl; k<=depos_order+1-dku; k++) {
-                sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k]);
+                sdzk += wq*invdtd.z*((reduce_shape_old || reduce_shape_new) ? sz_old[k] - sz_new[k] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape));
                 amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+k_new-1+k, 0, 0, 0), sdzk);
             }
 
@@ -1074,7 +1093,7 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
 
             amrex::Real sdri = 0._rt;
             for (int i=dil; i<=depos_order+1-diu; i++) {
-                sdri += wq*invdtd.x*(sx_old[i] - sx_new[i]);
+                sdri += wq*invdtd.x*((reduce_shape_old || reduce_shape_new) ? sx_old[i] - sx_new[i] : warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape));
                 amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, 0, 0, 0), sdri);
             }
             for (int i=dil; i<=depos_order+2-diu; i++) {
@@ -1089,6 +1108,26 @@ void doEsirkepovDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
         }
     );
 }
+
+/** Endpoint shape storage with arbitrary separation between old/new support.
+ * Used only by the implicit Esirkepov deposit. Bounds are checked against the
+ * actual current arrays; no fixed shifted-shape buffer can overflow when an
+ * implicit orbit spans several cells.
+ */
+template <int Order>
+struct IndexedEsirkepovShape
+{
+    double values[Order+1]{};
+    int first;
+    int origin;
+    AMREX_GPU_HOST_DEVICE explicit IndexedEsirkepovShape (double x, int base = 0)
+        : first(Compute_shape_factor<Order>{}(values,x)), origin(base) {}
+    AMREX_GPU_HOST_DEVICE double operator[] (int i) const
+    {
+        int const slot = origin+i-first;
+        return slot >= 0 && slot <= Order ? values[slot] : 0.0;
+    }
+};
 
 /**
  * \brief Esirkepov Current Deposition for thread thread_num for implicit scheme
@@ -1140,9 +1179,13 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
                                                  const amrex::GpuArray<amrex::GpuArray<bool,2>, AMREX_SPACEDIM> & do_cropping,
                                                  const amrex::Dim3 lo,
                                                  const amrex::Real q,
-                                                 [[maybe_unused]] const int n_rz_azimuthal_modes)
+                                                 [[maybe_unused]] const int n_rz_azimuthal_modes,
+                                                 amrex::GpuArray<amrex::ParticleReal const*,3> const orbit_chord = {nullptr,nullptr,nullptr},
+                                                 int const* const orbit_chord_valid = nullptr)
 {
     using namespace amrex;
+    bool const has_chord=orbit_chord[0] && orbit_chord[1] && orbit_chord[2];
+    AMREX_ALWAYS_ASSERT(has_chord || (!orbit_chord[0] && !orbit_chord[1] && !orbit_chord[2]));
 
     // Whether ion_lev is a null pointer (do_ionization=0) or a real pointer
     // (do_ionization=1)
@@ -1273,6 +1316,19 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             amrex::Real const vz = (-uxp_nph[ip]*costheta_mid*sinphi_mid - uyp_nph[ip]*sintheta_mid*sinphi_mid + uzp_nph[ip]*cosphi_mid)*gaminv;
 #endif
 
+            // Optional Cartesian full-step chord captured by the pusher
+            // before adding x_n. Reflection must supply its actual segmented
+            // chord; momentum substitution is not equivalent on bounce steps.
+#if !defined(WARPX_DIM_1D_Z)
+            double const x_uncropped=x_new;
+#endif
+#if defined(WARPX_DIM_3D)
+            double const y_uncropped=y_new;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+            double const z_uncropped=z_new;
+#endif
+
             // Crop the particles at the boundaries if it is absorbing.
             // Calculate the change in the length of the trajectory
             // so that the time step size can be appropriately scaled.
@@ -1294,11 +1350,39 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             ParticleUtils::crop_at_boundary(x_new, domain_double[0][0], domain_double[0][1], do_cropping[0]);
 #endif
 
+            bool chord_valid=has_chord && (!orbit_chord_valid || orbit_chord_valid[ip]);
+#if !defined(WARPX_DIM_1D_Z)
+            chord_valid=chord_valid && x_new==x_uncropped;
+#endif
+#if defined(WARPX_DIM_3D)
+            chord_valid=chord_valid && y_new==y_uncropped;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+            chord_valid=chord_valid && z_new==z_uncropped;
+#endif
+            // Cropped trajectories retain the exact maintained endpoint path.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+            double dx_shape=x_new-x_old;
+            if(chord_valid) {
+                double const dcx=orbit_chord[0][ip],dcy=orbit_chord[1][ip];
+                dx_shape=(rp_new+rp_old>0.)
+                    ? (dcx*(2.*xp_old+dcx)+dcy*(2.*yp_old+dcy))/(rp_new+rp_old)*dinv.x : 0.;
+            }
+#elif defined(WARPX_DIM_RSPHERE)
+            double const dx_shape=x_new-x_old;
+#elif !defined(WARPX_DIM_1D_Z)
+            double const dx_shape=chord_valid?orbit_chord[0][ip]*dinv.x:x_new-x_old;
+#endif
+#if defined(WARPX_DIM_3D)
+            double const dy_shape=chord_valid?orbit_chord[1][ip]*dinv.y:y_new-y_old;
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+            double const dz_shape=chord_valid?orbit_chord[2][ip]*dinv.z:z_new-z_old;
+#endif
+
             // --- Compute shape factors
             // Compute shape factors for position as they are now and at old positions
             // [ijk]_new: leftmost grid point that the particle touches
-            const Compute_shape_factor< depos_order > compute_shape_factor;
-            const Compute_shifted_shape_factor< depos_order > compute_shifted_shape_factor;
 
             // Shape factor arrays
             // Note that there are extra values above and below
@@ -1306,39 +1390,49 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             // which can be at a different grid location.
             // Keep these double to avoid bug in single precision
 #if !defined(WARPX_DIM_1D_Z)
-            double sx_new[depos_order + 3] = {0.};
-            double sx_old[depos_order + 3] = {0.};
-            const int i_new = compute_shape_factor(sx_new+1, x_new);
-            const int i_old = compute_shifted_shape_factor(sx_old, x_old, i_new);
+            IndexedEsirkepovShape<depos_order> sx_new(x_new);
+            const int i_new = sx_new.first;
+            sx_new.origin = i_new-1;
+            IndexedEsirkepovShape<depos_order> sx_old(x_old, i_new-1);
+            const int i_old = sx_old.first;
 #endif
 #if defined(WARPX_DIM_3D)
-            double sy_new[depos_order + 3] = {0.};
-            double sy_old[depos_order + 3] = {0.};
-            const int j_new = compute_shape_factor(sy_new+1, y_new);
-            const int j_old = compute_shifted_shape_factor(sy_old, y_old, j_new);
+            IndexedEsirkepovShape<depos_order> sy_new(y_new);
+            const int j_new = sy_new.first;
+            sy_new.origin = j_new-1;
+            IndexedEsirkepovShape<depos_order> sy_old(y_old, j_new-1);
+            const int j_old = sy_old.first;
 #endif
 #if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
-            double sz_new[depos_order + 3] = {0.};
-            double sz_old[depos_order + 3] = {0.};
-            const int k_new = compute_shape_factor(sz_new+1, z_new);
-            const int k_old = compute_shifted_shape_factor(sz_old, z_old, k_new);
+            IndexedEsirkepovShape<depos_order> sz_new(z_new);
+            const int k_new = sz_new.first;
+            sz_new.origin = k_new-1;
+            IndexedEsirkepovShape<depos_order> sz_old(z_old, k_new-1);
+            const int k_old = sz_old.first;
 #endif
 
             // computes min/max positions of current contributions
 #if !defined(WARPX_DIM_1D_Z)
-            int dil = 1, diu = 1;
-            if (i_old < i_new) { dil = 0; }
-            if (i_old > i_new) { diu = 0; }
+            int const dil = std::min(i_old,i_new)-i_new+1;
+            int const diu = i_new+1-std::max(i_old,i_new);
 #endif
 #if defined(WARPX_DIM_3D)
-            int djl = 1, dju = 1;
-            if (j_old < j_new) { djl = 0; }
-            if (j_old > j_new) { dju = 0; }
+            int const djl = std::min(j_old,j_new)-j_new+1;
+            int const dju = j_new+1-std::max(j_old,j_new);
 #endif
 #if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
-            int dkl = 1, dku = 1;
-            if (k_old < k_new) { dkl = 0; }
-            if (k_old > k_new) { dku = 0; }
+            int const dkl = std::min(k_old,k_new)-k_new+1;
+            int const dku = k_new+1-std::max(k_old,k_new);
+#endif
+
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+            int const irlo = lo.x+std::min(i_old,i_new);
+            int const irhi = lo.x+std::max(i_old,i_new)+depos_order;
+            int const izlo = lo.y+std::min(k_old,k_new);
+            int const izhi = lo.y+std::max(k_old,k_new)+depos_order;
+            AMREX_ALWAYS_ASSERT(Jx_arr.contains(irlo,izlo,0) && Jx_arr.contains(irhi-1,izhi,0));
+            AMREX_ALWAYS_ASSERT(Jy_arr.contains(irlo,izlo,0) && Jy_arr.contains(irhi,izhi,0));
+            AMREX_ALWAYS_ASSERT(Jz_arr.contains(irlo,izlo,0) && Jz_arr.contains(irhi,izhi-1,0));
 #endif
 
 #if defined(WARPX_DIM_3D)
@@ -1347,7 +1441,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
                 for (int j=djl; j<=depos_order+2-dju; j++) {
                     amrex::Real sdxi = 0._rt;
                     for (int i=dil; i<=depos_order+1-diu; i++) {
-                        sdxi += wq*invdtd.x*(sx_old[i] - sx_new[i])*(
+                        sdxi += wq*invdtd.x*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape)*(
                             one_third*(sy_new[j]*sz_new[k] + sy_old[j]*sz_old[k])
                            +one_sixth*(sy_new[j]*sz_old[k] + sy_old[j]*sz_new[k]));
                         amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdxi);
@@ -1358,7 +1452,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
                 for (int i=dil; i<=depos_order+2-diu; i++) {
                     amrex::Real sdyj = 0._rt;
                     for (int j=djl; j<=depos_order+1-dju; j++) {
-                        sdyj += wq*invdtd.y*(sy_old[j] - sy_new[j])*(
+                        sdyj += wq*invdtd.y*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(y_old,y_new,j_old,j_new,j_new-1+j,sy_old[j],sy_new[j],dy_shape)*(
                             one_third*(sx_new[i]*sz_new[k] + sx_old[i]*sz_old[k])
                            +one_sixth*(sx_new[i]*sz_old[k] + sx_old[i]*sz_new[k]));
                         amrex::Gpu::Atomic::AddNoRet( &Jy_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdyj);
@@ -1369,7 +1463,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
                 for (int i=dil; i<=depos_order+2-diu; i++) {
                     amrex::Real sdzk = 0._rt;
                     for (int k=dkl; k<=depos_order+1-dku; k++) {
-                        sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k])*(
+                        sdzk += wq*invdtd.z*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape)*(
                             one_third*(sx_new[i]*sy_new[j] + sx_old[i]*sy_old[j])
                            +one_sixth*(sx_new[i]*sy_old[j] + sx_old[i]*sy_new[j]));
                         amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+i_new-1+i, lo.y+j_new-1+j, lo.z+k_new-1+k), sdzk);
@@ -1382,7 +1476,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             for (int k=dkl; k<=depos_order+2-dku; k++) {
                 amrex::Real sdxi = 0._rt;
                 for (int i=dil; i<=depos_order+1-diu; i++) {
-                    sdxi += wq*invdtd.x*(sx_old[i] - sx_new[i])*0.5_rt*(sz_new[k] + sz_old[k]);
+                    sdxi += wq*invdtd.x*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape)*0.5_rt*(sz_new[k] + sz_old[k]);
                     amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, lo.y+k_new-1+k, 0, 0), sdxi);
 #if defined(WARPX_DIM_RZ)
                     Complex xy_mid = xy_mid0; // Throughout the following loop, xy_mid takes the value e^{i m theta}
@@ -1426,7 +1520,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             for (int i=dil; i<=depos_order+2-diu; i++) {
                 Real sdzk = 0._rt;
                 for (int k=dkl; k<=depos_order+1-dku; k++) {
-                    sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k])*0.5_rt*(sx_new[i] + sx_old[i]);
+                    sdzk += wq*invdtd.z*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape)*0.5_rt*(sx_new[i] + sx_old[i]);
                     amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+i_new-1+i, lo.y+k_new-1+k, 0, 0), sdzk);
 #if defined(WARPX_DIM_RZ)
                     Complex xy_mid = xy_mid0; // Throughout the following loop, xy_mid takes the value e^{i m theta}
@@ -1452,7 +1546,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
             }
             amrex::Real sdzk = 0._rt;
             for (int k=dkl; k<=depos_order+1-dku; k++) {
-                sdzk += wq*invdtd.z*(sz_old[k] - sz_new[k]);
+                sdzk += wq*invdtd.z*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(z_old,z_new,k_old,k_new,k_new-1+k,sz_old[k],sz_new[k],dz_shape);
                 amrex::Gpu::Atomic::AddNoRet( &Jz_arr(lo.x+k_new-1+k, 0, 0, 0), sdzk);
             }
 
@@ -1460,7 +1554,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
 
             amrex::Real sdri = 0._rt;
             for (int i=dil; i<=depos_order+1-diu; i++) {
-                sdri += wq*invdtd.x*(sx_old[i] - sx_new[i]);
+                sdri += wq*invdtd.x*warpx::particles::EsirkepovShapeDifferenceFromDisplacement<depos_order>(x_old,x_new,i_old,i_new,i_new-1+i,sx_old[i],sx_new[i],dx_shape);
                 amrex::Gpu::Atomic::AddNoRet( &Jx_arr(lo.x+i_new-1+i, 0, 0, 0), sdri);
             }
             for (int i=dil; i<=depos_order+2-diu; i++) {

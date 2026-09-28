@@ -3,7 +3,7 @@
  * This file is part of WarpX.
  *
  * Cartesian and collocated implementation imported from Prabhat Kumar,
- * impl_ext_vec_potential@c53f7d915b46386d2009889c5f5449171c99c23a.
+ * impl_ext_vec_potential@251f7bc2089a81d02cb33d7fcf33072943203bb3.
  * Native staggered RZ is implemented separately in HybridPICRZPC.H.
  *
  * License: BSD-3-Clause-LBNL
@@ -27,6 +27,7 @@
 #include <AMReX_BoxArray.H>
 #include <AMReX_DistributionMapping.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_GpuAtomic.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_iMultiFab.H>
 #include <AMReX_MultiFab.H>
@@ -39,10 +40,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <iomanip>
 
 /**
  * \brief Physics-based EMHD preconditioner for the theta-implicit hybrid-PIC
- *  solver, after L. Chacon, JCP 530 (2025) 113910.
+ *  solver, after L. Chacon, JCP 526 (2025) 113789.
  *
  *  With particles, density and electron pressure frozen, the only dependence
  *  of E_Ohm on the Newton iterate E is through Faraday's law,
@@ -109,8 +111,10 @@
  *
  *  Physical boundaries: PEC(_Insulator) faces are modeled exactly (identity
  *  tangential-E rows with dead columns and parity-mirrored delta-B/delta-J
- *  ghosts, matching the residual's boundary application; see ClosureClass);
- *  other non-periodic BCs fall back to a homogeneous zero-extension closure.
+ *  ghosts, matching the residual's boundary application; see ClosureClass),
+ *  and PMC (Neumann) faces likewise with the dual parities (identity
+ *  normal-E rows, tangential B zeroed on the wall); other non-periodic BCs
+ *  fall back to a homogeneous zero-extension closure.
  *  With embedded boundaries, EB-covered nodes are masked off the same nodal
  *  eb_update_E flag the residual's Ohm solves consume and act as identity
  *  rows.
@@ -189,7 +193,7 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  so periodic exchanges never wrap more than one period. */
         static constexpr int kNGrow = 3;
         /** Number of frozen coefficient components (see m_coef). */
-        static constexpr int kNCoef = 15;
+        static constexpr int kNCoef = 16;
 
         HybridPICPC () = default;
         ~HybridPICPC () override = default;
@@ -313,14 +317,21 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *            B parities, no wall write -- the copied field already
          *            satisfies its BCs);
          *   Coef   : the frozen coefficients (comps 0-2 = bhat with B-parity
-         *            signs, the rest even; mirror ghosts, no wall write). */
+         *            signs, the rest even; mirror ghosts, no wall write).
+         *  At a PMC (Neumann) face the residual applies the dual rules
+         *  (ApplyEfieldBoundary uses the B-parity kernel on E and
+         *  ApplyBfieldBoundary the E-parity kernel on B): the roles of the
+         *  normal and tangential components swap in every class above
+         *  (normal E zeroed on the wall and odd, tangential E even;
+         *  tangential B zeroed on the wall and odd, normal B even). */
         enum class ClosureClass { EField, BField, JField, BCoef, Coef };
 
         /** Apply the physical-boundary closure of class a_cls to a on level
-         *  a_lev (PEC/PEC_Insulator faces only; other non-periodic BCs keep
-         *  the zero-extension), then zero EB-covered nodes on the fine level
-         *  when an EB mask is present. The closure indexes components
-         *  RELATIVE to a_scomp (a_ncomp < 0: all remaining components). */
+         *  a_lev (PEC/PEC_Insulator and PMC/Neumann faces; other non-periodic
+         *  BCs keep the zero-extension), then zero EB-covered nodes on the
+         *  fine level when an EB mask is present. The closure indexes
+         *  components RELATIVE to a_scomp (a_ncomp < 0: all remaining
+         *  components). */
         void ApplyDomainClosure (MF& a, int a_lev, ClosureClass a_cls,
                                  int a_scomp = 0, int a_ncomp = -1) const;
 
@@ -343,6 +354,13 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  EB-covered nodes get a_out = a_in (the PC acts as the identity
          *  there; the covered residual rows are structurally zero). */
         void OverrideIdentityRows (T& a_out, const T& a_in) const;
+
+        /** verbose >= 2 diagnostic after an inner GMRES solve: prints where the
+         *  un-reduced inner residual r = b - M x lives (8 x 8 block shares of
+         *  ||r_E||^2 and ||b_E||^2 over the nodal domain, W/E split, boundary
+         *  planes). Public only because CUDA extended lambdas cannot live in
+         *  private member functions. */
+        void PrintInnerResidualMap ();
 
     private:
 
@@ -396,8 +414,8 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  Ohm gradient coupling dF_E/dpe the identity leg left entirely to
          *  GMRES). |ue| is clamped like the residual's pe advance, ue_c =
          *  c tanh(|ue|/c), c = implicit_evolve.pe_ue_cap_fac * dx_min /
-         *  (theta dt). Collocated Cartesian, in-loop pe closure only;
-         *  inert for E-only vectors. */
+         *  (theta dt). Collocated grids (Cartesian and RZ m = 0), in-loop pe
+         *  closure only; inert for E-only vectors. */
         bool m_pe_row_active = false;
         std::unique_ptr<MF> m_pe_row_scr;   //!< ghosted dpe scratch (1 comp)
         amrex::Real m_pe_ue_cap_fac = 1.0;
@@ -407,7 +425,8 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  conduction diffusion stencil -c_k del2(.) (c_k sized so its
          *  Nyquist diagonal equals the conduction part of D_p): the
          *  off-diagonal content the pointwise diagonal drops for both legs,
-         *  damped by the same D_p. Collocated Cartesian only. */
+         *  damped by the same D_p. Collocated grids (RZ: area-weighted radial
+         *  Laplacian, even parity across the axis). */
         int m_pe_row_sweeps = 0;
         std::unique_ptr<MF> m_pe_row_scr2;  //!< sweep iterate scratch (1 comp)
 
@@ -427,7 +446,7 @@ class HybridPICPC : public Preconditioner<T,Ops>
 
         bool m_is_defined = false;
         int m_mg_floor = 4;
-        bool m_verbose = false;
+        int m_verbose = 0;
         /** Per level: single-kernel ghost fill eligible (see FillGhosts). */
         std::vector<bool> m_fastfill_ok;
         /** True when the level solves need no pre-zeroed x: the collocated
@@ -465,7 +484,16 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  comp 10   : pe-row diagonal D_p - 1 (level 0 only),
          *  comp 11-13: theta*dt ue0 = theta*dt (J_i - J_plasma)/rho_e
          *              (pair convection),
-         *  comp 14   : local W-hat scale s_W = max(c_w, 1/l2) (pair). */
+         *  comp 14   : local W-hat scale s_W = max(c_w, 1/l2) (pair),
+         *  comp 15   : row mask, 1 at solved nodes and 0 at EB-covered nodes
+         *              (set to 1 in Update, zeroed with the other
+         *              coefficients by the EB closure, injected to the coarse
+         *              levels): the pair couplings tc/kk and the iterates are
+         *              multiplied by it so covered rows are identity rows on
+         *              every level while the first-curl F stays live there
+         *              (the residual's Faraday update is not EB-masked, so
+         *              the wall-adjacent delta-J does read the covered
+         *              delta-B). */
         std::vector<std::unique_ptr<MF>> m_coef;
 
         /** Per level (all 3-component): scaled W-half iterate (kNGrow
@@ -500,10 +528,11 @@ class HybridPICPC : public Preconditioner<T,Ops>
         int m_dot_nblocks_total = 0;
 
         /** Physical-BC closure state: per index dimension and side, whether
-         *  the face is a PEC(_Insulator) wall the closure must model; the
-         *  index-dim -> vector-component map; and the EB mask (the nodal
-         *  eb_update_E flag on the collocated grid; nullptr without EB). */
-        bool m_has_pec_wall = false;
+         *  the face is a PEC(_Insulator) or PMC (Neumann) wall the closure
+         *  must model; the index-dim -> vector-component map; and the EB mask
+         *  (the nodal eb_update_E flag on the collocated grid; nullptr
+         *  without EB). */
+        bool m_has_wall = false;
         /** RZ: the r-lo face is the symmetry axis (rmin == 0). */
         bool m_has_axis = false;
         /** Staggered (Yee) grid: solver-vector components carry their
@@ -513,6 +542,17 @@ class HybridPICPC : public Preconditioner<T,Ops>
          *  that maps to component c (m_dim2comp) and nodal elsewhere. */
         bool m_staggered = false;
         bool m_wall_pec[AMREX_SPACEDIM][2] = {};
+        /** hybrid_pic_model.pec_normal_E_from_interior on the collocated grid: the
+         *  residual takes the wall-normal E at a PEC wall node from the first interior
+         *  node, so that row is an identity row (dead column) in the preconditioner as
+         *  well, like the tangential rows. */
+        bool m_pec_normal_from_interior = false;
+        /** PMC (Neumann) faces: modeled with the dual parities (collocated
+         *  grid; the staggered path requires periodic BCs). */
+        bool m_wall_pmc[AMREX_SPACEDIM][2] = {};
+        /** pc_hybrid_pic.pmc_closure (default true): model PMC faces; false
+         *  keeps the zero-extension fallback there (attribution A/B). */
+        bool m_pmc_closure = true;
         /** Non-periodic faces under the zero-extension fallback: on the
          *  staggered grid the hi-side wall plane of components nodal along
          *  the face normal lives in the container's ghost region and is not

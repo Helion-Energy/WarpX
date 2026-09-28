@@ -236,7 +236,7 @@ main (int argc, char** argv)
                              .5 * (r(i, j, k) + r(q[0], q[1], q[2])) < floor) &&
                             !(f && f(i, j, k) == 0);
                         for (int c = 0; c < 3; ++c) {
-                            if (!per[c] && (p[c] <= lo[c] || p[c] >= hi[c])) {
+                            if (!per[c] && c != d && (p[c] <= lo[c] || p[c] >= hi[c])) {
                                 free = false;
                             }
                         }
@@ -283,7 +283,7 @@ main (int argc, char** argv)
                         !global_vacuum &&
                         .5 * (r(i, j, k) + r(q[0], q[1], q[2])) >= floor;
                     for (int c = 0; c < 3; ++c) {
-                        if (!per[c] && (p[c] <= lo[c] || p[c] >= hi[c])) {
+                        if (!per[c] && c != d && (p[c] <= lo[c] || p[c] >= hi[c])) {
                             fixed = true;
                         }
                     }

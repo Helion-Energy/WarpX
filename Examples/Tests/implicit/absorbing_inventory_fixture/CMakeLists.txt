@@ -1,0 +1,47 @@
+cmake_minimum_required(VERSION 3.24)
+project(WarpXAbsorbingInventoryFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(INVENTORY_GEOMETRY RZ CACHE STRING "RZ or 3D")
+if(INVENTORY_GEOMETRY STREQUAL RZ)
+    set(dim 2)
+    set(zindex 1)
+else()
+    set(dim 3)
+    set(zindex 2)
+endif()
+enable_testing()
+add_executable(test_absorbing_inventory test_absorbing_inventory.cpp
+    ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/AbsorbingElectronInventory.cpp
+    ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/KineticThermalMoments.cpp)
+target_link_libraries(test_absorbing_inventory PRIVATE AMReX::amrex_${dim}d)
+target_compile_features(test_absorbing_inventory PRIVATE cxx_std_20)
+target_include_directories(test_absorbing_inventory PRIVATE ${WARPX_SOURCE}/Source)
+target_compile_definitions(test_absorbing_inventory PRIVATE
+    WARPX_DIM_${INVENTORY_GEOMETRY} WARPX_ZINDEX=${zindex})
+if(AMReX_GPU_BACKEND STREQUAL "CUDA")
+    enable_language(CUDA)
+    include(AMReXTargetHelpers)
+    setup_target_for_cuda_compilation(test_absorbing_inventory)
+endif()
+foreach(grid IN ITEMS 4 64)
+    add_test(NAME inventory_algebra_grid${grid}
+        COMMAND test_absorbing_inventory test.case=algebra test.grid=${grid})
+    set_tests_properties(inventory_algebra_grid${grid}
+        PROPERTIES TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+endforeach()
+set(axes 0)
+if(INVENTORY_GEOMETRY STREQUAL RZ)
+    list(APPEND axes 1)
+endif()
+foreach(grid IN ITEMS 4 64)
+    foreach(periodic IN ITEMS 0 1)
+        foreach(axis IN LISTS axes)
+            add_test(NAME inventory_moments_grid${grid}_periodic${periodic}_axis${axis}
+                COMMAND test_absorbing_inventory test.case=moments test.grid=${grid}
+                    test.periodic=${periodic} test.axis=${axis})
+            set_tests_properties(inventory_moments_grid${grid}_periodic${periodic}_axis${axis}
+                PROPERTIES TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endforeach()

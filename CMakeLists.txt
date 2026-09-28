@@ -216,6 +216,9 @@ endif()
 include(CTest)
 
 
+include(${WarpX_SOURCE_DIR}/cmake/NativePairedPreciseCuda.cmake)
+warpx_prepare_paired_precise_cuda()
+
 # Dependencies ################################################################
 #
 
@@ -565,7 +568,9 @@ foreach(D IN LISTS WarpX_DIMS)
 
     if(ABLASTR_FFT)
         target_link_libraries(ablastr_${SD} PUBLIC WarpX::thirdparty::FFT)
-        if(D STREQUAL "RZ")
+        # The RZ spectral field solver needs Hankel-transform BLAS/LAPACK.
+        # Enabling only the FFT wrappers (e.g. bounded Darwin recovery) does not.
+        if(D STREQUAL "RZ" AND WarpX_FFT)
             target_link_libraries(ablastr_${SD} PUBLIC blaspp)
             target_link_libraries(ablastr_${SD} PUBLIC lapackpp)
 
@@ -895,3 +900,6 @@ endforeach()
 # Status Summary for Build Options ############################################
 #
 warpx_print_summary()
+
+# Last: audit all generated target commands, including dependencies.
+warpx_finalize_paired_precise_cuda()

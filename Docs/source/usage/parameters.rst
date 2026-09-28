@@ -328,6 +328,61 @@ Overall simulation parameters
         - ``implicit_evolve.use_mass_matrices_jacobian`` (``bool``, default: false).
           When ``true``, the plasma current density is computed using the mass matrices during the linear stage of PS-JFNK, replacing direct particle calculations. This can enable large speed ups for simulations with many particles.
 
+          - ``implicit_evolve.mass_matrices_density_projection`` (``bool``, default: true when the hybrid solver uses the MM Jacobian).
+            In the theta-implicit hybrid solver, predict the midpoint ion charge density during
+            linear evaluations from the continuity response
+            :math:`\rho_{i,1/2}=\rho_{i,1/2,0}-(\Delta t/2)\nabla_h\cdot(\mathbf J_i-\mathbf J_{i,0})`.
+            The reference current and density are the synchronized full particle deposit of the
+            current nonlinear iterate. Anchoring the prediction preserves that residual at zero
+            perturbation. With Esirkepov deposition, the nonlinear midpoint charge is the
+            average of direct deposits at the old and virtual endpoint positions, rather
+            than a deposit at the midpoint position. This matches the endpoint continuity
+            equation used by the current. With legacy Direct deposition the anchored
+            response is an approximation, since its current does not conserve charge exactly.
+            No particles are pushed and no elliptic solve is added by this projection.
+            Ohm's law consumes the live midpoint density. With electron energy, the segregated
+            thermal solve is required (and selected by default); pressure follows the density
+            at the held temperature, while the thermal particle advance remains outside GMRES.
+            True vacuum stays zero. The prediction is clipped only at zero charge; positive
+            sub-floor charge retains its two-sided response. Ohm and thermal density floors
+            are applied by their consumers, not by the continuity projection.
+            Current support is a single level without EB, a scalar density (m=0 in RZ), no
+            particle suborbits, and reflecting or periodic particle boundaries (plus the RZ axis).
+            Absorbing particles at PMC field boundaries (including the ``neumann`` alias)
+            are also supported: the existing charge/current deposition folds have the same
+            parity as a reflecting wall. Particle removal at the accepted endpoint retains
+            the standard engine treatment; this predictor describes trial-orbit continuity.
+            Set false only for a diagnostic comparison with the current-only MM path.
+            Other implicit electromagnetic solvers are unchanged.
+
+            The Esirkepov MM path currently supports single-level RZ m=0, no EB,
+            ``algo.particle_shape >= 2``, ``algo.field_gathering = momentum-conserving``,
+            ``implicit_evolve.theta = 0.5``, and ``warpx.use_filter = 0``. Its matrix
+            columns refer to the nodal gather fields and all nonsymmetric bands are
+            stored. Full-step particle orbits must converge and fit inside the allocated
+            deposition guards; ``particles.max_grid_crossings`` controls guard capacity.
+            Particle suborbits, orbit reflection inside the pusher, fused matrix deposition,
+            and legacy symmetric matrix boundary folding are
+            not supported on this path. Existing Direct and Villasenor paths remain
+            available. The default matrix-density response can be disabled for diagnosis
+            without changing the conservative nonlinear endpoint-average density.
+
+          - ``implicit_evolve.mass_matrices_deposit_interval`` (``integer``, default: 1).
+            Optional quasi-Newton tangent reuse within a Newton solve. Rebuild every N
+            linearizations, always at solve entry, after a rejected direction, or when dt
+            changes. The nonlinear residual, reference current, electric field and density
+            still refresh at each iterate. Requires separate (not fused) deposition without suborbits.
+            The default rebuilds at every linearization. Reuse needs problem-specific
+            convergence and total-time qualification. Cadence restarts after each actual rebuild.
+
+          - ``implicit_evolve.mass_matrices_reuse_within_step`` (``bool``, default: false).
+            In the theta-implicit hybrid solver, allow that bounded tangent reuse across
+            the nested thermal and longitudinal Newton solves within one timestep.
+            The cadence counts linearizations across solve entries. Every physical advance,
+            dt or step-time change, explicit refresh and rejected direction invalidates
+            the cache. Full residual deposits and their affine current/density reference
+            always refresh. This option requires the MM Jacobian and is experimental.
+
           - ``implicit_evolve.fused_mass_matrices_deposit`` (``bool``, default: false).
             When mass matrices are in use (Jacobian or preconditioner), deposit them inside the particle
             push-and-deposit pass of the nonlinear residual evaluation the linear solve linearizes about, in the
@@ -362,6 +417,14 @@ Overall simulation parameters
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
           Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, ``pc_hybrid_pic``, ``pc_block_banded``, or ``pc_curlcurl_banded``).
+
+          The hybrid Hall PC consumes the raw current response dJi/dE without the
+          electromagnetic curl-curl scaling. With Esirkepov/MC in RZ, its diagonal
+          includes Yee-to-node centering and electric boundary images followed by the
+          ordinary current volume and wall fold. It requires the full MM Jacobian,
+          width zero, second-order centering, unfiltered native guards, and axis/PEC/PMC
+          or periodic faces on a zero-origin domain wider than the response stencil.
+          Particle shape remains full order; second-order centering does not reduce it.
 
         - ``implicit_evolve.mass_matrices_pc_width`` (``integer``, default: 0).
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
@@ -437,8 +500,9 @@ Overall simulation parameters
             Density derivatives, inertia advection, and the live vacuum/circuit response remain in the outer Jacobian rather than this approximate inverse.
 
             The Cartesian collocated and periodic staggered implementations are retained separately, including their 3D kernels.
-            They retain their original coefficient reduction and optional scalar-pressure extension;
-            the RZ inertia and physical-boundary adaptations do not yet apply to these Cartesian paths.
+            They include the upstream ion-dissipation coupling, collocated PMC correction parity,
+            hierarchy-wide staircase masks and optional scalar-pressure extension. Native Yee RZ
+            still uses the segregated thermal solve; it does not activate that scalar-pressure block.
             This option does not provide a conformal embedded-boundary discretization or an AMR preconditioner.
 
             - ``pc_hybrid_pic.vacuum_rows`` (``bool``, native RZ default: true): use an identity approximation for the components replaced by half-cadence Darwin electric recovery.
@@ -455,7 +519,11 @@ Overall simulation parameters
             - ``pc_hybrid_pic.sigma_w`` (``float``, default: 1.2): damping of auxiliary corrections.
             - ``pc_hybrid_pic.pair_whistler_defect`` (``float``, native RZ default: 1): multiplier of the local curl-curl approximation in the smoother.
               The collocated implementation defaults to 0.4; periodic Cartesian staggering uses its compact-stencil value.
-            - ``pc_hybrid_pic.verbose`` (``bool``, default: false): inner-solver diagnostics.
+            - ``pc_hybrid_pic.rz_block_symbol`` (``bool``, native RZ default: false):
+              axis-aware upper bounds in the local pair smoother; does not change the operator.
+              False retains the earlier bound for qualification comparisons.
+            - ``pc_hybrid_pic.verbose`` (``integer``, default: 0): inner-solver diagnostics.
+              Values above one add spatial residual maps; leave zero for timing comparisons.
 
           - ``jacobian.pc_type = pc_block_banded``: Direct block-banded solve of the frozen-coefficient linearized Ohm operator for the theta-implicit hybrid (generalized Ohm's law) solver. RZ geometry only.
             The linearized operator (theta-Faraday advance of :math:`\delta B`, Ampere response :math:`\delta J`, the whistler :math:`\delta J\times B_0` and drift :math:`(J_0-J_{i,0})\times\delta B` legs, resistive and hyper-resistive legs, RZ metrics with :math:`m=0` axis parity, and the PEC-wall column treatment) is extracted exactly by colored probing of a frozen-coefficient operator application, assembled into dense blocks coupling the three electric-field components along each z-line, and the block-banded system (banded in the radial block index) is factorized and solved directly.
@@ -4183,6 +4251,44 @@ Maxwell solver: kinetic-fluid hybrid
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the exponent used to calculate
     the electron pressure (see :ref:`here <theory-hybrid-model-elec-temp>`).
 
+.. pp:param:: hybrid_pic_model.initial_electron_temperature_gamma
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.gamma`
+    :optional:
+
+    Exponent of the fresh-start electron temperature profile,
+    ``Te = elec_temp * (max(ne, initial_electron_temperature_n_floor)/n0_ref)^(gamma_init-1)``,
+    with ``Te`` and ``elec_temp`` in eV. Requires
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation = true`.
+    The native seed uses the deposited initial density (including an enabled density pedestal
+    unless ``initial_electron_temperature_include_pedestal = false``)
+    before constructing pressure and the initial Darwin electric field and current history.
+    This permits a fitted equilibrium profile while retaining, for example, ``gamma = 5/3``
+    for energy evolution. The seed runs once; segmented stepping and restored checkpoint
+    temperatures are not reseeded. No post-first-step temperature overwrite is needed.
+    A non-isothermal profile requires a positive, explicitly supplied ``n0_ref``.
+
+.. pp:param:: hybrid_pic_model.initial_electron_temperature_n_floor
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`
+    :optional:
+
+    Positive density floor in :math:`m^{-3}` for the initial temperature profile only.
+    Requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation = true`.
+    This does not change the density floors used by energy transport, pressure, Ohm's law
+    or heating. Leaving the initial-profile parameters unset preserves the existing seed.
+
+.. pp:param:: hybrid_pic_model.initial_electron_temperature_include_pedestal
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Include an enabled density pedestal when evaluating the initial temperature profile.
+    Set to ``false`` for a profile fitted to deposited physical density alone. This selects
+    the initial profile's density argument only; pressure, Ohm's law and electron-energy
+    evolution retain their configured pedestal. Requires
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation = true`.
+
 .. pp:param:: hybrid_pic_model.include_hall_term
     :type: ``bool``
     :default: ``true``
@@ -4320,12 +4426,14 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this evolves the electron temperature used for the
-    electron pressure with the electron energy equation, solved with the QDSMC scheme
-    (see the :ref:`theory section <theory-hybrid-model-electron-energy-eq>`), instead of evaluating the polytropic
-    closure with the constant reference state :math:`(n_0, T_{e0})`.
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this evolves the electron energy used for
+    pressure instead of evaluating the polytropic closure from the reference state
+    :math:`(n_0, T_{e0})`. Select its discretization with
+    :pp:param:`hybrid_pic_model.electron_energy_mode`. The following QDSMC description and
+    restart limitations apply to ``electron_energy_mode = legacy``.
 
-    Also supported with ``algo.evolve_scheme = theta_implicit_hybrid``, where the QDSMC stage runs
+    The legacy QDSMC scheme (see :ref:`theory-hybrid-model-electron-energy-eq`) is also
+    supported with ``algo.evolve_scheme = theta_implicit_hybrid``, where the QDSMC stage runs
     theta-centered inside every nonlinear residual evaluation (midpoint electron velocity and a
     second-order midpoint characteristic push for the entropy markers) and the electron temperature is
     converged together with the electric field by nonlinear elimination (or through the segregated
@@ -4347,12 +4455,231 @@ Maxwell solver: kinetic-fluid hybrid
     continuation of the energy-equation evolution across a restart is not yet guaranteed (the
     entropy-marker stage re-initializes on re-entry); field/particle restart is unaffected.
 
+.. pp:param:: hybrid_pic_model.electron_energy_mode
+    :type: ``string``
+    :default: ``legacy``
+    :optional:
+
+    Choose ``legacy``, ``decoupled_jfnk`` or ``coupled_jfnk``. The JFNK modes evolve
+    cell-centered electron internal energy :math:`U_e` in :math:`J/m^3` with Eulerian
+    transport, compression, finite-difference conduction and enabled physical sources.
+    They derive nodal temperature and pressure from the current energy and kinetic
+    charge state. These modes create no QDSMC entropy markers and do not invoke the
+    explicit conduction integrator. Existing conductivity, FD-order, limiter and
+    physical thermal-boundary parameters still select the spatial operator.
+
+    ``decoupled_jfnk`` alternates a field solve and a scalar thermal Newton--Krylov
+    solve, then checks both residuals at the same updated state. ``coupled_jfnk``
+    solves the electric-field and internal-energy blocks together. Both include
+    the existing longitudinal-field/circuit outer closure in final acceptance.
+    They use the same equations and accepted-step source treatment; choosing a
+    different preconditioner does not select a different physical residual.
+
+    Selecting either JFNK mode enables the energy equation. Explicitly setting
+    ``solve_electron_energy_equation = false`` at the same time is an error.
+    In PICMI, pass ``electron_energy_mode`` to ``picmi.HybridPICSolver``.
+
+    The runtime requires Darwin ``theta_implicit_hybrid``, ``theta = 0.5``,
+    one physical grid level, no embedded boundaries, endpoint-averaged Esirkepov
+    density, and the separate longitudinal outer solve. It supports RZ m=0 and
+    Cartesian 3D; species heating, trial viscous/hyper-resistive sources and the
+    pressure cross preconditioner currently have additional RZ-only guards.
+    The hard common energy/Ohm floor requires ``n_floor_smooth_width = 0`` and
+    ``qdsmc_te_n_floor = n_floor``. Circuit trial iterations require the native
+    C++ backend. Per-species resistivity overlays and conductor wall moment rows
+    are not yet supported by this adapter.
+
+    Current and continuity-density mass matrices remain available for compatible
+    field/thermal residuals. Enabling species Joule or relaxation sources requires
+    individual species responses: the runtime reports a full-particle Jacobian
+    fallback, while retaining an eligible field mass-matrix preconditioner. This
+    fallback is not equivalent to a per-species mass-matrix Jacobian.
+
+    Checkpoints retain cell energy, Darwin histories, original external-drive
+    reference, native circuit state and random streams. A checkpoint boundary can
+    switch between the two JFNK modes. Missing or incompatible required state is
+    rejected. Exact random-stream continuation requires matching rank/thread count,
+    backend and the recorded generator layout. Legacy checkpoints are not silently
+    promoted to a new-mode checkpoint.
+
+    ``implicit_evolve.thermal.audit_ion_electric_work = 1`` enables an optional
+    accepted-step force-work diagnostic (default zero). It captures the global
+    resistive electric term in the native Ohm kernel, applies homogeneous field
+    boundaries and native auxiliary centering, and gathers at the actual final
+    Boris iteration point. It reports that component's work and the full applied
+    electric work against the relativistic kinetic-energy change, before particle
+    boundary loss and collisions. The receipt separately measures the actual
+    applied field minus the synchronized, centered no-resistivity field, including
+    the recovered/constrained field's difference from raw Ohm's law, stage
+    differences, and communication/addition rounding. This remainder is not solely
+    a nonlinear residual and need not vanish at a converged root. It reports
+    signed and absolute work, gathered-field Cauchy bounds, and a momentum roundoff
+    reference ``eps(ParticleReal)*(K_old+K_endpoint)``. That reference is a scale,
+    not an error bound or rejection criterion. When the resistive push correction
+    is disabled, the base is the assembled native push field itself.
+    The diagnostic does not alter source terms or acceptance tolerances and is not
+    a claim of full field/particle energy conservation.
+    The audit requires shape-three momentum-conserving Boris particles without
+    suborbits, in-push wall reflection, variable charge, radiation or independent
+    particle electric fields. Field filtering, adjoint gather ghosts, transformed
+    Ohm solves and unqualified field boundaries are rejected while it is enabled.
+    Scratch storage adds three particle reals per charged particle and owned
+    field buffers; the particle scratch is neither communicated nor checkpointed.
+
+    Thermal solver controls use the ``implicit_evolve.thermal`` prefix. Field
+    tolerances and the longitudinal/circuit controls remain separate. Each block
+    must satisfy its own final residual gate. Scales stay fixed throughout a solve;
+    they are not adjusted after an outer sweep to hide a residual.
+
+    .. list-table:: Thermal solver controls (parameter suffixes)
+       :header-rows: 1
+       :widths: 36 15 49
+
+       * - Parameter
+         - Default
+         - Meaning
+       * - ``electric_scale``, ``energy_scale``
+         - ``1.e5``, ``1``
+         - Fixed electric and internal-energy block scales, in V/m and J/m^3.
+       * - ``relative_tolerance``, ``absolute_tolerance``
+         - ``1.e-6``, ``1.e-12``
+         - Thermal nonlinear gates; absolute tolerance uses the scaled vector norm.
+       * - ``linear_relative_tolerance``, ``probe_relative_size``
+         - ``1.e-6``, ``6.e-6``
+         - Fixed thermal Krylov target and finite-difference Jacobian probe size.
+       * - ``adaptive_forcing``
+         - ``false``
+         - Reuse MHD inexact-Newton forcing for scalar thermal and combined solves.
+           This control is independent of ``newton.adaptive_forcing``, which
+           controls the separate field solver. Final block gates are unchanged.
+       * - ``forcing_alpha``, ``forcing_gamma``, ``forcing_max``
+         - ``1.5``, ``0.9``, ``0.5``
+         - Superlinear exponent, safeguard factor and largest intermediate
+           Krylov relative tolerance. The first adaptive solve uses
+           ``forcing_max``. Later tolerances follow accepted nonlinear residual
+           decreases, using the smallest fixed block target for the final-step
+           safeguard. No residual reuse, clipping or automatic fallback is added.
+       * - ``max_newton_iterations``, ``max_linear_iterations``, ``restart_length``
+         - ``20``, ``300``, ``60``
+         - Nonlinear and Krylov budgets. Exhaustion rejects the step.
+       * - ``outer_max_iterations``
+         - ``30``
+         - Field/thermal sweep budget for the separate thermal solve.
+       * - ``push_max_iterations``, ``push_relative_tolerance``
+         - ``30``, ``1.e-12``
+         - Inner particle/thermodynamic context convergence controls. Charge and the
+           full current vector use separate relative infinity norms; current
+           components share one scale, including components that vanish by symmetry.
+       * - ``initial_guess_relative_margin``
+         - ``1.e-4``
+         - Interior margin for an otherwise inadmissible initial trial; does not clip accepted energy.
+       * - ``linear_verbosity``
+         - ``0``
+         - Thermal Krylov diagnostic verbosity.
+       * - ``pc_source_diagonal``
+         - ``true``
+         - Include the local source damping approximation in the thermal PC.
+       * - ``pc_cycles``
+         - ``2``
+         - Bounded multigrid cycles in the thermal elliptic inverse.
+       * - ``pc_transport``
+         - ``true``
+         - Include frozen central transport and compression in the PC target.
+       * - ``pc_transport_inner_max_iterations``, ``pc_transport_inner_relative_tolerance``
+         - ``32``, ``0.1``
+         - Inner flexible-GMRES limits for the nonsymmetric transport PC.
+       * - ``pc_transport_upwind_stabilization``
+         - ``0``
+         - Optional flow diffusion in the PC inverse only; no residual modification.
+       * - ``pc_agglomeration``, ``pc_consolidation``
+         - ``true``, ``true``
+         - AMReX thermal multigrid distribution controls.
+       * - ``pc_max_coarsening_level``
+         - ``30``
+         - Maximum thermal multigrid coarsening depth.
+
+.. pp:param:: implicit_evolve.thermal.expected_ou_thermal_partner
+    :type: ``string``
+    :default: ``population_bounded_nr`` with active relaxation, otherwise ``off``
+    :optional:
+
+    For either Eulerian JFNK mode, pair electron relaxation with the conditional
+    thermal-energy expectation of the accepted ion OU update. The population
+    partner uses the actual pre-collision endpoint moments and converged rate,
+    electron temperature and drift. It changes only the electron thermal partner;
+    ion momentum, relaxation rates and random draws retain their native treatment.
+    An explicit ``off`` selects the diagnostic/reference requested-rate source,
+    whose finite-step electron and ion thermal exchanges are not paired.
+    Legacy electron-energy mode retains its existing source law.
+
+    The population partner requires the bounded nonrelativistic energy convention.
+    ``expected_ou_relative_tolerance`` (default ``1.e-10``) and
+    ``expected_ou_absolute_tolerance_joule`` (default ``1.e-30`` per physical ion)
+    bound that convention's error. A trial outside the declared budget rejects;
+    the solver does not relax the budget automatically. Warm or fast populations
+    may require an explicitly validated accuracy budget. These parameters and the
+    resolved physical partner are recorded in checkpoints; changing them across
+    a restart rejects, even if the old choice was implicit in a default.
+
+    Conditional thermal pairing does not establish full electromagnetic energy
+    conservation or second-order accuracy of the inherited field-push followed
+    by endpoint OU composition. That composition is generally first order for
+    noncommuting forces. Spatial source-transfer defects, prescribed species-rate
+    differences, stochastic sampling and finite-step splitting remain separate.
+
+.. pp:param:: implicit_evolve.thermal.conduction_theta
+    :type: ``float``
+    :default: field ``theta`` (``0.5``)
+    :optional:
+
+    Time centering of conduction only. Use ``0.5`` for centered conduction or
+    ``1`` for backward-Euler conduction with stronger damping of stiff thermal
+    modes. The latter gives a first-order conduction leg; it does not change the
+    field, particle or transport theta. Centered conduction need not damp stiff
+    modes monotonically. Physical temperature/endpoint constraints remain active.
+
+.. pp:param:: implicit_evolve.thermal.use_preconditioner
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Enable the thermal PC, or the combined block PC in ``coupled_jfnk``. The
+    thermal inverse reuses the MHD density-weighted conduction stencil and a
+    distributed AMReX multigrid inverse. Frozen transport/compression make the
+    full PC target nonsymmetric; its inner solve and the outer solve use flexible
+    GMRES. Disabling this flag leaves the live residual and acceptance gates intact.
+
+.. pp:param:: implicit_evolve.thermal.pc_pressure_coupling
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    In ``coupled_jfnk``, add the upper-triangular temperature-to-pressure field
+    correction after the thermal inverse. This is an approximate cross block;
+    the full residual and Jv retain both directions regardless of this setting.
+    The pressure adapter is currently restricted to its validated RZ layout.
+
+.. pp:param:: implicit_evolve.thermal.pc_semicoarsening
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Enable thermal multigrid semicoarsening. The companion suffixes
+    ``pc_max_semicoarsening_level`` (default ``0``) and
+    ``pc_semicoarsening_direction`` (default ``-1``, automatic) set the depth and
+    dimension held fixed. RZ directions are r/z; Cartesian directions are x/y/z.
+    These controls are independent of longitudinal-field semicoarsening. The
+    selected AMReX CPU 2D line smoother requires at most 32 cells per line and
+    inverse dz squared greater than inverse dr squared; GPU execution with this
+    thermal option is not yet qualified. Respect the backend limits when enabling it.
+
 .. pp:param:: implicit_evolve.qdsmc_segregated_solve
     :type: ``bool``
     :default: ``true`` with live-temperature resistivity, otherwise ``false``
     :optional:
 
-    If ``algo.evolve_scheme = theta_implicit_hybrid`` and
+    For ``electron_energy_mode = legacy``, if
+    ``algo.evolve_scheme = theta_implicit_hybrid`` and
     :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, solve the coupled field/electron-energy
     system in segregated midpoint-iterated form: the nonlinear solver converges the field system with the
     electron pressure, temperature and Ohm-law density frozen, then one re-entrant QDSMC stage pass
@@ -4388,6 +4715,18 @@ Maxwell solver: kinetic-fluid hybrid
 
     Whether a segregated outer loop that reaches :pp:param:`implicit_evolve.qdsmc_outer_max_iterations`
     without satisfying the tolerance is a fatal error (mirrors ``newton.require_convergence``).
+
+.. pp:param:: implicit_evolve.qdsmc_outer_acceleration
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    On one physical level, apply a safeguarded scalar secant inverse to the thermal
+    fixed point. It changes the next temperature guess and its consistent pressure,
+    retaining the complete FD4/RKL2 transport and heating map. Acceptance still grades
+    the unaccelerated thermal defect and updated field residual at the original strict
+    tolerances. This is an experimental alternative to plain thermal fixed-point iteration,
+    not the fully coupled scalar-pressure Newton block.
 
 .. pp:param:: implicit_evolve.qdsmc_outer_verbose
     :type: ``bool``
@@ -4690,7 +5029,8 @@ Maxwell solver: kinetic-fluid hybrid
     adiabat seed need only numerical **positivity**, which is a property of the representation. Sharing one
     knob means the electron-energy floor cannot be lowered without also moving the Ohm's-law floor.
 
-    Applied at three sites: the adiabat :math:`T_e` seed, the :math:`T_e \rightarrow K_e` forward conversion
+    Used as the default for :pp:param:`hybrid_pic_model.initial_electron_temperature_n_floor`.
+    Applied at three sites unless that initial-only floor is overridden: the adiabat :math:`T_e` seed, the :math:`T_e \rightarrow K_e` forward conversion
     and the :math:`K_e \rightarrow T_e` recovery. The forward conversion and the recovery necessarily share
     this floor, so that the round trip is exact for a marker that did not move. The advection-velocity guard
     is deliberately not included.
@@ -5480,6 +5820,16 @@ Maxwell solver: kinetic-fluid hybrid
     which preserves charge continuity of the electron current.
     Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
 
+    On a fresh start, the solver deposits the synchronized initial particle moments
+    and computes the initial Ohm-law and longitudinal fields before iteration-zero
+    diagnostics or the first particle gather. The configured spatial vacuum recovery
+    is applied to this field as well. The electron-current history is seeded from
+    the committed initial plasma current minus the ion current, before any trial
+    midpoint evaluation. Initial temporal current and density derivatives are zero;
+    enabled spatial inertia terms are evaluated from the initial moments. This
+    initialization does not advance particles or time, add a fictitious previous
+    timestep, or change the subsequent implicit electron-current advance.
+
 .. pp:param:: implicit_evolve.darwin_vacuum_pc_regularization
 
     ``0`` (default) retains the electron-inertia curl-curl preconditioner.
@@ -5553,6 +5903,22 @@ Maxwell solver: kinetic-fluid hybrid
     direction and a ghost width no greater than the domain length in those directions.
     This option is consumed only when PEC pressure boundaries are used.
 
+.. pp:param:: implicit_evolve.darwin_current_absolute_tolerance
+    :type: ``float``
+    :optional:
+
+    Absolute tolerance in A/m^2 for the native endpoint Ampere current balance.
+    The candidate, published endpoint, and next field step use the same fixed
+    tolerance plus the existing local arithmetic roundoff allowance. The floor
+    does not depend on the trial residual or on a nearly zero current component.
+    Must be finite and nonnegative; zero restores the arithmetic-only check.
+
+    With ``native_stopping_event.material_support=1``, the default is the source
+    solver's scaled absolute tolerance (1e-12) times
+    ``q_e * hybrid_pic_model.n0_ref * native_stopping_event.proper_speed_cap``.
+    Otherwise the default is zero. This does not change the source equations,
+    the energy or charge checks, or the nonlinear solver's block tolerances.
+
 .. pp:param:: implicit_evolve.darwin_segregated_solve
     :type: ``bool``
     :default: ``false``
@@ -5604,6 +5970,37 @@ Maxwell solver: kinetic-fluid hybrid
     Relative tolerance of the MLMG solve for the Darwin constraint potential
     (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
     default 200, and ``darwin_poisson_verbosity``, default 0).
+
+.. pp:param:: hybrid_pic_model.darwin_poisson_semicoarsening
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    Maximum number of semicoarsening levels for the global Darwin longitudinal
+    potential solve (0 disables it; valid range 0 to 30). This control is independent
+    of vacuum recovery. On anisotropic cells, keep the widest-cell direction fixed
+    and coarsen the other directions until the next coarsening would make them
+    wider than the retained direction, or this limit is reached. AMReX can stop
+    earlier if the grids cannot be coarsened further. Isotropic cells use ordinary
+    full coarsening. This changes the multigrid hierarchy, not the finest-level
+    equation, boundary conditions, or convergence tolerances.
+
+    For an RZ grid with ``dz/dr = 5``, a value of 2 selects two initial radial
+    coarsenings, giving coarse-cell aspect ratios 2.5 and 1.25. Supported in RZ,
+    2D and 3D; requires at least two grid dimensions. Agglomeration and
+    consolidation retain their AMReX defaults.
+
+.. pp:param:: hybrid_pic_model.darwin_poisson_semicoarsening_direction
+    :type: ``int``
+    :default: ``-1``
+    :optional:
+
+    Direction held fixed during the longitudinal solve's semicoarsening.
+    The default chooses the direction with the largest physical cell width.
+    Explicit directions use grid indexing: 0=r and 1=z in RZ; 0=x and 1=z in 2D;
+    0=x, 1=y and 2=z in 3D. No semicoarsening is used unless the selected direction
+    is at least twice as wide as every other direction. Set the number of levels
+    with ``darwin_poisson_semicoarsening``.
 
 .. pp:param:: hybrid_pic_model.include_electron_inertia
     :type: ``bool``
@@ -5873,6 +6270,18 @@ Maxwell solver: kinetic-fluid hybrid
     fields or embedded-boundary update flags. Unsupported combinations fail
     explicitly rather than selecting additional electric boundary constraints.
 
+    A ``neumann`` field boundary is WarpX's ``pmc`` alias, with vector
+    parity: the normal electric response and tangential magnetic response
+    are odd about the face; their other components are even. Tangential A
+    nodes on a PMC face remain free. Normal A uses an odd ghost reflection
+    with its zero response trace at the physical face, not in the last
+    valid half-cell. With an imposed external drive, these conditions act
+    on A minus the gauge-shifted drive. Magnetic guards are derived from
+    the reflected A before the Ampere curl. Endpoint recovery uses the
+    same component conditions and half dual volumes for free boundary nodes.
+    The longitudinal scalar potential has homogeneous Neumann conditions
+    at PMC ends, and its gradient uses the corresponding vector parity.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_e_relative_tolerance
     :type: ``float``
     :default: ``1e-12``
@@ -6004,6 +6413,29 @@ Maxwell solver: kinetic-fluid hybrid
     problem, and interpolates back. Those transfers can lose edge modes, so a zero
     nodal correction does not by itself certify a zero native edge current near an EB.
 
+    ``greens`` applies the same nodal RZ Poisson inverse with a cached bounded
+    response: an axial sine/cosine transform and radial factors for each axial mode.
+    It includes both radial and axial coupling. The radial and azimuthal
+    components include the vector metric term; the axial component uses the
+    scalar radial Laplacian with its regular axis row.
+    Plans and factors are built with the level fields and reused for changing
+    sources and vacuum masks. Applications remain on the compute device,
+    including redistribution between axial and radial pencils across MPI ranks.
+
+    This option requires a single-level, axisymmetric RZ grid with an ``r=0``
+    axis, no embedded boundary, ``flux`` or ``all`` components, a PEC radial
+    outer wall, and **nonperiodic** axial boundaries. Every correction vanishes
+    at the outer radius. At the axis, radial and azimuthal corrections vanish;
+    the axial correction obeys the scalar regularity condition. Each axial end
+    follows its field type: zero correction for PEC, or zero normal derivative
+    of tangential corrections for PMC/``neumann``. The normal axial correction
+    is zero at either end for both field types.
+    Equal and mixed axial end types are supported. Prescribed or circuit-driven
+    full-field traces remain the caller's responsibility. The transform's
+    internal odd/even extension does not impose periodic physical boundaries. Build with ``ABLASTR_FFT=ON`` (or ``WarpX_FFT=ON``).
+    Multigrid iteration and semicoarsening controls are unused by this direct
+    backend; the endpoint spatial recovery is unchanged.
+
     ``curlcurl`` approximately inverts the defect with ``amrex::MLCurlCurl``:
     :math:`(\nabla\times\nabla\times{}+\beta)\delta\vec{A}=-\mu_0\vec{J}_{imp}`.
     The positive regularization ``darwin_vacuum_recovery_curlcurl_beta`` defaults
@@ -6014,9 +6446,10 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`\delta\vec{A}=-\mu_0\vec{J}_{imp}/(\sum_d4/\Delta x_d^2)` directly
     on unconstrained native vacuum edges. The outer Newton/Krylov solve supplies
     the global inverse; a curl-curl preconditioner is recommended. This avoids
-    nodal transfers and an inner recovery solve. It requires 3D, ``half`` cadence,
-    live recovery probes, and zero relaxation time. The Poisson recovery tolerance
-    and iteration controls are unused by this option.
+    nodal transfers and an inner recovery solve. It requires 3D or RZ, ``half``
+    cadence, live recovery probes, and zero relaxation time. RZ additionally
+    requires ``flux`` components, an ``r=0`` axis and no embedded boundary.
+    The Poisson recovery tolerance and iteration controls are unused by this option.
 
     With embedded boundaries, ``edge_relaxation`` uses the existing masked curl
     stencils. It does not supply a conformal cut-cell discretization or add EB
@@ -6169,6 +6602,53 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the vacuum region handling of the generalized Ohm's Law to suppress vacuum fluctuations. :cite:t:`param-holmstrom2013handlingvacuumregionshybrid`.
+
+.. pp:param:: hybrid_pic_model.end_region_width
+    :type: ``list of two floats``
+    :default: ``0 0``
+    :optional:
+
+    Geometric buffer widths in metres at the lower and upper physical z faces,
+    respectively (single-level RZ and Cartesian 3D). A zero width disables that
+    face. The combined widths must leave an interior region. These buffers
+    require nonperiodic z and the standard Ohm/implicit-current formulation.
+    They do not change the electromagnetic boundary condition.
+
+.. pp:param:: hybrid_pic_model.end_region_rolloff
+    :type: ``list of two floats``
+    :default: ``0 0``
+    :optional:
+
+    Lower/upper transition lengths in metres. At distance ``d`` from a face of
+    width ``w`` and positive rolloff ``s``, its buffer weight is
+    ``0.5*(1+tanh((w-d)/s))``. Zero rolloff gives a sharp band. The larger face
+    weight is used; each field samples its actual Yee location in global geometry.
+
+.. pp:param:: hybrid_pic_model.end_region_holmstrom
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Multiply the Hall, motional and electron-pressure Ohm drive by one minus
+    the end-buffer weight. Inertia, resistivity and hyper-resistivity remain.
+    Darwin's longitudinal pressure source uses the same factor. If density-based
+    Holmstrom suppression is also enabled, the two plasma factors multiply.
+    This is a modified Ohm-law buffer, not a Hall-only or open-boundary condition.
+
+.. pp:param:: hybrid_pic_model.end_region_resistivity
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Nonnegative numerical end resistivity in Ohm metres, multiplied by the
+    end-buffer weight. Its magnetic dissipation enters electron Joule heating,
+    including when a separate physical-heating resistivity is prescribed.
+    It is excluded from the no-resistivity particle-push evaluation even when
+    physical electron-ion relaxation is active. The existing full-minus-nores
+    correction therefore removes its ion electric force without adding another
+    thermal collision or drag rate. This requires
+    ``implicit_push_excludes_resistive_field=1`` (the default). Global physical
+    resistivity and electron-ion relaxation parameters are unchanged.
 
 .. pp:param:: hybrid_pic_model.holmstrom_transition_width
     :type: ``float``

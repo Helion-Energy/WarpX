@@ -279,6 +279,11 @@ void WarpX::HybridPICDepositRhoAndJ ()
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
+    // Implicit particles are synchronized at the committed time. Center the
+    // entry current there; the explicit leapfrog deposit remains at n-1/2.
+    const amrex::Real current_time_offset =
+        evolve_scheme == EvolveScheme::Explicit ? -0.5_rt * dt[0] : 0.0_rt;
+
     // Perform charge deposition in component 0 of rho_fp at current time.
     mypc->DepositCharge(m_fields.get_mr_levels(FieldType::rho_fp, finest_level), 0._rt);
 
@@ -299,7 +304,7 @@ void WarpX::HybridPICDepositRhoAndJ ()
             for (auto const & J_lev : J_spec) {
                 for (int idim = 0; idim < 3; ++idim) { J_lev[idim]->setVal(0._rt); }
             }
-            pc.DepositCurrent(J_spec, dt[0], -0.5_rt * dt[0]);
+            pc.DepositCurrent(J_spec, dt[0], current_time_offset);
             for (int lev = 0; lev <= finest_level; ++lev) {
                 for (int idim = 0; idim < 3; ++idim) {
                     MultiFab::Add(*current_fp[lev][idim], *J_spec[lev][idim],
@@ -341,7 +346,7 @@ void WarpX::HybridPICDepositRhoAndJ ()
         // consumes the per-species fields, so skip the extra per-species
         // charge deposits and guard-cell sums entirely. Zeroing and the RZ
         // inverse volume scaling are handled inside.
-        mypc->DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]);
+        mypc->DepositCurrent(current_fp, dt[0], current_time_offset);
     }
 
     // Perform Temperature Deposition at time t_{n}. Interval-gated (see
@@ -480,7 +485,12 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // mid-run — the same re-entry class as the closure Pe reset fixed
     // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
     // on every entry.
-    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+    if (m_hybrid_pic_model->UsesEulerianElectronEnergy()) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            m_hybrid_pic_model->InitializeEulerianElectronEnergy(
+                lev, *m_fields.get(FieldType::rho_fp, lev));
+        }
+    } else if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         for (int lev = 0; lev <= finest_level; ++lev) {
             if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
                 m_hybrid_pic_model->SeedTeAdiabat(lev);
@@ -506,7 +516,8 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // repeated sim.step() calls re-enters here mid-run) -- adding it again
     // double-counts the external field on every re-entry. On restart the
     // checkpointed fields likewise already contain it.
-    if (restart_chkfile.empty() && istep[0] == 0) {
+    if (restart_chkfile.empty() && istep[0] == 0
+        && !m_hybrid_pic_model->m_initial_external_B_added) {
         // Form the total initial field: add the t=0 external B on top of the
         // loaded initial condition, coil by coil, skipping coils whose flux
         // the initial condition already contains
@@ -517,6 +528,7 @@ void WarpX::HybridPICInitializeRhoJandB ()
         if (m_hybrid_pic_model->m_add_external_fields) {
             m_hybrid_pic_model->m_external_vector_potential->AddInitialExternalBField();
         }
+        m_hybrid_pic_model->m_initial_external_B_added = true;
     }
 
     // Copy the rho_fp values to rho_fp_temp and the current_fp values to

@@ -1,0 +1,26 @@
+cmake_minimum_required(VERSION 3.24)
+project(WarpXIonExchangeFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+enable_testing()
+add_executable(test_ion_exchange test_ion_exchange.cpp
+ ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/AcceptedIonExchange.cpp)
+target_link_libraries(test_ion_exchange PRIVATE AMReX::amrex)
+target_compile_features(test_ion_exchange PRIVATE cxx_std_20)
+target_include_directories(test_ion_exchange PRIVATE ${WARPX_SOURCE}/Source)
+target_compile_definitions(test_ion_exchange PRIVATE WARPX_DIM_RZ WARPX_ZINDEX=1)
+target_compile_options(test_ion_exchange PRIVATE -Wall -Wextra -Werror=return-type)
+foreach(case IN ITEMS prepare reference kernel rotation expectation commit once inactive invalid failed invalid_prepare alias relax_only redirect_only finite_step alias_prepare)
+ foreach(box IN ITEMS 4 64)
+  add_test(NAME exchange_${case}_box${box}
+   COMMAND test_ion_exchange test.case=${case} test.max_grid_size=${box})
+  set_tests_properties(exchange_${case}_box${box} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+ endforeach()
+endforeach()
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+foreach(case IN ITEMS cap shunt eb mode)
+ add_test(NAME exchange_guard_${case}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/expect_reject.py $<TARGET_FILE:test_ion_exchange> ${case})
+ set_tests_properties(exchange_guard_${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+endforeach()

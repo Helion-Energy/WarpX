@@ -9,7 +9,9 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "WarpX.H"
+#include "FieldSolver/ImplicitSolvers/NativeEndpointField.H"
 #include "Circuit/CircuitCoupling.H"
+#include "FieldSolver/ImplicitSolvers/ThermalRandomCheckpoint.H"
 
 #include "BoundaryConditions/PML.H"
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
@@ -286,7 +288,9 @@ namespace
 
         if (em_solver_algo == ElectromagneticSolverAlgo::HybridPIC)
         {
-            if (current_deposition_algo == CurrentDepositionAlgo::Esirkepov)
+            if (current_deposition_algo == CurrentDepositionAlgo::Esirkepov &&
+                !(WarpX::GetInstance().evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid &&
+                  WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving))
             {
                 ablastr::warn_manager::WMRecordWarning(
                     "Hybrid-PIC",
@@ -867,6 +871,9 @@ WarpX::InitData ()
     if (m_circuit_coupling) {
         m_circuit_coupling->InitData();
     }
+    // The native provider is now restored and attached. Validate the endpoint
+    // clock before diagnostics or any advance, including max_step=0 restarts.
+    ValidateNativeCircuitEndpointRestart(*this,t_new[0]);
 
     if (ParallelDescriptor::IOProcessor()) {
         std::cout << "\nGrids Summary:\n";
@@ -922,6 +929,17 @@ WarpX::InitData ()
     }
     else {
         ExecutePythonCallback("afterInitatRestart");
+    }
+
+    if (restart_chkfile.empty() && m_implicit_solver) {
+        m_implicit_solver->InitializeFields(t_new[0], dt[0]);
+    }
+
+    // Initialization and restart callbacks may draw random numbers. Restore
+    // the accepted stream last, before any restarted diagnostics or advance.
+    if (!restart_chkfile.empty() && m_hybrid_pic_model &&
+        m_hybrid_pic_model->UsesEulerianElectronEnergy()) {
+        warpx::thermal::ReadThermalRandomCheckpoint(restart_chkfile);
     }
 
     if (restart_chkfile.empty() || write_diagnostics_on_restart) {

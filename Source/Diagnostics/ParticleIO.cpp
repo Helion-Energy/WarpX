@@ -8,6 +8,10 @@
  */
 
 #include "Fields.H"
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
+#include "Particles/Gather/NativeEndpointElectricGather.H"
+#include <AMReX_GpuAtomic.H>
+#include <AMReX_GpuContainers.H>
 #include "Particles/ParticleIO.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/MultiParticleContainer.H"
@@ -126,8 +130,12 @@ PhysicalParticleContainer::WriteHeader (std::ostream& os) const
 }
 
 void
-MultiParticleContainer::Restart (const std::string& dir)
+MultiParticleContainer::Restart (const std::string& dir, bool preserve_all_attributes)
 {
+    if(preserve_all_attributes){
+        bool supported=lasers_names.empty();ParallelDescriptor::ReduceBoolAnd(supported);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(supported,"Accepted endpoint checkpoint does not support laser particles");
+    }
     // note: all containers is sorted like this
     // - species_names
     // - lasers_names
@@ -155,6 +163,35 @@ MultiParticleContainer::Restart (const std::string& dir)
             std::string comp_name;
             is >> comp_name;
             real_comp_names.push_back(comp_name);
+        }
+
+        if (preserve_all_attributes) {
+            int ni=0;is>>ni;
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ni>=0,"Invalid checkpoint integer component count");
+            std::vector<std::string> saved_int(ni);
+            for(auto& name:saved_int)is>>name;
+            // Mirror the checkpoint writer's fixed names and runtime order.
+            // AMReX reads columns positionally; equal counts or membership
+            // alone cannot protect against reordered named histories.
+            std::vector<std::string> expected_real={"weight","momentum_x","momentum_y","momentum_z"
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                ,"theta"
+#endif
+#if defined(WARPX_DIM_RSPHERE)
+                ,"phi"
+#endif
+            };
+            auto const real_names=pc->GetRealSoANames();
+            for(std::size_t j=PIdx::nattribs;j<real_names.size();++j)
+                expected_real.push_back(real_names[j]);
+            auto const integer_names=pc->GetIntSoANames();
+            std::vector<std::string> expected_int(integer_names.begin(),integer_names.end());
+            bool schema=real_comp_names==expected_real&&saved_int==expected_int;
+            ParallelDescriptor::ReduceBoolAnd(schema);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(schema,
+                "Accepted endpoint particle checkpoint ordered schema mismatch for "+species_names[i]);
+            pc->RestartAllAttributes(dir,species_names.at(i));
+            continue;
         }
 
         int n_rc = 0;
@@ -338,6 +375,30 @@ storeFieldOnParticles ( WarpXParticleContainer::Base& tmp, bool is_full_diagnost
     auto & warpx = WarpX::GetInstance();
     auto & fields = warpx.m_fields;
 
+    // A selected accepted endpoint has one live high/low owner. Collectively
+    // validate that origin before exposing arrays to any particle kernel. The
+    // initial diagnostic still uses ordinary freshly initialized fields.
+    warpx::darwin::NativePairedDarwinFields::EndpointAuxiliaryView paired;
+    bool paired_gather=false;
+    if(warpx::darwin::NativeEndpointPairSelected(warpx)){
+        auto* owner=warpx::darwin::NativeEndpointPairedFields(warpx);
+        bool initial=owner&&owner->State().phase==warpx::darwin::NativePairedDarwinFields::Phase::Idle&&
+            !owner->State().endpoint_step_open&&warpx.getistep(0)==0;
+        amrex::ParallelDescriptor::ReduceBoolAnd(initial);
+        if(!initial){
+            bool ready=owner&&owner->EndpointAccepted();
+            amrex::ParallelDescriptor::ReduceBoolAnd(ready);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ready,
+                "Accepted electric gather requires the live endpoint owner");
+            auto const lease=owner->EndpointLease();
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(owner->EndpointAuxiliary(lease,paired),
+                "Accepted electric gather declined a stale field, particle or clock origin");
+            paired_gather=true;
+        }
+    }
+    std::unique_ptr<amrex::Gpu::DeviceScalar<int>> paired_invalid;
+    if(paired_gather)paired_invalid=std::make_unique<amrex::Gpu::DeviceScalar<int>>(0);
+    int* const pair_bad=paired_invalid?paired_invalid->dataPtr():nullptr;
     const int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
     const int nox = WarpX::nox;
     const bool galerkin_interpolation = WarpX::galerkin_interpolation;
@@ -383,6 +444,11 @@ storeFieldOnParticles ( WarpXParticleContainer::Base& tmp, bool is_full_diagnost
             amrex::IndexType const by_type = byfab->box().ixType();
             amrex::IndexType const bz_type = bzfab->box().ixType();
 
+            warpx::particles::EndpointElectricArrays pair_high{},pair_low{};
+            if(paired_gather)for(int c=0;c<3;++c){
+                pair_high[c]=paired.high[c]->const_array(pti);
+                pair_low[c]=paired.low[c]->const_array(pti);
+            }
             const auto getPosition = GetParticlePosition<PIdx>(pti);
 
             amrex::ParticleReal* Ex_particle_arr = save_Ex ? pti.GetStructOfArrays().GetRealData(Ex_index).dataPtr() : nullptr;
@@ -409,6 +475,17 @@ storeFieldOnParticles ( WarpXParticleContainer::Base& tmp, bool is_full_diagnost
                                    nox, galerkin_interpolation);
 
 
+                    if(paired_gather){
+                        warpx::particles::EndpointElectricPair electric{};
+                        bool const ok=warpx::particles::GatherEndpointElectricPair<3>(
+                            xp,yp,zp,pair_high,pair_low,dinv,xyzmin,lo,electric);
+                        if(!ok){amrex::Gpu::Atomic::Max(pair_bad,1);return;}
+                        // A diagnostic file stores one scalar per component.
+                        // Round only after contraction and Cartesian rotation.
+                        Exp=electric[0].hi+electric[0].lo;
+                        Eyp=electric[1].hi+electric[1].lo;
+                        Ezp=electric[2].hi+electric[2].lo;
+                    }
                     if (Ex_particle_arr) { Ex_particle_arr[ip] = Exp; }
                     if (Ey_particle_arr) { Ey_particle_arr[ip] = Eyp; }
                     if (Ez_particle_arr) { Ez_particle_arr[ip] = Ezp; }
@@ -419,5 +496,11 @@ storeFieldOnParticles ( WarpXParticleContainer::Base& tmp, bool is_full_diagnost
                 }
             );
         }
+    }
+    if(paired_gather){
+        bool pair_ok=paired_invalid->dataValue()==0;
+        amrex::ParallelDescriptor::ReduceBoolAnd(pair_ok);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(pair_ok,
+            "Accepted electric gather encountered an unsupported or nonfinite stencil");
     }
 }

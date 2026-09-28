@@ -77,7 +77,8 @@ namespace hybridpcrz {
     /** Component-wise hyper-resistive Laplacian of a J-like field, the
      *  residual's RZ forms (r-row at the cell-centered radius including the
      *  -1/r^2 curvature term; theta-row zero on axis; z-row switching to
-     *  the plain second difference on axis). */
+     *  the control-volume axis limit 4 (a(dr) - a(0))/dr^2, which reads no
+     *  r < 0 guard: the residual's guard J_z there is not the even mirror). */
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
     void LapJ (amrex::Array4<amrex::Real const> const& a,
                amrex::Real& lr, amrex::Real& lt, amrex::Real& lz,
@@ -103,7 +104,7 @@ namespace hybridpcrz {
         if (rn > 0.5_rt*g.dr) {
             lz += dr_rdr_over_r(rn, 2);
         } else {
-            lz += inv_dr2*(a(i-1,j,0,2) - 2.0_rt*a(i,j,0,2) + a(i+1,j,0,2));
+            lz += 4.0_rt*inv_dr2*(a(i+1,j,0,2) - a(i,j,0,2));
         }
     }
 
@@ -223,9 +224,12 @@ void HybridPICPCPairTcKk (amrex::Array4<const amrex::Real> const& coef,
     kkz = 0.0_rt;
 #endif
     // U(aW)/sW - w x F, then the pointwise ion rotation
-    tcx = (cw*(ay*bhz - az*bhy) + ae*ax - ah*lx)/sW;
-    tcy = (cw*(az*bhx - ax*bhz) + ae*ay - ah*ly)/sW;
-    tcz = (cw*(ax*bhy - ay*bhx) + ae*az - ah*lz)/sW;
+    const amrex::Real udx = (ae*ax - ah*lx)/sW;   // dissipative part U_diss W
+    const amrex::Real udy = (ae*ay - ah*ly)/sW;
+    const amrex::Real udz = (ae*az - ah*lz)/sW;
+    tcx = cw*(ay*bhz - az*bhy)/sW + udx;
+    tcy = cw*(az*bhx - ax*bhz)/sW + udy;
+    tcz = cw*(ax*bhy - ay*bhx)/sW + udz;
     const amrex::Real ex = coef(i,j,k,11);
     const amrex::Real ey = coef(i,j,k,12);
     const amrex::Real ez = coef(i,j,k,13);
@@ -233,10 +237,26 @@ void HybridPICPCPairTcKk (amrex::Array4<const amrex::Real> const& coef,
     tcy -= ez*F(i,j,k,0) - ex*F(i,j,k,2);
     tcz -= ex*F(i,j,k,1) - ey*F(i,j,k,0);
     if (ion) {
+        // The ions are pushed with E* = E - D, D = eta J_p - eta_H del2 J_p
+        // recomputed from the iterate's B in every residual evaluation, so
+        // the mass-matrix response is Sigma dE* = Sigma (dE + U_diss W):
+        // the Hall-folded ion leg acts on the dissipative coupling as well,
+        // S (U_diss W) = (Sigma .* U_diss W) x bhat (eta_H-scaled; large in
+        // a boosted-eta_H band at the plasma edge where Sigma is not small).
+        const amrex::Real swx = coef(i,j,k,6)*udx;
+        const amrex::Real swy = coef(i,j,k,7)*udy;
+        const amrex::Real swz = coef(i,j,k,8)*udz;
+        tcx += swy*bhz - swz*bhy;
+        tcy += swz*bhx - swx*bhz;
+        tcz += swx*bhy - swy*bhx;
         HybridPICPCInvIpS(bhx, bhy, bhz,
                           coef(i,j,k,6), coef(i,j,k,7), coef(i,j,k,8),
                           tcx, tcy, tcz);
     }
+    // EB-covered rows are identity rows (coef comp 15 = 0 there)
+    const amrex::Real mk = coef(i,j,k,15);
+    tcx *= mk; tcy *= mk; tcz *= mk;
+    kkx *= mk; kky *= mk; kkz *= mk;
 }
 
 /** Staggered (Yee) rotation legs of U at container index (i,j,k), mirroring
@@ -458,9 +478,12 @@ void HybridPICPCPairTcKkStag (amrex::Array4<const amrex::Real> const& coef,
     const amrex::Real cvz = 0.5_rt*(ncrossF(i,j,k,2) + ncrossF(i+1,j,k,2));
 #endif
 
-    tcx = ux/sW - cvx;
-    tcy = uy/sW - cvy;
-    tcz = uz/sW - cvz;
+    tcx = (ux/sW - cvx)*coef(i,j,k,15);
+    tcy = (uy/sW - cvy)*coef(i,j,k,15);
+    tcz = (uz/sW - cvz)*coef(i,j,k,15);
+    kkx *= coef(i,j,k,15);
+    kky *= coef(i,j,k,15);
+    kkz *= coef(i,j,k,15);
     if (ion) {
         HybridPICPCInvIpS(coef(i,j,k,0), coef(i,j,k,1), coef(i,j,k,2),
                           coef(i,j,k,6), coef(i,j,k,7), coef(i,j,k,8),

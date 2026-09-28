@@ -30,6 +30,8 @@
 #include <array>
 #include <memory>
 
+namespace warpx::thermal { class EulerianDissipation; struct HybridOhmDampingFields; }
+
 /**
  * \brief Top-level class for the electromagnetic finite-difference solver
  *
@@ -177,6 +179,19 @@ class FiniteDifferenceSolver
         * viscous drag E_visc = -div(Pi_e)/(e n_eff)
         * (hybrid_pic_model.qdsmc_viscosity_in_ohms_law), read by the viscous
         * work booking.
+        * \param[out] ER_out optional private scratch for only the global eta*J
+        * addition, captured by the same kernel evaluation. Excludes end-region
+        * eta, species overlays, hyper-resistivity and viscosity. Native E
+        * staggering/units V/m; all scratch (including ghosts) is zeroed first,
+        * so skipped/EB/axis rows are zero. No wrapper boundary projection or
+        * auxiliary centering is performed here. Must match E layout/guards and
+        * must not alias any input/output. Null retains the original arithmetic.
+        * \param[out] damping_out optional same-kernel numerical end eta and
+        * signed geometric Holmstrom change. Independent E-layout scratch;
+        * caller projects homogeneous BC and books signed sinks, not heat.
+        * \param[in] transverse_offset optional held longitudinal field for
+        * compensated direct-Yee assembly. Must be null when capturing
+        * F_pressure_hall_out; those two paths have separate qualified scopes.
         */
        void HybridPICSolveE (
            ablastr::fields::VectorField const& Efield,
@@ -188,7 +203,14 @@ class FiniteDifferenceSolver
            int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
            bool include_resistivity,
            ablastr::fields::VectorField const* EH_out = nullptr,
-           ablastr::fields::VectorField const* EV_out = nullptr);
+           ablastr::fields::VectorField const* EV_out = nullptr,
+           const warpx::thermal::EulerianDissipation* trial_dissipation = nullptr,
+           ablastr::fields::VectorField const* ER_out = nullptr,
+           const warpx::thermal::HybridOhmDampingFields* damping_out = nullptr,
+           ablastr::fields::VectorField const* F_pressure_hall_out = nullptr,
+           ablastr::fields::VectorField const* transverse_offset = nullptr);
+
+
 
        /**
         * \brief Calculation of total current using Ampere's law (without
@@ -344,7 +366,12 @@ class FiniteDifferenceSolver
             int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
             bool include_resistivity,
             ablastr::fields::VectorField const* EH_out,
-            ablastr::fields::VectorField const* EV_out);
+            ablastr::fields::VectorField const* EV_out,
+            const warpx::thermal::EulerianDissipation* trial_dissipation,
+            ablastr::fields::VectorField const* ER_out,
+            const warpx::thermal::HybridOhmDampingFields* damping_out,
+            ablastr::fields::VectorField const* F_pressure_hall_out,
+            ablastr::fields::VectorField const* transverse_offset);
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCylindrical (
@@ -564,7 +591,11 @@ class FiniteDifferenceSolver
             int lev, HybridPICModel const* hybrid_model, bool solve_for_Faraday,
             bool include_resistivity,
             ablastr::fields::VectorField const* EH_out,
-            ablastr::fields::VectorField const* EV_out);
+            ablastr::fields::VectorField const* EV_out,
+            ablastr::fields::VectorField const* ER_out,
+            const warpx::thermal::HybridOhmDampingFields* damping_out,
+            ablastr::fields::VectorField const* F_pressure_hall_out,
+            ablastr::fields::VectorField const* transverse_offset);
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCartesian (

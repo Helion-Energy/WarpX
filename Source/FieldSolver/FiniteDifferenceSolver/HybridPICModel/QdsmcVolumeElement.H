@@ -51,7 +51,10 @@ struct QdsmcVolumeElement
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
     width (int const d, int const index) const
     {
-        return upper(d, index) - lower(d, index);
+        // Periodic images represent the same full dual cell. Subtracting
+        // translated coordinates can give them different rounded widths.
+        // Use the uniform mesh spacing so shared periodic values agree.
+        return periodic[d] ? dx[d] : upper(d, index) - lower(d, index);
     }
 
     // Integral r dr, with the 2*pi angular factor left out for radial fluxes.

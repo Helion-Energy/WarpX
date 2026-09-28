@@ -15,6 +15,8 @@
 #include "Coils/CoilSet.H"
 #include "Coils/FluxProbes.H"
 
+#include "ExternalCircuitIdentity.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,12 +69,33 @@ public:
      * re-measured from the restored fields). */
     void WriteCheckpointData (std::string const& dir) const;
 
-    /** Restore the scale segments on restart (all ranks read; the segments
-     * are rank-replicated state). Tolerant of checkpoints from before the
-     * circuit subsystem (no file: keeps initial_scale). */
+    /** Restore rank-replicated scale segments after collective preflight.
+     * Native external engines require matching immutable model/geometry
+     * metadata and complete scale rows before any rank publishes a segment
+     * or restores plugin dynamic state. Non-native engines retain tolerance
+     * of checkpoints predating the circuit subsystem. This is not a rollback
+     * of WarpX fields already read by the caller. */
     void ReadCheckpointData (std::string const& dir);
 
+    /** Collective immutable-definition preflight succeeded for this restore.
+     * Native dynamic state and its clock are validated later, after InitData. */
+    [[nodiscard]] bool NativeRestartBindingValidated () const noexcept
+    { return m_native_restart_binding_validated; }
+
 private:
+    void ResolveProbes ();
+    void PrepareExternalPlugin (bool restarting);
+    [[nodiscard]] std::string NativeImmutableDefinition () const;
+    std::unique_ptr<ExternalCircuit> m_prepared_plugin;
+    WarpxCircuitAffineApiV1 const* m_prepared_affine = nullptr;
+    WarpxCircuitRejectionApiV1 const* m_prepared_rejection = nullptr;
+    WarpxCircuitTransactionApiV1 const* m_prepared_transaction = nullptr;
+    WarpxCircuitRateApiV1 const* m_prepared_rate = nullptr;
+    WarpxCircuitRateClockApiV1 const* m_prepared_clock = nullptr;
+    WarpxCircuitImpulseApiV1 const* m_prepared_impulse = nullptr;
+    WarpxCircuitIdentityApiV1 const* m_prepared_identity = nullptr;
+    std::string m_native_definition;
+    bool m_native_restart_binding_validated = false;
     warpx::circuit::CoilSet m_coils;
 
     /** Per-coil linkage probe kind (parallel to the coil set); resolved at

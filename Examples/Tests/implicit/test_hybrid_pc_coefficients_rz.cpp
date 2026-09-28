@@ -78,6 +78,9 @@ struct Parameters {
     RT pedestal_number = 1.e18, mass = PhysConst::m_e, taper_width = 0.;
     RT density_width = 0., axis_radius = 0., axis_width = 0.;
     RT dr = 0., dz = 0.;
+    RT length_z = 1., end_eta = 0.;
+    amrex::GpuArray<RT,2> end_width{0.,0.}, end_rolloff{0.,0.};
+    bool end_holmstrom = false, physical_eta = true;
     bool hall = true, pedestal = true, vacuum = false, conductor = false;
     bool bdf = false, recovery = false, flux_only = true, live_mask = false;
     int mask_mode = 0;
@@ -128,7 +131,20 @@ expected_edge (int i, int j, int c, int slot, Parameters const& p) {
     RT const rindex = i + (c == 0 ? .5 : 0.);
     RT const zindex = j + (c == 2 ? .5 : 0.);
     RT const ped = p.pedestal ? p.pedestal_number * PhysConst::q_e : 0.;
-    RT const inverse =
+    RT end_weight = 0.;
+    RT const distances[2] = {zindex*p.dz,p.length_z-zindex*p.dz};
+    for (int side = 0; side < 2; ++side) {
+        if (p.end_width[side] > 0.) {
+            // Independent logistic form of the prescribed tanh end profile.
+            RT const weight = p.end_rolloff[side] > 0.
+                ? 1./(1.+std::exp(2.*(distances[side]-p.end_width[side])
+                                  /p.end_rolloff[side]))
+                : (distances[side] <= p.end_width[side] ? 1. : 0.);
+            end_weight = amrex::max(end_weight,weight);
+        }
+    }
+    RT const force_weight = p.end_holmstrom ? 1.-end_weight : 1.;
+    RT const inverse = force_weight *
         gate_value(rindex * p.dr, p) / floor_value(p.raw + ped, p);
     RT const hall = p.hall ? p.theta * p.dt * inverse / PhysConst::mu0 : 0.;
     RT const bmag =
@@ -151,7 +167,9 @@ expected_edge (int i, int j, int c, int slot, Parameters const& p) {
     }
     if (slot == Op::Eta) {
         return p.theta * p.dt / PhysConst::mu0 *
-               (.25 + .125 * p.raw + .05 * jmag + .0002 * te + 2. * p.time);
+               ((p.physical_eta ? .25 + .125 * p.raw + .05 * jmag
+                                 + .0002 * te + 2. * p.time : 0.)
+                + p.end_eta*end_weight);
     }
     if (slot == Op::Hyper) {
         return p.theta * p.dt / PhysConst::mu0 *
@@ -310,6 +328,11 @@ main (int argc, char** argv) {
             hp.m_holmstrom_axis_radius = p.axis_radius;
             hp.m_holmstrom_axis_rolloff = p.axis_width;
             hp.m_pec_conductor_wall_rows = p.conductor;
+            hp.m_end_region.width = p.end_width;
+            hp.m_end_region.rolloff = p.end_rolloff;
+            hp.m_end_region.holmstrom = p.end_holmstrom;
+            hp.m_end_region.resistivity = p.end_eta;
+            hp.m_eta_expression = p.physical_eta ? "coefficient_fixture" : "0.0";
             sim.sett_new(0, p.time);
             pc.CurTime(p.time + 7.);
             pc.CurTimeStep(p.dt);
@@ -421,6 +444,31 @@ main (int argc, char** argv) {
                         std::to_string(flux));
                 }
             }
+        }
+        if (!geom.isPeriodic(1)) {
+            p = Parameters{};
+            p.dr = geom.CellSize(0);
+            p.dz = geom.CellSize(1);
+            p.length_z = geom.ProbLength(1);
+            p.end_width = {.083,.137};
+            // Keep the smooth tails resolved for the strict relative-error
+            // oracle; hard zero/one weights are checked separately below.
+            p.end_rolloff = {.15,.2};
+            p.end_eta = .23;
+            p.physical_eta = false;
+            run("numerical_end_eta_without_physical_eta");
+            p.physical_eta = true;
+            p.end_eta = 0.;
+            p.end_holmstrom = true;
+            run("asymmetric_end_holmstrom_keeps_inertia");
+            p.end_eta = .23;
+            run("asymmetric_combined_end_buffers");
+            p.end_rolloff = {0.,0.};
+            run("hard_end_buffers_on_each_Yee_component");
+            p.end_width = {0.,0.};
+            p.end_holmstrom = false;
+            p.end_eta = 0.;
+            run("end_buffers_disabled_again");
         }
         amrex::Print() << "RZ_PC_COEFFICIENT_ADAPTER PASS\n";
         // No field solve/particle push is performed. All state is fixture-local

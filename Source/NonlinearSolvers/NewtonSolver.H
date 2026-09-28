@@ -23,6 +23,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <vector>
 #include <istream>
 #include <filesystem>
@@ -523,6 +524,8 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real line_search_min_alpha = 1._rt;
     int line_search_halvings = 0;
     int line_search_trials = 0;
+    int rejected_directions = 0;
+    bool force_tight_solve = false;
 
     // Count the full nonlinear residual evaluations initiated by this
     // routine. Matrix-free JVP probes call ComputeRHS directly and are
@@ -540,6 +543,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     // clear a prior success/failure before grading this solve.
     this->m_exit_status = 0;
     int convergence_status = 0;
+    bool invalid_evaluation = false;
     m_residual_current = false;
     for (iter = 0; iter <= m_maxits; ++iter) {
 
@@ -555,6 +559,13 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
 
         // Compute norm of the residual
         norm_abs = m_F.norm2();
+        if (!std::isfinite(norm_abs)) {
+            this->m_exit_status = convergence_status = -6;
+            invalid_evaluation = true;
+            amrex::Print() << "Newton: rejected nonfinite nonlinear residual at iteration "
+                           << iter << "; no linear solve or update performed.\n";
+            break;
+        }
         if (iter == 0) {
             solve_norm0 = norm_abs > 0. ? norm_abs : 1._rt;
             norm0 = m_convergence_reference_norm > 0.
@@ -617,7 +628,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         }
 
         // Prepare for the linear solve
-        m_ops->PreLinearSolve();
+        m_ops->PreLinearSolve(iter);
         m_linear_function->setBaseSolution(a_U);
         m_linear_function->setBaseRHS(m_R);
         m_linear_function->updatePreCondMat(a_U);
@@ -640,6 +651,10 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 zeta = std::min( m_forcing_zeta_max,
                     std::max(zeta_B, m_forcing_gamma*eps_newton/norm_abs) );
                 zeta = std::max(zeta, m_forcing_zeta_min);
+            }
+            if (force_tight_solve) {
+                zeta = std::min(m_linsol_rtol, m_forcing_zeta_min);
+                force_tight_solve = false;
             }
             zeta_prev = zeta;
             norm_prev = norm_abs;
@@ -664,6 +679,17 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         m_dU.zero();
         m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
+        if (m_linear_solver->failedEvaluation()
+            || !std::isfinite(m_linear_solver->getResidualNorm())
+            || !std::isfinite(m_dU.norm2())) {
+            this->m_exit_status = convergence_status = -6;
+            invalid_evaluation = true;
+            amrex::Print() << "Newton: rejected invalid linear solve at iteration " << iter
+                           << "; linear status=" << m_linear_solver->getStatus()
+                           << ", residual=" << m_linear_solver->getResidualNorm()
+                           << "; nonlinear iterate unchanged.\n";
+            break;
+        }
 
         const bool d1_selected = m_d1_operator_partition
             && (!m_d1_once || !m_d1_done)
@@ -770,8 +796,8 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // Update solution
         if (m_use_line_search) {
             // Backtracking: try alpha = 1, 1/2, ... and accept the first
-            // trial that reduces the residual norm (falling back to the
-            // best trial seen). Trial residuals reuse EvalResidual; the
+            // trial that reduces the residual norm. Reject a non-descent
+            // direction and retry at tight forcing (PR6613). The
             // accepted state is re-evaluated at the top of the next
             // Newton iteration as usual.
             m_U_ls.Copy(a_U);
@@ -803,13 +829,39 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 ++trials_this_update;
                 last_alpha = alpha;
                 amrex::Real const trial_norm = m_F.norm2();
-                if (best_norm < 0._rt || trial_norm < best_norm) {
+                if (std::isfinite(trial_norm) &&
+                    (best_norm < 0._rt || trial_norm < best_norm)) {
                     best_norm = trial_norm;
                     best_alpha = alpha;
                 }
                 if (trial_norm < norm_abs) { break; }
                 alpha *= 0.5_rt;
             }
+            if (!(best_norm >= 0._rt && best_norm < norm_abs)) {
+                // Trial residuals change particle/grid state. Restore the kept
+                // iterate with a complete evaluation before retrying or returning.
+                a_U.Copy(m_U_ls);
+                eval_residual(m_F,a_U,iter+1);
+                m_residual_current = false;
+                force_tight_solve = true;
+                m_ops->InvalidateMassMatrices();
+                ++rejected_directions;
+                line_search_trials += trials_this_update;
+                line_search_halvings += trials_this_update-1;
+                if (this->m_verbose) {
+                    amrex::Print() << "Newton: rejected non-descent direction "
+                                   << rejected_directions << "\n";
+                }
+                if (rejected_directions >= 2) {
+                    norm_abs = m_F.norm2();
+                    norm_rel = norm_abs/norm0;
+                    this->m_exit_status = -5;
+                    ++iter;
+                    break;
+                }
+                continue;
+            }
+            rejected_directions = 0;
             a_U.linComb(1._rt, m_U_ls, -best_alpha, m_dU);
             line_search_min_alpha = std::min(line_search_min_alpha, best_alpha);
             line_search_trials += trials_this_update;
@@ -834,7 +886,9 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     // The failure comparison is the exact complement of the strict success
     // tests above. A zero relative tolerance requests a fixed number of Newton
     // updates and intentionally suppresses the non-convergence warning.
-    if (norm_rel >= m_rtol && norm_abs >= m_atol && m_rtol > 0.) {
+    // Invalid residuals/directions are not permissive non-convergence. Preserve
+    // the hard failure for the caller's step rollback even if convergence was optional.
+    if (!invalid_evaluation && norm_rel >= m_rtol && norm_abs >= m_atol && m_rtol > 0.) {
         // Keep GetExitStatus behavior compatible: a permissive solve returns
         // zero so the caller can continue. The diagnostic convergence status
         // remains negative so those tolerated failures cannot be mistaken
@@ -1190,6 +1244,11 @@ void NewtonSolver<Vec,Ops>::EvalResidual ( Vec&         a_F,
                                            int          a_iter ) const
 {
     BL_PROFILE("NewtonSolver::EvalResidual()");
+    if (!std::isfinite(a_U.norm2())) {
+        m_R.setVal(std::numeric_limits<amrex::Real>::quiet_NaN());
+        a_F.setVal(std::numeric_limits<amrex::Real>::quiet_NaN());
+        return;
+    }
     m_ops->ComputeRHS( m_R, a_U, a_time, a_iter, false );
 
     // Compute residual: F(U) = U - b - R(U)

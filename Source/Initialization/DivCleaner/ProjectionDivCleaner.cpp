@@ -8,9 +8,13 @@
  */
 
 #include "ProjectionDivCleaner.H"
+#include "EmbeddedBoundary/Enabled.H"
 
 #include <AMReX_MLPoisson.H>
 #include <AMReX_MLNodeLaplacian.H>
+#if defined(WARPX_DIM_3D)
+#include <AMReX_MLEBNodeFDLaplacian.H>
+#endif
 #include <AMReX_MultiFabUtil.H>
 
 #include <WarpX.H>
@@ -32,6 +36,24 @@
 using namespace amrex;
 
 namespace warpx::initialization {
+
+namespace {
+#if defined(WARPX_DIM_3D)
+// Qualified Yee projection: one level, no EB, and a fixed scalar gauge supplied
+// by at least one PEC/Dirichlet face. Other cleaning routes retain their path.
+bool UseYeeVectorPotentialProjection(WarpX const& warpx,GridType grid,bool vector_potential)
+{
+    if (!vector_potential || grid!=GridType::Staggered || warpx.maxLevel()!=0 || EB::enabled()) {
+        return false;
+    }
+    for (int d=0;d<3;++d) {
+        if (WarpX::field_boundary_lo[d]==FieldBoundaryType::PEC ||
+            WarpX::field_boundary_hi[d]==FieldBoundaryType::PEC) return true;
+    }
+    return false;
+}
+#endif
+} // namespace
 
 ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name, bool a_vector_potential,
                                            int a_comp) :
@@ -195,6 +217,13 @@ ProjectionDivCleaner::solve ()
 
     for (int ilev = 0; ilev < m_levels; ++ilev)
     {
+#if defined(WARPX_DIM_3D)
+        if (UseYeeVectorPotentialProjection(warpx,m_grid_type,m_vector_potential)) {
+            // Match the native edge divergence composed with the nodal-to-edge gradient.
+            MLEBNodeFDLaplacian linop({geom[ilev]},{ba[ilev]},{dmap[ilev]},info);
+            runMLMG<MLEBNodeFDLaplacian>(linop,lobc,hibc,ilev);
+        } else
+#endif
         if (m_grid_type == GridType::Collocated || m_vector_potential) {
 #if defined(AMREX_USE_EB)
             const amrex::Vector<amrex::EBFArrayBoxFactory const *> eb_farray_box_factory{};
@@ -263,12 +292,31 @@ ProjectionDivCleaner::setSourceFromField ()
 
         amrex::Gpu::streamSynchronize();
 
+#if defined(WARPX_DIM_3D)
+        if (UseYeeVectorPotentialProjection(warpx,m_grid_type,m_vector_potential)) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                Bx.nGrowVect()[0] >= 1 && By.nGrowVect()[1] >= 1 && Bz.nGrowVect()[2] >= 1,
+                "Yee vector-potential divergence requires one normal guard per component");
+            auto const inverse=geom[ilev].InvCellSizeArray();
+            for(amrex::MFIter it(*m_source[ilev],amrex::TilingIfNotGPU());it.isValid();++it) {
+                auto const out=m_source[ilev]->array(it);
+                auto const ax=Bx.const_array(it),ay=By.const_array(it),az=Bz.const_array(it);
+                amrex::ParallelFor(it.tilebox(),[=] AMREX_GPU_DEVICE(int i,int j,int k){
+                    out(i,j,k)=inverse[0]*(ax(i,j,k)-ax(i-1,j,k))+
+                        inverse[1]*(ay(i,j,k)-ay(i,j-1,k))+
+                        inverse[2]*(az(i,j,k)-az(i,j,k-1));
+                });
+            }
+        } else
+#endif
+        {
         WarpX::ComputeDivB(
             *m_source[ilev],
             0,
             {&Bx, &By, &Bz},
             WarpX::CellSize(0)
             );
+        }
 
         m_source[ilev]->mult(-1._rt);
 
@@ -334,6 +382,64 @@ ProjectionDivCleaner::correctField ()
         amrex::MultiFab Bz(
             *warpx.m_fields.get(m_field_name, Direction{2}, ilev),
             amrex::make_alias, m_comp, 1);
+
+#if defined(WARPX_DIM_3D)
+        // A vector potential uses Yee edges; its cleaning scalar is nodal.
+        // The magnetic-field and collocated cleaning routes remain separate.
+        if (UseYeeVectorPotentialProjection(warpx,m_grid_type,m_vector_potential)) {
+            auto const& geometry=geom[ilev];
+            auto const nodal_domain=amrex::convert(geometry.Domain(),amrex::IntVect(1));
+            amrex::GpuArray<int,3> lower{},upper{},periodic{},low_odd{},high_odd{};
+            for(int d=0;d<3;++d) {
+                lower[d]=nodal_domain.smallEnd(d);upper[d]=nodal_domain.bigEnd(d);
+                periodic[d]=geometry.isPeriodic(d);
+                low_odd[d]=WarpX::field_boundary_lo[d]==FieldBoundaryType::PEC;
+                high_odd[d]=WarpX::field_boundary_hi[d]==FieldBoundaryType::PEC;
+            }
+            // Upward edge gradients on every allocated A row need one extra nodal guard.
+            auto ghost=amrex::max(Bx.nGrowVect(),amrex::max(By.nGrowVect(),Bz.nGrowVect()))+amrex::IntVect(1);
+            // One reflection must reach physical scalar data, never another physical
+            // guard that this same kernel is writing. Wider domains need a repeated
+            // image construction, which is outside this single-image route.
+            for (int d=0; d<3; ++d) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    geometry.isPeriodic(d) || ghost[d] <= geometry.Domain().length(d),
+                    "Vector-potential scalar mirror exceeds the physical domain width");
+            }
+            amrex::MultiFab extended(m_solution[ilev]->boxArray(),m_solution[ilev]->DistributionMap(),1,ghost);
+            extended.setVal(0.);
+            amrex::MultiFab::Copy(extended,*m_solution[ilev],0,0,1,0);
+            extended.OverrideSync(geometry.periodicity());extended.FillBoundary(geometry.periodicity());
+            for(amrex::MFIter it(extended,false);it.isValid();++it) {
+                auto const s=extended.array(it);
+                amrex::ParallelFor(it.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    int q[]{i,j,k};bool changed=false;amrex::Real sign=1.;
+                    for(int d=0;d<3;++d)if(!periodic[d]) {
+                        if(q[d]<lower[d]) {q[d]=2*lower[d]-q[d];changed=true;if(low_odd[d])sign=-sign;}
+                        else if(q[d]>upper[d]) {q[d]=2*upper[d]-q[d];changed=true;if(high_odd[d])sign=-sign;}
+                    }
+                    if(changed) {
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(s.contains(q[0],q[1],q[2]),"Vector-potential scalar mirror is outside its local allocation");
+                        s(i,j,k)=sign*s(q[0],q[1],q[2]);
+                    }
+                });
+            }
+            ablastr::fields::VectorField av{&Bx,&By,&Bz};
+            for(int c=0;c<3;++c) {
+                double const inv=geometry.InvCellSize(c);auto const off=amrex::IntVect::TheDimensionVector(c);
+                for(amrex::MFIter it(*av[c],false);it.isValid();++it) {
+                    auto const a=av[c]->array(it);auto const s=extended.const_array(it);
+                    amrex::ParallelFor(it.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                        amrex::IntVect const v(i,j,k);
+                        AMREX_ALWAYS_ASSERT(s.contains(i,j,k) && s.contains(i+off[0],j+off[1],k+off[2]));
+                        a(v)+=inv*(s(v+off)-s(v));
+                    });
+                }
+                av[c]->OverrideSync(geometry.periodicity());av[c]->FillBoundary(geometry.periodicity());
+            }
+            continue;
+        }
+#endif
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())

@@ -4,9 +4,13 @@ foreach(D IN LISTS WarpX_DIMS)
     target_sources(lib_${SD}
       PRIVATE
         CircuitCoupler.cpp
+    NativeCircuitTransaction.cpp
         CircuitCoupling.cpp
         DeviceCircuit.cpp
         DarwinDeviceCoupling.cpp
+        DeviceCircuitRate.cpp
+        NativeEndpointRateCoupling.cpp
+        NativeSourceImpulseCoupling.cpp
     )
 endforeach()
 

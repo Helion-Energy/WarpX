@@ -24,6 +24,11 @@
 #   endif
 #endif
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
+#include "FieldSolver/ImplicitSolvers/NativeAcceptedStepCandidate.H"
+#include "FieldSolver/ImplicitSolvers/NativeCandidateStopping.H"
+#include "FieldSolver/ImplicitSolvers/NativeRetainedAcceptance.H"
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
+#include "FieldSolver/ImplicitSolvers/NativeStoppingCarryCertificate.H"
 #include "Parallelization/GuardCellManager.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Fluids/MultiFluidContainer.H"
@@ -47,6 +52,7 @@
 #include <AMReX_LayoutData.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_ParallelDescriptor.H>
 #include <AMReX_Print.H>
 #include <AMReX_REAL.H>
 #include <AMReX_RealVect.H>
@@ -66,6 +72,17 @@ using ablastr::utils::SignalHandling;
 
 namespace
 {
+    // Ordinary OneStep publishes these immediately. The explicit outer
+    // candidate path publishes only after its owner and global clock commit.
+    void PublishImplicitFieldCallbacks (bool const fire_esolve_callbacks)
+    {
+        ExecutePythonCallback("afterEpush");
+        ExecutePythonCallback("afterBpush");
+        if (fire_esolve_callbacks) {
+            ExecutePythonCallback("afterEsolve");
+        }
+    }
+
     /** Print Unused Parameter Warnings after Step 1
      *
      * Instead of waiting for a simulation to end, we already do an early "unused parameter check"
@@ -164,6 +181,120 @@ WarpX::Evolve (int numsteps)
 
     static Real evolve_time = 0;
 
+    bool native_outer_candidate = false;
+    amrex::ParmParse("implicit_evolve").query("native_outer_candidate", native_outer_candidate);
+    bool native_outer_stopping = false;
+    amrex::ParmParse("implicit_evolve").query("native_outer_stopping", native_outer_stopping);
+    bool native_material_stopping = false;
+    amrex::ParmParse("native_stopping_event").query("material_support",native_material_stopping);
+    bool producer_certificate = false;
+    amrex::ParmParse("endpoint_diagnostic").query(
+        "stopping_producer_certificate", producer_certificate);
+    // Selection must agree before any branch enters a collective candidate
+    // method. Checking only an event's returned status would be too late.
+    bool const native_endpoint_pair=warpx::darwin::NativeEndpointPairSelected(*this);
+    int selection_min = (native_outer_candidate ? 1 : 0) |
+        (native_outer_stopping ? 2 : 0) | (producer_certificate ? 4 : 0) |
+        (native_endpoint_pair ? 8 : 0) | (native_material_stopping ? 16 : 0);
+    int selection_max = selection_min;
+    amrex::ParallelDescriptor::ReduceIntMin(selection_min);
+    amrex::ParallelDescriptor::ReduceIntMax(selection_max);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(selection_min == selection_max,
+        "Native outer candidate, stopping and producer selections must agree across ranks");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!native_endpoint_pair ||
+        (native_outer_candidate && warpx::darwin::NativePairedDarwinFields::EndpointAcceptanceRequested() &&
+         (!native_outer_stopping || native_material_stopping)),
+        "Retained endpoint Evolve requires accepted native candidates; source publication is qualified separately");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!native_material_stopping ||
+        (native_outer_candidate&&native_outer_stopping&&native_endpoint_pair&&!producer_certificate),
+        "Material symmetric stopping requires its retained pair and explicit outer stopping selection");
+    warpx::thermal::NativeStoppingCarryRequest endpoint_carry;
+    if(native_material_stopping)endpoint_carry.mode=warpx::thermal::NativeStoppingCarryMode::FieldTransition;
+    warpx::implicit::NativeCandidateStoppingOptions native_stopping_options;
+    warpx::implicit::NativeSymmetricStoppingOptions symmetric_stopping_options;
+    bool symmetric_stopping=false;
+    if (native_outer_stopping) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(native_outer_candidate && (producer_certificate || native_material_stopping),
+            "Native outer stopping requires a retained outer candidate and its "
+            "qualified longitudinal producer certificate");
+        amrex::ParmParse stopping("native_stopping_event");
+        std::string scheme="fixed_temperature_post";stopping.queryAdd("scheme",scheme);
+        int scheme_min=scheme=="fixed_temperature_post" ? 0 : scheme=="symmetric_midpoint" ? 1 : -1;
+        int scheme_max=scheme_min;
+        amrex::ParallelDescriptor::ReduceIntMin(scheme_min);
+        amrex::ParallelDescriptor::ReduceIntMax(scheme_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scheme_min>=0 && scheme_min==scheme_max,
+            "Native stopping scheme must agree: fixed_temperature_post or symmetric_midpoint");
+        symmetric_stopping=scheme_min==1;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!native_material_stopping || symmetric_stopping,
+            "Material source supports only the complete symmetric_midpoint schedule");
+        symmetric_stopping_options.material_support=native_material_stopping;
+        if(native_material_stopping)symmetric_stopping_options.thermal.nonlinear.use_preconditioner=false;
+        stopping.queryAdd("analytic_temperature_pc",
+            symmetric_stopping_options.thermal.analytic_temperature_column);
+        int analytic_min=symmetric_stopping_options.thermal.analytic_temperature_column ? 1 : 0;
+        int analytic_max=analytic_min;
+        amrex::ParallelDescriptor::ReduceIntMin(analytic_min);
+        amrex::ParallelDescriptor::ReduceIntMax(analytic_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(analytic_min==analytic_max &&
+            (!analytic_min || (symmetric_stopping&&!native_material_stopping)),
+            "Analytic temperature PC selection must agree across ranks and requires symmetric_midpoint");
+        bool const have_species = stopping.query("fast_species", native_stopping_options.fast_species);
+        bool const have_log = stopping.query("coulomb_log", native_stopping_options.coulomb_log);
+        bool const have_cap = stopping.query("proper_speed_cap", native_stopping_options.proper_speed_cap);
+        bool const have_budget = stopping.query(
+            "relative_convention_budget", native_stopping_options.relative_convention_budget);
+        bool complete = have_species && have_log && have_cap && have_budget;
+        amrex::ParallelDescriptor::ReduceBoolAnd(complete);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(complete,
+            "Native stopping requires species, Coulomb logarithm, proper-speed cap and convention budget");
+        symmetric_stopping_options.physical=native_stopping_options;
+    }
+    if (native_outer_candidate) {
+        // The retained path keeps generic collisions disabled. Its opt-in
+        // native stopping event owns its physical reclosure and publication.
+        amrex::Vector<std::string> collisions;
+        amrex::ParmParse("collisions").queryarr("collision_names", collisions);
+        bool supported = m_implicit_solver && m_hybrid_pic_model &&
+            electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+            warpx::implicit::NativeRetainedAcceptanceEnabled() && collisions.empty() &&
+            !m_hybrid_pic_model->m_has_electron_stopping &&
+            finest_level == 0 && max_level == 0 && !do_moving_window &&
+            !m_particle_thermalizer.defined() && gamma_boost == 1. &&
+            std::all_of(m_v_galilean.begin(), m_v_galilean.end(),
+                        [](amrex::Real value) { return value == 0.; });
+        for (auto const& pc : *mypc) {
+            // Match the fixed species configuration checked by the native
+            // endpoint adapter; the particle member itself is protected.
+            int resampling = 0;
+            amrex::ParmParse(pc->getName()).query("do_resampling", resampling);
+            supported = !resampling && !pc->doContinuousInjection() &&
+                !pc->DoFieldIonization() && supported;
+        }
+#ifdef WARPX_QED
+        supported = false;
+#endif
+        amrex::ParallelDescriptor::ReduceBoolAnd(supported);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(supported,
+            "Native outer candidate currently requires retained implicit hybrid state "
+            "on a fixed grid without generic collisions, legacy stopping, resampling, injection or grid motion");
+    }
+
+    // The source-free PMC candidate is already qualified without the
+    // periodic stopping-carry protocol. Require its actual captured owner and
+    // full scope; a physical source selection must retain its carry request.
+    bool pmc_endpoint_without_carry = false;
+    if (native_endpoint_pair && !native_outer_stopping && !symmetric_stopping) {
+        pmc_endpoint_without_carry =
+            warpx::darwin::NativeEndpointPMCQualificationSelected(*this);
+    }
+    int pmc_carry_min = pmc_endpoint_without_carry ? 1 : 0;
+    int pmc_carry_max = pmc_carry_min;
+    amrex::ParallelDescriptor::ReduceIntMin(pmc_carry_min);
+    amrex::ParallelDescriptor::ReduceIntMax(pmc_carry_max);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(pmc_carry_min == pmc_carry_max,
+        "Source-free PMC candidate ownership must agree across ranks");
+
     const int step_begin = istep[0];
     for (int step = istep[0]; step < numsteps_max && cur_time < stop_time; ++step)
     {
@@ -218,7 +349,12 @@ WarpX::Evolve (int numsteps)
         if (step == step_begin &&
             electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
         ) {
-            HybridPICInitializeRhoJandB();
+            auto* paired=warpx::darwin::NativeEndpointPairedFields(*this);
+            // Evolve(1) may be called repeatedly. A warm accepted endpoint
+            // already owns these deposited moments; initializing again changes
+            // the origin behind its retained fields and current history.
+            if(!native_endpoint_pair || !paired || !paired->EndpointAccepted())
+                HybridPICInitializeRhoJandB();
         }
 
         // multi-physics: field ionization
@@ -233,8 +369,115 @@ WarpX::Evolve (int numsteps)
         // perform particle injection
         ExecutePythonCallback("particleinjection");
 
-        // perform collisions and advance fields and particles by one time step
-        OneStep(cur_time, dt[0], step);
+        // Retain the validated endpoint until any selected native event has
+        // completed its own physical closure. Publish the final endpoint once.
+        if (native_outer_candidate) {
+            using warpx::implicit::NativeCandidateStatus;
+            ExecutePythonCallback("beforeEsolve");
+            auto result = warpx::implicit::AdvanceNativeStepCandidate(
+                *this, cur_time, dt[0], step,
+                symmetric_stopping ? &symmetric_stopping_options : nullptr,
+                native_endpoint_pair && !pmc_endpoint_without_carry ? &endpoint_carry : nullptr);
+            bool ready = result.status == NativeCandidateStatus::Success &&
+                result.candidate && result.candidate->Active();
+            amrex::ParallelDescriptor::ReduceBoolAnd(ready);
+            if (!ready) {
+                // Declined has already restored the attempt. Unsupported is
+                // pre-mutation; terminal cannot be retried. Preserve the
+                // ordinary Evolve policy of reporting a failed advance.
+                std::stringstream message;
+                message << "Native outer candidate failed at step = " << step
+                        << ", status = " << static_cast<int>(result.status)
+                        << ", implicit status = " << result.implicit_exit_status
+                        << ": " << result.reason;
+                WARPX_ABORT_WITH_MESSAGE(message.str());
+            }
+            auto const lease = result.candidate->EndpointLease();
+            bool const valid_lease = result.candidate->ValidateLease(lease);
+            bool clock_unchanged = gett_new(0) == cur_time && getistep(0) == step &&
+                lease.EndpointTime() == cur_time + dt[0] &&
+                lease.EndpointEpoch() == static_cast<std::uint64_t>(step + 1);
+            amrex::ParallelDescriptor::ReduceBoolAnd(clock_unchanged);
+            if (!valid_lease || !clock_unchanged) {
+                auto const canceled = result.candidate->Cancel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                    "Native outer candidate could not restore an invalid endpoint lease");
+                WARPX_ABORT_WITH_MESSAGE("Native outer candidate changed its clock or endpoint lease");
+            }
+            if (native_outer_stopping && !symmetric_stopping) {
+                // ParmParse expresses the requested mode, not initialized
+                // capability. Require the actual producer bound to this lease,
+                // so changing an option after InitData cannot select fallback.
+                auto const certificate = result.candidate->StoppingProducerCertificate(lease);
+                bool certified = static_cast<bool>(certificate);
+                amrex::ParallelDescriptor::ReduceBoolAnd(certified);
+                if (!certified) {
+                    auto const canceled = result.candidate->Cancel();
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                        "Native outer candidate could not restore a missing stopping producer");
+                    WARPX_ABORT_WITH_MESSAGE(
+                        "Native stopping requires a live producer certificate created before InitData");
+                }
+                auto const stopping = result.candidate->ApplyStopping(lease, native_stopping_options);
+                int status_min = static_cast<int>(stopping.status);
+                int status_max = status_min;
+                amrex::ParallelDescriptor::ReduceIntMin(status_min);
+                amrex::ParallelDescriptor::ReduceIntMax(status_max);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(status_min == status_max,
+                    "Native stopping returned inconsistent collective ownership");
+                if (stopping.status != NativeCandidateStatus::Success) {
+                    if (stopping.status == NativeCandidateStatus::Unsupported) {
+                        auto const canceled = result.candidate->Cancel();
+                        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                            "Native outer candidate could not cancel an unsupported stopping event");
+                    } else if (stopping.status == NativeCandidateStatus::Declined) {
+                        bool inactive = !result.candidate->Active();
+                        amrex::ParallelDescriptor::ReduceBoolAnd(inactive);
+                        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(inactive,
+                            "Declined native stopping did not release its restored candidate");
+                    }
+                    // Terminal does not certify restoration. None of these
+                    // failure statuses publishes a clock, source or field step.
+                    std::stringstream message;
+                    message << "Native stopping failed at step = " << step
+                            << ", status = " << static_cast<int>(stopping.status)
+                            << ": " << stopping.reason;
+                    WARPX_ABORT_WITH_MESSAGE(message.str());
+                }
+                auto const reclosed_lease = result.candidate->EndpointLease();
+                bool const reclosed_valid = result.candidate->ValidateLease(reclosed_lease);
+                bool event_closed = result.candidate->Active() && !lease.Valid() &&
+                    gett_new(0) == cur_time && getistep(0) == step &&
+                    reclosed_lease.EndpointTime() == cur_time + dt[0] &&
+                    reclosed_lease.EndpointEpoch() == static_cast<std::uint64_t>(step + 1);
+                amrex::ParallelDescriptor::ReduceBoolAnd(event_closed);
+                if (!reclosed_valid || !event_closed) {
+                    auto const canceled = result.candidate->Cancel();
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                        "Native outer candidate could not restore a failed stopping reclosure");
+                    WARPX_ABORT_WITH_MESSAGE("Native stopping lost its reclosed endpoint lease or clock");
+                }
+            }
+            bool const finalizable = result.candidate->CanFinalize();
+            if (!finalizable) {
+                auto const canceled = result.candidate->Cancel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                    "Native outer candidate could not restore a declined finalization");
+                WARPX_ABORT_WITH_MESSAGE("Native outer candidate is not ready for finalization");
+            }
+            auto const finalized = result.candidate->Finalize();
+            if (finalized == NativeCandidateStatus::Declined) {
+                auto const canceled = result.candidate->Cancel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(canceled == NativeCandidateStatus::Success,
+                    "Native outer candidate could not restore a declined finalization");
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(finalized == NativeCandidateStatus::Success,
+                "Native outer candidate finalization failed after collective preflight");
+            // No numerical validation or recoverable operation follows the
+            // irreversible publication. Only now may the driver advance time.
+        } else {
+            OneStep(cur_time, dt[0], step);
+        }
 
         // Resample particles
         // +1 is necessary here because value of step seen by user (first step is 1) is different than
@@ -267,6 +510,15 @@ WarpX::Evolve (int numsteps)
             UpdateAuxiliaryData();
             FillBoundaryAux(guard_cells.ng_UpdateAux);
         }
+        if(native_endpoint_pair){
+            // On a single physical level FillBoundaryAux is a no-op; the
+            // ordinary centering above is the same operator used for the
+            // retained high and low auxiliary fields. Check the one clock
+            // transition before any accepted diagnostic consumer runs.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(warpx::darwin::BindNativeAcceptedEndpointBoundary(*this),
+                "Accepted endpoint could not bind its physical clock and auxiliary fields");
+        }
+        if (native_outer_candidate) { PublishImplicitFieldCallbacks(true); }
         multi_diags->FilterComputePackFlush( step, false, true );
 
         const bool move_j = m_is_synchronized;
@@ -373,6 +625,13 @@ WarpX::Evolve (int numsteps)
 
         // execute afterdiagnostic callbacks
         ExecutePythonCallback("afterdiagnostics");
+        if(native_endpoint_pair){
+            auto* paired=warpx::darwin::NativeEndpointPairedFields(*this);
+            bool ready=paired&&paired->EndpointAccepted();
+            amrex::ParallelDescriptor::ReduceBoolAnd(ready);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ready&&paired->MatchesEndpoint(paired->EndpointLease()),
+                "An action after endpoint acceptance changed its retained physical origin");
+        }
 
         // inputs: unused parameters (e.g. typos) check after step 1 has finished
         if (!early_params_checked) {
@@ -447,9 +706,7 @@ void WarpX::OneStep (
             WARPX_ABORT_WITH_MESSAGE(solverMsg.str());
         }
 
-        ExecutePythonCallback("afterEpush");
-        ExecutePythonCallback("afterBpush");
-        if (fire_esolve_callbacks) { ExecutePythonCallback("afterEsolve"); }
+        PublishImplicitFieldCallbacks(fire_esolve_callbacks);
     }
     // explicit solver
     else {
@@ -764,6 +1021,16 @@ void WarpX::ExplicitFillBoundaryEBUpdateAux ()
 
 void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num_moved)
 {
+    bool const paired_handoff=warpx::darwin::NativeEndpointPairSelected(*this);
+    auto redistribute=[&](bool local,amrex::IntVect const& max_cells){
+        if(paired_handoff){
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(warpx::darwin::RedistributeNativeAcceptedEndpoint(
+                *this,local,max_cells,sort_intervals.contains(step+1),sort_bin_size,
+                m_sort_particles_for_deposition,m_sort_idx_type),
+                "Accepted particle redistribution did not preserve its endpoint origin");
+        }else if(local)mypc->RedistributeLocal(max_cells);
+        else mypc->Redistribute();
+    };
     mypc->ContinuousFluxInjection(cur_time, dt[0]);
 
     ExecutePythonCallback("particlescraper");
@@ -824,14 +1091,10 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
             if (max_cells_travelled[d] >= domain_length[d]) { use_local_redistribute = false; }
         }
-        if (use_local_redistribute) {
-            mypc->RedistributeLocal(max_cells_travelled);
-        } else {
-            mypc->Redistribute();
-        }
+        redistribute(use_local_redistribute,max_cells_travelled);
     }
     else {
-        mypc->Redistribute();
+        redistribute(false,amrex::IntVect(0));
     }
 
     // interact the particles with EB walls (if present)
@@ -851,7 +1114,7 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
         }
     }
 
-    if (sort_intervals.contains(step+1)) {
+    if (!paired_handoff && sort_intervals.contains(step+1)) {
         if (verbose && !m_limit_verbose_step) {
             amrex::Print() << Utils::TextMsg::Info("re-sorting particles");
         }

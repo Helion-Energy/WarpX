@@ -69,6 +69,10 @@ public:
     //! Gets the solver status.
     [[nodiscard]] virtual int getStatus () const = 0;
 
+    //! True for an invalid evaluation/breakdown, which must never produce a
+    //! nonlinear update. Ordinary finite iteration-limit status is distinct.
+    [[nodiscard]] virtual bool failedEvaluation () const { return false; }
+
     //! Gets the 2-norm of the residual.
     [[nodiscard]] virtual RT getResidualNorm () const = 0;
 

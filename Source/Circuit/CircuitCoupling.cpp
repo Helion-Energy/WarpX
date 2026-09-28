@@ -7,6 +7,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "CircuitCoupling.H"
+#include "NativeCircuitIdentity.H"
 
 #include "Coils/CoilFieldSolver.H"
 #include "Coils/LoopInductance.H"
@@ -27,6 +28,8 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include <iomanip>
 #include <set>
 #include <string>
@@ -43,10 +46,15 @@ namespace
      * exporting the C factory symbol warpx_create_external_circuit. */
     std::unique_ptr<ExternalCircuit>
     LoadExternalCircuitPlugin (std::string const& path,
-                               WarpxCircuitAffineApiV1 const*& affine_api)
+                               WarpxCircuitAffineApiV1 const*& affine_api,
+                               WarpxCircuitRejectionApiV1 const*& rejection_api,
+        WarpxCircuitTransactionApiV1 const*& transaction_api,
+        WarpxCircuitRateApiV1 const*& rate_api, WarpxCircuitRateClockApiV1 const*& clock_api,
+        WarpxCircuitIdentityApiV1 const*& identity_api,
+        WarpxCircuitImpulseApiV1 const*& impulse_api)
     {
 #if defined(_WIN32)
-        amrex::ignore_unused(path, affine_api);
+        amrex::ignore_unused(path, affine_api, rejection_api, transaction_api, rate_api, clock_api, identity_api, impulse_api);
         WARPX_ABORT_WITH_MESSAGE(
             "circuit.engine = external is not supported on Windows");
         return nullptr;
@@ -82,6 +90,30 @@ namespace
         auto affine_factory = reinterpret_cast<affine_factory_t>(
             dlsym(handle, "warpx_external_circuit_affine_api_v1"));
         affine_api = affine_factory ? affine_factory() : nullptr;
+        using rejection_factory_t = WarpxCircuitRejectionApiV1 const* (*)();
+        auto rejection_factory = reinterpret_cast<rejection_factory_t>(
+            dlsym(handle, "warpx_external_circuit_rejection_api_v1"));
+        rejection_api = rejection_factory ? rejection_factory() : nullptr;
+        using transaction_factory_t=WarpxCircuitTransactionApiV1 const* (*)();
+        auto transaction_factory=reinterpret_cast<transaction_factory_t>(
+            dlsym(handle,"warpx_external_circuit_transaction_api_v1"));
+        transaction_api=transaction_factory?transaction_factory():nullptr;
+        using rate_factory_t = WarpxCircuitRateApiV1 const* (*)();
+        auto rate_factory = reinterpret_cast<rate_factory_t>(
+            dlsym(handle, "warpx_external_circuit_rate_api_v1"));
+        rate_api = rate_factory ? rate_factory() : nullptr;
+        using clock_factory_t = WarpxCircuitRateClockApiV1 const* (*)();
+        auto clock_factory = reinterpret_cast<clock_factory_t>(
+            dlsym(handle, "warpx_external_circuit_rate_clock_api_v1"));
+        clock_api = clock_factory ? clock_factory() : nullptr;
+        using identity_factory_t = WarpxCircuitIdentityApiV1 const* (*)();
+        auto identity_factory = reinterpret_cast<identity_factory_t>(
+            dlsym(handle,"warpx_external_circuit_identity_api_v1"));
+        identity_api = identity_factory ? identity_factory() : nullptr;
+        using impulse_factory_t = WarpxCircuitImpulseApiV1 const* (*)();
+        auto impulse_factory = reinterpret_cast<impulse_factory_t>(
+            dlsym(handle,"warpx_external_circuit_impulse_api_v1"));
+        impulse_api = impulse_factory ? impulse_factory() : nullptr;
         auto plugin = std::unique_ptr<ExternalCircuit>(factory());
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(plugin != nullptr, "Circuit plugin factory returned null");
         return plugin;
@@ -210,10 +242,20 @@ CircuitCoupling::InitData ()
         implicit.query("darwin_segregated_solve", segregated);
         implicit.query("external_field_iteration", external_iteration);
         implicit.query("darwin_circuit_consistent_stage", consistent);
+        bool native_circuit_geometry = AMREX_SPACEDIM == 3;
+#if defined(WARPX_DIM_RZ)
+        // Match the interval driver's scalar cylindrical disk-probe contract.
+        auto const& geometry = warpx.Geom(0);
+        native_circuit_geometry = WarpX::n_rz_azimuthal_modes == 1 && !EB::enabled()
+            && !WarpX::do_moving_window
+            && geometry.Domain().smallEnd() == amrex::IntVect(0)
+            && geometry.ProbLo(0) == amrex::Real(0) && !geometry.isPeriodic(0);
+#endif
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(driver == "native" && segregated
-            && external_iteration && consistent && AMREX_SPACEDIM == 3
+            && external_iteration && consistent && native_circuit_geometry
             && warpx.maxLevel() == 0 && sizeof(amrex::Real) == sizeof(double),
-            "External circuit plugin requires the supported native Darwin driver");
+            "External circuit plugin requires the native Darwin driver in 3D or "
+            "non-EB, fixed, zero-based, on-axis RZ m=0 geometry");
     }
 
     // Each engine port owns one distinct external-field scale segment.
@@ -447,6 +489,208 @@ CircuitCoupling::InitData ()
     }
 #endif
 
+    ResolveProbes();
+
+    // Construct the coupling engine (RZ m = 0 and 3D Cartesian: the
+    // probes, the discrete inductance table and the coupling-power
+    // integral exist for both; the coupler and the engines are
+    // geometry-neutral).
+    if (m_engine != "none") {
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_3D)
+        WARPX_ABORT_WITH_MESSAGE(
+            "the circuit coupling engine (circuit.engine) is implemented "
+            "for RZ and 3D geometry");
+#else
+        // The coupled (measured) coils must be scale-driven: the engine
+        // pushes their segments every coupling interval.
+        for (int ic = 0; ic < m_coils.size(); ++ic) {
+            if (m_probes[ic] == ProbeKind::none) { continue; }
+            const Coil& c = m_coils.coil(ic);
+            bool scale_driven = false;
+            for (int i = 0; i < ext.nFields(); ++i) {
+                if (ext.FieldName(i) == c.field_name) {
+                    scale_driven = ext.UsesPythonScale(i);
+                    break;
+                }
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scale_driven,
+                "coupled circuit coil '" + c.name + "' requires "
+                "external_vector_potential." + c.field_name +
+                ".python_scale = 1 (the engine drives its scale segments)");
+        }
+
+        std::unique_ptr<ExternalCircuit> plugin;
+        WarpxCircuitAffineApiV1 const* affine_api = nullptr;
+        WarpxCircuitRejectionApiV1 const* rejection_api = nullptr;
+        WarpxCircuitRateApiV1 const* rate_api = nullptr;
+        WarpxCircuitRateClockApiV1 const* clock_api = nullptr;
+        if (m_engine == "external") {
+            if(!m_prepared_plugin) { PrepareExternalPlugin(!m_restart_dir.empty()); }
+            if(m_native_definition.empty() && m_prepared_identity) {
+                try { m_native_definition=NativeImmutableDefinition(); }
+                catch(std::runtime_error const& ex) {
+                    // Fresh starts keep legacy behavior. Such a checkpoint
+                    // cannot be used by the protected native restart path.
+                    amrex::Print()<<"Native circuit checkpoint identity unavailable: "<<ex.what()<<"\n";
+                }
+            }
+            plugin=std::move(m_prepared_plugin);
+            affine_api=m_prepared_affine;rejection_api=m_prepared_rejection;
+            rate_api=m_prepared_rate;clock_api=m_prepared_clock;
+            const bool restarting = !m_restart_dir.empty();
+            // On restart, restore the engine's own state on every rank
+            // (the engine runs replicated in lockstep, exactly like the
+            // Python-callback engine).
+            if (restarting) {
+                plugin->ReadCheckpoint(m_restart_dir);
+            }
+        }
+        m_coupler = std::make_unique<CircuitCoupler>(
+            m_coils, m_probes, m_probe_exclusion, m_coupler_params,
+            std::move(plugin), affine_api);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupler->SetTransactionCapability(m_prepared_transaction),
+            "Circuit plugin advertises an invalid post-accept transaction capability");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupler->SetRejectionCapability(rejection_api),
+            "Circuit plugin advertises an invalid native rejection capability");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_coupler->SetNativeEndpointRateCapabilities(rate_api, clock_api),
+            "Circuit plugin advertises an invalid native rate or clock capability");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coupler->SetSourceImpulseCapability(m_prepared_impulse),
+            "Circuit plugin advertises an invalid source-impulse capability");
+        // The coupler's own per-step memory (EMF low-pass state) is part
+        // of the checkpoint; restore it with the engine state.
+        if (!m_restart_dir.empty()) {
+            m_coupler->ReadMemoryCheckpoint(m_restart_dir);
+        }
+        amrex::Print() << "Circuit coupling engine: " << m_engine
+                       << " (corrector_iterations = "
+                       << m_coupler_params.corrector_iterations
+                       << ", corrector_rtol = "
+                       << m_coupler_params.corrector_rtol
+                       << ", eps_lowpass_tau = "
+                       << m_coupler_params.eps_lowpass_tau << " s"
+                       << (m_coupler_params.eps_lowpass_tau > 0.0
+                               ? " [one-pole EMA on the port EMF, memory "
+                                 "committed on accept]"
+                               : " [off: raw interval EMF]")
+                       << ", linkage_reference = "
+                       << (m_coupler_params.linkage_reference_accepted
+                               ? "accepted [previous accepting evaluation; "
+                                 "first step open loop]"
+                               : "first_iterate")
+                       << ", residual_advance = "
+                       << (m_coupler_params.residual_advance_full_step
+                               ? "full_step [EMF over the theta interval]"
+                               : "theta_stage")
+                       << ")\n";
+#endif
+    }
+}
+
+
+void
+CircuitCoupling::WriteCheckpointData (std::string const& dir) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_coupler || !m_coupler->NativeStepRetained(),
+        "Cannot checkpoint an application-provisional circuit endpoint");
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+    auto& warpx = WarpX::GetInstance();
+    auto* hybrid = warpx.get_pointer_HybridPICModel();
+    if (hybrid == nullptr || !hybrid->m_add_external_fields) { return; }
+    auto& ext = *hybrid->m_external_vector_potential;
+
+    std::ofstream ofs{dir + "/circuit_coupling.dat", std::ofstream::out};
+    ofs << std::setprecision(17);
+    ofs << "version 1\n";
+    for (int i = 0; i < ext.nFields(); ++i) {
+        amrex::Real s_old, s_new, t_old, t_new;
+        if (ext.GetScaleSegment(i, s_old, s_new, t_old, t_new)) {
+            ofs << ext.FieldName(i) << " " << s_old << " " << s_new
+                << " " << t_old << " " << t_new << "\n";
+        }
+    }
+    ofs.close();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(ofs), "Unable to write circuit scale checkpoint");
+
+    // A compiled engine checkpoints its own state (I/O rank only, like the
+    // segments above); the Python engine re-seeds itself on restart. The
+    // coupler's per-step memory (EMF low-pass state) goes with it.
+    if (m_coupler && m_coupler->Plugin() != nullptr) {
+        if(!m_native_definition.empty()) {
+            std::ofstream identity(dir+"/circuit_native_identity_v1.dat",std::ios::binary);
+            identity.write(m_native_definition.data(),static_cast<std::streamsize>(m_native_definition.size()));
+            identity.close();WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(identity),"Unable to write native circuit immutable definition");
+        }
+        m_coupler->Plugin()->WriteCheckpoint(dir);
+        m_coupler->WriteMemoryCheckpoint(dir);
+    }
+}
+
+void
+CircuitCoupling::ReadCheckpointData (std::string const& dir)
+{
+    m_native_restart_binding_validated = false;
+    bool const strict=m_engine=="external";
+    auto& warpx=WarpX::GetInstance();auto* hybrid=warpx.get_pointer_HybridPICModel();
+    std::ifstream ifs(dir+"/circuit_coupling.dat");
+    if(!ifs.good() && !strict) { return; }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid && hybrid->m_add_external_fields,
+        "Circuit restart requires hybrid external fields");
+    auto& ext=*hybrid->m_external_vector_potential;
+    struct Segment {std::string name;amrex::Real so,sn,to,tn;};
+    std::vector<Segment> staged;std::string error;int valid=1;
+    try {
+        if(!ifs) { throw std::runtime_error("native restart missing circuit_coupling.dat"); }
+        if(strict) {
+            ResolveProbes();PrepareExternalPlugin(true);
+            auto const current=NativeImmutableDefinition();
+            std::ifstream definition(dir+"/circuit_native_identity_v1.dat",std::ios::binary);
+            if(!definition) { throw std::runtime_error("protected native restart missing circuit_native_identity_v1.dat"); }
+            std::string recorded{std::istreambuf_iterator<char>(definition),{}};
+            if(!definition.eof() && definition.fail()) { throw std::runtime_error("native definition read failure"); }
+            if(recorded!=current) { throw std::runtime_error("immutable native circuit model/geometry definition mismatch"); }
+            std::ifstream memory(dir+"/circuit_coupler_memory.dat");
+            if(!memory) { throw std::runtime_error("native restart missing circuit_coupler_memory.dat"); }
+            m_native_definition=current;
+        }
+        std::string token;int version=0;ifs>>token>>version;
+        if(token!="version" || version!=1) { throw std::runtime_error("unsupported circuit scale checkpoint"); }
+        std::set<std::string> restored;Segment row;
+        while(ifs>>row.name) {
+            if(!(ifs>>row.so>>row.sn>>row.to>>row.tn) || !std::isfinite(row.so) ||
+               !std::isfinite(row.sn) || !std::isfinite(row.to) || !std::isfinite(row.tn) ||
+               !restored.insert(row.name).second) {
+                throw std::runtime_error("truncated/nonfinite/duplicate circuit scale checkpoint");
+            }
+            bool matched=false;
+            for(int i=0;i<ext.nFields();++i) {
+                if(ext.FieldName(i)==row.name && ext.UsesPythonScale(i)) { matched=true; }
+            }
+            if(!matched) { throw std::runtime_error("unknown or non-scale-driven circuit checkpoint field"); }
+            staged.push_back(row);
+        }
+        if(!ifs.eof()) { throw std::runtime_error("invalid circuit scale checkpoint data"); }
+        if(strict) {
+            for(int i=0;i<ext.nFields();++i) {
+                if(ext.UsesPythonScale(i) && restored.count(ext.FieldName(i))!=1) {
+                    throw std::runtime_error("native restart missing external scale segment");
+                }
+            }
+        }
+    } catch(std::exception const& ex) {valid=0;error=ex.what();}
+    // Every rank finishes preflight before ANY rank publishes a scale segment
+    // or restores plugin dynamic state. Private Define/bootstrap is disposable.
+    amrex::ParallelDescriptor::ReduceIntMin(valid);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(valid==1,"Circuit restart preflight rejected: "+
+        (error.empty()?std::string("immutable definition or checkpoint rejected on another rank"):error));
+    for(auto const& row:staged) { ext.SetScale(row.name,row.so,row.sn,row.to,row.tn); }
+    m_restart_dir=dir;
+    m_native_restart_binding_validated = strict;
+}
+
+void CircuitCoupling::ResolveProbes ()
+{
+    using namespace warpx::circuit;
     // Resolve the per-coil linkage probes. The reciprocity probe is exact
     // only in free space: it requires the Green's-function open boundary
     // (a conducting wall's image response is not in the unit A), unless
@@ -524,162 +768,80 @@ CircuitCoupling::InitData ()
         }
     }
 
-    // Construct the coupling engine (RZ m = 0 and 3D Cartesian: the
-    // probes, the discrete inductance table and the coupling-power
-    // integral exist for both; the coupler and the engines are
-    // geometry-neutral).
-    if (m_engine != "none") {
-#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_3D)
-        WARPX_ABORT_WITH_MESSAGE(
-            "the circuit coupling engine (circuit.engine) is implemented "
-            "for RZ and 3D geometry");
+}
+
+void CircuitCoupling::PrepareExternalPlugin (bool restarting)
+{
+    if(m_prepared_plugin) { return; }
+    auto plugin=LoadExternalCircuitPlugin(m_plugin_library,m_prepared_affine,m_prepared_rejection,
+                                         m_prepared_transaction,m_prepared_rate,m_prepared_clock,m_prepared_identity,m_prepared_impulse);
+    if(m_coupler_params.device_affine && (!m_prepared_affine ||
+       m_prepared_affine->struct_bytes!=sizeof(WarpxCircuitAffineApiV1) ||
+       m_prepared_affine->api_version!=WARPX_CIRCUIT_AFFINE_API_V1 ||
+       !m_prepared_affine->prepare || !m_prepared_affine->release)) {
+        throw std::runtime_error("Device circuit trials require affine v1 plugin capability");
+    }
+    std::vector<std::string> names;std::vector<amrex::Real> reference;
+    for(auto const& coil:m_coils.coils()) { names.push_back(coil.name);reference.push_back(coil.I_ref); }
+    plugin->Define(names,reference,restarting && !m_plugin_restart_config.empty()
+        ? m_plugin_restart_config : m_plugin_config);
+    m_prepared_plugin=std::move(plugin);
+}
+
+std::string CircuitCoupling::NativeImmutableDefinition () const
+{
+    using namespace warpx::circuit;
+    IdentityWriter out;out.Text("warpx-native-circuit-checkpoint-identity-v1");
+    out.Text(QueryNativeCircuitIdentity(m_prepared_plugin.get(),m_prepared_identity));
+    auto const& warpx=WarpX::GetInstance();auto const& geom=warpx.Geom(0);
+    out.Text("resolved-run-geometry");out.IntegerValue(AMREX_SPACEDIM);
+#if defined(WARPX_DIM_RZ)
+    out.Text("RZ");out.IntegerValue(WarpX::n_rz_azimuthal_modes);
 #else
-        // The coupled (measured) coils must be scale-driven: the engine
-        // pushes their segments every coupling interval.
-        for (int ic = 0; ic < m_coils.size(); ++ic) {
-            if (m_probes[ic] == ProbeKind::none) { continue; }
-            const Coil& c = m_coils.coil(ic);
-            bool scale_driven = false;
-            for (int i = 0; i < ext.nFields(); ++i) {
-                if (ext.FieldName(i) == c.field_name) {
-                    scale_driven = ext.UsesPythonScale(i);
-                    break;
-                }
-            }
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scale_driven,
-                "coupled circuit coil '" + c.name + "' requires "
-                "external_vector_potential." + c.field_name +
-                ".python_scale = 1 (the engine drives its scale segments)");
-        }
-
-        std::unique_ptr<ExternalCircuit> plugin;
-        WarpxCircuitAffineApiV1 const* affine_api = nullptr;
-        if (m_engine == "external") {
-            plugin = LoadExternalCircuitPlugin(m_plugin_library, affine_api);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_coupler_params.device_affine ||
-                (affine_api && affine_api->struct_bytes == sizeof(WarpxCircuitAffineApiV1)
-                    && affine_api->api_version == WARPX_CIRCUIT_AFFINE_API_V1
-                    && affine_api->prepare && affine_api->release),
-                "Device circuit trials require the affine v1 plugin capability; no host fallback");
-            // One-time port configuration: coil order fixes the eps/scale
-            // vector indexing of every AdvanceInterval call.
-            std::vector<std::string> names;
-            std::vector<amrex::Real> i_ref;
-            for (int ic = 0; ic < m_coils.size(); ++ic) {
-                names.push_back(m_coils.coil(ic).name);
-                i_ref.push_back(m_coils.coil(ic).I_ref);
-            }
-            // On restart, hand the engine the restart variant of its
-            // opaque config when one is declared (circuit.
-            // plugin_restart_config): ReadCheckpoint below supersedes any
-            // engine-side boot state, so engines can skip boot work
-            // (e.g. a pre-roll) that Define would otherwise redo.
-            const bool restarting = !m_restart_dir.empty();
-            plugin->Define(names, i_ref,
-                           (restarting && !m_plugin_restart_config.empty())
-                               ? m_plugin_restart_config
-                               : m_plugin_config);
-            // On restart, restore the engine's own state on every rank
-            // (the engine runs replicated in lockstep, exactly like the
-            // Python-callback engine).
-            if (restarting) {
-                plugin->ReadCheckpoint(m_restart_dir);
-            }
-        }
-        m_coupler = std::make_unique<CircuitCoupler>(
-            m_coils, m_probes, m_probe_exclusion, m_coupler_params,
-            std::move(plugin), affine_api);
-        // The coupler's own per-step memory (EMF low-pass state) is part
-        // of the checkpoint; restore it with the engine state.
-        if (!m_restart_dir.empty()) {
-            m_coupler->ReadMemoryCheckpoint(m_restart_dir);
-        }
-        amrex::Print() << "Circuit coupling engine: " << m_engine
-                       << " (corrector_iterations = "
-                       << m_coupler_params.corrector_iterations
-                       << ", corrector_rtol = "
-                       << m_coupler_params.corrector_rtol
-                       << ", eps_lowpass_tau = "
-                       << m_coupler_params.eps_lowpass_tau << " s"
-                       << (m_coupler_params.eps_lowpass_tau > 0.0
-                               ? " [one-pole EMA on the port EMF, memory "
-                                 "committed on accept]"
-                               : " [off: raw interval EMF]")
-                       << ", linkage_reference = "
-                       << (m_coupler_params.linkage_reference_accepted
-                               ? "accepted [previous accepting evaluation; "
-                                 "first step open loop]"
-                               : "first_iterate")
-                       << ", residual_advance = "
-                       << (m_coupler_params.residual_advance_full_step
-                               ? "full_step [EMF over the theta interval]"
-                               : "theta_stage")
-                       << ")\n";
+    out.Text("Cartesian");
 #endif
+    out.IntegerValue(warpx.maxLevel());
+    for(int d=0;d<AMREX_SPACEDIM;++d) {
+        out.IntegerValue(geom.Domain().smallEnd(d));out.IntegerValue(geom.Domain().bigEnd(d));
+        out.Number(geom.ProbLo(d));out.Number(geom.ProbHi(d));out.IntegerValue(geom.isPeriodic(d));
+        out.IntegerValue(static_cast<int>(WarpX::field_boundary_lo[d]));
+        out.IntegerValue(static_cast<int>(WarpX::field_boundary_hi[d]));
     }
-}
-
-
-void
-CircuitCoupling::WriteCheckpointData (std::string const& dir) const
-{
-    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
-    auto& warpx = WarpX::GetInstance();
-    auto* hybrid = warpx.get_pointer_HybridPICModel();
-    if (hybrid == nullptr || !hybrid->m_add_external_fields) { return; }
-    auto& ext = *hybrid->m_external_vector_potential;
-
-    std::ofstream ofs{dir + "/circuit_coupling.dat", std::ofstream::out};
-    ofs << std::setprecision(17);
-    ofs << "version 1\n";
-    for (int i = 0; i < ext.nFields(); ++i) {
-        amrex::Real s_old, s_new, t_old, t_new;
-        if (ext.GetScaleSegment(i, s_old, s_new, t_old, t_new)) {
-            ofs << ext.FieldName(i) << " " << s_old << " " << s_new
-                << " " << t_old << " " << t_new << "\n";
-        }
+    // WarpX restores ProbDomain before this preflight. Bind the resolved
+    // requested domain too, so checkpoint geometry cannot hide an input edit.
+    out.Text("configured-geometry");
+    std::vector<amrex::Real> configured_lo(AMREX_SPACEDIM),configured_hi(AMREX_SPACEDIM);
+    std::vector<int> configured_cells(AMREX_SPACEDIM);
+    for(int d=0;d<AMREX_SPACEDIM;++d) {
+        configured_lo[d]=geom.ProbLo(d);configured_hi[d]=geom.ProbHi(d);
+        configured_cells[d]=geom.Domain().length(d);
     }
-    ofs.close();
-
-    // A compiled engine checkpoints its own state (I/O rank only, like the
-    // segments above); the Python engine re-seeds itself on restart. The
-    // coupler's per-step memory (EMF low-pass state) goes with it.
-    if (m_coupler && m_coupler->Plugin() != nullptr) {
-        m_coupler->Plugin()->WriteCheckpoint(dir);
-        m_coupler->WriteMemoryCheckpoint(dir);
+    utils::parser::queryArrWithParser(amrex::ParmParse("geometry"),"prob_lo",configured_lo);
+    utils::parser::queryArrWithParser(amrex::ParmParse("geometry"),"prob_hi",configured_hi);
+    utils::parser::queryArrWithParser(amrex::ParmParse("amr"),"n_cell",configured_cells);
+    if(configured_lo.size()!=AMREX_SPACEDIM || configured_hi.size()!=AMREX_SPACEDIM ||
+       configured_cells.size()!=AMREX_SPACEDIM) {
+        throw std::runtime_error("invalid configured native circuit geometry dimension");
     }
-}
-
-void
-CircuitCoupling::ReadCheckpointData (std::string const& dir)
-{
-    // Tolerate checkpoints from before the circuit subsystem.
-    std::ifstream ifs{dir + "/circuit_coupling.dat", std::ifstream::in};
-    if (!ifs.good()) { return; }
-
-    auto& warpx = WarpX::GetInstance();
-    auto* hybrid = warpx.get_pointer_HybridPICModel();
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        hybrid != nullptr && hybrid->m_add_external_fields,
-        "restarting a checkpoint with circuit_coupling.dat requires the "
-        "hybrid solver with external fields");
-    auto& ext = *hybrid->m_external_vector_potential;
-
-    std::string token;
-    int version = 0;
-    ifs >> token >> version;
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(token == "version" && version == 1,
-        "unsupported circuit_coupling.dat checkpoint format");
-
-    std::string name;
-    amrex::Real s_old, s_new, t_old, t_new;
-    while (ifs >> name >> s_old >> s_new >> t_old >> t_new) {
-        // Aborts with a clear message if the restart inputs dropped the
-        // field or its python_scale declaration.
-        ext.SetScale(name, s_old, s_new, t_old, t_new);
+    for(int d=0;d<AMREX_SPACEDIM;++d) {
+        out.Number(configured_lo[d]);out.Number(configured_hi[d]);out.IntegerValue(configured_cells[d]);
     }
-
-    // A compiled engine's own state is restored in InitData: this runs
-    // from InitFromCheckpoint, before the coupler (and the plugin) exist.
-    m_restart_dir = dir;
+    // Embedded-boundary geometry can contain external data and callbacks.
+    // There is no complete immutable identity for it in this version.
+    if(EB::enabled()) {throw std::runtime_error("protected native circuit restart lacks embedded-boundary geometry identity");}
+    out.Text("ordered-resolved-ports");out.IntegerValue(m_coils.size());
+    std::vector<std::string> painted;
+    for(int i=0;i<m_coils.size();++i) {
+        auto const& c=m_coils.coil(i);out.Text(c.name);out.Text(c.field_name);
+        out.Number(c.r);out.Number(c.z);out.Number(c.I_ref);out.Number(c.n_turns);
+        out.IntegerValue(c.fill_unit_field);out.IntegerValue(static_cast<int>(m_probes.at(i)));
+        out.Number(m_probe_exclusion.at(i));if(c.fill_unit_field){painted.push_back(c.field_name);}
+    }
+    out.IntegerValue(m_probe_ignore_walls);
+    out.Text("coupling-law");out.Number(m_coupler_params.eps_lowpass_tau);
+    out.IntegerValue(m_coupler_params.linkage_reference_accepted);
+    out.IntegerValue(m_coupler_params.residual_advance_full_step);
+    auto const* hybrid=warpx.get_pointer_HybridPICModel();
+    out.Text(hybrid->m_external_vector_potential->NativeCircuitFieldIdentity(painted));
+    return out.Value();
 }

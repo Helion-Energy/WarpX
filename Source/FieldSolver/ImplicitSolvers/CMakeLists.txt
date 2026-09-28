@@ -2,10 +2,104 @@ foreach(D IN LISTS WarpX_DIMS)
     warpx_set_suffix_dims(SD ${D})
     target_sources(lib_${SD}
       PRIVATE
+        NativeCoilField.cpp
+        NativeCircuitFieldRate.cpp
+        NativeCircuitFieldImpulse.cpp
+        NativeVacuumCircuitFieldRate.cpp
+        NativeBoundaryFieldRate.cpp
+        NativeInertiaSupport.cpp
+        NativeInstantaneousForce.cpp
+        NativeJouleWork.cpp
+        NativeSplitAmpere.cpp
+        ImplicitIonElectricWork.cpp
+        ImplicitIonElectricWorkNative.cpp
+        IonExchangeMomentAudit.cpp
+        ExpectedIonExchangeSource.cpp
+        ExpectedIonExchangeSourceNative.cpp
+        ImplicitIonEndpointTrial.cpp
+        ImplicitIonEndpointTrialNative.cpp
+        ExpectedIonExchangeChannel.cpp
+        ExpectedIonThermalPartner.cpp
+        EulerianSourceDiagonal.cpp
+        NativeConductionActivity.cpp
+        ThermalStageInitialGuess.cpp
+        DarwinThermalAdvance.cpp
+        DarwinThermalRemainder.cpp
+        DarwinThermalInitialize.cpp
+        DarwinThermalContext.cpp
+        DarwinThermalCommit.cpp
+        DarwinThermalAbsorption.cpp
+        DarwinThermalElectricWork.cpp
+        AbsorbingElectronInventory.cpp
+        DarwinLongitudinalSchur.cpp
+        DarwinInitialRateSchur.cpp
+        NativeEndpointField.cpp
+        NativeRetainedAcceptance.cpp
+        NativePECPlasma.cpp
+        NativeStoppingMaterialSupport.cpp
+        NativeStoppingMaterialSupport.H
+        NativeStoppingCarryCertificate.cpp
+        NativeStoppingMaterialOwner.cpp
+        NativeStoppingCarryCertificate.H
+        NativeStoppingMaterialOwner.H
+        NativeStoppingMaterialSource.cpp
+        NativeStoppingMaterialSource.H
+        NativeStoppingThetaRegistration.H
+        NativeStoppingMaterialReaction.cpp
+        NativeStoppingMaterialReaction.H
+        NativeAcceptedStoppingContext.cpp
+        NativeStoppingReactionTranspose.cpp
+        NativeUniformStoppingEvent.cpp
+        NativeSpatialStoppingEvent.cpp
+        NativeRZSpatialStoppingEvent.cpp
+        NativeRZMidpointStoppingEvent.H
+        NativeRZMidpointStoppingEventImpl.H
+        NativeRZMidpointTemperaturePC.H
+        NativePairedDarwinFields.cpp
+        NativePairedDarwinFields.H
+        NativeEndpointParticleHandoff.H
+        NativePairedBuildCapability.H
+        NativeLongitudinalProducerCertificate.cpp
+        NativeVacuumConstraint.cpp
+        NativeVacuumRetainedLinearOps.H
+        NativeVacuumEndpoint.cpp
+        NativeVacuumJouleError.cpp
+        NativeEndpointCurrentResponse.cpp
+        NativeInstantaneousIonCurrent.cpp
+        NativeInstantaneousIonIncrement.cpp
+        AcceptedIonExchange.cpp
+        AcceptedIonExchangeNative.cpp
+        FrozenPressureFieldCoupling.cpp
+        EulerianThermalSources.cpp
+        EulerianDissipation.cpp
+        EulerianStoppingTransfer.cpp
+        ThermalEnergyBalance.cpp
+        EulerianThermalStage.cpp
+        EulerianThermalResidual.cpp
+        EulerianThermalStageUtils.H
+        KineticThermalMoments.cpp
+        ThermalFiniteMaterial.cpp
+        ThermalFiniteFluxResponse.cpp
+        ThermalMassMatrixResponse.cpp
+        KineticThermalSpecies.cpp
+        KineticThermalSpeciesNative.cpp
+        ThermalConductionPC.cpp
+        ThermalStageSolver.cpp
+        ImplicitParticleEndpointAudit.cpp
         ImplicitSolver.cpp
+        MassMatrixDensityProjection.cpp
         SemiImplicitEM.cpp
         ThetaImplicitEM.cpp
+        DarwinVacuumAffineResponse.cpp
+        DarwinVacuumHodgePC.cpp
+        NativeJointCurrentArithmetic.cpp
+        NativeJointCurrentArithmetic.H
+        NativeJointCurlArithmetic.H
+        DarwinVacuumJointSolve.cpp
+        NativeVacuumParticleSupport.cpp
         DarwinVacuumERecovery.cpp
+        DarwinRZGreenSolver.cpp
+        DarwinRZYeeGreenSolver.cpp
         ThetaImplicitHybrid.cpp
         StrangImplicitSpectralEM.cpp
         WarpXImplicitOps.cpp

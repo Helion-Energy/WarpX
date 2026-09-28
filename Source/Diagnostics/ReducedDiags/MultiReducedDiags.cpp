@@ -39,6 +39,9 @@
 #include <AMReX_REAL.H>
 
 #include <algorithm>
+#include <cstring>
+#include <typeinfo>
+#include <utility>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -200,4 +203,142 @@ void MultiReducedDiags::ReadCheckpointData (std::string const & dir)
         m_multi_rd[i_rd]->ReadCheckpointData(dir);
     }
     // end loop over all reduced diags
+}
+
+namespace
+{
+    // Explicit schema: adding a midpoint override requires extending the saved
+    // state here. Unknown types fail closed instead of silently losing state.
+    int MidStepStateSchema (ReducedDiags const& diagnostic)
+    {
+        auto const& type = typeid(diagnostic);
+        if (type == typeid(FieldPoyntingFlux)) { return 2; }
+        std::type_info const* const stateless_midpoint_types[] = {
+            &typeid(BeamRelevant), &typeid(ChargeOnEB), &typeid(ColliderRelevant),
+            &typeid(DifferentialLuminosity), &typeid(DifferentialLuminosity2D),
+            &typeid(HybridDissipation), &typeid(ParticleBoundaryFlux),
+            &typeid(ParticleEnergy), &typeid(ParticleExtrema),
+            &typeid(ParticleHistogram), &typeid(ParticleHistogram2D),
+            &typeid(ParticleMomentum), &typeid(ParticleNumber),
+            &typeid(FieldEnergy), &typeid(FieldMaximum), &typeid(FieldMomentum),
+            &typeid(FieldProbe), &typeid(FieldReduction), &typeid(LoadBalanceCosts),
+            &typeid(LoadBalanceEfficiency), &typeid(RhoMaximum),
+            &typeid(ScrapedParticleEnergy), &typeid(Timestep)
+        };
+        for (auto const* known : stateless_midpoint_types) {
+            if (type == *known) { return 1; }
+        }
+        return 0;
+    }
+
+    bool AllMidStepRanks (bool const local)
+    {
+        int valid = local ? 1 : 0;
+        amrex::ParallelDescriptor::ReduceIntMin(valid);
+        return valid != 0;
+    }
+}
+
+struct MultiReducedDiags::MidStepSnapshot::State
+{
+    struct Entry
+    {
+        ReducedDiags const* object = nullptr;
+        int schema = 0;
+        std::type_info const* type = nullptr;
+        std::string name;
+        std::vector<amrex::Real> data;
+        bool poynting_midpoint = false;
+    };
+    MultiReducedDiags const* owner = nullptr;
+    int plot = 0;
+    std::vector<std::string> names;
+    std::vector<Entry> entries;
+};
+
+MultiReducedDiags::MidStepSnapshot::MidStepSnapshot () = default;
+MultiReducedDiags::MidStepSnapshot::~MidStepSnapshot () = default;
+MultiReducedDiags::MidStepSnapshot::MidStepSnapshot (MidStepSnapshot&&) noexcept = default;
+
+bool MultiReducedDiags::CaptureMidStepState (MidStepSnapshot& snapshot) const
+{
+    bool valid = !snapshot.m_state && m_rd_names.size() == m_multi_rd.size();
+    for (auto const& diagnostic : m_multi_rd) {
+        valid = valid && diagnostic && MidStepStateSchema(*diagnostic) != 0;
+    }
+    if (!AllMidStepRanks(valid)) { return false; }
+
+    auto state = std::make_unique<MidStepSnapshot::State>();
+    state->owner = this;
+    state->plot = m_plot_rd;
+    state->names = m_rd_names;
+    state->entries.reserve(m_multi_rd.size());
+    for (auto const& diagnostic : m_multi_rd) {
+        auto& entry = state->entries.emplace_back();
+        entry.object = diagnostic.get();
+        entry.schema = MidStepStateSchema(*diagnostic);
+        entry.type = &typeid(*diagnostic);
+        entry.name = diagnostic->m_rd_name;
+        entry.data.resize(diagnostic->m_data.size());
+        if (!entry.data.empty()) {
+            std::memcpy(entry.data.data(), diagnostic->m_data.data(),
+                        entry.data.size()*sizeof(amrex::Real));
+        }
+        if (entry.schema == 2) {
+            entry.poynting_midpoint =
+                static_cast<FieldPoyntingFlux const&>(*diagnostic).use_mid_step_value;
+        }
+    }
+    snapshot.m_state = std::move(state);
+    return true;
+}
+
+bool MultiReducedDiags::CanRestoreMidStepState (MidStepSnapshot const& snapshot) const
+{
+    auto const* state = snapshot.m_state.get();
+    bool valid = state && state->owner == this && state->plot == m_plot_rd
+        && state->names == m_rd_names && state->entries.size() == m_multi_rd.size();
+    if (valid) {
+        for (std::size_t i = 0; i < m_multi_rd.size(); ++i) {
+            auto const& diagnostic = m_multi_rd[i];
+            auto const& entry = state->entries[i];
+            if (!diagnostic || entry.object != diagnostic.get()
+                || entry.schema != MidStepStateSchema(*diagnostic)
+                || !entry.type || *entry.type != typeid(*diagnostic)
+                || entry.name != diagnostic->m_rd_name
+                || entry.data.size() != diagnostic->m_data.size()) {
+                valid = false;
+                break;
+            }
+        }
+    }
+    return AllMidStepRanks(valid);
+}
+
+bool MultiReducedDiags::RestoreMidStepState (MidStepSnapshot& snapshot)
+{
+    // No diagnostic or saved-state write precedes this collective preflight.
+    if (!CanRestoreMidStepState(snapshot)) { return false; }
+    auto const& entries = snapshot.m_state->entries;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        auto const& entry = entries[i];
+        auto& diagnostic = *m_multi_rd[i];
+        if (!entry.data.empty()) {
+            std::memcpy(diagnostic.m_data.data(), entry.data.data(),
+                        entry.data.size()*sizeof(amrex::Real));
+        }
+        if (entry.schema == 2) {
+            static_cast<FieldPoyntingFlux&>(diagnostic).use_mid_step_value =
+                entry.poynting_midpoint;
+        }
+    }
+    snapshot.m_state.reset();
+    return true;
+}
+
+void MultiReducedDiags::CommitMidStepState (MidStepSnapshot& snapshot) noexcept
+{
+    if (snapshot.m_state && snapshot.m_state->owner == this) {
+        snapshot.m_state.reset();
+    }
 }

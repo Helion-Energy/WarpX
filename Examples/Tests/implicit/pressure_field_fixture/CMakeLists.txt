@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.24)
+project(WarpXPressureFieldFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(PRESSURE_MOMENT_SOURCE "${WARPX_SOURCE}" CACHE PATH "Source tree containing the kinetic moment prerequisite")
+add_executable(test_pressure_field test_pressure_field.cpp
+    ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/FrozenPressureFieldCoupling.cpp
+    ${PRESSURE_MOMENT_SOURCE}/Source/FieldSolver/ImplicitSolvers/KineticThermalMoments.cpp)
+target_link_libraries(test_pressure_field PRIVATE AMReX::amrex)
+target_compile_features(test_pressure_field PRIVATE cxx_std_20)
+target_compile_definitions(test_pressure_field PRIVATE WARPX_DIM_RZ)
+target_include_directories(test_pressure_field PRIVATE ${WARPX_SOURCE}/Source ${PRESSURE_MOMENT_SOURCE}/Source)
+target_compile_options(test_pressure_field PRIVATE -Wall -Wextra -Werror=return-type)
+enable_testing()
+foreach(case IN ITEMS transfer linear uniform freeze weight)
+    foreach(box IN ITEMS 4 64)
+        foreach(boundary IN ITEMS periodic pec pmc)
+            add_test(NAME pressure_${case}_box${box}_${boundary}
+                COMMAND test_pressure_field test.case=${case} test.box=${box} test.boundary=${boundary})
+            set_tests_properties(pressure_${case}_box${box}_${boundary} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endforeach()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME pressure_reject_transformed
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/expect_reject.py $<TARGET_FILE:test_pressure_field>)
+set_tests_properties(pressure_reject_transformed PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+
+# Native coefficient-stagger helper is generic; the full pressure PC remains RZ-only.
+add_executable(test_pressure_stagger test_pressure_stagger.cpp)
+target_link_libraries(test_pressure_stagger PRIVATE AMReX::amrex)
+target_compile_features(test_pressure_stagger PRIVATE cxx_std_20)
+target_include_directories(test_pressure_stagger PRIVATE ${WARPX_SOURCE}/Source)
+add_test(NAME pressure_native_stagger COMMAND test_pressure_stagger)
+set_tests_properties(pressure_native_stagger PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+
+if(AMReX_GPU_BACKEND STREQUAL "CUDA")
+    enable_language(CUDA)
+    include(AMReXTargetHelpers)
+    setup_target_for_cuda_compilation(test_pressure_field)
+    setup_target_for_cuda_compilation(test_pressure_stagger)
+endif()

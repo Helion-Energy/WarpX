@@ -1,7 +1,18 @@
 #include "ImplicitSolver.H"
+#include "NativeEndpointField.H"
+#include "EsirkepovMMDiagonal.H"
 #include "Fields.H"
 #include "WarpX.H"
 #include "Particles/MultiParticleContainer.H"
+#include "Particles/PhysicalParticleContainer.H"
+#include "Particles/SubcycledParticleContainer.H"
+#include "Particles/Pusher/ImplicitFinalGather.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include <AMReX_ParmParse.H>
+#include "Particles/Pusher/GetAndSetPosition.H"
+#include "Particles/ShapeFactors.H"
+#include "EmbeddedBoundary/Enabled.H"
+#include <AMReX_Reduce.H>
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include <array>
@@ -18,6 +29,30 @@ void ImplicitSolver::CreateParticleAttributes () const
     // Set comm to false so that the attributes are not communicated
     // nor written to the checkpoint files
     int const comm = 0;
+    bool audit_ion_work = false;
+    amrex::ParmParse thermal("implicit_evolve.thermal");
+    thermal.query("audit_ion_electric_work", audit_ion_work);
+    bool joint_vacuum = false;
+    thermal.query("joint_vacuum", joint_vacuum);
+    // Joint support consumes the actual final MC gather point independently
+    // of the optional ion-work audit. The unchanged native pusher owns it.
+    bool const capture_final_gather = audit_ion_work || joint_vacuum;
+    if (capture_final_gather) {
+        auto const* model = m_WarpX->get_pointer_HybridPICModel();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(model && model->UsesEulerianElectronEnergy(),
+            "Final ion gather audit requires an Eulerian electron energy mode");
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_3D)
+        amrex::Abort("Final ion gather audit supports only RZ and Cartesian 3D");
+#endif
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::particle_pusher_algo == ParticlePusherAlgo::Boris &&
+            WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving && WarpX::nox == 3,
+            "Final ion gather audit requires Boris and shape3 momentum-conserving gather");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_particle_suborbits,
+            "Final ion gather audit does not support particle suborbits");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_reflect_particles_at_rmax,
+            "Final ion gather audit does not support in-push wall reflection momentum changes");
+    }
 
     // Add space to save the positions and velocities at the start of the time steps
     for (auto const& pc : m_WarpX->GetPartContainer()) {
@@ -33,6 +68,33 @@ void ImplicitSolver::CreateParticleAttributes () const
         pc->AddRealComp("ux_n", comm);
         pc->AddRealComp("uy_n", comm);
         pc->AddRealComp("uz_n", comm);
+        // Transient precise-orbit scratch, excluded from communication/checkpoint.
+        pc->AddRealComp("esirkepov_chord_x", comm);
+        pc->AddRealComp("esirkepov_chord_y", comm);
+        pc->AddRealComp("esirkepov_chord_z", comm);
+        pc->AddIntComp("esirkepov_chord_valid", comm);
+        bool correlated_increment=false;
+        amrex::ParmParse("endpoint_diagnostic").query("correlated_increment",correlated_increment);
+        // Exact neutrals have no current response and no Lorentz impulse.
+        // Keep their ordinary orbit snapshot, but do not attach a charged
+        // impulse recorder that requires field gathering.
+        if(correlated_increment && pc->getCharge()!=0.) {
+            pc->AddRealComp("diagnostic_du_x",comm);
+            pc->AddRealComp("diagnostic_du_y",comm);
+            pc->AddRealComp("diagnostic_du_z",comm);
+            pc->AddIntComp("diagnostic_impulse_valid",comm);
+        }
+
+        if (capture_final_gather && pc->getCharge() != 0.) {
+            auto const* physical = dynamic_cast<PhysicalParticleContainer const*>(pc.get());
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(physical &&
+                !dynamic_cast<SubcycledParticleContainer const*>(pc.get()),
+                "Final ion gather audit requires a physical charged species without subcycling");
+            physical->ValidateImplicitIonElectricWorkCapture();
+            for (auto const* name : warpx::particles::FinalGatherAttributeNames) {
+                pc->AddRealComp(name, comm);
+            }
+        }
 
         if (m_particle_suborbits) {
             pc->AddIntComp("nsuborbits", comm);
@@ -154,7 +216,8 @@ void ImplicitSolver::SaveE ()
 
     using warpx::fields::FieldType;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-        const ablastr::fields::VectorField E = m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, lev);
+        const ablastr::fields::VectorField E = m_WarpX->m_fields.get_alldirs(
+            m_esirkepov_mass_matrices ? FieldType::Efield_aux : FieldType::Efield_fp, lev);
         ablastr::fields::VectorField E0 = m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp_save, lev);
         amrex::MultiFab::Copy(*E0[0], *E[0], 0, 0, E[0]->nComp(), E[0]->nGrowVect());
         amrex::MultiFab::Copy(*E0[1], *E[1], 0, 0, E[1]->nComp(), E[1]->nGrowVect());
@@ -507,7 +570,9 @@ void ImplicitSolver::ComputeJfromMassMatrices (const bool  a_J_from_MM_only)
     ablastr::fields::MultiLevelVectorField J_ml =
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level);
     const ablastr::fields::MultiLevelVectorField E_ml =
-        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level);
+        m_WarpX->m_fields.get_mr_levels_alldirs(
+            m_esirkepov_mass_matrices ? FieldType::Efield_aux : FieldType::Efield_fp,
+            finest_level);
     const ablastr::fields::MultiLevelVectorField E0_ml =
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp_save, finest_level);
     const ablastr::fields::MultiLevelVectorField J0_ml =
@@ -517,7 +582,7 @@ void ImplicitSolver::ComputeJfromMassMatrices (const bool  a_J_from_MM_only)
         /* a_out           = */ J_ml,
         /* a_in            = */ E_ml,
         /* a_in_ref        = */ &E0_ml,
-        /* a_baseline      = */ &J0_ml,
+        /* a_baseline      = */ UseMassMatrixCurrentIncrement() ? nullptr : &J0_ml,
         /* a_scale         = */ 1.0_rt,
         /* a_zero_out_first = */ a_J_from_MM_only);
 }
@@ -556,10 +621,38 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
         pp.query("adjoint_gather_ghosts", m_adjoint_gather_ghosts);
         pp.query("print_unconverged_particle_details", m_print_unconverged_particle_details);
         pp.query("use_mass_matrices_jacobian", m_use_mass_matrices_jacobian);
+        pp.query("mass_matrices_deposit_interval",m_mass_matrices_deposit_interval);
+        pp.query("mass_matrices_reuse_within_step",m_mass_matrices_reuse_within_step);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_mass_matrices_reuse_within_step ||
+            (m_use_mass_matrices_jacobian &&
+             m_WarpX->evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid),
+            "Cross-solve tangent reuse requires the theta-implicit hybrid MM Jacobian");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_mass_matrices_deposit_interval >= 1,
+            "mass_matrices_deposit_interval must be positive");
         pp.query("use_mass_matrices_pc", m_use_mass_matrices_pc);
         if (m_use_mass_matrices_jacobian || m_use_mass_matrices_pc) {
             m_use_mass_matrices = true;
             pp.query("fused_mass_matrices_deposit", m_fused_mass_matrices_deposit);
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_mass_matrices_deposit_interval == 1 ||
+            (!m_fused_mass_matrices_deposit && !m_particle_suborbits),
+            "Mass-matrix tangent reuse requires separate deposition without suborbits");
+        if (m_use_mass_matrices &&
+            WarpX::current_deposition_algo == CurrentDepositionAlgo::Esirkepov) {
+#if defined(WARPX_DIM_RZ)
+            m_esirkepov_mass_matrices = true;
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_WarpX->evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid &&
+                WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving &&
+                WarpX::nox >= 2 && WarpX::n_rz_azimuthal_modes == 1 &&
+                m_WarpX->maxLevel() == 0 && !EB::enabled() && !m_particle_suborbits &&
+                !m_fused_mass_matrices_deposit &&
+                !m_reflect_particles_at_rmax,
+                "Esirkepov mass matrices require single-level m=0 RZ hybrid, shape>=2, "
+                "momentum gather, without EB, suborbits, fused deposit or orbit reflection");
+#else
+            WARPX_ABORT_WITH_MESSAGE("Esirkepov mass matrices currently support RZ only");
+#endif
         }
         if (m_use_mass_matrices_jacobian) {
             // Default m_skip_particle_picard_init to true if using suborbits
@@ -567,6 +660,10 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
             pp.query("skip_particle_picard_init", m_skip_particle_picard_init);
             pp.query("mass_matrices_boundary_rows", m_mass_matrices_boundary_rows);
             pp.query("verify_mm_jvp_step", m_verify_mm_jvp_step);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_esirkepov_mass_matrices ||
+                (!m_mass_matrices_boundary_rows && m_verify_mm_jvp_step < 0),
+                "Esirkepov MM uses native nodal gather guards and current folding; "
+                "legacy symmetric-band folding/debug probes are unsupported");
             if (m_mass_matrices_boundary_rows && m_use_mass_matrices_pc) {
                 std::stringstream warningMsg;
                 warningMsg << "mass_matrices_boundary_rows folds the physical-boundary "
@@ -577,6 +674,9 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
                 ablastr::warn_manager::WMRecordWarning("ImplicitSolver", warningMsg.str());
             }
         }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_esirkepov_mass_matrices ||
+            !m_use_mass_matrices_pc || NeedFullCurrentResponse(),
+            "Esirkepov MM-PC requires the full current-response matrices");
         if (m_use_mass_matrices_pc) {
             m_mass_matrices_pc_width = 0;
 #if AMREX_SPACEDIM != 3
@@ -647,6 +747,11 @@ void ImplicitSolver::InitializeMassMatrices ()
         }
     }
 
+    // Resolve effective consumers before deciding storage/build requirements.
+    // In particular pc_type=none may have disabled the only requested user.
+    m_use_mass_matrices = m_use_mass_matrices_jacobian || m_use_mass_matrices_pc;
+    if (!m_use_mass_matrices) { return; }
+
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
@@ -665,11 +770,11 @@ void ImplicitSolver::InitializeMassMatrices ()
     int Nc_tot_xx = 1, Nc_tot_xy = 1, Nc_tot_xz = 1;
     int Nc_tot_yx = 1, Nc_tot_yy = 1, Nc_tot_yz = 1;
     int Nc_tot_zx = 1, Nc_tot_zy = 1, Nc_tot_zz = 1;
-    if (m_use_mass_matrices_jacobian) {
+    if (NeedFullCurrentResponse()) {
 
         for (int dir=0; dir<AMREX_SPACEDIM; dir++) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE( ngE[dir]>=ngJ[dir],
-                "Mass Matrices for Jacobian requires guard cells for E "
+                "Full current-response matrices require guard cells for E "
                 "to be at least as many as those for J.");
         }
 
@@ -695,6 +800,19 @@ void ImplicitSolver::InitializeMassMatrices ()
                 Nc_tot_zy *= m_ncomp_zy[dir];
                 Nc_tot_zz *= m_ncomp_zz[dir];
             }
+        }
+        else if (m_esirkepov_mass_matrices) {
+            // Initial minimal reach; PreLinearSolve measures actual endpoint
+            // support before depositing the nonsymmetric reference matrices.
+            int const width = 2*shape+1;
+            m_ncomp_xx = m_ncomp_xy = m_ncomp_xz = amrex::IntVect(width);
+            m_ncomp_yx = m_ncomp_yy = m_ncomp_yz = amrex::IntVect(width);
+            m_ncomp_zx = m_ncomp_zy = m_ncomp_zz = amrex::IntVect(width);
+            int count = 1;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) { count *= width; }
+            Nc_tot_xx = Nc_tot_xy = Nc_tot_xz = count;
+            Nc_tot_yx = Nc_tot_yy = Nc_tot_yz = count;
+            Nc_tot_zx = Nc_tot_zy = Nc_tot_zz = count;
         }
         else if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Villasenor) {
 #ifndef WARPX_DIM_3D
@@ -802,9 +920,13 @@ void ImplicitSolver::InitializeMassMatrices ()
         const auto& dm = m_WarpX->m_fields.get(FieldType::current_fp, Direction{0}, lev)->DistributionMap();
         //
         if (m_use_mass_matrices_jacobian) {
-            m_WarpX->m_fields.alloc_init(FieldType::Efield_fp_save, Direction{0}, lev, ba_Jx, dm, 1, ngE, 0.0_rt);
-            m_WarpX->m_fields.alloc_init(FieldType::Efield_fp_save, Direction{1}, lev, ba_Jy, dm, 1, ngE, 0.0_rt);
-            m_WarpX->m_fields.alloc_init(FieldType::Efield_fp_save, Direction{2}, lev, ba_Jz, dm, 1, ngE, 0.0_rt);
+            for (int d = 0; d < 3; ++d) {
+                auto const& electric = *m_WarpX->m_fields.get(
+                    m_esirkepov_mass_matrices ? FieldType::Efield_aux : FieldType::Efield_fp,
+                    Direction{d}, lev);
+                m_WarpX->m_fields.alloc_init(FieldType::Efield_fp_save, Direction{d}, lev,
+                    electric.boxArray(), dm, 1, electric.nGrowVect(), 0.0_rt);
+            }
         }
         //
         m_WarpX->m_fields.alloc_init(FieldType::MassMatrices_X, Direction{0}, lev, ba_Jx, dm, Nc_tot_xx, ngJ, 0.0_rt);
@@ -850,11 +972,96 @@ void ImplicitSolver::InitializeMassMatrices ()
 
 }
 
-void ImplicitSolver::PreLinearSolve ()
+
+void ImplicitSolver::ResizeEsirkepovMassMatrices ()
+{
+#if defined(WARPX_DIM_RZ)
+    BL_PROFILE("ImplicitSolver::ResizeEsirkepovMassMatrices()");
+    auto const dinv = WarpX::InvCellSize(0);
+    int const shape = WarpX::nox;
+    amrex::ReduceOps<amrex::ReduceOpMax> op;
+    amrex::ReduceData<int> data(op);
+    using Tuple = decltype(data)::Type;
+    for (auto const& species : m_WarpX->GetPartContainer()) {
+        // Only depositing charged particles contribute to this response.
+        if (species->do_not_deposit || species->getCharge() == 0.0) { continue; }
+        for (WarpXParIter pti(*species, 0); pti.isValid(); ++pti) {
+            auto const position = GetParticlePosition<PIdx>(pti);
+            auto const xyzmin = WarpX::LowerCorner(pti.tilebox(),0,0.5_rt*m_dt);
+            auto const* xn = pti.GetAttribs("x_n").dataPtr();
+            auto const* yn = pti.GetAttribs("y_n").dataPtr();
+            auto const* zn = pti.GetAttribs("z_n").dataPtr();
+            op.eval(pti.numParticles(), data, [=] AMREX_GPU_DEVICE(int i) -> Tuple {
+                amrex::ParticleReal x,y,z;
+                position(i,x,y,z);
+                amrex::Real const r = std::hypot(x,y);
+                amrex::Real const ro = std::hypot(xn[i],yn[i]);
+                amrex::Real const re = std::hypot(2*x-xn[i],2*y-yn[i]);
+                amrex::Real const ze = 2*z-zn[i];
+                // Use exactly the deposition coordinates and shape indexing.
+                // Coordinate-distance bounds can gain or lose a cell at an
+                // integer crossing through floating-point cancellation.
+                auto first = [=] (double coordinate) {
+                    double weights[5];
+                    if (shape == 2) {
+                        return Compute_shape_factor<2>{}(weights,coordinate);
+                    } else if (shape == 3) {
+                        return Compute_shape_factor<3>{}(weights,coordinate);
+                    }
+                    return Compute_shape_factor<4>{}(weights,coordinate);
+                };
+                int const gr = first((r-xyzmin.x)*dinv.x);
+                int const gz = first((z-xyzmin.z)*dinv.z);
+                return {amrex::max(
+                    std::abs(gr-first((ro-xyzmin.x)*dinv.x)),
+                    std::abs(gr-first((re-xyzmin.x)*dinv.x)),
+                    std::abs(gz-first((zn[i]-xyzmin.z)*dinv.z)),
+                    std::abs(gz-first((ze-xyzmin.z)*dinv.z)))};
+            });
+        }
+    }
+    int reach = std::max(0,amrex::get<0>(data.value(op)));
+    amrex::ParallelDescriptor::ReduceIntMax(reach);
+    // Every order-p endpoint and gather shape spans p+1 nodes. Their largest
+    // first-index difference plus p bounds all row/column offsets, including
+    // theta's full endpoint support, without an unused outer ring.
+    int const width = 2*(shape+reach)+1;
+    if (width <= m_ncomp_xx[0]) { return; }
+    m_ncomp_xx = m_ncomp_xy = m_ncomp_xz = amrex::IntVect(width);
+    m_ncomp_yx = m_ncomp_yy = m_ncomp_yz = amrex::IntVect(width);
+    m_ncomp_zx = m_ncomp_zy = m_ncomp_zz = amrex::IntVect(width);
+    using warpx::fields::FieldType;
+    for (auto type : {FieldType::MassMatrices_X,FieldType::MassMatrices_Y,
+                      FieldType::MassMatrices_Z}) {
+        for (auto* matrix : m_WarpX->m_fields.get_alldirs(type, 0)) {
+            auto const boxes = matrix->boxArray();
+            auto const ranks = matrix->DistributionMap();
+            auto const ghosts = matrix->nGrowVect();
+            *matrix = amrex::MultiFab(boxes,ranks,width*width,ghosts);
+        }
+    }
+#endif
+}
+
+void ImplicitSolver::PreLinearSolve (int a_newton_iter)
 {
     BL_PROFILE("ImplicitSolver::PreLinearSolve()");
 
     if (m_use_mass_matrices) {
+        // Optional quasi-Newton tangent reuse within this nonlinear solve only.
+        // J0/E0 and endpoint density still refresh in every nonlinear residual.
+        // Rebuild at solve entry by default. Optional step scope also reuses
+        // across the nested thermal/longitudinal solves, with a bounded number
+        // of linearizations and mandatory step/dt/rejection refresh. Neither
+        // reference deposits nor the physical residual are cached.
+        auto const step_time = m_WarpX->gett_new(0);
+        bool const refresh = a_newton_iter < 0 || !m_mass_matrices_cached ||
+            (!m_mass_matrices_reuse_within_step && a_newton_iter == 0) ||
+            m_mass_matrices_cached_dt != m_dt ||
+            m_mass_matrices_cached_time != step_time ||
+            m_mass_matrices_calls_since_deposit >= m_mass_matrices_deposit_interval;
+        if (!refresh) { ++m_mass_matrices_calls_since_deposit; return; }
+        if (m_esirkepov_mass_matrices) { ResizeEsirkepovMassMatrices(); }
 
         // The fused path deposits the mass matrices inside the nonlinear residual
         // evaluation the linear solve linearizes about; the separate pass runs
@@ -877,10 +1084,34 @@ void ImplicitSolver::PreLinearSolve ()
         }
 
         if (m_use_mass_matrices_pc) {
+            if (m_mass_matrices_deposit_interval > 1) {
+                // No suborbits are permitted with reuse; start the additive
+                // generic reduction fresh when its full tangent is rebuilt.
+                for (auto const& level : m_mmpc_mfarrvec) {
+                    for (auto* matrix : level) { matrix->setVal(0.); }
+                }
+            }
             SyncMassMatricesPCAndApplyBCs();
             const amrex::Real theta_dt = m_theta*m_dt;
             SetMassMatricesForPC( theta_dt );
         }
+        if (m_use_mass_matrices_jacobian && NativeCorrelatedIncrementEnabled()) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_esirkepov_mass_matrices &&
+                m_mass_matrices_deposit_interval == 1 && !m_mass_matrices_reuse_within_step,
+                "Endpoint MM requires a fresh native Esirkepov tangent at every linearization");
+            if (!m_endpoint_current_response) {
+                m_endpoint_current_response =
+                    std::make_unique<warpx::particles::NativeEndpointCurrentResponse>();
+            }
+            if (!FreezeNativeInertiaResponse(*m_WarpX,*m_endpoint_current_response,
+                    m_dt,m_ncomp_xx[0])) {
+                amrex::Print()<<"Endpoint MM rejected frozen endpoint response; linear samples will reject\n";
+            }
+        }
+        m_mass_matrices_cached = true;
+        m_mass_matrices_cached_dt = m_dt;
+        m_mass_matrices_cached_time = step_time;
+        m_mass_matrices_calls_since_deposit = 1;
 
     }
 
@@ -934,7 +1165,10 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     // Set the implict solver options for particles and setting the current density
     ImplicitOptions options;
     options.linear_stage_of_jfnk = a_from_jacobian;
-    options.use_mass_matrices_pc = m_use_mass_matrices_pc;
+    // Nonlinear pushes otherwise zero the PC arrays for suborbit deposits.
+    // Reused, already-folded diagonals must survive those full residuals.
+    options.use_mass_matrices_pc = m_use_mass_matrices_pc &&
+                                  m_mass_matrices_deposit_interval == 1;
     options.use_mass_matrices_jacobian = m_use_mass_matrices_jacobian;
     options.evolve_suborbit_particles_only = false;
     options.reflect_particles_at_rmax = m_reflect_particles_at_rmax;
@@ -946,7 +1180,11 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     if (options.deposit_mass_matrices) { m_WarpX->ZeroMassMatrices(); }
     // Any nonlinear evaluation moves the particles: the held mass matrices are
     // current only if this evaluation deposits them.
-    if (!a_from_jacobian) { m_mass_matrices_current = options.deposit_mass_matrices; }
+    if (!a_from_jacobian) {
+        m_mass_matrices_current = options.deposit_mass_matrices;
+        InvalidateMassMatrixCurrentIncrement();
+        if (m_endpoint_current_response) { m_endpoint_current_response->Invalidate(); }
+    }
 
     if (a_nl_iter == 0 && !a_from_jacobian &&
         m_use_mass_matrices_jacobian && m_skip_particle_picard_init) {
@@ -990,6 +1228,21 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     const bool mm_linear_stage =
         m_use_mass_matrices_jacobian && a_from_jacobian && !m_particle_suborbits;
 
+    // The local Boris tangent has a magnetic leg as well as the electric
+    // bands. Add it in raw deposition units, before the existing one-time
+    // metric scaling, guard sums and continuity-density projection.
+    if (mm_linear_stage && NativeCorrelatedIncrementEnabled()) {
+        auto const current = m_WarpX->m_fields.get_alldirs(FieldType::current_fp, 0);
+        bool const valid = m_endpoint_current_response &&
+            m_endpoint_current_response->ApplyIntervalMagnetic(*m_WarpX, m_dt,
+                m_WarpX->m_fields.get_alldirs(FieldType::Bfield_aux, 0), current);
+        if (!valid) {
+            for (auto* field : current) {
+                field->setVal(std::numeric_limits<amrex::Real>::quiet_NaN());
+            }
+        }
+    }
+
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     // Apply the inverse volume scaling for radial geometries after the total
     // current has been accumulated from all containers above. The charge
@@ -1014,6 +1267,11 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
                 m_WarpX->m_fields.get(FieldType::current_fp, Direction{1}, lev),
                 m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev),
                 PatchType::fine);
+        }
+        if (UseMassMatrixCurrentIncrement()) {
+            // The native metric, sum and wall images above acted on delta Ji
+            // alone. Preserve it before adding the already synchronized base.
+            ComposeMassMatrixCurrentIncrement();
         }
         // One-shot debug verification of the mass-matrix current response
         // against a full particle push/deposit at this exact field state
@@ -1312,6 +1570,81 @@ void ImplicitSolver::SyncMassMatricesPCAndApplyBCs ()
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
+#if defined(WARPX_DIM_RZ)
+    if (m_esirkepov_mass_matrices) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(NeedFullCurrentResponse() &&
+            m_mass_matrices_pc_width == 0 && !WarpX::use_filter &&
+            !m_adjoint_gather_ghosts && WarpX::field_centering_nox == 2 &&
+            WarpX::field_centering_noz == 2,
+            "Esirkepov MM-PC requires full MM, diagonal PC, unfiltered second-order "
+            "Yee-to-node centering and native field guards");
+        auto const& geom = m_WarpX->Geom(0);
+        auto const& lo = m_WarpX->GetFieldBoundaryLo();
+        auto const& hi = m_WarpX->GetFieldBoundaryHi();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(geom.Domain().smallEnd() == amrex::IntVect(0) &&
+            geom.ProbLo(0) == 0., "Esirkepov MM-PC requires an axis-aligned RZ domain");
+        esirkepov_mm::Diagonal diagonal;
+        for (int d = 0; d < 2; ++d) {
+            diagonal.cells[d] = geom.Domain().length(d);
+            diagonal.lo[d] = lo[d]; diagonal.hi[d] = hi[d];
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(diagonal.cells[d] > m_ncomp_xx[d],
+                "Esirkepov MM-PC requires a domain wider than the response stencil");
+            for (int side = 0; side < 2; ++side) {
+                auto const bc = side == 0 ? lo[d] : hi[d];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bc == FieldBoundaryType::PEC ||
+                    bc == FieldBoundaryType::PMC || bc == FieldBoundaryType::Periodic ||
+                    (d == 0 && side == 0 && bc == FieldBoundaryType::None),
+                    "Esirkepov MM-PC supports the axis, PEC, PMC and periodic faces");
+            }
+        }
+        int const width = m_ncomp_xx[0];
+        auto pc = m_WarpX->m_fields.get_alldirs(FieldType::MassMatrices_PC,0);
+        auto const electric = m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp,0);
+        auto const aux = m_WarpX->m_fields.get_alldirs(FieldType::Efield_aux,0);
+        FieldType const types[3] = {FieldType::MassMatrices_X,
+                                   FieldType::MassMatrices_Y,FieldType::MassMatrices_Z};
+        // Validate the full deposited operator, not merely a Jacobian-use
+        // switch: the source fallback intentionally keeps this PC while
+        // replacing its aggregate Jv with actual per-species particle pushes.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(width > 0 && width % 2 == 1,
+            "Esirkepov current-response bands require a positive odd width");
+        std::array<amrex::IntVect,9> const widths{m_ncomp_xx,m_ncomp_xy,m_ncomp_xz,
+            m_ncomp_yx,m_ncomp_yy,m_ncomp_yz,m_ncomp_zx,m_ncomp_zy,m_ncomp_zz};
+        for (auto const& band : widths) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(band == amrex::IntVect(width),
+                "Esirkepov current-response band widths are inconsistent");
+        }
+        auto const current=m_WarpX->m_fields.get_alldirs(FieldType::current_fp,0);
+        for (int row=0;row<3;++row) {
+            for (int column=0;column<3;++column) {
+                auto const& band=*m_WarpX->m_fields.get(types[row],Direction{column},0);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(band.nComp()==width*width &&
+                    band.boxArray()==current[row]->boxArray() &&
+                    band.DistributionMap()==current[row]->DistributionMap() &&
+                    band.nGrowVect()==current[row]->nGrowVect(),
+                    "Esirkepov MM-PC requires all nine complete current-response bands with native current layout");
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            auto const& matrix = *m_WarpX->m_fields.get(types[c],Direction{c},0);
+            for (amrex::MFIter mfi(*pc[c]); mfi.isValid(); ++mfi) {
+                auto out = pc[c]->array(mfi);
+                auto const mm = matrix.const_array(mfi);
+                auto const eb = (*electric[c])[mfi].box(), nb = (*aux[c])[mfi].box();
+                amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    out(i,j,k) = diagonal(mm,eb,nb,i,j,c,width);
+                });
+            }
+        }
+        // Electric parity is included in each raw-row coefficient above.
+        // Fold with current parity and scale, rather than folding twice.
+        m_WarpX->ApplyInverseVolumeScalingToCurrentDensity(pc[0],pc[1],pc[2],0);
+        m_WarpX->SyncMassMatricesPC();
+        m_WarpX->ApplyJfieldBoundary(0,pc[0],pc[1],pc[2],PatchType::fine);
+        return;
+    }
+#endif
+
     // Add select mass matrices elements to the preconditioner containers,
     // which may alread include contributions from suborbit particles that
     // are not included in the mass matrices.
@@ -1379,7 +1712,7 @@ void ImplicitSolver::SyncMassMatricesPCAndApplyBCs ()
             m_WarpX->m_fields.get(FieldType::MassMatrices_PC, Direction{0}, lev),
             m_WarpX->m_fields.get(FieldType::MassMatrices_PC, Direction{1}, lev),
             m_WarpX->m_fields.get(FieldType::MassMatrices_PC, Direction{2}, lev),
-            PatchType::fine);
+            PatchType::fine, /*even_diagonal=*/true);
     }
 }
 
@@ -1394,6 +1727,12 @@ void ImplicitSolver::SetMassMatricesForPC ( const amrex::Real a_theta_dt )
     // Add one to diagonal terms when using the curl_curl_mlmg pc_type.
     // The pc_type petsc already has the one from the curl curl operator
     // Note: This should be done after Sync/communication has been called
+
+    // Hybrid Ohm's law consumes the physical dJ_i/dE diagonal, not the
+    // electromagnetic Ampere coefficient (PR6613, Prabhat Kumar).
+    if (m_nlsolver->GetPreconditionerType() == PreconditionerType::pc_hybrid_pic) {
+        return;
+    }
 
     const amrex::Real pc_factor = PhysConst::c2 * PhysConst::mu0 * a_theta_dt;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -1420,6 +1759,10 @@ void ImplicitSolver::SetMassMatricesForPC ( const amrex::Real a_theta_dt )
 void ImplicitSolver::FinishMassMatrices ()
 {
     BL_PROFILE("ImplicitSolver::FinishMassMatrices()");
+    // Momentum gather and Esirkepov deposition form a nonsymmetric pair.
+    // Its complete bands already include both triangular halves.
+    if (m_esirkepov_mass_matrices) { return; }
+
 
     // The MM deposit routine takes advantage of symmetry for the diagonal mass
     // matrices to only deposit roughly half of the values. The remainder are

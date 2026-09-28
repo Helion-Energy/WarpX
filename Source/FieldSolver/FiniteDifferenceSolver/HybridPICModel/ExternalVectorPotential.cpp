@@ -8,6 +8,9 @@
  */
 
 #include "ExternalVectorPotential.H"
+#include "Circuit/NativeCircuitIdentity.H"
+#include <algorithm>
+#include <stdexcept>
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "Initialization/DivCleaner/ProjectionDivCleaner.H"
@@ -55,6 +58,14 @@ ExternalVectorPotential::ReadParameters ()
 
     m_A_external_time_parser.resize(m_nFields);
     m_A_time_scale.resize(m_nFields);
+    m_time_derivative_function.assign(m_nFields,"0");
+    m_time_increment_function.assign(m_nFields,"0");
+    m_time_companions_declared.assign(m_nFields,false);
+    m_has_time_profile.assign(m_nFields,false);
+    m_time_derivative_parser.resize(m_nFields);
+    m_time_increment_parser.resize(m_nFields);
+    m_time_derivative.resize(m_nFields);
+    m_time_increment.resize(m_nFields);
 
     m_read_A_from_file.resize(m_nFields);
     m_external_file_path.resize(m_nFields);
@@ -97,6 +108,15 @@ ExternalVectorPotential::ReadParameters ()
 
         pp_ext_A.query(m_field_names[i]+".A_time_external_function(t)",
             m_A_ext_time_function[i]);
+        bool const has_derivative=pp_ext_A.query(
+            m_field_names[i]+".A_time_derivative_external_function(t)",
+            m_time_derivative_function[i]);
+        bool const has_increment=pp_ext_A.query(
+            m_field_names[i]+".A_time_increment_external_function(t,dt)",
+            m_time_increment_function[i]);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(has_derivative==has_increment,
+            "Prescribed drive analytic derivative and finite increment must be supplied together");
+        m_time_companions_declared[i]=has_derivative && has_increment;
 
         bool in_initial_field = false;
         utils::parser::queryWithParser(pp_ext_A,
@@ -247,6 +267,16 @@ ExternalVectorPotential::InitData ()
         m_A_external_time_parser[i] = std::make_unique<amrex::Parser>(
             utils::parser::makeParser(m_A_ext_time_function[i],{"t",}));
         m_A_time_scale[i] = m_A_external_time_parser[i]->compile<1>();
+        m_has_time_profile[i]=m_time_companions_declared[i] ||
+            !m_A_external_time_parser[i]->symbols().contains("t");
+        if (m_has_time_profile[i]) {
+            m_time_derivative_parser[i]=std::make_unique<amrex::Parser>(
+                utils::parser::makeParser(m_time_derivative_function[i],{"t"}));
+            m_time_increment_parser[i]=std::make_unique<amrex::Parser>(
+                utils::parser::makeParser(m_time_increment_function[i],{"t","dt"}));
+            m_time_derivative[i]=m_time_derivative_parser[i]->compile<1>();
+            m_time_increment[i]=m_time_increment_parser[i]->compile<2>();
+        }
     }
 
     UpdateHybridExternalFields(warpx.gett_new(0), warpx.getdt(0));
@@ -569,4 +599,44 @@ ExternalVectorPotential::AddInitialExternalBField ()
     }
 
     UpdateHybridExternalFields(t0, dt_half);
+}
+
+std::string ExternalVectorPotential::NativeCircuitFieldIdentity (
+    std::vector<std::string> const& painted_fields) const
+{
+    warpx::circuit::IdentityWriter out;
+    out.Text("native-circuit-external-fields-v1");
+    out.IntegerValue(m_nFields);out.IntegerValue(m_do_clean_divA);
+    auto expression=[&](std::string const& text,amrex::Vector<std::string> const& vars) {
+        out.Text(text);
+        amrex::Parser raw(text);auto symbols=raw.symbols();
+        for(auto const& v:vars) { symbols.erase(v); }
+        out.IntegerValue(symbols.size());
+        for(auto const& symbol:symbols) {
+            auto constant=utils::parser::makeParser(symbol,{});
+            out.Text(symbol);out.Number(constant.compileHost<0>()());
+        }
+    };
+    for(int i=0;i<m_nFields;++i) {
+        out.Text(m_field_names[i]);out.IntegerValue(m_use_python_scale[i]);
+        bool const painted=std::find(painted_fields.begin(),painted_fields.end(),m_field_names[i])!=painted_fields.end();
+        out.IntegerValue(painted);
+        if(!painted) {
+            if(m_read_A_from_file[i]) {
+                throw std::runtime_error("protected native circuit restart lacks content identity for external field file "+m_field_names[i]);
+            }
+            expression(m_Ax_ext_grid_function[i],{"x","y","z","t"});
+            expression(m_Ay_ext_grid_function[i],{"x","y","z","t"});
+            expression(m_Az_ext_grid_function[i],{"x","y","z","t"});
+        }
+        if(!m_use_python_scale[i]) {
+            expression(m_A_ext_time_function[i],{"t"});
+            out.IntegerValue(m_time_companions_declared[i]);
+            if(m_time_companions_declared[i]) {
+                expression(m_time_derivative_function[i],{"t"});
+                expression(m_time_increment_function[i],{"t","dt"});
+            }
+        }
+    }
+    return out.Value();
 }

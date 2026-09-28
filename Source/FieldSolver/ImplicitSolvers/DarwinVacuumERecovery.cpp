@@ -2,6 +2,8 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "DarwinVacuumERecovery.H"
+#include "DarwinVacuumAffineResponse.H"
+#include "DarwinABoundary.H"
 
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -96,9 +98,8 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
     {
         hybrid.m_external_vector_potential->UpdateHybridExternalFields(time, dt);
     }
-    Field base, delta, residual, direction, action, input, curl, current;
-    amrex::Array<amrex::iMultiFab, 3> mask;
-    amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> owner;
+    Field base, input;
+    amrex::Array<amrex::iMultiFab, 3> mask, trace_mask;
     amrex::Real diagonal = 0.;
     for (int d = 0; d < AMREX_SPACEDIM; ++d)
     {
@@ -110,7 +111,6 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
         // Preserve its meaning when applying the normalized native operator.
         atol /= diagonal;
     }
-    amrex::Real const scale = PhysConst::mu0 / diagonal;
     amrex::Real const floor =
         PhysConst::q_e * hybrid.m_n_floor * hybrid.m_darwin_vacuum_recovery_density_fraction;
     int const mode = hybrid.m_darwin_vacuum_recovery_mask == "global"
@@ -118,31 +118,35 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
                          : (hybrid.m_darwin_vacuum_recovery_mask == "transition" ? 1 : 0);
     auto const periodic = geom.periodicity();
     amrex::GpuArray<int, 3> per{1, 1, 1};
+    amrex::GpuArray<int, AMREX_SPACEDIM> pmc_lo{}, pmc_hi{};
     for (int c = 0; c < AMREX_SPACEDIM; ++c)
     {
         per[c] = geom.isPeriodic(c);
+        pmc_lo[c] = WarpX::field_boundary_lo[c] == FieldBoundaryType::PMC;
+        pmc_hi[c] = WarpX::field_boundary_hi[c] == FieldBoundaryType::PMC;
     }
     for (int d = 0; d < 3; ++d)
     {
         auto const ba = e[d]->boxArray();
         auto const dm = e[d]->DistributionMap();
-        for (auto* f : {&base, &delta, &residual, &direction, &action})
-        {
-            (*f)[d].define(ba, dm, 1, 0);
-            (*f)[d].setVal(0.);
-        }
+        base[d].define(ba, dm, 1, 0);
+        base[d].setVal(0.);
         input[d].define(ba, dm, 1, e[d]->nGrowVect());
-        current[d].define(ba, dm, 1, 1);
-        curl[d].define(b[d]->boxArray(), b[d]->DistributionMap(), 1, b[d]->nGrowVect());
         mask[d].define(ba, dm, 1, 0);
-        owner[d] = e[d]->OwnerMask(periodic);
+        trace_mask[d].define(ba, dm, 1, 0);
         auto const domain = amrex::convert(geom.Domain(), e[d]->ixType());
         auto const lo = domain.smallEnd(), hi = domain.bigEnd();
+        amrex::GpuArray<int, AMREX_SPACEDIM> nodal{};
+        for (int c = 0; c < AMREX_SPACEDIM; ++c)
+        {
+            nodal[c] = e[d]->ixType().nodeCentered(c);
+        }
         auto const* eb = EB::enabled() ? warpx.GetEBUpdateEFlag()[0][d].get() : nullptr;
         for (amrex::MFIter mfi(base[d], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
             auto dst = base[d].array(mfi);
             auto m = mask[d].array(mfi);
+            auto trace = trace_mask[d].array(mfi);
             auto r = rho.const_array(mfi);
             auto old = accepted[d]->const_array(mfi);
             auto end = endpoint[d]->const_array(mfi);
@@ -178,7 +182,12 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
                                            low_wall = false;
                                        }
 #endif
-                                       if (!per[c] && (low_wall || p[c] >= hi[c]))
+                                       // Only nodal points lie on the wall. The first/last
+                                       // normal half-cell is an interior unknown, just as in
+                                       // DarwinApplyABoundary; do not overwrite its endpoint E.
+                                       if (!per[c] && nodal[c] &&
+                                           ((low_wall && !pmc_lo[c]) ||
+                                            (p[c] >= hi[c] && !pmc_hi[c])))
                                        {
                                            wall = true;
                                        }
@@ -188,6 +197,7 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
                                    conductor = conductor || (axis && d == 1 && i == 0);
 #endif
                                    m(i, j, k) = vacuum && !wall && !conductor;
+                                   trace(i, j, k) = !vacuum && !wall && !conductor;
                                    dst(i, j, k) = (!magnetic && vacuum) ? old(i, j, k) : end(i, j, k);
                                    if (wall && !magnetic)
                                    {
@@ -201,233 +211,31 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
         }
         base[d].OverrideSync(periodic);
     }
-    // Cylindrical dual-volume weights make the native curl pair adjoint.
-    // Divide all weights by dr^2: the axis Ez weight is then 1/8.
-    auto component_dot =
-        [&] (amrex::MultiFab const& x, amrex::MultiFab const& y, amrex::iMultiFab const& own)
-    {
+    warpx::darwin::DarwinVacuumAffineResponse::Options options;
+    options.relative_tolerance = rtol;
+    options.absolute_tolerance = atol;
+    options.max_iterations = max_iterations;
+    options.magnetic = magnetic;
+    options.check_operator = check_operator;
+    options.pmc_lo = pmc_lo;
+    options.pmc_hi = pmc_hi;
 #if defined(WARPX_DIM_RZ)
-        amrex::Real const r0 = geom.ProbLo(0) / geom.CellSize(0);
-        bool const node = x.ixType().nodeCentered(0);
-        amrex::ReduceOps<amrex::ReduceOpSum> op;
-        amrex::ReduceData<amrex::Real> data(op);
-        using Tuple = decltype(data)::Type;
-        for (amrex::MFIter mfi(x); mfi.isValid(); ++mfi)
-        {
-            auto const a = x.const_array(mfi), b = y.const_array(mfi);
-            auto const o = own.const_array(mfi);
-            op.eval(mfi.validbox(), data,
-                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple
-                    {
-                        amrex::Real weight = r0 + i + (node ? 0. : .5);
-                        if (axis && node && i == 0)
-                        {
-                            weight = .125;
-                        }
-                        return {o(i, j, k) ? weight * a(i, j, k) * b(i, j, k) : 0.};
-                    });
-        }
-        return amrex::get<0>(data.value(op));
-#else
-        return amrex::MultiFab::Dot(own, x, 0, y, 0, 1, 0, true);
+    options.flux_only = flux_only;
 #endif
-    };
-    auto dot = [&] (Field const& x, Field const& y)
-    {
-        amrex::Real v = 0.;
-        for (int d = 0; d < 3; ++d)
-        {
-            v += component_dot(x[d], y[d], *owner[d]);
-        }
-        amrex::ParallelAllReduce::Sum(v, amrex::ParallelContext::CommunicatorSub());
-        return v;
-    };
-    auto apply = [&] (Field& out, Field const& x)
-    {
-        for (int d = 0; d < 3; ++d)
-        {
-            input[d].setVal(0.);
-            amrex::MultiFab::Copy(input[d], x[d], 0, 0, 1, 0);
-            input[d].OverrideSync(periodic);
-            input[d].FillBoundary(periodic);
-            curl[d].setVal(0.);
-            current[d].setVal(0.);
-        }
-#if defined(WARPX_DIM_RZ)
-        if (axis)
-        {
-            warpx.ApplyFieldBoundaryOnAxis(&input[0], &input[1], &input[2], 0);
-        }
-#endif
-        auto cv = view(curl), iv = view(input), jv = view(current);
-        warpx.get_pointer_fdtd_solver_fp(0)->ComputeCurlA(cv, iv, warpx.GetEBUpdateBFlag()[0], 0);
-        for (auto& f : curl)
-        {
-            f.OverrideSync(periodic);
-            f.FillBoundary(periodic);
-        }
-#if defined(WARPX_DIM_RZ)
-        if (axis)
-        {
-            warpx.ApplyFieldBoundaryOnAxis(&curl[0], &curl[1], &curl[2], 0);
-        }
-#endif
-        warpx.get_pointer_fdtd_solver_fp(0)->CalculateCurrentAmpere(jv, cv,
-                                                                    warpx.GetEBUpdateEFlag()[0], 0);
-        for (int d = 0; d < 3; ++d)
-        {
-            for (amrex::MFIter mfi(out[d], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                auto a = out[d].array(mfi);
-                auto c = current[d].const_array(mfi);
-                auto m = mask[d].const_array(mfi);
-                amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
-                                   { a(i, j, k) = m(i, j, k) ? scale * c(i, j, k) : 0.; });
-            }
-            out[d].OverrideSync(periodic);
-        }
-    };
-    if (check_operator)
-    {
-        Field u, v, ku, kv;
-        for (int d = 0; d < 3; ++d)
-        {
-            for (auto* f : {&u, &v, &ku, &kv})
-            {
-                (*f)[d].define(base[d].boxArray(), base[d].DistributionMap(), 1, 0);
-            }
-            for (amrex::MFIter mfi(u[d], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                auto ua = u[d].array(mfi), va = v[d].array(mfi);
-                auto m = mask[d].const_array(mfi);
-                amrex::ParallelFor(
-                    mfi.tilebox(),
-                    [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
-                    {
-                        ua(i, j, k) =
-                            m(i, j, k) ? std::sin(.731 * (i + 3 * j + 7 * k + 11 * d)) : 0.;
-                        va(i, j, k) =
-                            m(i, j, k) ? std::cos(.413 * (5 * i + 2 * j + 3 * k + 13 * d)) : 0.;
-                    });
-            }
-        }
-        apply(ku, u);
-        amrex::Real energy = 0.;
-        for (int d = 0; d < 3; ++d)
-        {
-            auto const own = curl[d].OwnerMask(periodic);
-            energy += component_dot(curl[d], curl[d], *own) / diagonal;
-        }
-        amrex::ParallelAllReduce::Sum(energy, amrex::ParallelContext::CommunicatorSub());
-        apply(kv, v);
-        amrex::Real const uku = dot(u, ku), ukv = dot(u, kv), vku = dot(v, ku);
-        amrex::Real const energy_error = std::abs(uku - energy) / std::max(1., std::abs(energy));
-        amrex::Real const symmetry_error =
-            std::abs(ukv - vku) / std::max(1., std::sqrt(dot(u, u) * dot(v, v)));
-        amrex::Print() << "Spatial recovery operator: symmetry=" << symmetry_error
-                       << " energy=" << energy_error << "\n";
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            symmetry_error < 1.e-12 && energy_error < 1.e-12,
-            "Spatial recovery operator violates its symmetry or curl-energy "
-            "identity");
-    }
-    apply(action, base);
+    warpx::darwin::DarwinVacuumAffineResponse response(warpx, e, b, options);
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        response.Freeze({&mask[0], &mask[1], &mask[2]},
+                        {&trace_mask[0], &trace_mask[1], &trace_mask[2]}, view(base),
+                        magnetic ? endpoint : ext),
+        "Invalid frozen spatial recovery context");
+    auto const result = response.Recover(endpoint);
+    amrex::Print() << (magnetic ? "SPATIAL_A_RECOVERY iterations=" : "SPATIAL_RECOVERY iterations=")
+                   << result.iterations << " initial=" << result.initial
+                   << " residual=" << result.residual << " target=" << result.target << "\n";
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(result,
+        "Spatial vacuum recovery did not converge to its true residual tolerance");
     for (int d = 0; d < 3; ++d)
     {
-        amrex::MultiFab::Copy(residual[d], action[d], 0, 0, 1, 0);
-        residual[d].mult(-1., 0, 1, 0);
-        amrex::MultiFab::Copy(direction[d], residual[d], 0, 0, 1, 0);
-    }
-    // With K = I_V C^T C I_V, zero-start unpreconditioned CG keeps every
-    // correction in range(K). It preserves the baseline's null modes (accepted
-    // electric modes or extrapolated endpoint A modes). Fixed plasma and wall
-    // values never enter the correction space. A global inverse followed by
-    // masking is not this projection and can amplify the interface defect.
-    // An arbitrary preconditioner would invalidate the null-mode selection.
-    amrex::Real rr = dot(residual, residual), initial = std::sqrt(rr);
-    // A has no universal dimensional absolute floor. Stop at the native
-    // operator's roundoff scale when an already projected field is revisited;
-    // otherwise a second projection would demand a tolerance below cancellation
-    // error. This bound scales with the actual field, not a fixed unit value.
-    amrex::Real reference_norm = 0.;
-    if (magnetic)
-    {
-#if defined(WARPX_DIM_RZ)
-        if (flux_only)
-        {
-            // The axisymmetric toroidal block does not depend on Ar or Az.
-            // Large unchanged poloidal fields must not loosen this solve.
-            reference_norm = component_dot(base[1], base[1], *owner[1]);
-            amrex::ParallelAllReduce::Sum(reference_norm,
-                                         amrex::ParallelContext::CommunicatorSub());
-        }
-        else
-#endif
-        {
-            reference_norm = dot(base, base);
-        }
-    }
-    amrex::Real const roundoff =
-        64. * std::numeric_limits<amrex::Real>::epsilon() * std::sqrt(reference_norm);
-    amrex::Real const target = std::max({atol, rtol * initial, roundoff});
-    amrex::Real truth = initial;
-    int iter = 0;
-    while (truth > target && iter < max_iterations)
-    {
-        apply(action, direction);
-        amrex::Real const pap = dot(direction, action);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(pap > 0. && std::isfinite(pap),
-                                         "Spatial recovery CG curvature must be positive");
-        amrex::Real const alpha = rr / pap;
-        for (int d = 0; d < 3; ++d)
-        {
-            amrex::MultiFab::Saxpy(delta[d], alpha, direction[d], 0, 0, 1, 0);
-            amrex::MultiFab::Saxpy(residual[d], -alpha, action[d], 0, 0, 1, 0);
-        }
-        ++iter;
-        amrex::Real next = dot(residual, residual);
-        truth = std::sqrt(next);
-        bool restart = false;
-        if (truth <= target)
-        {
-            for (int d = 0; d < 3; ++d)
-            {
-                amrex::MultiFab::LinComb(input[d], 1., base[d], 0, 1., delta[d], 0, 0, 1, 0);
-            }
-            // apply() owns input scratch: use direction only after its old
-            // value is no longer needed.
-            for (int d = 0; d < 3; ++d)
-            {
-                amrex::MultiFab::Copy(direction[d], input[d], 0, 0, 1, 0);
-            }
-            apply(action, direction);
-            for (int d = 0; d < 3; ++d)
-            {
-                amrex::MultiFab::Copy(residual[d], action[d], 0, 0, 1, 0);
-                residual[d].mult(-1., 0, 1, 0);
-            }
-            next = dot(residual, residual);
-            truth = std::sqrt(next);
-            restart = true;
-        }
-        if (truth <= target)
-        {
-            break;
-        }
-        for (int d = 0; d < 3; ++d)
-        {
-            amrex::MultiFab::LinComb(direction[d], 1., residual[d], 0, restart ? 0. : next / rr,
-                                     direction[d], 0, 0, 1, 0);
-        }
-        rr = next;
-    }
-    amrex::Print() << (magnetic ? "SPATIAL_A_RECOVERY iterations=" : "SPATIAL_RECOVERY iterations=") << iter << " initial=" << initial
-                   << " residual=" << truth << " target=" << target << "\n";
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(truth <= target, "Spatial vacuum recovery did not converge "
-                                                      "to its true residual tolerance");
-    for (int d = 0; d < 3; ++d)
-    {
-        amrex::MultiFab::LinComb(*endpoint[d], 1., base[d], 0, 1., delta[d], 0, 0, 1, 0);
         endpoint[d]->OverrideSync(periodic);
         if (magnetic)
         {
@@ -460,6 +268,7 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
             }
         }
 #endif
+        ApplyDarwinPMCVectorBoundary(input[d], geom, pmc_lo, pmc_hi, ext[d]);
         amrex::MultiFab::Copy(*e[d], input[d], 0, 0, 1, e[d]->nGrowVect());
         // Match the existing all-component boundary pin and continue its value
         // through physical guards.
@@ -480,7 +289,8 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
 #if defined(WARPX_DIM_RZ)
                                                           !(c == 0 && axis && p[c] < lo[c]) &&
 #endif
-                                                          (p[c] < lo[c] || p[c] > hi[c])))
+                                                          ((p[c] < lo[c] && !pmc_lo[c]) ||
+                                                           (p[c] > hi[c] && !pmc_hi[c]))))
                                        {
                                            p[c] = amrex::Clamp(p[c], lo[c], hi[c]);
                                            outside = true;
@@ -495,6 +305,7 @@ RecoverDarwinVacuumField (WarpX& warpx, HybridPICModel& hybrid, View const& endp
         amrex::MultiFab::Add(*e[d], *el[d], 0, 0, 1, e[d]->nGrowVect());
         e[d]->OverrideSync(periodic);
         e[d]->FillBoundary(periodic);
+        ApplyDarwinPMCVectorBoundary(*e[d], geom, pmc_lo, pmc_hi, ext[d]);
     }
 }
 

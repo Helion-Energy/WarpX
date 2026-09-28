@@ -14,13 +14,18 @@
 
 #include "HybridPICModel_fwd.H"
 
+class DarwinRZGreenSolver;
+
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
 
 #include "EBJBoundary.H"
 #include "ESolveBandedPC.H"
+#include "ElectronThermalRuntime.H"
+#include "ElectronDensityControl.H"
 #include "ElectronViscosityPoint.H"
 #include "ExternalVectorPotential.H"
+#include "HybridEndRegion.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -128,6 +133,62 @@ public:
 
     void InitData (const ablastr::fields::MultiFabRegister& fields);
 
+    using ElectronEnergyMode = warpx::thermal::ElectronEnergyMode;
+    [[nodiscard]] ElectronEnergyMode GetElectronEnergyMode () const { return m_electron_energy_mode; }
+    [[nodiscard]] bool UsesEulerianElectronEnergy () const {
+        return m_electron_energy_mode != ElectronEnergyMode::Legacy;
+    }
+    [[nodiscard]] bool UsesQDSMC () const {
+        return m_solve_electron_energy_equation && !UsesEulerianElectronEnergy();
+    }
+    [[nodiscard]] amrex::Geometry ElectronThermalGeometry (int lev = 0) const;
+    [[nodiscard]] warpx::thermal::ThermalMomentOptions EulerianMomentOptions (int lev = 0) const;
+    void InitializeEulerianElectronEnergy (int lev, const amrex::MultiFab& rho);
+    // Accepted-state operation only. The nonlinear driver owns stage scratch.
+    void RefreshEulerianElectronThermodynamics (int lev, const amrex::MultiFab& rho) const;
+    void MarkEulerianElectronEnergyRestored (int lev);
+    // Complete physical history contract for the Eulerian Darwin modes.
+    // A mode switch changes the nonlinear solve, not the stored coordinates.
+    [[nodiscard]] std::string DarwinCheckpointConfiguration () const;
+    [[nodiscard]] std::string DarwinCheckpointMetadata () const;
+    void RestoreDarwinCheckpointMetadata (const std::string& text);
+    void ValidateDarwinCheckpointFields (const std::vector<std::string>& names) const;
+    bool m_darwin_checkpoint_restored = false;
+    void InitializeDensityControl ();
+    void AssertDensityControlState () const;
+    std::uint64_t DensityControlEpoch () const;
+    void BeginDensityControlStep ();
+    void EndDensityControlStep ();
+    void SetHybridDensityFloor (amrex::Real value);
+    void SetQdsmcDensityFloor (amrex::Real value);
+    const warpx::thermal::ElectronDensityControl& ConfigureDensityFloorController (
+        const std::string& configuration);
+    void CommitDensityFloorController (const std::string& configuration,
+        amrex::Real last, amrex::Real ema, bool has_ema, std::int64_t step,
+        amrex::Real gate = -1.);
+    std::string DensityControlCheckpointMetadata () const;
+    void RestoreDensityControlCheckpointMetadata (const std::string& metadata);
+    const warpx::thermal::ElectronDensityControl& DensityControlState () const {
+        return m_density_control;
+    }
+    const warpx::thermal::ElectronThermalModelConfig& ElectronThermalModel () const {
+        return m_electron_thermal_model;
+    }
+    [[nodiscard]] std::string ElectronEnergyCheckpointMetadata () const;
+    void ValidateElectronEnergyCheckpointMetadata (const std::string& metadata) const;
+
+    void SetElectronThermalTrial (int lev, const amrex::MultiFab& temperature,
+                                 const amrex::MultiFab& ohm_pressure);
+    void ClearElectronThermalTrial (int lev) { m_electron_thermal_trial.Clear(lev); }
+    void ClearElectronThermalTrials () { m_electron_thermal_trial.Clear(); }
+    [[nodiscard]] bool HasElectronThermalTrial (int lev) const { return m_electron_thermal_trial.Has(lev); }
+    [[nodiscard]] const amrex::MultiFab& ElectronTemperatureForSolve (int lev) const;
+    [[nodiscard]] const amrex::MultiFab& ElectronPressureForSolve (int lev) const;
+
+    /** Initial external B is added once, including an initial implicit field solve
+     *  followed by the first Evolve entry at the same step/time. */
+    bool m_initial_external_B_added = false;
+
     /**
      * \brief
      * Report how far the transport CLAMPS move the electron Prandtl number
@@ -178,6 +239,8 @@ public:
         bool solve_for_Faraday,
         std::optional<bool> include_resistivity = std::nullopt) const;
 
+    // ER_out is optional RAW global eta*J scratch. Its caller must apply the
+    // homogeneous native field boundaries and gather centering before use.
     void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
         ablastr::fields::VectorField const& Jfield,
@@ -185,7 +248,12 @@ public:
         amrex::MultiFab const& rhofield,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, bool solve_for_Faraday,
-        std::optional<bool> include_resistivity = std::nullopt) const;
+        std::optional<bool> include_resistivity = std::nullopt,
+        warpx::thermal::EulerianDissipation* trial_dissipation = nullptr,
+        ablastr::fields::VectorField const* ER_out = nullptr,
+        const warpx::thermal::HybridOhmDampingFields* damping_out = nullptr,
+        ablastr::fields::VectorField const* F_pressure_hall_out = nullptr,
+        ablastr::fields::VectorField const* transverse_offset = nullptr) const;
 
     void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
@@ -194,7 +262,12 @@ public:
         amrex::MultiFab const& rhofield,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, PatchType patch_type, bool solve_for_Faraday,
-        std::optional<bool> include_resistivity = std::nullopt) const;
+        std::optional<bool> include_resistivity = std::nullopt,
+        warpx::thermal::EulerianDissipation* trial_dissipation = nullptr,
+        ablastr::fields::VectorField const* ER_out = nullptr,
+        const warpx::thermal::HybridOhmDampingFields* damping_out = nullptr,
+        ablastr::fields::VectorField const* F_pressure_hall_out = nullptr,
+        ablastr::fields::VectorField const* transverse_offset = nullptr) const;
 
     /** Constitutive-PEC zeroing of an edge-staggered field on the conformal
      *  (ECT) wall: zero every masked (fully covered) edge and every cut edge.
@@ -977,7 +1050,11 @@ public:
      * \brief Seed T_e = T_e0 * (max(n_e, n_floor)/n0)^(gamma-1): the
      *        algebraic adiabat evaluated on the floored density.
      *
-     * This is the QDSMC transport's zero-gradient state (K_e uniform
+     * The initial_electron_temperature_gamma/n_floor parameters can specify
+     * a fitted initial profile independently of the evolution closure. It is
+     * seeded once, before initial Pe/E/Je assembly, and never on re-entry or
+     * when a checkpoint restored Te. With the default initial parameters,
+     * this is the QDSMC transport's zero-gradient state (K_e uniform
      * everywhere, floored halo included), so an energy-equation run starts
      * free of spurious entropy mixing and from the same electron pressure as
      * the algebraic closure wherever n_e >= n_floor (below the floor the
@@ -1288,6 +1365,10 @@ public:
      *  default 1 on coupled runs. */
     int m_substep_finite_check_interval = 1;
 
+    // Default-off geometric end buffers; independent of the density vacuum gate.
+    HybridEndRegion m_end_region;
+    [[nodiscard]] HybridEndRegion EndRegion (int lev) const;
+
     bool m_holmstrom_vacuum_region = false;
 
     /** Smooth transition width of the Holmstrom vacuum gate, as a fraction
@@ -1419,6 +1500,11 @@ public:
     bool m_n_floor_given = false;
     /** Electron pressure scaling exponent */
     amrex::Real m_gamma = 5.0/3.0;
+    /** Fresh-start Te profile only; defaults are resolved after reading gamma
+     * and qdsmc_te_n_floor. Evolution continues to use those original values. */
+    amrex::Real m_initial_electron_temperature_gamma = 5.0/3.0;
+    amrex::Real m_initial_electron_temperature_n_floor = 1.0;
+    bool m_initial_electron_temperature_include_pedestal = true;
 
     /** Master gate for the electron-energy equation. When true, K_e is
      * transported each step by QDSMC fictitious particles advecting with
@@ -1428,6 +1514,11 @@ public:
      * false (default), Pe is computed from the algebraic adiabatic closure
      * (FillElectronPressureMF) -- no temperature evolution. */
     bool m_solve_electron_energy_equation = false;
+    // Generic gate above remains true for both evolved representations.
+    ElectronEnergyMode m_electron_energy_mode = ElectronEnergyMode::Legacy;
+    warpx::thermal::ElectronThermalModelConfig m_electron_thermal_model;
+    mutable std::map<int, bool> m_eulerian_energy_initialized;
+    warpx::thermal::ElectronThermalTrialViews m_electron_thermal_trial;
 
     /** Darwin (magnetoinductive) field split for the theta-implicit hybrid
      *  solver: the electric field is decomposed as E = E_T + E_L with the
@@ -1449,6 +1540,11 @@ public:
     amrex::Real m_darwin_poisson_atol = 0.0;
     int m_darwin_poisson_max_iters = 200;
     int m_darwin_poisson_verbosity = 0;
+    /** Maximum anisotropy-reducing semicoarsening levels in the E_L solve.
+     *  Independent of the vacuum recovery hierarchy. Zero preserves full coarsening. */
+    int m_darwin_poisson_semicoarsening = 0;
+    /** Grid direction retained during semicoarsening; -1 selects the widest cells. */
+    int m_darwin_poisson_semicoarsening_direction = -1;
 
     /** Electron inertia in the generalized Ohm's law (per the implicit-PIC
      *  formulation of Angus et al.): the Je-form of the material derivative
@@ -1533,11 +1629,9 @@ public:
      *  (error O(alpha dU)); reassembling at the accepted state in the
      *  rotation is a possible refinement.
      *
-     *  One-time Je-history seeding from the first evaluated state: a
-     *  quiescent plasma's pre-history is its initial (noisy) electron
-     *  current, NOT zero -- seeding both levels with Je(t=0) makes the
-     *  first BDF2 derivative exactly zero instead of a deposit-noise
-     *  impulse of order Je/dt. */
+     *  Seed Je history from the committed initial current before evaluating
+     *  any trial midpoint. Both slots initially hold that current, but only
+     *  one history level exists; the first step uses the two-point derivative. */
     bool m_inertia_history_initialized = false;
     /** Number of genuine per-step history levels accumulated (seeding
      *  counts as one). BDF2 engages only at >= 2 -- the first step after
@@ -1883,11 +1977,39 @@ public:
                          int lev, bool solve_for_Faraday,
                          bool include_resistivity) const;
 
+    /** Assemble Je = J_plasma - J_ion using the same interpolation and ghost
+     *  convention at initialization, at theta stages and in the history store. */
+    void ComputeElectronCurrentNodal (amrex::MultiFab& electron_current) const;
+
+    /** Seed the history from the committed current, before any particle trial.
+     *  Repeated calls preserve the history. No fictitious earlier step is added. */
+    void InitializeElectronInertiaHistory ();
+
+    // Isolated spatial-discretization diagnostic; nonvirtual and no model
+    // data-layout change. False preserves the maintained nodal route.
+    bool UseCompatibleYeeInertia () const;
+
     /** Assemble E_inertial on the nodal scratch "hybrid_E_inertial_nodal"
      *  from the current theta-stage state (see m_include_electron_inertia).
      */
     void ComputeElectronInertiaNodal (amrex::Real a_theta, amrex::Real a_dt,
                                       bool a_from_jacobian);
+
+    /** Diagnostic one-step endpoint-quadrature reference. The borrowed current
+     * is nodal A/m^2, fully refreshed from this trial's virtual endpoint. Only
+     * the dJe/dt assembly and saved theta history consume it; force/Hall current
+     * registers retain their primary Esirkepov interval values. No new model
+     * state or alternative recovery stencil is introduced. */
+    void ComputeElectronInertiaNodal (amrex::Real a_theta, amrex::Real a_dt,
+                                      bool a_from_jacobian,
+                                      amrex::MultiFab const* inertia_stage_current);
+    // Diagnostic correlated rate from the SAME endpoint-trapezoid theta
+    // equations; current still supplies the saved stage/history companion.
+    void ComputeElectronInertiaNodal (amrex::Real a_theta, amrex::Real a_dt,
+                                      bool a_from_jacobian,
+                                      amrex::MultiFab const* inertia_stage_current,
+                                      amrex::MultiFab const* inertia_stage_rate);
+
 
     /** Rotate the per-step nodal Je history: nm1 <- n, then
      *  n <- (Je^theta - (1-theta) Je^n)/theta from the converged
@@ -1985,10 +2107,15 @@ public:
      *  "edge_relaxation": dA = -mu0 J_imp / (4 sum_d 1/dx_d^2) on native
      *  unconstrained vacuum edges. The outer Newton/Krylov solve supplies
      *  the global inverse, using its curl-curl preconditioner. No nodal
-     *  transfer or inner recovery solve is needed. Requires 3D, half cadence,
-     *  live probes and zero relaxation time. EB support uses the existing
-     *  update masks, not a conformal cut-cell curl discretization. */
+     *  transfer or inner recovery solve is needed. Requires half cadence,
+     *  live probes and zero relaxation time. RZ supports only flux recovery,
+     *  an r=0 axis and no EB. The 3D path retains all components and existing
+     *  EB update masks, not a conformal cut-cell curl discretization. */
     std::string m_darwin_vacuum_recovery_operator = "poisson";
+    /** "greens" applies the same nodal RZ Poisson inverse with cached axial
+     *  DST-I/radial factors. Flux-only, r=0 axis, nonperiodic z, no EB, FFT
+     *  build. Allocated with the level fields and rebuilt on reallocation. */
+    mutable std::unique_ptr<DarwinRZGreenSolver> m_darwin_rz_green_solver;
     /** Tikhonov beta for the "curlcurl" recovery operator, relative to
      *  the grid-scale curl-curl diagonal sum_d 4/dx_d^2. */
     amrex::Real m_darwin_vacrec_cc_beta_rel = 1.0e-8;
@@ -2041,9 +2168,15 @@ public:
     /** Solve the Darwin longitudinal-field constraint with the given charge
      *  density and the current hybrid_electron_pressure_fp, writing
      *  E_L = grad(phi) into the "hybrid_E_long_fp" fields (E staggering).
+     *  When full_source is supplied, project that already assembled native
+     *  Ohm field, including its actual source/drive context. Inputs are read
+     *  only and must not alias E_L. The default pressure+inertia map remains
+     *  available as the existing control.
      */
     void ComputeDarwinELong (ablastr::fields::MultiLevelScalarField const& rho,
-                             amrex::Real t, bool reset_guess = false);
+                             amrex::Real t, bool reset_guess = false,
+                             ablastr::fields::MultiLevelVectorField const*
+                                 full_source = nullptr);
     /** Time-advance scheme for the QDSMC energy step (bake-off switch,
      *  hybrid_pic_model.qdsmc_time_advance = euler | leapfrog | pc).
      *  See AdvanceElectronEnergyQDSMC for the scheme definitions.
@@ -3534,6 +3667,7 @@ public:
      *  resistivity parser, per-species overlays, or hyper-resistivity. */
     [[nodiscard]] bool HasResistivity () const {
         return (m_eta_expression != "0.0") || m_has_per_species_eta ||
+               m_end_region.resistivity > 0. ||
                m_include_hyper_resistivity_term || m_visc_in_ohms_law;
     }
 
@@ -3789,11 +3923,20 @@ public:
      *  a spurious boundary heat source. The stage therefore deposits its own
      *  midpoint density through the same MultiParticleContainer path used
      *  for rho^n and rho^{n+1}. Lazily allocated per level. */
+    /** The implicit Esirkepov solver supplies conservative endpoint-averaged
+     * midpoint charge. Thermal recovery must consume that same density map. */
+    bool m_implicit_continuity_density = false;
     mutable std::map<int, std::unique_ptr<amrex::MultiFab>> m_qdsmc_rho_mid;
 
     /** Boundary-condition handler for the Darwin phi solve (same BC mapping
      *  as the electrostatic solver). Lazily constructed on first use. */
     mutable std::unique_ptr<PoissonBoundaryHandler> m_darwin_bc_handler;
+
+private:
+    warpx::thermal::ElectronDensityControl m_density_control;
+    bool m_density_control_step_open = false;
+    bool m_density_controller_needs_registration = false;
+
 };
 
 /**

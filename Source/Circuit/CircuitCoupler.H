@@ -13,13 +13,20 @@
 #include "Coils/FluxProbes.H"
 #include "ExternalCircuit.H"
 #include "DeviceCircuit.H"
+#include "DeviceCircuitRate.H"
+#include "NativeCircuitRejection.H"
+#include "NativeCircuitTransaction.H"
 
 #include <AMReX_REAL.H>
 
+#include <array>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+class ExternalVectorPotential;
 
 /**
  * \brief Per-substep predictor-corrector coupling of an external circuit
@@ -137,6 +144,117 @@ public:
                     std::unique_ptr<ExternalCircuit> plugin,
                     WarpxCircuitAffineApiV1 const* affine_api = nullptr);
 
+    /** Optional plugin capability; attach once after construction, before any
+     * reversible step. Legacy ABI2 stepping is unchanged when absent. */
+    bool SetRejectionCapability (WarpxCircuitRejectionApiV1 const* api);
+    [[nodiscard]] bool SupportsNativeRejection () const;
+    /** BEFORE any step-entry measurement or BeginStep: preserve coupler,
+     * external scale segments, and plugin state. external must outlive this
+     * attempt. No field arrays are copied. False leaves no retry guarantee. */
+    bool SnapshotNativeStep (ExternalVectorPotential& external);
+    /** Before accept=true only. On success clears borrowed device scale views,
+     * device trial readiness and restores exact pre-BeginStep host metadata.
+     * Parent separately restores field/particle/thermal arrays. Failure is
+     * terminal if NativeRejectionFailed(); never use FinishStep as cancellation. */
+    bool CancelNativeStep ();
+    [[nodiscard]] bool NativeStepCancelable () const { return m_rejection.Ready(); }
+    [[nodiscard]] bool NativeRejectionFailed () const { return m_rejection.Failed(); }
+    [[nodiscard]] bool DarwinDeviceStepReady () const { return m_device != nullptr; }
+
+    /** Separate optional post-accept transaction. Snapshot before BeginStep;
+     * true+Finish publishes only an internal candidate until Finalize. These
+     * operations never use or weaken PRE_ACCEPT V1 cancellation. */
+    bool SetTransactionCapability(WarpxCircuitTransactionApiV1 const* api);
+    [[nodiscard]] bool SupportsNativeTransaction() const;
+    bool SnapshotRetainedNativeStep(ExternalVectorPotential& external);
+    [[nodiscard]] bool RetainedNativeStepCancelable() const;
+    [[nodiscard]] bool RetainedNativeStepFinalizable() const;
+    [[nodiscard]] bool NativeStepRetained() const { return m_transaction.Active(); }
+    [[nodiscard]] bool RetainedNativeEndpointReady() const;
+    bool CancelRetainedNativeStep();
+    bool FinalizeRetainedNativeStep();
+    /** Same device/native accepting map, but errors after native true remain
+     * recoverable and the accepted receipt is deferred. Endpoint setup may use
+     * its closed native n+1 rate. Only the retained OneStep owner calls this. */
+    bool TryCommitRetainedDarwinDeviceStep(amrex::Real t0,amrex::Real dt,
+        amrex::Real theta,amrex::Real tolerance,std::string& error);
+
+    enum class SourceImpulsePhase : std::uint32_t {
+        PreField = WARPX_IMPULSE_PRE_FIELD, PostField = WARPX_IMPULSE_POST_FIELD
+    };
+    /** Optional source impulse; setup/publication run only at source boundaries.
+     * The original retained transaction owns all rollback. */
+    bool SetSourceImpulseCapability(WarpxCircuitImpulseApiV1 const* api);
+    [[nodiscard]] bool SupportsSourceImpulse() const;
+    [[nodiscard]] bool RetainedSourcePhaseReady(SourceImpulsePhase phase) const;
+    bool PrepareNativeSourceImpulse(amrex::Real time, SourceImpulsePhase phase,
+                                    std::string& error);
+    void ApplyNativeSourceImpulse(amrex::MultiFab const& homogeneous_delta_bz);
+    [[nodiscard]] amrex::Gpu::DeviceVector<double> const& SourceFieldIncrements() const;
+    [[nodiscard]] amrex::Gpu::DeviceVector<double> const& SourcePortImpulses() const;
+    /** Setup-only accepted port values for the exact prepared source epoch.
+     * No provider call or device transfer; callers retain their own copy. */
+    [[nodiscard]] std::vector<double> const& SourceEntryCurrents() const
+    { AMREX_ALWAYS_ASSERT(m_source_impulse_ready); return m_source_entry_current; }
+
+    /** Reads only the small final port vectors, checks exact native acceptance,
+     * and publishes provisional provider/scales. Caller must cancel the whole
+     * retained step on failure, including a post-publication failure. */
+    bool CommitNativeSourceImpulse(WarpxCircuitImpulseReceiptV1& receipt,
+                                    std::string& error);
+    /** Call after publishing the matching source field increments; clears the
+     * required rebase fence before endpoint closure or finalization. */
+    bool RebaseNativeSourceLinkage(std::string& error);
+    [[nodiscard]] bool RetainedSourceEndpointReady(SourceImpulsePhase phase,
+                                                   amrex::Real time) const;
+    void InvalidateNativeSourceImpulse();
+    [[nodiscard]] bool NativeSourceImpulseReady() const { return m_source_impulse_ready; }
+    [[nodiscard]] std::uint64_t NativeSourceImpulseGeneration() const
+    { return m_source_impulse_generation; }
+    /** Exact last device application within this preparation generation.
+     * Zero means no live applied output. Reading it performs no device copy. */
+    [[nodiscard]] std::uint64_t NativeSourceImpulseApplication() const noexcept
+    { return m_source_impulse_ready && m_source_impulse_applied ? m_source_impulse_application : 0; }
+
+    /** Optional differential-rate and clock capabilities. Attach once after
+     * construction. Missing APIs preserve legacy ABI2 interval behavior. */
+    bool SetNativeEndpointRateCapabilities (WarpxCircuitRateApiV1 const* rate,
+                                            WarpxCircuitRateClockApiV1 const* clock);
+    [[nodiscard]] bool SupportsNativeEndpointRate () const;
+    /** Fixed-grid coil-by-external-field H, in the exact cached Q convention.
+     * ConfigureDarwinMagneticResponse clears H; time/restart invalidation does
+     * not. Geometry, unit fields and coil metadata must remain immutable. */
+    bool SetNativeEndpointBoundaryResponse (std::vector<double> const& response,
+                                            std::string& error);
+    [[nodiscard]] std::vector<double> const& NativeEndpointBoundaryResponse () const
+    { return m_endpoint_boundary_response; }
+    /** Collective accepted-boundary preparation. Prescribed rates are ordered
+     * like ExternalVectorPotential fields and zero at every coupled port.
+     * Copies and releases both plugin views before return; no time advance.
+     * Nonzero lowpass and active interval device scales are unsupported. */
+    bool PrepareNativeEndpointRate (amrex::Real time,
+        std::vector<double> const& prescribed_field_rates, std::string& error);
+    /** Optional response for a frozen, eliminated field block. Copied for this
+     * rate generation only; the standard geometry H cache is unchanged. */
+    bool PrepareNativeEndpointRate (amrex::Real time,
+        std::vector<double> const& prescribed_field_rates, std::string& error,
+        std::vector<double> const* boundary_response_override);
+    /** Fixed prepared state, native disk/none measurement then device action.
+     * No plugin calls or host coil-vector readbacks. Input layout must match
+     * the registered Bz layout; all ranks participate. affine=false suppresses
+     * both circuit offset and prescribed-field rates for homogeneous Jv. */
+    void ApplyNativeEndpointRate (amrex::MultiFab const& homogeneous_Bdot_z, bool affine);
+    [[nodiscard]] amrex::Gpu::DeviceVector<double> const& EndpointFieldRates () const;
+    [[nodiscard]] amrex::Gpu::DeviceVector<double> const& EndpointEmf () const;
+    /** Call before ANY out-of-band plugin/external-field mutation. Standard
+     * coupler begin/trial/accept/cancel/restart paths invalidate automatically.
+     * Device output references expire at invalidation or the next Apply. */
+    void InvalidateNativeEndpointRate ();
+    [[nodiscard]] bool NativeEndpointRateReady () const { return m_endpoint_rate_ready; }
+    /** Pin after Prepare; a mismatch invalidates any enclosing field context. */
+    [[nodiscard]] std::uint64_t NativeEndpointRateGeneration () const
+    { return m_endpoint_rate_generation; }
+
     /** Once per step, after the split-field subtraction (the evolved
      * fields hold the plasma response): seed the linkage registers at t^n
      * and open the engine's step. */
@@ -183,6 +301,10 @@ public:
     [[nodiscard]] int DeviceIterations () const { return m_params.device_iterations; }
     void PrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
                                  amrex::Real theta, amrex::Real tolerance);
+    // Preparation is outside residual/Jv. A false return requires the caller's
+    // original whole-step rollback; the provider may have opened its interval.
+    bool TryPrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
+        amrex::Real theta, amrex::Real tolerance, std::string& error);
     void ResetDarwinDeviceTrial ();
     void AdvanceDarwinDeviceTrial (bool force = false);
     void RequireDarwinDeviceConvergence ();
@@ -269,6 +391,32 @@ private:
     std::unique_ptr<warpx::circuit::DeviceCircuit> m_device;
     std::vector<amrex::Real> m_darwin_unit_response;
     int m_darwin_external_count = -1;
+    WarpxCircuitImpulseApiV1 const* m_source_impulse_api = nullptr;
+    bool m_source_capability_attached = false;
+    std::uint64_t m_source_impulse_token = 0, m_source_impulse_generation = 0;
+    bool m_source_impulse_ready = false, m_source_impulse_applied = false;
+    std::uint64_t m_source_impulse_application = 0;
+    bool m_source_rebase_pending = false;
+    std::uint32_t m_source_endpoint_phase = 0;
+    amrex::Real m_source_time = 0.;
+    SourceImpulsePhase m_source_phase = SourceImpulsePhase::PreField;
+    std::unique_ptr<warpx::circuit::DeviceCircuitRate> m_source_impulse;
+    std::vector<double> m_source_entry_current;
+    WarpxCircuitRateApiV1 const* m_rate_api = nullptr;
+    WarpxCircuitRateClockApiV1 const* m_rate_clock_api = nullptr;
+    std::uint64_t m_endpoint_rate_generation = 0;
+    bool m_endpoint_capabilities_attached = false;
+    bool m_endpoint_rate_ready = false, m_endpoint_rate_applied = false;
+    std::unique_ptr<warpx::circuit::DeviceCircuitRate> m_endpoint_rate;
+    std::vector<double> m_endpoint_boundary_response;
+    amrex::Box m_endpoint_domain;
+    amrex::BoxArray m_endpoint_ba;
+    amrex::DistributionMapping m_endpoint_dm;
+    std::array<amrex::Real, AMREX_SPACEDIM> m_endpoint_prob_lo{}, m_endpoint_prob_hi{};
+    std::array<int, AMREX_SPACEDIM> m_endpoint_periodic{};
+    int m_endpoint_coord = -1;
+    std::vector<std::string> m_endpoint_field_names;
+    [[nodiscard]] bool NativeEndpointGeometryMatches (amrex::MultiFab const& bz) const;
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
     void FireEngine (char const* hook, bool accept);
     [[nodiscard]] std::vector<amrex::Real> CoupledScales (amrex::Real t) const;
@@ -304,6 +452,36 @@ private:
     std::vector<amrex::Real> m_lambda_scratch;
     //! per-coil unit-field components (RZ reads the theta entry; 3D all three)
     std::vector<warpx::circuit::VectorFieldPtrs> m_a_ext_scratch;
+
+    struct RejectionSnapshot {
+        struct Segment {
+            std::string name;
+            bool python = false;
+            amrex::Real old_scale = 0., new_scale = 0., old_time = 0., new_time = 0.;
+        };
+        Interval interval;
+        int substep_count = 0;
+        amrex::Real step_dt = 0., eps_interval = -1.;
+        std::map<std::string, amrex::Real> lambda, lambda_start, eps_filt, lambda_accepted;
+        bool have_lambda_accepted = false, open_loop_step = false;
+        std::vector<Segment> segments;
+    };
+    // These members follow m_plugin: callback cleanup must precede destruction
+    // of the engine instance. The borrowed external object lives through Finish
+    // or successful Cancel and never changes within an attempt.
+    WarpxCircuitRejectionApiV1 const* m_rejection_api = nullptr;
+    warpx::circuit::NativeCircuitRejection m_rejection;
+    std::unique_ptr<RejectionSnapshot> m_rejection_snapshot;
+    ExternalVectorPotential* m_rejection_external = nullptr;
+    WarpxCircuitTransactionApiV1 const* m_transaction_api = nullptr;
+    warpx::circuit::NativeCircuitTransaction m_transaction;
+    std::unique_ptr<RejectionSnapshot> m_transaction_snapshot;
+    ExternalVectorPotential* m_transaction_external = nullptr;
+    int m_transaction_device_trials = -1;
+    [[nodiscard]] bool RetainedExternalMatches() const;
+    void BeforeNativeAccept ();
+    ExternalVectorPotential& StepExternal ();
+
 };
 
 #endif // WARPX_CIRCUIT_CIRCUITCOUPLER_H_

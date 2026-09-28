@@ -24,6 +24,7 @@
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel_fwd.H"
 #include "FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties_fwd.H"
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver_fwd.H"
+#include "FieldSolver/ImplicitSolvers/NativeVacuumMassMatrixCapabilities.H"
 #include "Filter/NCIGodfreyFilter_fwd.H"
 #include "Fluids/MultiFluidContainer_fwd.H"
 #include "Fluids/WarpXFluidContainer_fwd.H"
@@ -45,6 +46,7 @@
 #include "Fields.H"
 #include "FieldSolver/MagnetostaticSolver/MagnetostaticSolver.H"
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
+#include "FieldSolver/ImplicitSolvers/ImplicitParticleRollback.H"
 #include "Filter/BilinearFilter.H"
 #include "Parallelization/GuardCellManager.H"
 #include "Particles/ParticleThermalizer/ParticleThermalizer.H"
@@ -142,7 +144,14 @@ public:
     // Functions used by implicit solvers
     //
     void SyncMassMatricesPC ();
-    void SaveParticlesAtImplicitStepStart ();
+    // Opt in only when the caller owns a rejectable step transaction. The
+    // default preserves legacy implicit memory use and behavior.
+    void SaveParticlesAtImplicitStepStart (bool capture_rollback = false);
+    // Restore before physical boundary actions, collisions or Redistribute.
+    // All tile identities/topology are checked collectively before mutation.
+    void RestoreParticlesAtImplicitStepStart ();
+    void DiscardSavedImplicitParticleState ();
+    [[nodiscard]] bool HasSavedImplicitParticleState () const { return m_implicit_particle_rollback_valid; }
     void FinishImplicitParticleUpdate (amrex::Real a_time);
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
     void UpdateMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
@@ -164,6 +173,9 @@ public:
     MultiFluidContainer& GetFluidContainer () { return *myfl; }
     ElectrostaticSolver& GetElectrostaticSolver () {return *m_electrostatic_solver;}
     [[nodiscard]] HybridPICModel * get_pointer_HybridPICModel () const { return m_hybrid_pic_model.get(); }
+    [[nodiscard]] ImplicitSolver* get_pointer_ImplicitSolver () const
+    { return m_implicit_solver.get(); }
+
     [[nodiscard]] CircuitCoupling* get_pointer_CircuitCoupling () const
     { return m_circuit_coupling.get(); }
     MultiDiagnostics& GetMultiDiags () {return *multi_diags;}
@@ -620,6 +632,11 @@ public:
 
     void ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho,
                                                    int lev) const;
+
+    [[nodiscard]] bool UseVerboncoeurAxisCorrection () const
+    {
+        return m_verboncoeur_axis_correction;
+    }
 #endif
 
     /**
@@ -637,7 +654,7 @@ public:
      */
     void ApplyJfieldBoundary (int lev, amrex::MultiFab* Jx,
                               amrex::MultiFab* Jy, amrex::MultiFab* Jz,
-                              PatchType patch_type);
+                              PatchType patch_type, bool even_parity = false);
 
     void ApplyEfieldBoundary (int lev, PatchType patch_type, amrex::Real cur_time);
     void ApplyBfieldBoundary (int lev, PatchType patch_type, SubcyclingHalf subcycling_half, amrex::Real cur_time);
@@ -698,6 +715,10 @@ public:
     // Caller must make sure fp and cp have ghost cells filled.
     void UpdateAuxiliaryData ();
     void UpdateAuxiliaryDataStagToNodal ();
+    // Pure level-zero counterpart of native gather centering for owned scratch.
+    void InterpolateLevelZeroFieldToAux (
+        ablastr::fields::VectorField const& auxiliary,
+        ablastr::fields::VectorField const& source) const;
     void UpdateAuxiliaryDataSameType ();
 
     // Fill boundary cells including coarse/fine boundaries
@@ -1718,6 +1739,19 @@ private:
 
     // implicit solver object
     std::unique_ptr<ImplicitSolver> m_implicit_solver;
+    // Dispatch receipt belongs to the simulation, independently of the live
+    // solver pointer. Only collectively agreeing startup may bind it; there
+    // is deliberately no public setter or invalidation reset.
+    friend class ThetaImplicitHybrid;
+    friend NativePrivatePMCMassMatrixSelection
+        NativePrivatePMCMassMatrixSelectionOf(WarpX const&) noexcept;
+    friend std::uint64_t NativePrivatePMCMassMatrixOwnerGeneration(WarpX const&) noexcept;
+    // Monotonic Define identity defeats same-address solver replacement ABA.
+    std::uint64_t m_private_pmc_mm_owner_generation = 0;
+    NativePrivatePMCMassMatrixSelection m_private_pmc_mm_selection =
+        NativePrivatePMCMassMatrixSelection::Unbound;
+    std::map<std::array<int, 4>, warpx::implicit::ParticleRollbackTile> m_implicit_particle_rollback;
+    bool m_implicit_particle_rollback_valid = false;
 
     //! PSATD JRhom algorithm
     bool m_JRhom = false;

@@ -2,7 +2,13 @@ CEXE_sources += CircuitCoupler.cpp
 CEXE_sources += CircuitCoupling.cpp
 CEXE_sources += DeviceCircuit.cpp
 CEXE_sources += DarwinDeviceCoupling.cpp
+CEXE_sources += DeviceCircuitRate.cpp
+CEXE_sources += NativeEndpointRateCoupling.cpp
+CEXE_sources += NativeSourceImpulseCoupling.cpp
 
 include $(WARPX_HOME)/Source/Circuit/Coils/Make.package
 
 VPATH_LOCATIONS += $(WARPX_HOME)/Source/Circuit
+
+CEXE_sources += NativeCircuitTransaction.cpp
+CEXE_headers += NativeCircuitTransaction.H ExternalCircuitTransaction.h

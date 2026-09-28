@@ -9,13 +9,23 @@
 #include <AMReX_Print.H>
 #include <algorithm>
 #include <cmath>
+#include <exception>
 
 using warpx::fields::FieldType;
 
 void CircuitCoupler::PrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
                                              amrex::Real theta, amrex::Real tolerance)
 {
+    std::string error;
+    bool const prepared=TryPrepareDarwinDeviceStep(t0,dt,theta,tolerance,error);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(prepared,error);
+}
+
+bool CircuitCoupler::TryPrepareDarwinDeviceStep(amrex::Real t0,amrex::Real dt,
+    amrex::Real theta,amrex::Real tolerance,std::string& preparation_error)
+{
     BL_PROFILE("CircuitCoupler::PrepareDarwinDeviceStep");
+    InvalidateNativeEndpointRate();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_params.device_affine && m_plugin && m_affine_api
         && m_affine_api->prepare && m_affine_api->release,
         "Device circuit preparation requires the affine plugin capability");
@@ -46,9 +56,12 @@ void CircuitCoupler::PrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
     char error[512]{};
     auto const status = m_affine_api->prepare(m_plugin.get(),t0,t0+dt,&packet,error,sizeof(error));
     error[sizeof(error)-1] = '\0';
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(status == WARPX_AFFINE_OK,
-        "Device circuit interval is unsupported; no host residual fallback: "
-        + std::to_string(status) + " " + std::string(error));
+    if(status != WARPX_AFFINE_OK) {
+        preparation_error="Device circuit interval is unsupported; no host residual fallback: "
+            + std::to_string(status) + " " + std::string(error);
+        if(packet.token) { m_affine_api->release(m_plugin.get(),packet.token); }
+        return false;
+    }
     if (!m_device) { m_device = std::make_unique<warpx::circuit::DeviceCircuit>(); }
     double const sigma = m_params.eps_lowpass_tau > 0.
         ? dt/(dt+m_params.eps_lowpass_tau) : 1.;
@@ -60,6 +73,7 @@ void CircuitCoupler::PrepareDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
     ext.SetDeviceScaleSegments(m_device->Start(),m_device->End(),t0,(t0+dt)-t0,fields);
     amrex::Print() << "Device circuit prepared: ports=" << m_coils.size()
                    << " fixed_iterations=" << m_params.device_iterations << "\n";
+    preparation_error.clear();return true;
 }
 
 void CircuitCoupler::ResetDarwinDeviceTrial ()
@@ -93,6 +107,7 @@ void CircuitCoupler::CommitDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
     auto& ext = *WarpX::GetInstance().get_pointer_HybridPICModel()->m_external_vector_potential;
     ext.ClearDeviceScaleSegments();
     std::vector<amrex::Real> input(emf.begin(),emf.end()), exact;
+    BeforeNativeAccept();
     m_plugin->AdvanceInterval(t0,t0+dt,input,true,exact);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(exact.size() == static_cast<std::size_t>(m_coils.size()),
         "Circuit accepted scale count mismatch");
@@ -118,4 +133,49 @@ void CircuitCoupler::CommitDarwinDeviceStep (amrex::Real t0, amrex::Real dt,
     FinishStep();
     amrex::Print() << "Device circuit accepted: trials=" << m_device->Trials()
                    << " host_trial_calls=0\n";
+}
+
+// Kept separate from the old irreversible path so legacy acceptance and its
+// PRE_ACCEPT barrier stay unchanged. All field/particle work is still owned by
+// OneStep; only small accepted native circuit vectors cross to the host here.
+bool CircuitCoupler::TryCommitRetainedDarwinDeviceStep(amrex::Real t0,amrex::Real dt,
+    amrex::Real theta,amrex::Real tolerance,std::string& error)
+{
+    if(!RetainedNativeStepCancelable() || !m_device || m_transaction_device_trials>=0) {
+        error="retained circuit candidate is not ready";return false;
+    }
+    AdvanceDarwinDeviceTrial(true);
+    RequireDarwinDeviceConvergence();
+    std::vector<double> candidate,emf,response;m_device->ReadAccepted(candidate,emf,response);
+    auto& ext=*m_transaction_external;
+    amrex::Gpu::synchronize();ext.ClearDeviceScaleSegments();InvalidateNativeEndpointRate();
+    try {
+        std::vector<amrex::Real> input(emf.begin(),emf.end()),exact;
+        m_plugin->AdvanceInterval(t0,t0+dt,input,true,exact);
+        if(exact.size()!=static_cast<std::size_t>(m_coils.size())) {
+            error="retained circuit accepted scale count mismatch";return false;
+        }
+        for(int c=0;c<m_coils.size();++c) {
+            auto const& coil=m_coils.coil(c);int field=-1;
+            for(int f=0;f<ext.nFields();++f)if(ext.FieldName(f)==coil.field_name){field=f;break;}
+            if(field<0 || !std::isfinite(exact[c]) || !std::isfinite(candidate[field]) ||
+               std::abs(exact[c]-candidate[field])>tolerance*
+                   std::max({1.,std::abs(double(exact[c])),std::abs(candidate[field])})) {
+                error="exact retained circuit acceptance disagrees with device affine candidate";return false;
+            }
+            auto const entry=ext.TimeScale(field,t0);
+            ext.SetScale(coil.field_name,entry,exact[c],t0,t0+dt);
+            if(m_probes[c]!=warpx::circuit::ProbeKind::none) {
+                m_lambda[coil.name]=response[c];
+                if(m_params.eps_lowpass_tau>0.)m_eps_filt[coil.name]=input[c];
+            }
+        }
+        m_lambda_accepted=m_lambda;m_have_lambda_accepted=true;
+        m_interval.t0=t0;m_interval.t1=t0+dt;m_eps_interval=theta*dt;m_interval.iteration=0;
+        m_plugin->FinishStep();
+        m_transaction_device_trials=m_device->Trials();
+        if(!RetainedNativeStepFinalizable()) {error="native circuit did not close its retained endpoint";return false;}
+        error.clear();return true;
+    } catch(std::exception const& ex) {error=ex.what();return false;}
+    catch(...) {error="native circuit provisional acceptance threw";return false;}
 }

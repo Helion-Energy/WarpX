@@ -2342,6 +2342,21 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     Te: float
         Electron temperature in eV.
 
+    initial_electron_temperature_gamma: float, optional
+        Fresh-start temperature profile exponent. Defaults to ``gamma``;
+        does not change the electron-energy evolution exponent.
+
+    initial_electron_temperature_n_floor: float, optional
+        Density floor in m^-3 for the initial temperature profile only.
+        Defaults to ``qdsmc_te_n_floor``. These initial-profile options
+        require ``solve_electron_energy_equation=True`` and seed Te before
+        initial pressure and Darwin electric-field assembly.
+
+    initial_electron_temperature_include_pedestal: bool, default=True
+        Include an enabled density pedestal in the initial Te profile's density.
+        Set False for a profile fitted to deposited physical density alone.
+        Evolution retains its configured density pedestal in either case.
+
     n0: float
         Reference plasma density in m^-3.
 
@@ -2454,10 +2469,20 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
     solve_electron_energy_equation: bool, default=False
         Solve the electron energy equation instead of the algebraic adiabatic
-        pressure closure: the electron entropy ``K = Te * ne**(1-gamma)`` is
-        transported each step by QDSMC markers advected with the electron
-        fluid velocity, the source terms below are applied per cell, and
-        ``Pe = ne * kB * Te`` is fed back into the Ohm's-law E-solve.
+        pressure closure. With ``electron_energy_mode=legacy``, QDSMC markers
+        transport electron entropy ``K = Te * ne**(1-gamma)``. The JFNK modes
+        instead evolve Eulerian cell internal energy. Both derive the pressure
+        ``Pe = ne * kB * Te`` used by the Ohm's-law electric-field solve.
+
+    electron_energy_mode: str, optional
+        Select ``legacy``, ``decoupled_jfnk`` or ``coupled_jfnk``. The two
+        JFNK modes use cell-centered electron internal energy with implicit
+        Eulerian finite-difference transport and conduction. The decoupled
+        mode alternates field and thermal solves until both residuals pass;
+        the coupled mode solves both blocks together. Both require Darwin
+        theta-implicit advance on one physical level without EB. Selecting
+        either mode enables the energy equation unless explicitly disabled,
+        which is an input error. Legacy behavior is the default.
 
     include_joule_heating: bool, default=False
         Add the resistive (Joule) heating source to the electron temperature.
@@ -2681,15 +2706,41 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        initial_electron_temperature_gamma=None,
+        initial_electron_temperature_n_floor=None,
+        initial_electron_temperature_include_pedestal=None,
+        electron_energy_mode=None,
         **kw,
     ):
         self.grid = grid
         self.method = "hybrid"
 
+        if electron_energy_mode not in (
+            None,
+            "legacy",
+            "decoupled_jfnk",
+            "coupled_jfnk",
+        ):
+            raise ValueError("Unknown hybrid electron_energy_mode")
+        if (
+            electron_energy_mode in ("decoupled_jfnk", "coupled_jfnk")
+            and solve_electron_energy_equation is not None
+            and not solve_electron_energy_equation
+        ):
+            raise ValueError(
+                "JFNK electron_energy_mode conflicts with "
+                "solve_electron_energy_equation=False"
+            )
+        self.electron_energy_mode = electron_energy_mode
         self.Te = Te
         self.n0 = n0
         self.gamma = gamma
         self.n_floor = n_floor
+        self.initial_electron_temperature_gamma = initial_electron_temperature_gamma
+        self.initial_electron_temperature_n_floor = initial_electron_temperature_n_floor
+        self.initial_electron_temperature_include_pedestal = (
+            initial_electron_temperature_include_pedestal
+        )
         self.plasma_resistivity = plasma_resistivity
         self.plasma_resistivity_Te = plasma_resistivity_Te
         if plasma_resistivity_Te is not None and plasma_resistivity is not None:
@@ -2783,6 +2834,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.n0_ref = self.n0
         pywarpx.hybridpicmodel.gamma = self.gamma
         pywarpx.hybridpicmodel.n_floor = self.n_floor
+        pywarpx.hybridpicmodel.initial_electron_temperature_gamma = (
+            self.initial_electron_temperature_gamma
+        )
+        pywarpx.hybridpicmodel.initial_electron_temperature_n_floor = (
+            self.initial_electron_temperature_n_floor
+        )
+        pywarpx.hybridpicmodel.initial_electron_temperature_include_pedestal = (
+            self.initial_electron_temperature_include_pedestal
+        )
         if self.plasma_resistivity_Te is not None:
             # ETATE: the 4-argument Te-dependent form (Te in KELVIN); the
             # 3-argument key is deliberately NOT written (the solver aborts
@@ -2823,6 +2883,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         # Only assign the electron-energy-equation attributes when given, so
         # that scripts setting them directly on the hybridpicmodel bucket are
         # not clobbered with None here.
+        if self.electron_energy_mode is not None:
+            pywarpx.hybridpicmodel.electron_energy_mode = self.electron_energy_mode
         if self.solve_electron_energy_equation is not None:
             pywarpx.hybridpicmodel.solve_electron_energy_equation = (
                 self.solve_electron_energy_equation

@@ -40,17 +40,21 @@ class WarpX;
 /**
  * \brief
  *  This is a wrapper class around a Vector of pointers to MultiFabs that
- *  contains basic math operators and functionality needed to interact with nonlinear
- *  solvers in WarpX and linear solvers in AMReX, such as GMRES. The size of the
- *  Vector is the number of amr levels. Hardcoded for 1 right now.
+ *  contains basic math operators and functionality needed to interact with
+ * nonlinear solvers in WarpX and linear solvers in AMReX, such as GMRES. The
+ * size of the Vector is the number of amr levels. Hardcoded for 1 right now.
  *
- *  A WarpXSolverVec can consist of an array size 3 of MultiFabs (for vector fields
- *  such as E, B, and A) or of a single MultiFab for scalar fields. Both the array
- *  size 3 and scalar fields must be of type warpx::fields::FieldType.
- *  Additionally, a WarpXSolverVec can in general contain both an array size 3 field and a
- *  scalar field. For example, the array size 3 field can be used for the vector potential A
- *  and the scalar field can be used for the scalar potential phi, which is the full state of
- *  unknowns for a Darwin electromagnetic model.
+ *  A WarpXSolverVec can consist of an array size 3 of MultiFabs (for vector
+ * fields such as E, B, and A) or of a single MultiFab for scalar fields. Both
+ * the array size 3 and scalar fields must be of type warpx::fields::FieldType.
+ *  Additionally, a WarpXSolverVec can in general contain both an array size 3
+ * field and a scalar field. For example, the array size 3 field can be used for
+ * the vector potential A and the scalar field can be used for the scalar
+ * potential phi, which is the full state of unknowns for a Darwin
+ * electromagnetic model. Named MultiFab blocks additionally support independent
+ * centerings/component counts, e.g. cell-centered electron internal energy with
+ * or without an E block. This layout facility does not select a thermal time
+ * advance or initialize physical energy.
  */
 class WarpXSolverVec
 {
@@ -64,6 +68,7 @@ public:
 
     using value_type = amrex::Real;
     using RT = value_type;
+    using MultiFabBlockSpec = WarpXSolverMultiFabBlockSpec;
 
     [[nodiscard]] inline bool IsDefined () const { return m_is_defined; }
 
@@ -71,15 +76,12 @@ public:
              const std::string&  a_vector_type_name,
              const std::string&  a_scalar_type_name = "none" );
 
-    inline
-    void Define ( const WarpXSolverVec&  a_solver_vec )
-    {
-        assertIsDefined( a_solver_vec );
-        m_num_amr_levels = a_solver_vec.m_num_amr_levels;
-        Define( a_solver_vec.m_WarpX,
-                a_solver_vec.getVectorType(),
-                a_solver_vec.getScalarType() );
-    }
+    void Define (WarpX* a_WarpX, const std::string& a_vector_type_name,
+                 const std::string& a_scalar_type_name,
+                 const std::vector<MultiFabBlockSpec>& a_multifab_block_specs,
+                 RT a_vector_scale = 1.0, RT a_scalar_scale = 1.0);
+
+    void Define (const WarpXSolverVec& a_solver_vec);
 
     [[nodiscard]] RT dotProduct( const WarpXSolverVec&  a_X ) const;
 
@@ -107,6 +109,12 @@ public:
                 amrex::MultiFab::Copy( *m_scalar_vec[lev], *this_scalar, 0, 0, m_ncomp,
                                        amrex::IntVect::TheZeroVector() );
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& destination = *m_multifab_blocks[iblock].data[lev];
+                amrex::MultiFab::Copy(destination,
+                                      *a_solver_vec.m_multifab_blocks[iblock].data[lev], 0, 0,
+                                      destination.nComp(), amrex::IntVect::TheZeroVector());
+            }
         }
     }
 
@@ -114,19 +122,41 @@ public:
     WarpXSolverVec& operator= ( const WarpXSolverVec&  a_solver_vec ) = delete;
 
     // Move assignment operator
-    WarpXSolverVec(WarpXSolverVec&&) noexcept = default;
+    WarpXSolverVec (WarpXSolverVec&& a_solver_vec) noexcept
+    {
+        *this = std::move(a_solver_vec);
+    }
     WarpXSolverVec& operator= ( WarpXSolverVec&&  a_solver_vec ) noexcept
     {
         if (this != &a_solver_vec) {
+            ClearData();
+
             m_array_vec = std::move(a_solver_vec.m_array_vec);
             m_scalar_vec = std::move(a_solver_vec.m_scalar_vec);
             m_array_type = a_solver_vec.m_array_type;
             m_scalar_type = a_solver_vec.m_scalar_type;
-            m_vector_type_name = a_solver_vec.m_vector_type_name;
-            m_scalar_type_name = a_solver_vec.m_scalar_type_name;
+            m_vector_type_name = std::move(a_solver_vec.m_vector_type_name);
+            m_scalar_type_name = std::move(a_solver_vec.m_scalar_type_name);
+            m_array_scale = a_solver_vec.m_array_scale;
+            m_scalar_scale = a_solver_vec.m_scalar_scale;
+            m_multifab_blocks = std::move(a_solver_vec.m_multifab_blocks);
+            m_multifab_block_specs = std::move(a_solver_vec.m_multifab_block_specs);
             m_num_amr_levels = a_solver_vec.m_num_amr_levels;
             m_WarpX = a_solver_vec.m_WarpX;
-            m_is_defined = true;
+            m_dofs = std::move(a_solver_vec.m_dofs);
+            m_is_defined = a_solver_vec.m_is_defined;
+
+            a_solver_vec.m_array_vec.clear();
+            a_solver_vec.m_scalar_vec.clear();
+            a_solver_vec.m_multifab_blocks.clear();
+            a_solver_vec.m_multifab_block_specs.clear();
+            a_solver_vec.m_array_type = warpx::fields::FieldType::None;
+            a_solver_vec.m_scalar_type = warpx::fields::FieldType::None;
+            a_solver_vec.m_array_scale = 1.0;
+            a_solver_vec.m_scalar_scale = 1.0;
+            a_solver_vec.m_num_amr_levels = 0;
+            a_solver_vec.m_WarpX = nullptr;
+            a_solver_vec.m_is_defined = false;
         }
         return *this;
     }
@@ -145,6 +175,10 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->plus(*(a_solver_vec.getScalarVec()[lev]), 0, 1, 0);
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                block.plus(*a_solver_vec.m_multifab_blocks[iblock].data[lev], 0, block.nComp(), 0);
+            }
         }
     }
 
@@ -161,6 +195,10 @@ public:
             }
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->minus(*(a_solver_vec.getScalarVec()[lev]), 0, 1, 0);
+            }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                block.minus(*a_solver_vec.m_multifab_blocks[iblock].data[lev], 0, block.nComp(), 0);
             }
         }
     }
@@ -188,6 +226,12 @@ public:
                                                              b, *Y.getScalarVec()[lev], 0,
                                                              0, 1, 0);
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                const int ncomp = block.nComp();
+                amrex::MultiFab::LinComb(block, a, *X.m_multifab_blocks[iblock].data[lev], 0, b,
+                                         *Y.m_multifab_blocks[iblock].data[lev], 0, 0, ncomp, 0);
+            }
         }
     }
 
@@ -208,6 +252,11 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 amrex::MultiFab::Saxpy( *m_scalar_vec[lev], a, *X.getScalarVec()[lev],
                                         0, 0, 1, amrex::IntVect::TheZeroVector() );
+            }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                amrex::MultiFab::Saxpy(block, a, *X.m_multifab_blocks[iblock].data[lev], 0, 0,
+                                       block.nComp(), amrex::IntVect::TheZeroVector());
             }
         }
     }
@@ -230,6 +279,9 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->mult(a_a, 0, 1);
             }
+            for (auto& block : m_multifab_blocks) {
+                block.data[lev]->mult(a_a, 0, block.data[lev]->nComp());
+            }
         }
     }
 
@@ -251,6 +303,9 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->setVal(a_val);
             }
+            for (auto& block : m_multifab_blocks) {
+                block.data[lev]->setVal(a_val);
+            }
         }
     }
 
@@ -262,20 +317,44 @@ public:
             "WarpXSolverVec::function(X) called with undefined WarpXSolverVec X");
     }
 
-    inline
-    void assertSameType( const WarpXSolverVec&  a_solver_vec ) const
-    {
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            a_solver_vec.getArrayVecType()==m_array_type &&
-            a_solver_vec.getScalarVecType()==m_scalar_type,
-            "WarpXSolverVec::function(X) called with WarpXSolverVec X of different type");
-    }
+    void assertSameType (const WarpXSolverVec& a_solver_vec) const;
 
     [[nodiscard]] inline RT norm2 () const
     {
         auto const norm = dotProduct(*this);
         return std::sqrt(norm);
     }
+
+    /**
+     * \brief Inner product with or without the per-block reference scales.
+     * dotProduct(X) weights every block by 1/scale^2 (the solver norm);
+     * with a_apply_block_scales = false the plain, unweighted sum over all
+     * degrees of freedom is returned (same nodal duplicate masks). The
+     * unweighted form is for quantities that are already dimensionless
+     * per component, e.g. a state divided by a component-wise scale
+     * (the component-scaled Jacobian probe relies on it). Any fused or
+     * packed implementation of this product MUST honor the flag: a
+     * weighted result in place of the unweighted one mis-sizes the probe
+     * by the block weights (measured: eps off by ~1e3, every Newton step
+     * frozen).
+     */
+    [[nodiscard]] RT dotProduct (const WarpXSolverVec& a_X, bool a_apply_block_scales) const;
+
+    /**
+     * \brief Names of the field blocks present in this vector, in the
+     * order the per-block API (blockNorms, blockScales) uses.
+     */
+    [[nodiscard]] std::vector<std::string> blockNames () const;
+
+    /**
+     * \brief Reference scales of the field blocks (the 1/scale^2 weights of
+     * the solver norm), ordered as blockNames().
+     */
+    [[nodiscard]] std::vector<RT> blockScales () const;
+
+    /** Scaled L2 norms in blockNames() order, with each block's own owner mask.
+     */
+    [[nodiscard]] std::vector<RT> blockNorms (bool a_apply_block_scales = true) const;
 
     [[nodiscard]] const ablastr::fields::MultiLevelVectorField& getArrayVec() const {return m_array_vec;}
     ablastr::fields::MultiLevelVectorField& getArrayVec() {return m_array_vec;}
@@ -290,6 +369,19 @@ public:
     // solver vector type names
     [[nodiscard]] std::string getVectorType () const { return m_vector_type_name; }
     [[nodiscard]] std::string getScalarType () const { return m_scalar_type_name; }
+
+    [[nodiscard]] bool hasMultiFabBlock (const std::string& a_name) const;
+    [[nodiscard]] amrex::MultiFab& getMultiFabBlock (const std::string& a_name, int a_lev);
+    [[nodiscard]] const amrex::MultiFab& getMultiFabBlock (const std::string& a_name,
+                                                           int a_lev) const;
+    [[nodiscard]] const std::vector<MultiFabBlockSpec>&
+    getMultiFabBlockSpecs () const
+    {
+        return m_multifab_block_specs;
+    }
+
+    void CopyMultiFabBlocksFromFields ();
+    void CopyMultiFabBlocksToFields () const;
 
     // vector sizes
     [[nodiscard]] amrex::Long nDOF_local  () const
@@ -321,29 +413,47 @@ public:
     [[nodiscard]] inline const auto& getDOFsObject () const { return m_dofs; }
 
 private:
+  struct MultiFabBlock
+  {
+      MultiFabBlockSpec spec;
+      amrex::Vector<std::unique_ptr<amrex::MultiFab>> data;
+  };
 
     bool m_is_defined = false;
 
     ablastr::fields::MultiLevelVectorField m_array_vec;
     ablastr::fields::MultiLevelScalarField m_scalar_vec;
+    std::vector<MultiFabBlock> m_multifab_blocks;
+    std::vector<MultiFabBlockSpec> m_multifab_block_specs;
 
     warpx::fields::FieldType m_array_type = warpx::fields::FieldType::None;
     warpx::fields::FieldType m_scalar_type = warpx::fields::FieldType::None;
 
     std::string m_vector_type_name = "none";
     std::string m_scalar_type_name = "none";
+    RT m_array_scale = 1.0;
+    RT m_scalar_scale = 1.0;
 
     static constexpr int m_ncomp = 1;
     int m_num_amr_levels = 1;
 
-    /** The WarpX instance whose fields this vector mirrors.
-     *
-     * Set by Define() and scoped to a single vector, so that a process running
-     * several simulations one after another gets the instance it is solving for.
-     */
+    // Per-vector instance: retain Darwin's sequential/multiple simulation
+    // ownership.
     WarpX* m_WarpX = nullptr;
 
-    static std::unique_ptr<WarpXSolverDOF> m_dofs;
+    /**
+     * Serialized layout for this nonlinear state. Solver work vectors created
+     * with Define(other) share the layout, while independently defined states
+     * may use different field blocks and centerings.
+     */
+    std::shared_ptr<const WarpXSolverDOF> m_dofs;
+
+    void DefineData (WarpX* a_WarpX, const std::string& a_vector_type_name,
+                     const std::string& a_scalar_type_name,
+                     const std::vector<MultiFabBlockSpec>& a_multifab_block_specs,
+                     RT a_vector_scale, RT a_scalar_scale);
+
+    void ClearData () noexcept;
 };
 
 #endif

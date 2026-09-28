@@ -129,6 +129,21 @@ main (int argc, char** argv)
             amrex::Print() << "RZ_REGISTER dir=" << d << " error=" << error << "\n";
             AMREX_ALWAYS_ASSERT(error < 1.e-9);
         }
+        // A dense-domain recovery must not replace the physical normal field
+        // in the last valid half-cell with a wall value. This catches a wall
+        // mask that incorrectly treats cell-centered domain endpoints as nodes.
+        rho.setVal(1.e8);
+        for (int d = 0; d < 3; ++d)
+        {
+            accepted[d].setVal(31. + d);
+            endpoint[d].setVal(17. + d);
+        }
+        RecoverDarwinVacuumE(simulation, hybrid, {&endpoint[0], &endpoint[1], &endpoint[2]},
+                             {&accepted[0], &accepted[1], &accepted[2]}, 1.e-9, 1.e-9);
+        amrex::MultiFab::Copy(difference[0], endpoint[0], 0, 0, 1, 0);
+        difference[0].plus(-17., 0, 1, 0);
+        amrex::Print() << "RZ_NORMAL_HALFCELL error=" << difference[0].norminf() << "\n";
+        AMREX_ALWAYS_ASSERT(difference[0].norminf() == 0.);
         amrex::Print() << "RZ_SPATIAL_RECOVERY_PASS\n";
         WarpX::Finalize();
     }

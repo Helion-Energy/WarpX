@@ -22,6 +22,7 @@
 #include <AMReX_ParmParse.H>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 /**
@@ -294,18 +295,30 @@ void JacobianFunctionMF<T,Ops>::applyWithJFNKEps (
         isDefined(),
         "JacobianFunction::apply() called on undefined JacobianFunction");
 
+    if (!std::isfinite(normY)) {
+        a_dF.setVal(std::numeric_limits<RT>::quiet_NaN());
+        return;
+    }
     if (normY < 1.0e-15) { a_dF.zero(); }
     else {
 
         /* eps = error_rel * ||Y0|| / ||dU||.  The more common
          * error_rel*sqrt(1+||Y0||) form is not recommended for poorly scaled
          * Y0.  The zero-base fallback uses ||R0||. */
-        // Reuse the norm already computed above: the production apply path
-        // must not acquire a second global reduction when D1 is disabled.
+        // Reuse the direction norm for the perturbation scale. The separate
+        // trial norm below protects the physical residual from overflow.
         const RT eps = perturbationScaleFromNorm(normY, a_relative_eps);
+        if (!(std::isfinite(eps) && eps > RT(0.0))) {
+            a_dF.setVal(std::numeric_limits<RT>::quiet_NaN());
+            return;
+        }
         const RT eps_inv = 1.0_rt/eps;
 
         m_Z.linComb( 1.0, m_Y0, eps, a_dU ); // Z = Y0 + eps*dU
+        if (!std::isfinite(eps_inv) || !std::isfinite(this->norm2(m_Z))) {
+            a_dF.setVal(std::numeric_limits<RT>::quiet_NaN());
+            return;
+        }
         m_ops->ComputeRHS(m_R, m_Z, m_cur_time, -1, true );
 
         // F(Y) = Y - b - R(Y) ==> dF = dF/dY*dU = [1 - dR/dY]*dU

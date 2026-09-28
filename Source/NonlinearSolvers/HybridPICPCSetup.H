@@ -54,6 +54,12 @@ void HybridPICPC<T,Ops>::Define ( const T& a_U, Ops* a_ops )
     m_has_axis = true;
 #endif
     {
+        // read before the face classification below uses it
+        const amrex::ParmParse pp_bc("pc_hybrid_pic");
+        pp_bc.query("pmc_closure", m_pmc_closure);
+        // Our residual retains its parity PEC closure; upstream's optional
+        // collocated normal-E model is not enabled by this PC import.
+        m_pec_normal_from_interior = false;
         const auto& fbc_lo = a_ops->GetFieldBoundaryLo();
         const auto& fbc_hi = a_ops->GetFieldBoundaryHi();
         for (int d = 0; d < AMREX_SPACEDIM; d++) {
@@ -64,7 +70,12 @@ void HybridPICPC<T,Ops>::Define ( const T& a_U, Ops* a_ops )
                 if (bt == FieldBoundaryType::PEC
                     || bt == FieldBoundaryType::PEC_Insulator) {
                     m_wall_pec[d][side] = true;
-                    m_has_pec_wall = true;
+                    m_has_wall = true;
+                } else if (bt == FieldBoundaryType::PMC && !m_staggered
+                           && m_pmc_closure) {
+                    // Neumann is an alias of PMC
+                    m_wall_pmc[d][side] = true;
+                    m_has_wall = true;
                 } else {
                     m_wall_open[d][side] = true;
                     ablastr::warn_manager::WMRecordWarning("HybridPICPC",
@@ -366,9 +377,10 @@ void HybridPICPC<T,Ops>::printParameters () const
                 ? "true" : "false")
             << "\n";
     Print() << "  boundary closure: "
-            << (m_has_pec_wall
-                ? "PEC wall model (identity tangential-E rows, dead "
-                  "columns, parity-mirrored delta-B/delta-J ghosts)"
+            << (m_has_wall
+                ? "PEC/PMC wall model (identity tangential-E rows at PEC, "
+                  "normal-E rows at PMC; dead columns, parity-mirrored "
+                  "delta-B/delta-J ghosts)"
                 : "periodic/zero-extension")
             << (EB::enabled() ? " + EB staircase mask (eb_update_E)" : "")
             << "\n";
@@ -415,11 +427,8 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
     // solver vector carries the scalar row, so activate on the model gates
     // only; Apply() additionally gates on the scalar's presence, making
     // this inert for E-only vectors.
-#if defined(WARPX_DIM_RZ)
-    m_pe_row_active = false;
-#else
+    // The solver adapter controls whether pressure is an actual Newton unknown.
     m_pe_row_active = !m_staggered && m_ops->HasPressureUnknownForPC();
-#endif
     const bool pe_row_on = m_pe_row_active;
     // the frozen electron velocity of the convection term
     const auto Ji_fp = m_ops->GetIonCurrentForPC(0);
@@ -440,6 +449,9 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
     const auto* te_mf = hybrid->ResistivityTe(0);
     const auto eta_h = hybrid->m_eta_h;
     const bool include_hyper = hybrid->m_include_hyper_resistivity_term;
+    const bool holmstrom = hybrid->m_holmstrom_vacuum_region;
+    const HybridPICPCGrid g0 = m_grid[0];
+    amrex::ignore_unused(g0);
 
     // J0 = curl(B_tot)/mu0 at the linearization state, for freezing the
     // (possibly J-dependent) resistivity at |J0| rather than |J| = 0
@@ -483,9 +495,6 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
     }
     const bool stag = m_staggered;
     const auto dxi_pc = m_geom[0].InvCellSizeArray();
-#if defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(dxi_pc);   // the pe-row leg is Cartesian only
-#endif
     const RT l2_pc = m_l2[0];
     // marker-CFL clamp of |ue| for the pe-row diagonal (see m_pe_row_active):
     // c = pe_ue_cap_fac * dx_min / (theta dt), the residual's cap; <= 0 = none
@@ -579,6 +588,17 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                 const Real Bmag = std::sqrt(bx_v*bx_v + by_v*by_v + bz_v*bz_v);
                 const Real rho_raw = r(i,j,k,rho_comp);
                 const Real rho_e = HybridSmoothFloor(rho_raw, rho_floor, floor_w);
+                // Holmstrom vacuum region: the residual weights the Hall and
+                // pressure terms by HybridExtSubWeight(rho) (0 below the floor),
+                // so the whistler, the convection and the Hall-folded ion
+                // response carry the same weight; only the resistive and
+                // hyper-resistive legs survive in vacuum cells
+                Real wvac = 1.0_rt;
+                if (holmstrom) {
+                    // Match this residual's existing density floor.
+                    const Real rf = static_cast<Real>(rho_floor);
+                    wvac = HybridExtSubWeight(rho_raw, rf, floor_w*(rf/rho_floor));
+                }
                 if (Bmag > 0.0_rt) {
                     coef(i,j,k,0) = bx_v / Bmag;
                     coef(i,j,k,1) = by_v / Bmag;
@@ -588,7 +608,7 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                     coef(i,j,k,1) = 0.0_rt;
                     coef(i,j,k,2) = 0.0_rt;
                 }
-                coef(i,j,k,3) = theta_dt * Bmag * one_over_mu0 / rho_e;
+                coef(i,j,k,3) = wvac * theta_dt * Bmag * one_over_mu0 / rho_e;
                 // Resistivity frozen at the linearization state |J0|
                 // (|J| = 0 would underestimate anomalous eta(J) in current
                 // sheets). The parsers see the raw (unfloored) rho, matching
@@ -607,7 +627,7 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                 // implicit velocity integration, so w ~ Omega_ci theta*dt)
                 Real w6 = 0.0_rt, w7 = 0.0_rt, w8 = 0.0_rt;
                 if (have_mm) {
-                    const Real bfac = Bmag / rho_e;
+                    const Real bfac = wvac * Bmag / rho_e;
                     w6 = Sxx(i,j,k,cxx) * bfac;
                     w7 = Syy(i,j,k,cyy) * bfac;
                     w8 = Szz(i,j,k,czz) * bfac;
@@ -630,7 +650,7 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                     Real adv = 0.0_rt;
 #if defined(WARPX_DIM_1D_Z)
                     adv = uec(std::abs(Jiz(i,j,k) - Jpz(i,j,k)) * irho) * dxi_pc[0];
-#elif defined(WARPX_DIM_XZ)
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
                     adv = uec(std::abs(Jix(i,j,k) - Jpx(i,j,k)) * irho) * dxi_pc[0]
                         + uec(std::abs(Jiz(i,j,k) - Jpz(i,j,k)) * irho) * dxi_pc[1];
 #elif defined(WARPX_DIM_3D)
@@ -654,7 +674,7 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                 // ghost-filled J provides the lo-side reads), matching the
                 // B down-averages above
                 {
-                    const Real irho = theta_dt / rho_e;
+                    const Real irho = wvac * theta_dt / rho_e;
                     if (stag) {
                         auto jn = [&] (Array4<const Real> const& Ja,
                                        Array4<const Real> const& Jb,
@@ -704,7 +724,44 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
                 // weight both the vacuum, beta ~ 1/rho_floor, and the plasma
                 // of a strong density-contrast profile)
                 coef(i,j,k,14) = amrex::max(coef(i,j,k,3), Real(1.0)/Real(l2_pc));
+                // row mask: 1 here, 0 at EB-covered nodes after the closure
+                coef(i,j,k,15) = 1.0_rt;
             });
+    }
+
+    if (m_verbose) {
+        // coefficient-field summary of the linearization state (level 0,
+        // valid region): the whistler, resistive and hyper-resistive scales
+        // in units of the Laplacian symbol l2, the floored density, the
+        // convection speed and the W-hat scale, plus the field magnitudes
+        // they were built from
+        const RT l2v = m_l2[0];
+        amrex::Real bfp = 0.0_rt, bext = 0.0_rt;
+        for (int n = 0; n < 3; ++n) {
+            bfp = amrex::max(bfp, B_fp[n]->norminf(0, 0));
+            if (add_external) { bext = amrex::max(bext, B_ext[n]->norminf(0, 0)); }
+        }
+        amrex::Real ue = 0.0_rt;
+        for (int c = 11; c <= 13; ++c) {
+            ue = amrex::max(ue, m_coef[0]->norminf(c, 0));
+        }
+        amrex::Print() << "  pc_hybrid_pic coefficients: |B_fp| " << bfp
+                       << ", |B_ext| " << bext
+                       << "; c_w l2 [" << m_coef[0]->min(3, 0)*l2v << ", "
+                       << m_coef[0]->max(3, 0)*l2v << "]"
+                       << ", c_eta l2 [" << m_coef[0]->min(4, 0)*l2v << ", "
+                       << m_coef[0]->max(4, 0)*l2v << "]"
+                       << ", c_h l2^2 [" << m_coef[0]->min(5, 0)*l2v*l2v << ", "
+                       << m_coef[0]->max(5, 0)*l2v*l2v << "]"
+                       << ", rho_e [" << m_coef[0]->min(9, 0) << ", "
+                       << m_coef[0]->max(9, 0) << "]"
+                       << ", |theta dt ue| max " << ue
+                       << " (" << ue*std::sqrt(l2v) << " cells)"
+                       << ", s_W [" << m_coef[0]->min(14, 0) << ", "
+                       << m_coef[0]->max(14, 0) << "]"
+                       << (m_coef[0]->contains_nan(0, m_coef[0]->nComp(), 0)
+                           || m_coef[0]->contains_inf(0, m_coef[0]->nComp(), 0)
+                           ? "  NON-FINITE" : "") << "\n";
     }
 
     // optional floor of the local W-hat scale at pair_sw_min x the global

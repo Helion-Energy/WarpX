@@ -25,7 +25,7 @@
  * problem. Recompute the true residual after every solution update, including
  * an apparent happy breakdown, before reporting convergence.
  */
-template <typename Vec, typename Ops>
+template <typename Vec, typename Ops, bool BatchedOrthogonalization = false>
 class FlexibleGMRES : public LinearSolver<Vec, Ops>
 {
 public:
@@ -44,6 +44,7 @@ public:
     }
     [[nodiscard]] int getNumIters () const override { return m_iterations; }
     [[nodiscard]] int getStatus () const override { return m_status; }
+    [[nodiscard]] bool failedEvaluation () const override { return m_status == 2; }
     [[nodiscard]] RT getResidualNorm () const override { return m_residual; }
 
     void solve (Vec& solution, Vec const& rhs, RT relative_tolerance,
@@ -84,18 +85,35 @@ public:
             for (int column = 0; column < length; ++column) {
                 preconditioned.emplace_back(m_ops->makeVecLHS());
                 m_ops->precond(preconditioned.back(), basis[column]);
+                if (!std::isfinite(m_ops->norm2(preconditioned.back()))) {
+                    m_status = 2;
+                    return;
+                }
                 basis.emplace_back(m_ops->makeVecRHS());
                 auto& next = basis.back();
                 m_ops->apply(next, preconditioned.back());
                 RT const action_norm = m_ops->norm2(next);
                 if (!std::isfinite(action_norm)) { m_status = 2; return; }
-                // Two-pass modified Gram-Schmidt keeps the small least-squares
-                // residual reliable when the preconditioner changes direction.
-                for (int pass = 0; pass < 2; ++pass) {
-                    for (int row = 0; row <= column; ++row) {
-                        RT const coefficient = m_ops->dotProduct(next, basis[row]);
-                        H(row, column) += coefficient;
-                        m_ops->increment(next, basis[row], -coefficient);
+                if constexpr (BatchedOrthogonalization) {
+                    // CGS with reorthogonalization: each pass computes all
+                    // coefficients before updating next. Ops batches the
+                    // reductions; the actual remainder norm below is retained.
+                    std::vector<RT> projection(column + 1, RT(0));
+                    for (int pass = 0; pass < 2; ++pass) {
+                        m_ops->dotProducts(next, basis, column + 1, projection);
+                        for (int row = 0; row <= column; ++row) {
+                            H(row, column) += projection[row];
+                        }
+                        m_ops->subtractProjection(next, basis, column + 1, projection);
+                    }
+                } else {
+                    // Preserve two-pass MGS for every existing operator.
+                    for (int pass = 0; pass < 2; ++pass) {
+                        for (int row = 0; row <= column; ++row) {
+                            RT const coefficient = m_ops->dotProduct(next, basis[row]);
+                            H(row, column) += coefficient;
+                            m_ops->increment(next, basis[row], -coefficient);
+                        }
                     }
                 }
                 RT const remainder = m_ops->norm2(next);

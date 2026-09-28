@@ -15,7 +15,7 @@
 
 namespace warpx::circuit
 {
-    /** Sum small coil vectors using device-buffer MPI transfers and device
+    /** Sum small vectors using device-buffer MPI transfers and device
      * arithmetic. GPU-aware point-to-point MPI is sufficient: no assumption
      * is made about accelerator support in MPI's reduction implementation.
      * Scratch is persistent and distinct from values. All ranks participate
@@ -24,8 +24,9 @@ namespace warpx::circuit
      * already joined it. A blocking exchange completes before its GPU consumer.
      * Recursive doubling takes O(log P) exchanges, including non-power-of-two
      * groups through an initial/final pairing. No vector is staged on host. */
-    inline void SumDeviceCoils (amrex::Gpu::DeviceVector<double>& values,
-                               amrex::Gpu::DeviceVector<double>& scratch)
+    template <typename Scalar>
+    inline void SumDeviceVector (amrex::Gpu::DeviceVector<Scalar>& values,
+                                 amrex::Gpu::DeviceVector<Scalar>& scratch)
     {
         namespace pd = amrex::ParallelDescriptor;
         if (pd::NProcs() == 1 || values.empty()) { return; }
@@ -43,12 +44,13 @@ namespace warpx::circuit
         auto const comm = pd::Communicator();
         int const rank = pd::MyProc();
         int const count = static_cast<int>(values.size());
+        auto const type = pd::Mpi_typemap<Scalar>::type();
         int const tag = pd::SeqNum();
         int power = 1;
         while (power <= pd::NProcs()/2) { power *= 2; }
         int const extra = pd::NProcs() - power;
-        double* const value = values.data();
-        double* const other = scratch.data();
+        Scalar* const value = values.data();
+        Scalar* const other = scratch.data();
         auto add = [=] () {
             amrex::ParallelFor(count, [=] AMREX_GPU_DEVICE (int i) noexcept {
                 value[i] += other[i];
@@ -60,10 +62,10 @@ namespace warpx::circuit
         int reduced_rank = rank - extra;
         if (rank < 2*extra) {
             if (rank%2 == 0) {
-                BL_MPI_REQUIRE(MPI_Send(value, count, MPI_DOUBLE, rank+1, tag, comm));
+                BL_MPI_REQUIRE(MPI_Send(value, count, type, rank+1, tag, comm));
                 reduced_rank = -1;
             } else {
-                BL_MPI_REQUIRE(MPI_Recv(other, count, MPI_DOUBLE, rank-1, tag,
+                BL_MPI_REQUIRE(MPI_Recv(other, count, type, rank-1, tag,
                                         comm, MPI_STATUS_IGNORE));
                 add();
                 reduced_rank = rank/2;
@@ -73,21 +75,28 @@ namespace warpx::circuit
             for (int mask = 1; mask < power; mask *= 2) {
                 int const peer_reduced = reduced_rank ^ mask;
                 int const peer = peer_reduced < extra ? 2*peer_reduced+1 : peer_reduced+extra;
-                BL_MPI_REQUIRE(MPI_Sendrecv(value, count, MPI_DOUBLE, peer, tag,
-                                            other, count, MPI_DOUBLE, peer, tag,
+                BL_MPI_REQUIRE(MPI_Sendrecv(value, count, type, peer, tag,
+                                            other, count, type, peer, tag,
                                             comm, MPI_STATUS_IGNORE));
                 add();
             }
         }
         if (rank < 2*extra) {
             if (rank%2 == 0) {
-                BL_MPI_REQUIRE(MPI_Recv(value, count, MPI_DOUBLE, rank+1, tag,
+                BL_MPI_REQUIRE(MPI_Recv(value, count, type, rank+1, tag,
                                         comm, MPI_STATUS_IGNORE));
             } else {
-                BL_MPI_REQUIRE(MPI_Send(value, count, MPI_DOUBLE, rank-1, tag, comm));
+                BL_MPI_REQUIRE(MPI_Send(value, count, type, rank-1, tag, comm));
             }
         }
 #endif
+    }
+
+    // Preserve the circuit API and its binary64 arithmetic exactly.
+    inline void SumDeviceCoils (amrex::Gpu::DeviceVector<double>& values,
+                               amrex::Gpu::DeviceVector<double>& scratch)
+    {
+        SumDeviceVector(values, scratch);
     }
 }
 #endif

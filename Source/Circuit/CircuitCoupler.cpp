@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <set>
 #include <utility>
 
 using namespace amrex;
@@ -153,6 +154,8 @@ CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
 void
 CircuitCoupler::ConfigureDarwinMagneticResponse ()
 {
+    InvalidateNativeEndpointRate();
+    m_endpoint_boundary_response.clear();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_plugin != nullptr,
         "Native Darwin coupling requires a compiled ExternalCircuit plugin");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_params.linkage_reference_accepted
@@ -182,6 +185,7 @@ CircuitCoupler::ConfigureDarwinMagneticResponse ()
 void
 CircuitCoupler::ResetDarwinTrialScales (amrex::Real t0, amrex::Real dt)
 {
+    InvalidateNativeEndpointRate();
     auto& external = *WarpX::GetInstance().get_pointer_HybridPICModel()
         ->m_external_vector_potential;
     for (auto const& coil : m_coils.coils()) {
@@ -264,10 +268,12 @@ CircuitCoupler::CoupledScales (const amrex::Real t) const
 void
 CircuitCoupler::FireEngine (char const* hook, const bool accept)
 {
+    InvalidateNativeEndpointRate();
     if (!m_plugin) {
         ExecutePythonCallback(hook);
         return;
     }
+    if (accept) { BeforeNativeAccept(); }
     // Compiled-engine dispatch of the identical contract.
     const std::string h(hook);
     if (h == "circuitbeginstep") {
@@ -354,8 +360,7 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
         // the engine calls no WarpX symbols). GetScale(t0) of the live
         // segment is the interval-entry scale and stays fixed across
         // repeated (corrector) re-pushes of the same interval.
-        auto& ext = *WarpX::GetInstance().get_pointer_HybridPICModel()
-                         ->m_external_vector_potential;
+        auto& ext = StepExternal();
         for (int ic = 0; ic < m_coils.size(); ++ic) {
             const std::string& fname = m_coils.coil(ic).field_name;
             const amrex::Real s_old = ext.GetScale(fname, m_interval.t0);
@@ -440,8 +445,15 @@ CircuitCoupler::AcceptSubstep (const amrex::Real t0, const amrex::Real t1)
 void
 CircuitCoupler::FinishStep ()
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_rejection_external || m_rejection.Irreversible(),
+        "Cannot use FinishStep to cancel an unaccepted native circuit attempt");
     m_interval.iteration = 0;
     FireEngine("circuitfinish", false);
+    if (m_rejection_external) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_rejection.FinishAccepted(),
+            "Cannot finish a reversible circuit attempt before native acceptance");
+        m_rejection_external = nullptr;
+    }
 }
 
 void
@@ -533,6 +545,8 @@ namespace
 void
 CircuitCoupler::WriteMemoryCheckpoint (std::string const& dir) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!NativeStepRetained(),
+        "Cannot checkpoint provisional native circuit memory");
     const std::string path = dir + "/circuit_coupler_memory.dat";
     std::ofstream ofs{path, std::ofstream::out};
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ofs.good(),
@@ -545,11 +559,17 @@ CircuitCoupler::WriteMemoryCheckpoint (std::string const& dir) const
     if (m_have_lambda_accepted) {
         WriteMemoryBlock(ofs, "lambda_accepted", m_lambda_accepted);
     }
+    ofs.flush();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ofs.good(),
+        "CircuitCoupler: incomplete memory checkpoint write to '" + path + "'");
 }
 
 void
 CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!NativeStepRetained(),
+        "Cannot restore checkpoint over a retained native circuit attempt");
+    InvalidateNativeEndpointRate();
     const std::string path = dir + "/circuit_coupler_memory.dat";
     std::ifstream ifs{path, std::ifstream::in};
     if (!ifs.good()) {
@@ -564,29 +584,54 @@ CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
     }
     std::string token;
     int version = 0;
-    ifs >> token >> version;
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(token == "version" && version == 1,
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(ifs >> token >> version)
+        && token == "version" && version == 1,
         "unsupported circuit_coupler_memory.dat format in '" + path + "'");
+
+    // Parse into temporary maps: a partial or malformed checkpoint must never
+    // silently reset a linkage or supply strtod's zero for an invalid number.
+    std::map<std::string, amrex::Real> eps_filt, lambda_accepted;
+    std::set<std::string> blocks, coil_names;
+    for (auto const& coil : m_coils.coils()) { coil_names.insert(coil.name); }
     std::string key;
-    std::size_t count = 0;
-    while (ifs >> key >> count) {
-        std::map<std::string, amrex::Real>* block = nullptr;
-        if (key == "eps_filt") { block = &m_eps_filt; }
-        if (key == "lambda_accepted") {
-            block = &m_lambda_accepted;
-            m_have_lambda_accepted = true;
-        }
+    while (ifs >> key) {
+        std::size_t count = 0;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(ifs >> count)
+            && count <= coil_names.size() && blocks.insert(key).second,
+            "circuit_coupler_memory.dat: invalid count or repeated block '" + key + "'");
+        auto* block = key == "eps_filt" ? &eps_filt
+            : key == "lambda_accepted" ? &lambda_accepted : nullptr;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(block != nullptr,
             "circuit_coupler_memory.dat: unknown block '" + key + "'");
-        block->clear();
         for (std::size_t i = 0; i < count; ++i) {
             std::string name, hex;
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(ifs >> name >> hex),
                 "circuit_coupler_memory.dat: truncated block '" + key + "'");
-            (*block)[name] = static_cast<amrex::Real>(
-                std::strtod(hex.c_str(), nullptr));
+            char* end = nullptr;
+            double const value = std::strtod(hex.c_str(), &end);
+            auto const restored = static_cast<amrex::Real>(value);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(end != hex.c_str() && *end == '\0'
+                && std::isfinite(value) && std::isfinite(restored)
+                && coil_names.count(name) == 1 && block->emplace(name, restored).second,
+                "circuit_coupler_memory.dat: invalid value, unknown or repeated coil '" + name + "'");
         }
     }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ifs.eof() && blocks.count("eps_filt") == 1,
+        "circuit_coupler_memory.dat: incomplete memory checkpoint");
+    auto const& simulation = WarpX::GetInstance();
+    auto const* hybrid = simulation.get_pointer_HybridPICModel();
+    if (hybrid && hybrid->UsesEulerianElectronEnergy() && simulation.getistep(0) > 0) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(blocks.count("lambda_accepted") == 1,
+            "circuit_coupler_memory.dat: missing accepted linkage in Eulerian restart");
+        for (int c = 0; c < m_coils.size(); ++c) {
+            if (m_probes[c] == warpx::circuit::ProbeKind::none) { continue; }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lambda_accepted.count(m_coils.coil(c).name) == 1,
+                "circuit_coupler_memory.dat: missing accepted coil linkage");
+        }
+    }
+    m_eps_filt = std::move(eps_filt);
+    m_lambda_accepted = std::move(lambda_accepted);
+    m_have_lambda_accepted = blocks.count("lambda_accepted") == 1;
     amrex::Print() << "Circuit coupler memory: restored from " << path
                    << " (" << m_eps_filt.size() << " EMF low-pass entries, "
                    << (m_have_lambda_accepted
@@ -594,4 +639,98 @@ CircuitCoupler::ReadMemoryCheckpoint (std::string const& dir)
                                  + " accepted-linkage entries"
                            : std::string("no accepted-linkage block"))
                    << ")\n";
+}
+
+
+bool CircuitCoupler::SetRejectionCapability (WarpxCircuitRejectionApiV1 const* api)
+{
+    if (!m_rejection.Idle() || m_rejection_external || NativeStepRetained()) { return false; }
+    if (api && !warpx::circuit::NativeCircuitRejection::Supports(api)) { return false; }
+    m_rejection_api = api;
+    return true;
+}
+
+bool CircuitCoupler::SupportsNativeRejection () const
+{
+    return m_plugin && warpx::circuit::NativeCircuitRejection::Supports(m_rejection_api);
+}
+
+ExternalVectorPotential& CircuitCoupler::StepExternal ()
+{
+    if (m_transaction_external) { return *m_transaction_external; }
+    if (m_rejection_external) { return *m_rejection_external; }
+    return *WarpX::GetInstance().get_pointer_HybridPICModel()->m_external_vector_potential;
+}
+
+bool CircuitCoupler::SnapshotNativeStep (ExternalVectorPotential& external)
+{
+    if (!SupportsNativeRejection() || !m_rejection.Idle() || m_rejection_external || NativeStepRetained()
+        || external.DeviceScales().start || external.DeviceScales().end) { return false; }
+    auto saved = std::make_unique<RejectionSnapshot>();
+    saved->interval = m_interval; saved->substep_count = m_substep_count;
+    saved->step_dt = m_step_dt; saved->eps_interval = m_eps_interval;
+    saved->lambda = m_lambda; saved->lambda_start = m_lambda_start;
+    saved->eps_filt = m_eps_filt; saved->lambda_accepted = m_lambda_accepted;
+    saved->have_lambda_accepted = m_have_lambda_accepted;
+    saved->open_loop_step = m_open_loop_step;
+    for (int f = 0; f < external.nFields(); ++f) {
+        RejectionSnapshot::Segment segment;
+        segment.name = external.FieldName(f);
+        segment.python = external.GetScaleSegment(f,segment.old_scale,segment.new_scale,
+                                                  segment.old_time,segment.new_time);
+        if (segment.python && (!std::isfinite(segment.old_scale)
+            || !std::isfinite(segment.new_scale) || !std::isfinite(segment.old_time)
+            || !std::isfinite(segment.new_time))) { return false; }
+        saved->segments.push_back(std::move(segment));
+    }
+    if (!m_rejection.Snapshot(m_plugin.get(),m_rejection_api)) { return false; }
+    m_rejection_snapshot = std::move(saved);
+    m_rejection_external = &external;
+    return true;
+}
+
+bool CircuitCoupler::CancelNativeStep ()
+{
+    InvalidateNativeEndpointRate();
+    if (!m_rejection.Ready() || !m_rejection_snapshot || !m_rejection_external) { return false; }
+    auto& ext = *m_rejection_external;
+    auto const& saved = *m_rejection_snapshot;
+    if (ext.nFields() != static_cast<int>(saved.segments.size())) { return false; }
+    for (int f = 0; f < ext.nFields(); ++f) {
+        if (ext.FieldName(f) != saved.segments[f].name
+            || ext.UsesPythonScale(f) != saved.segments[f].python) { return false; }
+    }
+    // This is an attempt boundary, never a residual/Jv vector readback. Finish
+    // outstanding consumers before clearing borrowed pointers and owner storage.
+    amrex::Gpu::synchronize();
+    ext.ClearDeviceScaleSegments();
+    m_device.reset();
+    if (!m_rejection.Cancel()) { return false; }
+    for (auto const& segment : saved.segments) {
+        if (segment.python) {
+            ext.SetScale(segment.name,segment.old_scale,segment.new_scale,
+                         segment.old_time,segment.new_time);
+        }
+    }
+    m_interval = saved.interval; m_substep_count = saved.substep_count;
+    m_step_dt = saved.step_dt; m_eps_interval = saved.eps_interval;
+    m_lambda = std::move(m_rejection_snapshot->lambda);
+    m_lambda_start = std::move(m_rejection_snapshot->lambda_start);
+    m_eps_filt = std::move(m_rejection_snapshot->eps_filt);
+    m_lambda_accepted = std::move(m_rejection_snapshot->lambda_accepted);
+    m_have_lambda_accepted = saved.have_lambda_accepted;
+    m_open_loop_step = saved.open_loop_step;
+    m_rejection_snapshot.reset(); m_rejection_external = nullptr;
+    return true;
+}
+
+void CircuitCoupler::BeforeNativeAccept ()
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!NativeStepRetained(),
+        "Retained native acceptance requires the explicit provisional device path");
+    InvalidateNativeEndpointRate();
+    if (!m_rejection_external) { return; }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_rejection.MakeIrreversible(),
+        "Native circuit acceptance requires a live reversible snapshot");
+    m_rejection_snapshot.reset();
 }

@@ -124,6 +124,97 @@ void HybridPICPC<T,Ops>::InnerGMRES ()
         amrex::Print() << "  pc_hybrid_pic inner GMRES: " << its << " its, rel res "
                        << std::abs(g[its])/beta << "\n";
     }
+    if (m_verbose > 1) { PrintInnerResidualMap(); }
+}
+
+template <class T, class Ops>
+void HybridPICPC<T,Ops>::PrintInnerResidualMap ()
+{
+    using namespace amrex;
+    constexpr int nkb = kNKB;
+    // Diagnostic (verbose >= 2): where the un-reduced inner residual
+    // r = b - M x lives. Share of ||r_E||^2 and of the RHS ||b_E||^2 per
+    // block of an 8 x 8 partition of the nodal domain (rows: dim-1 blocks
+    // lo -> hi, cols: dim-0 blocks lo -> hi), the W/E split, and the share
+    // of ||r_E||^2 on the four domain-boundary planes.
+    MergeBlock(*m_zB);
+    FillGhosts(*m_zB, 0);
+    ApplyDomainClosure(*m_zB, 0, ClosureClass::JField, 0, 3);
+    ApplyDomainClosure(*m_zB, 0, ClosureClass::EField, 3, 3);
+    ApplyReducedOp(*m_zB, *m_wB);
+    amrex::MultiFab::Xpay(*m_wB, -1.0_rt, *m_bKB, 0, 0, nkb, 0);   // r = b - M x
+    const Box ndom = amrex::convert(m_geom[0].Domain(), amrex::IntVect::TheNodeVector());
+    const auto dlo = ndom.smallEnd();
+    const auto dhi = ndom.bigEnd();
+    constexpr int NB = 8;
+    constexpr int NACC = 2*NB*NB + 7;
+    amrex::Gpu::DeviceVector<amrex::Real> acc(NACC, 0.0_rt);
+    amrex::Real* pa = acc.data();
+    const int n0 = dhi[0] - dlo[0] + 1;
+#if (AMREX_SPACEDIM > 1)
+    const int n1 = dhi[1] - dlo[1] + 1;
+#endif
+    for (MFIter mfi(*m_wB, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        Array4<const Real> const& r = m_wB->const_array(mfi);
+        Array4<const Real> const& b = m_bKB->const_array(mfi);
+        amrex::For(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const Real rE = r(i,j,k,3)*r(i,j,k,3) + r(i,j,k,4)*r(i,j,k,4)
+                              + r(i,j,k,5)*r(i,j,k,5);
+                const Real rW = r(i,j,k,0)*r(i,j,k,0) + r(i,j,k,1)*r(i,j,k,1)
+                              + r(i,j,k,2)*r(i,j,k,2);
+                const Real bE = b(i,j,k,3)*b(i,j,k,3) + b(i,j,k,4)*b(i,j,k,4)
+                              + b(i,j,k,5)*b(i,j,k,5);
+                const int b0 = amrex::min(NB - 1, ((i - dlo[0]) * NB) / n0);
+#if (AMREX_SPACEDIM > 1)
+                const int b1 = amrex::min(NB - 1, ((j - dlo[1]) * NB) / n1);
+#else
+                const int b1 = 0;
+                amrex::ignore_unused(j);
+#endif
+                amrex::ignore_unused(k);
+                amrex::HostDevice::Atomic::Add(pa + b1*NB + b0, rE);
+                amrex::HostDevice::Atomic::Add(pa + NB*NB + b1*NB + b0, bE);
+                amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 0, rW);
+                amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 1, rE);
+                amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 2, bE);
+                if (i == dlo[0]) { amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 3, rE); }
+                if (i == dhi[0]) { amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 4, rE); }
+#if (AMREX_SPACEDIM > 1)
+                if (j == dlo[1]) { amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 5, rE); }
+                if (j == dhi[1]) { amrex::HostDevice::Atomic::Add(pa + 2*NB*NB + 6, rE); }
+#endif
+            });
+    }
+    amrex::Gpu::streamSynchronize();
+    std::vector<amrex::Real> h(NACC, 0.0_rt);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, acc.begin(), acc.end(), h.begin());
+    amrex::ParallelDescriptor::ReduceRealSum(h.data(), NACC);
+    const amrex::Real rW2 = h[2*NB*NB], rE2 = h[2*NB*NB + 1], bE2 = h[2*NB*NB + 2];
+    const amrex::Real irE = (rE2 > 0.0_rt) ? 1.0_rt/rE2 : 0.0_rt;
+    const amrex::Real ibE = (bE2 > 0.0_rt) ? 1.0_rt/bE2 : 0.0_rt;
+    amrex::Print() << "  pc_hybrid_pic inner residual: ||r_E||/||b_E|| "
+                   << std::sqrt(rE2*ibE) << ", ||r_W||/||r_E|| "
+                   << std::sqrt(rW2*irE) << "; r_E share on planes lo0 "
+                   << h[2*NB*NB + 3]*irE << " hi0 " << h[2*NB*NB + 4]*irE
+                   << " lo1 " << h[2*NB*NB + 5]*irE << " hi1 " << h[2*NB*NB + 6]*irE
+                   << "\n  block shares (dim-1 rows lo->hi | dim-0 cols lo->hi):"
+                   << "  r_E  ||  b_E\n";
+    for (int b1 = 0; b1 < NB; ++b1) {
+        amrex::Print() << "   ";
+        for (int b0 = 0; b0 < NB; ++b0) {
+            amrex::Print() << " " << std::fixed << std::setprecision(3)
+                           << h[b1*NB + b0]*irE;
+        }
+        amrex::Print() << "  ||";
+        for (int b0 = 0; b0 < NB; ++b0) {
+            amrex::Print() << " " << std::fixed << std::setprecision(3)
+                           << h[NB*NB + b1*NB + b0]*ibE;
+        }
+        amrex::Print() << std::defaultfloat << "\n";
+    }
 }
 
 template <class T, class Ops>
@@ -168,7 +259,6 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
                     s(i,j,k) = v * inv_kappa;   // physical dpe for the E leg
                 });
         }
-#if !defined(WARPX_DIM_RZ)
         if (m_pe_row_sweeps > 0) {
             // damped-Jacobi sweeps carrying the signed UPWIND advection
             // stencil theta*dt*gamma ue0.grad(.) (comps 11-13 hold
@@ -188,6 +278,13 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
                 dx_min_pe = std::min(dx_min_pe, m_geom[0].CellSize(d));
             }
             const amrex::Real capl = m_pe_ue_cap_fac * dx_min_pe;
+#if defined(WARPX_DIM_RZ)
+            // RZ m = 0: area-weighted radial Laplacian neighbours, even
+            // parity across the axis (u_r = 0 there by symmetry)
+            const bool sw_axis = m_has_axis;
+            const int sw_iax = m_geom[0].Domain().smallEnd(0);
+            const HybridPICPCGrid gsw = m_grid[0];
+#endif
             amrex::MultiFab& x2 = *m_pe_row_scr2;
             amrex::MultiFab::Copy(x2, xp, 0, 0, 1, 0);
             for (int sw = 0; sw < m_pe_row_sweeps; sw++) {
@@ -231,6 +328,25 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
                             adiag = gam * (std::abs(ux) * dxi[0] + std::abs(uz) * dxi[1]);
                             nbr = (xi(i+1,j,k) + xi(i-1,j,k))*dxi[0]*dxi[0]
                                 + (xi(i,j+1,k) + xi(i,j-1,k))*dxi[1]*dxi[1];
+#elif defined(WARPX_DIM_RZ)
+                            const bool on_ax = sw_axis && (i == sw_iax);
+                            const Real ur = on_ax ? 0.0_rt : clamp_u(cf(i,j,k,11));
+                            const Real uz = clamp_u(cf(i,j,k,13));
+                            up += gam * dxi[0] * (ur > 0.0_rt
+                                ? ur*(xi(i,j,k) - xi(i-1,j,k))
+                                : ur*(xi(i+1,j,k) - xi(i,j,k)));
+                            up += gam * dxi[1] * (uz > 0.0_rt
+                                ? uz*(xi(i,j,k) - xi(i,j-1,k))
+                                : uz*(xi(i,j+1,k) - xi(i,j,k)));
+                            adiag = gam * (std::abs(ur) * dxi[0] + std::abs(uz) * dxi[1]);
+                            if (on_ax) {
+                                nbr = 2.0_rt*xi(i+1,j,k)*dxi[0]*dxi[0];
+                            } else {
+                                const Real rn = gsw.rmin + i*gsw.dr;
+                                nbr = ((rn + 0.5_rt*gsw.dr)*xi(i+1,j,k)
+                                     + (rn - 0.5_rt*gsw.dr)*xi(i-1,j,k))/rn*dxi[0]*dxi[0];
+                            }
+                            nbr += (xi(i,j+1,k) + xi(i,j-1,k))*dxi[1]*dxi[1];
 #elif defined(WARPX_DIM_3D)
                             const Real ux = clamp_u(cf(i,j,k,11));
                             const Real uy = clamp_u(cf(i,j,k,12));
@@ -281,7 +397,6 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
                     });
             }
         }
-#endif
         FillGhosts(*m_pe_row_scr, 0);
     }
 
@@ -300,6 +415,9 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
         // scratch are zero-extended; the affected wall-tangential E rows are
         // identity-overridden on output anyway.
         const auto dxi = m_geom[0].InvCellSizeArray();
+        const bool pe_axis = m_has_axis;
+        const int pe_iax = m_geom[0].Domain().smallEnd(0);
+        amrex::ignore_unused(pe_axis, pe_iax);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -316,6 +434,13 @@ void HybridPICPC<T,Ops>::Apply ( T& a_x, const T& a_b )
                     be(i,j,k,2) -= ir * (s(i+1,j,k) - s(i-1,j,k)) * 0.5_rt * dxi[0];
 #elif defined(WARPX_DIM_XZ)
                     be(i,j,k,0) -= ir * (s(i+1,j,k) - s(i-1,j,k)) * 0.5_rt * dxi[0];
+                    be(i,j,k,2) -= ir * (s(i,j+1,k) - s(i,j-1,k)) * 0.5_rt * dxi[1];
+#elif defined(WARPX_DIM_RZ)
+                    // d_r pe = 0 on the axis (even scalar; the zero-extended
+                    // ghost would fake a gradient there)
+                    if (!(pe_axis && i == pe_iax)) {
+                        be(i,j,k,0) -= ir * (s(i+1,j,k) - s(i-1,j,k)) * 0.5_rt * dxi[0];
+                    }
                     be(i,j,k,2) -= ir * (s(i,j+1,k) - s(i,j-1,k)) * 0.5_rt * dxi[1];
 #elif defined(WARPX_DIM_3D)
                     be(i,j,k,0) -= ir * (s(i+1,j,k) - s(i-1,j,k)) * 0.5_rt * dxi[0];

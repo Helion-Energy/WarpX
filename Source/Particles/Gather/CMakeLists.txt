@@ -3,5 +3,6 @@ foreach(D IN LISTS WarpX_DIMS)
     target_sources(lib_${SD}
       PRIVATE
         GetExternalFields.cpp
+        NativeEndpointElectricGather.H
     )
 endforeach()

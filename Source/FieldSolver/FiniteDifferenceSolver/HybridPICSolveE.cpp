@@ -9,7 +9,12 @@
  * License: BSD-3-Clause-LBNL
  */
 
+#include "FieldSolver/ImplicitSolvers/NativeCoilField.H"
+#include "FieldSolver/ImplicitSolvers/NativePECPlasma.H"
 #include "FiniteDifferenceSolver.H"
+#include "CompensatedTransverseOhm.H"
+#include "HybridPICModel/HybridOhmDampingFields.H"
+#include "FieldSolver/ImplicitSolvers/EulerianDissipation.H"
 
 #include "EmbeddedBoundary/Enabled.H"
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
@@ -26,9 +31,13 @@
 #include "WarpX.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <cmath>
 
 using namespace amrex;
 using warpx::fields::FieldType;
+
+namespace CompensatedOhm=warpx::ohm::compensated;
+
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
@@ -496,7 +505,140 @@ FiniteDifferenceSolver::HybridPICSolveE (
         eb_update_E,
     int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
     const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
-    ablastr::fields::VectorField const* EV_out) {
+    ablastr::fields::VectorField const* EV_out,
+    const warpx::thermal::EulerianDissipation* trial_dissipation,
+    ablastr::fields::VectorField const* ER_out,
+    const warpx::thermal::HybridOhmDampingFields* damping_out,
+    ablastr::fields::VectorField const* F_pressure_hall_out,
+    ablastr::fields::VectorField const* transverse_offset) {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!(F_pressure_hall_out && transverse_offset),
+        "Pressure/Hall capture and compensated transverse assembly require separate calls");
+    if (transverse_offset) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid_model->UseCompatibleYeeInertia() &&
+            hybrid_model->m_include_electron_inertia && !solve_for_Faraday &&
+            WarpX::grid_type==GridType::Staggered,
+            "Transverse Ohm offset requires direct Yee inertia");
+        for (int c=0;c<3;++c) {
+            auto const* offset=(*transverse_offset)[c];
+            AMREX_ALWAYS_ASSERT(offset && offset->boxArray()==Efield[c]->boxArray() &&
+                offset->DistributionMap()==Efield[c]->DistributionMap() &&
+                offset->nComp()==1 && Efield[c]->nComp()==1 &&
+                offset->nGrowVect().allGE(Efield[c]->nGrowVect()));
+            for (int d=0;d<3;++d) AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                offset!=Efield[d] && (!EH_out || offset!=(*EH_out)[d]) &&
+                (!EV_out || offset!=(*EV_out)[d]) &&
+                (!ER_out || offset!=(*ER_out)[d]) &&
+                (!damping_out || (offset!=damping_out->end_resistivity[d] &&
+                                 offset!=damping_out->end_holmstrom[d])),
+                "Transverse Ohm offset must not alias a field or capture output");
+        }
+    }
+
+#if !defined(WARPX_DIM_RZ)
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(trial_dissipation==nullptr,
+        "Trial dissipative field application currently requires RZ");
+#endif
+    if (F_pressure_hall_out) {
+        // This is the exact value already evaluated by the native kernel,
+        // before inertia and before wrapper electric boundary replacement.
+        // Its complete non-inertial meaning is deliberately restricted to
+        // this pressure/Hall-only algebraic scope. Never subtract a rounded
+        // inertial field from the final electric field to reconstruct it.
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !hybrid_model->HasResistivity() &&
+            !hybrid_model->m_include_electron_viscosity &&
+            !hybrid_model->m_include_hyper_resistivity_term &&
+            !hybrid_model->m_end_region.holmstrom &&
+            !hybrid_model->m_holmstrom_vacuum_region &&
+            !hybrid_model->m_esolve_tensor && !hybrid_model->m_esolve_curlcurl &&
+            (!hybrid_model->m_add_external_fields ||
+             (hybrid_model->m_external_unified && warpx::darwin::NativeCoilCurrentEnabled() &&
+              warpx::darwin::NativePECPlasmaEnabled())) && !hybrid_model->m_pec_conductor_wall_rows &&
+            !EB::enabled(),
+            "Pressure/Hall capture excludes resistivity, viscosity, hyper, vacuum/end, transformed, external and EB closures");
+        for (int c=0;c<3;++c) {
+            auto const* out=(*F_pressure_hall_out)[c];
+            bool valid=out && out!=&rhofield && out!=&Pefield;
+            if (out) {
+                valid=valid && out->boxArray()==Efield[c]->boxArray() &&
+                    out->DistributionMap()==Efield[c]->DistributionMap() &&
+                    out->nComp()==Efield[c]->nComp() &&
+                    out->nGrowVect().allGE(Efield[c]->nGrowVect());
+                for (int d=0;d<3;++d) {
+                    valid=valid && out!=Efield[d] && out!=Jfield[d] &&
+                        out!=Jifield[d] && out!=Bfield[d] &&
+                        (!ER_out || out!=(*ER_out)[d]) &&
+                        (!EH_out || out!=(*EH_out)[d]) &&
+                        (!EV_out || out!=(*EV_out)[d]) &&
+                        (!damping_out || (out!=damping_out->end_resistivity[d] &&
+                                         out!=damping_out->end_holmstrom[d])) &&
+                        (c==d || out!=(*F_pressure_hall_out)[d]);
+                }
+                valid=valid && out!=&hybrid_model->ElectronTemperatureForSolve(lev);
+            }
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(valid,
+                "Pressure/Hall capture requires independent matching E scratch and all guards");
+        }
+        for (auto* out:*F_pressure_hall_out) out->setVal(0._rt);
+    }
+    if (ER_out) {
+        // Validate every output before clearing any scratch. In particular,
+        // accepting an aliased E/J/rho would change the physical solve.
+        for (int c = 0; c < 3; ++c) {
+            auto const* out = (*ER_out)[c];
+            bool valid = out && out != &rhofield && out != &Pefield;
+            if (out) {
+                valid = valid && out->boxArray() == Efield[c]->boxArray() &&
+                    out->DistributionMap() == Efield[c]->DistributionMap() &&
+                    out->nComp() == Efield[c]->nComp() &&
+                    out->nGrowVect().allGE(Efield[c]->nGrowVect());
+                for (int d = 0; d < 3; ++d) {
+                    valid = valid && out != Efield[d] && out != Jfield[d] &&
+                        out != Jifield[d] && out != Bfield[d] &&
+                        (!EH_out || out != (*EH_out)[d]) &&
+                        (!EV_out || out != (*EV_out)[d]) &&
+                        (c == d || out != (*ER_out)[d]);
+                }
+                if (hybrid_model->m_resistivity_has_Te_dependence) {
+                    valid = valid && out != &hybrid_model->ElectronTemperatureForSolve(lev);
+                }
+            }
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(valid,
+                "Global eta field capture requires independent, matching E scratch and all guards");
+        }
+        for (int c = 0; c < 3; ++c) { (*ER_out)[c]->setVal(0._rt); }
+    }
+    if (damping_out) {
+        // Validate ALL borrowed arrays before clearing any of them. The
+        // wrapper owns no input mutation through a requested component.
+        auto const& end=damping_out->end_resistivity;
+        auto const& gate=damping_out->end_holmstrom;
+        for (int c=0;c<3;++c) {
+            for (auto const* out : {end[c],gate[c]}) {
+                bool valid=out && out!=&rhofield && out!=&Pefield;
+                if (out) {
+                    valid=valid && out->boxArray()==Efield[c]->boxArray() &&
+                        out->DistributionMap()==Efield[c]->DistributionMap() &&
+                        out->nComp()==Efield[c]->nComp() &&
+                        out->nGrowVect().allGE(Efield[c]->nGrowVect());
+                    int occurrences=0;
+                    for (int d=0;d<3;++d) {
+                        valid=valid && out!=Efield[d] && out!=Jfield[d] &&
+                            out!=Jifield[d] && out!=Bfield[d] &&
+                            (!ER_out || out!=(*ER_out)[d]) &&
+                            (!EH_out || out!=(*EH_out)[d]) &&
+                            (!EV_out || out!=(*EV_out)[d]);
+                        occurrences+=int(out==end[d])+int(out==gate[d]);
+                    }
+                    valid=valid && occurrences==1 &&
+                        out!=&hybrid_model->ElectronTemperatureForSolve(lev);
+                }
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(valid,
+                    "Numerical damping capture needs independent matching E scratch and all guards");
+            }
+        }
+        for (int c=0;c<3;++c) { end[c]->setVal(0._rt); gate[c]->setVal(0._rt); }
+    }
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
@@ -505,17 +647,17 @@ FiniteDifferenceSolver::HybridPICSolveE (
         HybridPICSolveECylindrical<CylindricalYeeAlgorithm>(
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
             lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
-            EV_out);
+            EV_out, trial_dissipation, ER_out, damping_out, F_pressure_hall_out, transverse_offset);
 
 #elif defined(WARPX_DIM_RSPHERE)
 
-        // The spherical kernels carry no hyper-resistivity or viscous drag
-        // term, so there is nothing to mirror; a caller asking for it here
-        // has nothing to book.
+        // The spherical kernels have no hyper-resistivity or viscous drag
+        // term. Global eta capture is not implemented there either: reject
+        // the request rather than returning an incomplete work component.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            EH_out == nullptr && EV_out == nullptr,
-            "HybridPICSolveE: EH_out / EV_out (hyper_resistivity_heating, "
-            "qdsmc_viscosity_in_ohms_law) are not available in the spherical "
+            EH_out == nullptr && EV_out == nullptr && ER_out == nullptr && damping_out == nullptr && F_pressure_hall_out == nullptr,
+            "HybridPICSolveE: EH_out / EV_out / ER_out (hyper_resistivity_heating, "
+            "qdsmc_viscosity_in_ohms_law / global eta / damping capture) are not available in the spherical "
             "geometry");
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
@@ -528,17 +670,30 @@ FiniteDifferenceSolver::HybridPICSolveE (
         HybridPICSolveECartesian<CartesianYeeAlgorithm>(
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
             lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
-            EV_out);
+            EV_out, ER_out, damping_out, F_pressure_hall_out, transverse_offset);
     } else {
         HybridPICSolveECartesian<CartesianNodalAlgorithm>(
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield, eb_update_E,
             lev, hybrid_model, solve_for_Faraday, include_resistivity, EH_out,
-            EV_out);
+            EV_out, ER_out, damping_out, F_pressure_hall_out, transverse_offset);
     }
 #endif
     } else {
         amrex::Abort(Utils::TextMsg::Err(
             "HybridSolveE: The hybrid-PIC electromagnetic solver algorithm must be used"));
+    }
+
+    if (transverse_offset) {
+        auto const Ei=WarpX::GetInstance().m_fields.get_alldirs("hybrid_E_inertial_fp",lev);
+        for (int c=0;c<3;++c) {
+            for (amrex::MFIter mfi(*Efield[c],amrex::TilingIfNotGPU());mfi.isValid();++mfi) {
+                auto const e=Efield[c]->array(mfi);
+                auto const inertia=Ei[c]->const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    e(i,j,k)+=inertia(i,j,k);
+                });
+            }
+        }
     }
 }
 
@@ -554,7 +709,14 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
     const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
-    ablastr::fields::VectorField const* EV_out) {
+    ablastr::fields::VectorField const* EV_out,
+    const warpx::thermal::EulerianDissipation* trial_dissipation,
+    ablastr::fields::VectorField const* ER_out,
+    const warpx::thermal::HybridOhmDampingFields* damping_out,
+    ablastr::fields::VectorField const* F_pressure_hall_out,
+    ablastr::fields::VectorField const* transverse_offset) {
+    bool const write_er = ER_out != nullptr;
+    bool const write_damping = damping_out != nullptr;
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -568,6 +730,11 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    const auto end_region = hybrid_model->EndRegion(lev);
+    // End eta is numerical magnetic damping. The legacy thermal path heats
+    // electrons with it; the opt-in edge-work path books its signed sink
+    // separately. Full-minus-nores removes its ion force, and no physical
+    // OU/drag rate includes this increment.
     const auto eta_te = hybrid_model->m_eta_te;
     const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
     amrex::MultiFab const* const te_mf = hybrid_model->ResistivityTe(lev);
@@ -576,8 +743,9 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
-    const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
-    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
+    const bool include_hyper_resistivity_term =
+        hybrid_model->m_include_hyper_resistivity_term && trial_dissipation==nullptr;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia && transverse_offset==nullptr;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
@@ -650,6 +818,11 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    bool const direct_yee_inertia = hybrid_model->UseCompatibleYeeInertia();
+    ablastr::fields::VectorField Ei_yee;
+    if (direct_yee_inertia) {
+        Ei_yee = warpx.m_fields.get_alldirs("hybrid_E_inertial_fp", lev);
+    }
     // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
     // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
     // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
@@ -922,7 +1095,7 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
 #if defined(WARPX_DIM_RZ)
     bool const include_visc_drag =
-        hybrid_model->m_visc_in_ohms_law && include_resistivity;
+        hybrid_model->m_visc_in_ohms_law && include_resistivity && trial_dissipation==nullptr;
     auto const visc_edges = hybrid_model->ViscosityRZEdges(lev);
     bool const write_ev = EV_out != nullptr;
     if (write_ev) {
@@ -983,6 +1156,18 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
+        Array4<Real const> longitudinal0, longitudinal1, longitudinal2;
+        if (transverse_offset) {
+            longitudinal0=(*transverse_offset)[0]->const_array(mfi);
+            longitudinal1=(*transverse_offset)[1]->const_array(mfi);
+            longitudinal2=(*transverse_offset)[2]->const_array(mfi);
+        }
+        Array4<Real const> eiY0, eiY1, eiY2;
+        if (direct_yee_inertia) {
+            eiY0 = Ei_yee[0]->const_array(mfi);
+            eiY1 = Ei_yee[1]->const_array(mfi);
+            eiY2 = Ei_yee[2]->const_array(mfi);
+        }
         // curlcurl_form (division-free) toroidal sector: the numerator
         // capture target and the measured inertia numerator (see
         // HybridPICModel::SolveEThetaCurlCurlRZ; both nodal). The arrays stay
@@ -1050,6 +1235,27 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
             ev_z = (*EV_out)[2]->array(mfi);
         }
 #endif
+        Array4<Real> end_r, end_t, end_z, gate_r, gate_t, gate_z;
+        if (write_damping) {
+            end_r = damping_out->end_resistivity[0]->array(mfi);
+            gate_r = damping_out->end_holmstrom[0]->array(mfi);
+            end_t = damping_out->end_resistivity[1]->array(mfi);
+            gate_t = damping_out->end_holmstrom[1]->array(mfi);
+            end_z = damping_out->end_resistivity[2]->array(mfi);
+            gate_z = damping_out->end_holmstrom[2]->array(mfi);
+        }
+        Array4<Real> ph_r, ph_t, ph_z;
+        if (F_pressure_hall_out) {
+            ph_r = (*F_pressure_hall_out)[0]->array(mfi);
+            ph_t = (*F_pressure_hall_out)[1]->array(mfi);
+            ph_z = (*F_pressure_hall_out)[2]->array(mfi);
+        }
+        Array4<Real> er_r, er_t, er_z;
+        if (write_er) {
+            er_r = (*ER_out)[0]->array(mfi);
+            er_t = (*ER_out)[1]->array(mfi);
+            er_z = (*ER_out)[2]->array(mfi);
+        }
         Array4<Real> eh_r, eh_t, eh_z;
         if (write_eh) {
             eh_r = (*EH_out)[0]->array(mfi);
@@ -1101,6 +1307,9 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
+                CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+                CompensatedOhm::Pair quotient_density{1.,0.};
+                Real quotient_gate=0._rt;
 
                 // curlcurl_form poloidal sector: capture the multiplied-through
                 // numerator (division-free) for the grad-div-completed
@@ -1149,6 +1358,21 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                           rho_floor, floor_w);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
+                    if (transverse_offset) {
+                        int const axis=0;
+                        quotient_hall=CompensatedOhm::Average(enE,i,j,0,0,axis);
+                        quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                            : include_electron_pressure_term)
+                            ? CompensatedOhm::Gradient(Pe,i,j,0,axis,coefs_r[0])
+                            : CompensatedOhm::Pair{0.,0.};
+                        quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                        if(floor_w==0. && rho_val_limited>rho_floor) {
+                            auto exact_density=CompensatedOhm::Average(rho,i,j,0,0,axis);
+                            if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                                CompensatedOhm::Average(rho_ped,i,j,0,0,axis));
+                            quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                        }
+                    }
                     // Conductor-wall stack, gate-on-raw / divide-by-floored:
                     // where the RAW (unfloored) rho at this stencil location
                     // is not positive -- the wall node row is zeroed by
@@ -1159,6 +1383,7 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // where(rho_raw > 0, enE/max(rho, rho_floor), 0).
                     if (conductor_wall_row && !(rho_val > 0._rt)) {
                         ohm_val = 0._rt;
+                        if (transverse_offset) { quotient_gate=0._rt; }
                     }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
@@ -1166,11 +1391,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // Legacy arithmetic when unconfined (bit-identical).
                         ohm_val *= (holmstrom_axis_confined
                                     ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (transverse_offset) quotient_gate *= (holmstrom_axis_confined
+                            ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Er(i, j, 0) = ohm_val;
                 }
+                if (end_region.holmstrom)
+                {
+                    Real const before_end = write_damping ? Er(i, j, 0) : 0._rt;
+                    Er(i, j, 0) *= 1. - end_region.Weight(i, j, 0, Er_stag);
+                    if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,0,Er_stag);
+                    if (write_damping) { gate_r(i, j, 0) = Er(i, j, 0) - before_end; }
+                }
+                if (ph_r) { ph_r(i, j, 0) = Er(i, j, 0); }
+                if (transverse_offset) {
+                    Er(i,j,0)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                        quotient_density,quotient_gate,longitudinal0(i,j,0));
+                }
                 if (include_electron_inertia) {
-                    Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    Er(i, j, 0) += direct_yee_inertia ? eiY0(i, j, 0)
+                    : Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
 
                 } // end !cc_num_r
@@ -1192,12 +1432,35 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) +=
-                        (eta_has_Te
-                             ? eta_te(rho_val, jtot_val,
-                                      Interp(te_K, nodal, Er_stag, coarsen, i, j, 0, 0), t_new)
-                             : eta(rho_val, jtot_val, t_new)) *
-                        Jr(i, j, 0);
+                    if (write_er) {
+                        Real const global_eta_field =
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Er_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jr(i, j, 0);
+                        Er(i, j, 0) += global_eta_field;
+                        er_r(i, j, 0) = global_eta_field;
+                    } else {
+                        Er(i, j, 0) +=
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Er_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jr(i, j, 0);
+                    }
+                    if (end_region.resistivity > 0. && include_resistivity)
+                    {
+                        if (write_damping) {
+                            Real const end_field = end_region.resistivity *
+                                end_region.Weight(i, j, 0, Er_stag) * Jr(i, j, 0);
+                            Er(i, j, 0) += end_field;
+                            end_r(i, j, 0) = end_field;
+                        } else {
+                        Er(i, j, 0) += end_region.resistivity *
+                            end_region.Weight(i, j, 0, Er_stag) * Jr(i, j, 0);
+                        }
+                    }
                     // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
@@ -1289,6 +1552,9 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
+                CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+                CompensatedOhm::Pair quotient_density{1.,0.};
+                Real quotient_gate=0._rt;
 
                 // curlcurl_form (division-free) toroidal sector: assemble the
                 // multiplied-through numerator e n E_theta_num = the
@@ -1334,10 +1600,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         rho_floor, floor_w);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
+                    if (transverse_offset) {
+                        int const axis=-1;
+                        quotient_hall=CompensatedOhm::Average(enE,i,j,0,1,axis);
+                        quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                            : include_electron_pressure_term)
+                            ? CompensatedOhm::Gradient(Pe,i,j,0,axis,0._rt)
+                            : CompensatedOhm::Pair{0.,0.};
+                        quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                        if(floor_w==0. && rho_val_limited>rho_floor) {
+                            auto exact_density=CompensatedOhm::Average(rho,i,j,0,0,axis);
+                            if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                                CompensatedOhm::Average(rho_ped,i,j,0,0,axis));
+                            quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                        }
+                    }
                     // Conductor-wall stack, gate-on-raw / divide-by-floored
                     // (see the Er branch).
                     if (conductor_wall_row && !(rho_val > 0._rt)) {
                         ohm_val = 0._rt;
+                        if (transverse_offset) { quotient_gate=0._rt; }
                     }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
@@ -1345,11 +1627,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // Legacy arithmetic when unconfined (bit-identical).
                         ohm_val *= (holmstrom_axis_confined
                                     ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (transverse_offset) quotient_gate *= (holmstrom_axis_confined
+                            ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Etheta(i, j, 0) = ohm_val;
                 }
+                if (end_region.holmstrom)
+                {
+                    Real const before_end = write_damping ? Etheta(i, j, 0) : 0._rt;
+                    Etheta(i, j, 0) *= 1. - end_region.Weight(i, j, 0, Etheta_stag);
+                    if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,0,Etheta_stag);
+                    if (write_damping) { gate_t(i, j, 0) = Etheta(i, j, 0) - before_end; }
+                }
+                if (ph_t) { ph_t(i, j, 0) = Etheta(i, j, 0); }
+                if (transverse_offset) {
+                    Etheta(i,j,0)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                        quotient_density,quotient_gate,longitudinal1(i,j,0));
+                }
                 if (include_electron_inertia) {
-                    Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+                    Etheta(i, j, 0) += direct_yee_inertia ? eiY1(i, j, 0)
+                    : Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
                 }
 
                 } // end !cc_num
@@ -1371,12 +1668,35 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) +=
-                        (eta_has_Te
-                             ? eta_te(rho_val, jtot_val,
-                                      Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
-                             : eta(rho_val, jtot_val, t_new)) *
-                        Jtheta(i, j, 0);
+                    if (write_er) {
+                        Real const global_eta_field =
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jtheta(i, j, 0);
+                        Etheta(i, j, 0) += global_eta_field;
+                        er_t(i, j, 0) = global_eta_field;
+                    } else {
+                        Etheta(i, j, 0) +=
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jtheta(i, j, 0);
+                    }
+                    if (end_region.resistivity > 0. && include_resistivity)
+                    {
+                        if (write_damping) {
+                            Real const end_field = end_region.resistivity *
+                                end_region.Weight(i, j, 0, Etheta_stag) * Jtheta(i, j, 0);
+                            Etheta(i, j, 0) += end_field;
+                            end_t(i, j, 0) = end_field;
+                        } else {
+                        Etheta(i, j, 0) += end_region.resistivity *
+                            end_region.Weight(i, j, 0, Etheta_stag) * Jtheta(i, j, 0);
+                        }
+                    }
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
@@ -1462,6 +1782,9 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
+                CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+                CompensatedOhm::Pair quotient_density{1.,0.};
+                Real quotient_gate=0._rt;
 
                 // curlcurl_form poloidal sector: numerator capture (see the
                 // Er branch).
@@ -1508,10 +1831,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                           rho_floor, floor_w);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                    if (transverse_offset) {
+                        int const axis=AMREX_SPACEDIM==2 ? 1 : -1;
+                        quotient_hall=CompensatedOhm::Average(enE,i,j,0,2,axis);
+                        quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                            : include_electron_pressure_term)
+                            ? CompensatedOhm::Gradient(Pe,i,j,0,axis,axis<0 ? 0._rt : coefs_z[0])
+                            : CompensatedOhm::Pair{0.,0.};
+                        quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                        if(floor_w==0. && rho_val_limited>rho_floor) {
+                            auto exact_density=CompensatedOhm::Average(rho,i,j,0,0,axis);
+                            if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                                CompensatedOhm::Average(rho_ped,i,j,0,0,axis));
+                            quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                        }
+                    }
                     // Conductor-wall stack, gate-on-raw / divide-by-floored
                     // (see the Er branch).
                     if (conductor_wall_row && !(rho_val > 0._rt)) {
                         ohm_val = 0._rt;
+                        if (transverse_offset) { quotient_gate=0._rt; }
                     }
                     if (holmstrom_smooth) {
                         const Real g = 0.5_rt * (1._rt + std::tanh(
@@ -1519,11 +1858,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // Legacy arithmetic when unconfined (bit-identical).
                         ohm_val *= (holmstrom_axis_confined
                                     ? 1._rt - (1._rt - g)*ax_mask : g);
+                        if (transverse_offset) quotient_gate *= (holmstrom_axis_confined
+                            ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Ez(i, j, 0) = ohm_val;
                 }
+                if (end_region.holmstrom)
+                {
+                    Real const before_end = write_damping ? Ez(i, j, 0) : 0._rt;
+                    Ez(i, j, 0) *= 1. - end_region.Weight(i, j, 0, Ez_stag);
+                    if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,0,Ez_stag);
+                    if (write_damping) { gate_z(i, j, 0) = Ez(i, j, 0) - before_end; }
+                }
+                if (ph_z) { ph_z(i, j, 0) = Ez(i, j, 0); }
+                if (transverse_offset) {
+                    Ez(i,j,0)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                        quotient_density,quotient_gate,longitudinal2(i,j,0));
+                }
                 if (include_electron_inertia) {
-                    Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    Ez(i, j, 0) += direct_yee_inertia ? eiY2(i, j, 0)
+                    : Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
 
                 } // end !cc_num_z
@@ -1545,12 +1899,35 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) +=
-                        (eta_has_Te
-                             ? eta_te(rho_val, jtot_val,
-                                      Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
-                             : eta(rho_val, jtot_val, t_new)) *
-                        Jz(i, j, 0);
+                    if (write_er) {
+                        Real const global_eta_field =
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jz(i, j, 0);
+                        Ez(i, j, 0) += global_eta_field;
+                        er_z(i, j, 0) = global_eta_field;
+                    } else {
+                        Ez(i, j, 0) +=
+                            (eta_has_Te
+                                 ? eta_te(rho_val, jtot_val,
+                                          Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
+                                 : eta(rho_val, jtot_val, t_new)) *
+                            Jz(i, j, 0);
+                    }
+                    if (end_region.resistivity > 0. && include_resistivity)
+                    {
+                        if (write_damping) {
+                            Real const end_field = end_region.resistivity *
+                                end_region.Weight(i, j, 0, Ez_stag) * Jz(i, j, 0);
+                            Ez(i, j, 0) += end_field;
+                            end_z(i, j, 0) = end_field;
+                        } else {
+                        Ez(i, j, 0) += end_region.resistivity *
+                            end_region.Weight(i, j, 0, Ez_stag) * Jz(i, j, 0);
+                        }
+                    }
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
@@ -1600,15 +1977,10 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                 nabla2Jz += T_Algo::Dr_rDr_over_r(
                                     Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
                             } else {
-                                // m = 0 regularity: lim_{r->0} (1/r) d_r(r d_r
-                                // Jz) = 2 d_rr Jz. NOTE: trajectories of eta_H
-                                // runs with on-axis current change relative to
-                                // the historical (factor-2-low) row; the exact
-                                // curl-curl path (hyper_resistivity_curlcurl)
-                                // has this limit by composition.
-                                nabla2Jz +=
-                                    2.0_rt * T_Algo::Drr(Jz, coefs_r, n_coefs_r,
-                                                         i, j, 0, 0);
+                                // Control-volume axis limit. The Ampere current's
+                                // negative-radius guard is not necessarily an even
+                                // mirror, so do not differentiate through it.
+                                nabla2Jz += 4.0_rt * (Jz(i+1,j,0,0)-Jz(i,j,0,0)) / (dr*dr);
                             }
 
                             eh = -eta_h(rho_val, btot_val) * nabla2Jz;
@@ -1649,6 +2021,19 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
+    // Use exactly the current trial's projected force increments for the
+    // thermal work. A null context preserves every legacy path; no-resistivity
+    // evaluations omit both increments for the existing particle correction.
+    if (trial_dissipation && include_resistivity) {
+        auto const hyper=trial_dissipation->HyperField();
+        auto const viscous=trial_dissipation->ViscousField();
+        for (int c=0;c<3;++c) {
+            amrex::MultiFab::Add(*Efield[c],*hyper[c],0,0,1,0);
+            if (hybrid_model->m_visc_in_ohms_law) { amrex::MultiFab::Add(*Efield[c],*viscous[c],0,0,1,0); }
+            if (EH_out) { amrex::MultiFab::Copy(*(*EH_out)[c],*hyper[c],0,0,1,0); }
+            if (EV_out && hybrid_model->m_visc_in_ohms_law) { amrex::MultiFab::Copy(*(*EV_out)[c],*viscous[c],0,0,1,0); }
+        }
+    }
 }
 
 #elif defined(WARPX_DIM_RSPHERE)
@@ -1678,7 +2063,13 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model, const bool solve_for_Faraday,
     const bool include_resistivity, ablastr::fields::VectorField const* EH_out,
-    ablastr::fields::VectorField const* EV_out) {
+    ablastr::fields::VectorField const* EV_out,
+    ablastr::fields::VectorField const* ER_out,
+    const warpx::thermal::HybridOhmDampingFields* damping_out,
+    ablastr::fields::VectorField const* F_pressure_hall_out,
+    ablastr::fields::VectorField const* transverse_offset) {
+    bool const write_er = ER_out != nullptr;
+    bool const write_damping = damping_out != nullptr;
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
 
@@ -1686,6 +2077,11 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     // get hybrid model parameters
     const auto eta = hybrid_model->m_eta;
+    const auto end_region = hybrid_model->EndRegion(lev);
+    // End eta is numerical magnetic damping. The legacy thermal path heats
+    // electrons with it; the opt-in edge-work path books its signed sink
+    // separately. Full-minus-nores removes its ion force, and no physical
+    // OU/drag rate includes this increment.
     const auto eta_te = hybrid_model->m_eta_te;
     const bool eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
     amrex::MultiFab const* const te_mf = hybrid_model->ResistivityTe(lev);
@@ -1695,7 +2091,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
-    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia && transverse_offset==nullptr;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
@@ -1748,6 +2144,11 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     // evaluation (theta-implicit hybrid only; stays zero elsewhere).
     amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
+    bool const direct_yee_inertia = hybrid_model->UseCompatibleYeeInertia();
+    ablastr::fields::VectorField Ei_yee;
+    if (direct_yee_inertia) {
+        Ei_yee = warpx.m_fields.get_alldirs("hybrid_E_inertial_fp", lev);
+    }
     // Density pedestal (change of variables, HybridPICModel::m_density_pedestal):
     // the Hall / grad Pe divisor is max(rho + rho_ped, rho_floor) instead of
     // max(rho, rho_floor); the Holmstrom gate, the external-E subtraction
@@ -1960,6 +2361,18 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
+        Array4<Real const> longitudinal0, longitudinal1, longitudinal2;
+        if (transverse_offset) {
+            longitudinal0=(*transverse_offset)[0]->const_array(mfi);
+            longitudinal1=(*transverse_offset)[1]->const_array(mfi);
+            longitudinal2=(*transverse_offset)[2]->const_array(mfi);
+        }
+        Array4<Real const> eiY0, eiY1, eiY2;
+        if (direct_yee_inertia) {
+            eiY0 = Ei_yee[0]->const_array(mfi);
+            eiY1 = Ei_yee[1]->const_array(mfi);
+            eiY2 = Ei_yee[2]->const_array(mfi);
+        }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> rho_ped;
         if (rho_ped_mf)
@@ -1992,6 +2405,27 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
         // E_H mirror arrays (default-constructed and never indexed unless
         // EH_out was passed -- the kernels gate the write on the Array4).
+        Array4<Real> end_x, end_y, end_z, gate_x, gate_y, gate_z;
+        if (write_damping) {
+            end_x = damping_out->end_resistivity[0]->array(mfi);
+            gate_x = damping_out->end_holmstrom[0]->array(mfi);
+            end_y = damping_out->end_resistivity[1]->array(mfi);
+            gate_y = damping_out->end_holmstrom[1]->array(mfi);
+            end_z = damping_out->end_resistivity[2]->array(mfi);
+            gate_z = damping_out->end_holmstrom[2]->array(mfi);
+        }
+        Array4<Real> ph_x, ph_y, ph_z;
+        if (F_pressure_hall_out) {
+            ph_x = (*F_pressure_hall_out)[0]->array(mfi);
+            ph_y = (*F_pressure_hall_out)[1]->array(mfi);
+            ph_z = (*F_pressure_hall_out)[2]->array(mfi);
+        }
+        Array4<Real> er_x, er_y, er_z;
+        if (write_er) {
+            er_x = (*ER_out)[0]->array(mfi);
+            er_y = (*ER_out)[1]->array(mfi);
+            er_z = (*ER_out)[2]->array(mfi);
+        }
         Array4<Real> eh_x, eh_y, eh_z;
         if (write_eh) {
             eh_x = (*EH_out)[0]->array(mfi);
@@ -2048,6 +2482,9 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
+            CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+            CompensatedOhm::Pair quotient_density{1.,0.};
+            Real quotient_gate=0._rt;
 
             if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ex(i, j, k) = 0._rt;
@@ -2070,14 +2507,44 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
+                if (transverse_offset) {
+                    int const axis=AMREX_SPACEDIM==1 ? -1 : 0;
+                    quotient_hall=CompensatedOhm::Average(enE,i,j,k,0,axis);
+                    quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                        : include_electron_pressure_term)
+                        ? CompensatedOhm::Gradient(Pe,i,j,k,axis,coefs_x[0])
+                        : CompensatedOhm::Pair{0.,0.};
+                    quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                    if(floor_w==0. && rho_val_limited>rho_floor) {
+                        auto exact_density=CompensatedOhm::Average(rho,i,j,k,0,axis);
+                        if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                            CompensatedOhm::Average(rho_ped,i,j,k,0,axis));
+                        quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                    }
+                }
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                    if (transverse_offset) quotient_gate *= 0.5_rt * (1._rt + std::tanh(
                         (rho_val - rho_floor) * holmstrom_inv_width));
                 }
                 Ex(i, j, k) = ohm_val;
             }
+            if (end_region.holmstrom)
+            {
+                Real const before_end = write_damping ? Ex(i, j, k) : 0._rt;
+                Ex(i, j, k) *= 1. - end_region.Weight(i, j, k, Ex_stag);
+                if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,k,Ex_stag);
+                if (write_damping) { gate_x(i, j, k) = Ex(i, j, k) - before_end; }
+            }
+            if (ph_x) { ph_x(i, j, k) = Ex(i, j, k); }
+            if (transverse_offset) {
+                Ex(i,j,k)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                    quotient_density,quotient_gate,longitudinal0(i,j,k));
+            }
             if (include_electron_inertia) {
-                Ex(i, j, k) += Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
+                Ex(i, j, k) += direct_yee_inertia ? eiY0(i, j, k)
+                    : Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
             }
 
 
@@ -2097,11 +2564,33 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ex(i, j, k) +=
-                    (eta_has_Te ? eta_te(rho_val, jtot_val,
-                                         Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
-                                : eta(rho_val, jtot_val, t_new)) *
-                    Jx(i, j, k);
+                if (write_er) {
+                    Real const global_eta_field =
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jx(i, j, k);
+                    Ex(i, j, k) += global_eta_field;
+                    er_x(i, j, k) = global_eta_field;
+                } else {
+                    Ex(i, j, k) +=
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jx(i, j, k);
+                }
+                if (end_region.resistivity > 0. && include_resistivity)
+                {
+                    if (write_damping) {
+                        Real const end_field = end_region.resistivity *
+                            end_region.Weight(i, j, k, Ex_stag) * Jx(i, j, k);
+                        Ex(i, j, k) += end_field;
+                        end_x(i, j, k) = end_field;
+                    } else {
+                    Ex(i, j, k) += end_region.resistivity *
+                        end_region.Weight(i, j, k, Ex_stag) * Jx(i, j, k);
+                    }
+                }
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
@@ -2162,6 +2651,9 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
+            CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+            CompensatedOhm::Pair quotient_density{1.,0.};
+            Real quotient_gate=0._rt;
 
             if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ey(i, j, k) = 0._rt;
@@ -2184,14 +2676,44 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
+                if (transverse_offset) {
+                    int const axis=AMREX_SPACEDIM==3 ? 1 : -1;
+                    quotient_hall=CompensatedOhm::Average(enE,i,j,k,1,axis);
+                    quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                        : include_electron_pressure_term)
+                        ? CompensatedOhm::Gradient(Pe,i,j,k,axis,coefs_y[0])
+                        : CompensatedOhm::Pair{0.,0.};
+                    quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                    if(floor_w==0. && rho_val_limited>rho_floor) {
+                        auto exact_density=CompensatedOhm::Average(rho,i,j,k,0,axis);
+                        if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                            CompensatedOhm::Average(rho_ped,i,j,k,0,axis));
+                        quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                    }
+                }
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                    if (transverse_offset) quotient_gate *= 0.5_rt * (1._rt + std::tanh(
                         (rho_val - rho_floor) * holmstrom_inv_width));
                 }
                 Ey(i, j, k) = ohm_val;
             }
+            if (end_region.holmstrom)
+            {
+                Real const before_end = write_damping ? Ey(i, j, k) : 0._rt;
+                Ey(i, j, k) *= 1. - end_region.Weight(i, j, k, Ey_stag);
+                if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,k,Ey_stag);
+                if (write_damping) { gate_y(i, j, k) = Ey(i, j, k) - before_end; }
+            }
+            if (ph_y) { ph_y(i, j, k) = Ey(i, j, k); }
+            if (transverse_offset) {
+                Ey(i,j,k)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                    quotient_density,quotient_gate,longitudinal1(i,j,k));
+            }
             if (include_electron_inertia) {
-                Ey(i, j, k) += Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
+                Ey(i, j, k) += direct_yee_inertia ? eiY1(i, j, k)
+                    : Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
             }
 
 
@@ -2211,11 +2733,33 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ey(i, j, k) +=
-                    (eta_has_Te ? eta_te(rho_val, jtot_val,
-                                         Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
-                                : eta(rho_val, jtot_val, t_new)) *
-                    Jy(i, j, k);
+                if (write_er) {
+                    Real const global_eta_field =
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jy(i, j, k);
+                    Ey(i, j, k) += global_eta_field;
+                    er_y(i, j, k) = global_eta_field;
+                } else {
+                    Ey(i, j, k) +=
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jy(i, j, k);
+                }
+                if (end_region.resistivity > 0. && include_resistivity)
+                {
+                    if (write_damping) {
+                        Real const end_field = end_region.resistivity *
+                            end_region.Weight(i, j, k, Ey_stag) * Jy(i, j, k);
+                        Ey(i, j, k) += end_field;
+                        end_y(i, j, k) = end_field;
+                    } else {
+                    Ey(i, j, k) += end_region.resistivity *
+                        end_region.Weight(i, j, k, Ey_stag) * Jy(i, j, k);
+                    }
+                }
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
@@ -2274,6 +2818,9 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+            CompensatedOhm::Pair quotient_hall{0.,0.}, quotient_grad{0.,0.};
+            CompensatedOhm::Pair quotient_density{1.,0.};
+            Real quotient_gate=0._rt;
 
             if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ez(i, j, k) = 0._rt;
@@ -2296,14 +2843,44 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                if (transverse_offset) {
+                    int const axis=AMREX_SPACEDIM-1;
+                    quotient_hall=CompensatedOhm::Average(enE,i,j,k,2,axis);
+                    quotient_grad=(solve_for_Faraday ? add_grad_pe_faraday
+                        : include_electron_pressure_term)
+                        ? CompensatedOhm::Gradient(Pe,i,j,k,axis,coefs_z[0])
+                        : CompensatedOhm::Pair{0.,0.};
+                    quotient_density={rho_val_limited,0.}; quotient_gate=1._rt;
+                    if(floor_w==0. && rho_val_limited>rho_floor) {
+                        auto exact_density=CompensatedOhm::Average(rho,i,j,k,0,axis);
+                        if(use_pedestal) exact_density=CompensatedOhm::Add(exact_density,
+                            CompensatedOhm::Average(rho_ped,i,j,k,0,axis));
+                        quotient_density=CompensatedOhm::WithHigh(exact_density,rho_val_limited);
+                    }
+                }
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                    if (transverse_offset) quotient_gate *= 0.5_rt * (1._rt + std::tanh(
                         (rho_val - rho_floor) * holmstrom_inv_width));
                 }
                 Ez(i, j, k) = ohm_val;
             }
+            if (end_region.holmstrom)
+            {
+                Real const before_end = write_damping ? Ez(i, j, k) : 0._rt;
+                Ez(i, j, k) *= 1. - end_region.Weight(i, j, k, Ez_stag);
+                if (transverse_offset) quotient_gate *= 1. - end_region.Weight(i,j,k,Ez_stag);
+                if (write_damping) { gate_z(i, j, k) = Ez(i, j, k) - before_end; }
+            }
+            if (ph_z) { ph_z(i, j, k) = Ez(i, j, k); }
+            if (transverse_offset) {
+                Ez(i,j,k)=CompensatedOhm::OffsetQuotient(quotient_hall,quotient_grad,
+                    quotient_density,quotient_gate,longitudinal2(i,j,k));
+            }
             if (include_electron_inertia) {
-                Ez(i, j, k) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
+                Ez(i, j, k) += direct_yee_inertia ? eiY2(i, j, k)
+                    : Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
             }
 
 
@@ -2323,11 +2900,33 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ez(i, j, k) +=
-                    (eta_has_Te ? eta_te(rho_val, jtot_val,
-                                         Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
-                                : eta(rho_val, jtot_val, t_new)) *
-                    Jz(i, j, k);
+                if (write_er) {
+                    Real const global_eta_field =
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jz(i, j, k);
+                    Ez(i, j, k) += global_eta_field;
+                    er_z(i, j, k) = global_eta_field;
+                } else {
+                    Ez(i, j, k) +=
+                        (eta_has_Te ? eta_te(rho_val, jtot_val,
+                                             Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
+                                    : eta(rho_val, jtot_val, t_new)) *
+                        Jz(i, j, k);
+                }
+                if (end_region.resistivity > 0. && include_resistivity)
+                {
+                    if (write_damping) {
+                        Real const end_field = end_region.resistivity *
+                            end_region.Weight(i, j, k, Ez_stag) * Jz(i, j, k);
+                        Ez(i, j, k) += end_field;
+                        end_z(i, j, k) = end_field;
+                    } else {
+                    Ez(i, j, k) += end_region.resistivity *
+                        end_region.Weight(i, j, k, Ez_stag) * Jz(i, j, k);
+                    }
+                }
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {

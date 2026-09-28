@@ -24,6 +24,79 @@
 
 using namespace amrex;
 
+namespace
+{
+    // A physical curl guard also needs its tangential box guards: the next
+    // curl/interpolation can read their intersection at a physical boundary.
+    // FillBoundary cannot obtain those corners from any valid cell. Complete
+    // them from A without extending the requested physical-boundary region.
+    [[maybe_unused]] Box CurlEvaluationBox (
+        MFIter const& mfi, MultiFab const& field, IntVect const& physical_grow,
+        Geometry const& geom)
+    {
+        if (physical_grow == IntVect::TheZeroVector()) {
+            return mfi.tilebox(field.ixType().toIntVect());
+        }
+        // A physical ghost can be consumed across a tangential FAB seam.
+        // Complete every local direction to the requested physical width;
+        // FillBoundary cannot source a corner outside the physical domain.
+        int width = 1;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            width = amrex::max(width, physical_grow[d]);
+        }
+        IntVect const local_grow(width);
+        IntVect domain_grow = physical_grow;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            if (geom.isPeriodic(d)) {
+                domain_grow[d] = local_grow[d];
+            }
+        }
+        return mfi.tilebox(field.ixType().toIntVect(), local_grow)
+            & amrex::grow(amrex::convert(geom.Domain(), field.ixType()), domain_grow);
+    }
+
+    // Check actual integer-index footprints before any grown curl launch. Yee
+    // differences read p and p+e_d; collocated differences read p-e_d and p+e_d.
+    // setType preserves the index bounds (convert would change them).
+    [[maybe_unused]] void AssertCurlStorage (
+        MFIter const& mfi, MultiFab const& output,
+        ablastr::fields::VectorField const& input, int const component,
+        Box const& region, bool const collocated, iMultiFab const* eb_flag,
+        bool const axis_mode = false)
+    {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(output[mfi].box().contains(region),
+            "ComputeCurlA: output allocation does not contain the completed curl guards");
+        if (eb_flag) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE((*eb_flag)[mfi].box().contains(region),
+                "ComputeCurlA: EB flag allocation does not contain the completed curl guards");
+        }
+        for (int c = 0; c < 3; ++c) {
+            if (c == component) { continue; }
+            int const physical_direction = 3 - component - c;
+            int direction = physical_direction;
+#if defined(WARPX_DIM_RCYLINDER)
+            direction = physical_direction == 0 ? 0 : -1;
+#elif AMREX_SPACEDIM == 2
+            direction = physical_direction == 2 ? 1 : (physical_direction == 0 ? 0 : -1);
+#elif AMREX_SPACEDIM == 1
+            direction = physical_direction == 2 ? 0 : -1;
+#endif
+            Box required = region;
+            required.setType(input[c]->ixType());
+            if (direction >= 0) {
+                required.growHi(direction, 1);
+                if (collocated) { required.growLo(direction, 1); }
+            }
+            // The higher-mode cylindrical Br axis formula also samples Az at r=dr.
+            if (axis_mode && component == 0 && c == 2 && required.smallEnd(0) == 0) {
+                required.setBig(0, amrex::max(required.bigEnd(0), 1));
+            }
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE((*input[c])[mfi].box().contains(required),
+                "ComputeCurlA: input allocation does not contain the completed curl stencil");
+        }
+    }
+}
+
 void FiniteDifferenceSolver::ComputeCurlA (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
@@ -137,12 +210,22 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
         // ghosts; the axis side is clipped since r < 0 has no meaning for
         // the cylindrical stencils (axis ghosts are handled by the axis
         // boundary treatment of the consumer).
-        Box tbr  = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow);
-        Box tbt  = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow);
-        Box tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow);
+        auto const& geom = WarpX::GetInstance().Geom(lev);
+        Box tbr = CurlEvaluationBox(mfi, *Bfield[0], ngrow, geom);
+        Box tbt = CurlEvaluationBox(mfi, *Bfield[1], ngrow, geom);
+        Box tbz = CurlEvaluationBox(mfi, *Bfield[2], ngrow, geom);
         if (ngrow != amrex::IntVect::TheZeroVector() && m_rmin == 0._rt) {
             for (Box* b : {&tbr, &tbt, &tbz}) {
                 b->setSmall(0, amrex::max(b->smallEnd(0), 0));
+            }
+        }
+
+        if (ngrow != IntVect::TheZeroVector()) {
+            Box const regions[3]{tbr, tbt, tbz};
+            for (int c = 0; c < 3; ++c) {
+                auto const* flag = EB::enabled() ? eb_update_B[c].get() : nullptr;
+                AssertCurlStorage(mfi, *Bfield[c], Afield, c, regions[c], false, flag,
+                                  m_rmin == 0._rt && m_nmodes > 1);
             }
         }
 
@@ -382,9 +465,19 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
         // Extract tileboxes for which to loop (optionally grown into the
         // guard region for analytic external fields, see the cylindrical
         // variant)
-        Box const& tbx  = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow);
-        Box const& tby  = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow);
-        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow);
+        auto const& geom = WarpX::GetInstance().Geom(lev);
+        Box const tbx = CurlEvaluationBox(mfi, *Bfield[0], ngrow, geom);
+        Box const tby = CurlEvaluationBox(mfi, *Bfield[1], ngrow, geom);
+        Box const tbz = CurlEvaluationBox(mfi, *Bfield[2], ngrow, geom);
+
+        if (ngrow != IntVect::TheZeroVector()) {
+            Box const regions[3]{tbx, tby, tbz};
+            for (int c = 0; c < 3; ++c) {
+                auto const* flag = EB::enabled() ? eb_update_B[c].get() : nullptr;
+                AssertCurlStorage(mfi, *Bfield[c], Afield, c, regions[c],
+                                  WarpX::grid_type == GridType::Collocated, flag);
+            }
+        }
 
         // Calculate the curl of A
         amrex::ParallelFor(tbx, tby, tbz,

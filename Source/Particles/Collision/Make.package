@@ -11,3 +11,6 @@ include $(WARPX_HOME)/Source/Particles/Collision/HybridResistiveDrag/Make.packag
 include $(WARPX_HOME)/Source/Particles/Collision/HybridElectronStopping/Make.package
 
 VPATH_LOCATIONS   += $(WARPX_HOME)/Source/Particles/Collision
+
+CEXE_sources += NativeCollisionTransaction.cpp
+CEXE_headers += NativeCollisionTransaction.H

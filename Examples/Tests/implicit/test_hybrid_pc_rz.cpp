@@ -513,6 +513,7 @@ main (int argc, char** argv) {
             pp.query("sigma", op.sigma);
             pp.query("sigma_w", op.sigma_w);
             pp.query("chi", op.whistler_defect);
+            pp.query("rz_block_symbol",op.rz_block_symbol);
             if (outer) {
                 coefficients(op, ref);
                 outer_inverse(op, ref);

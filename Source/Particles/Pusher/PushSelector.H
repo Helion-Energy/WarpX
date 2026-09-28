@@ -103,4 +103,44 @@ void doParticleMomentumPush(amrex::ParticleReal& ux,
 //    }
 }
 
+/** Recorder route is selected only by explicitly enabled implicit capture. */
+template <int do_sync, typename BorisRecorder>
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+void doParticleMomentumPush(amrex::ParticleReal& ux,
+                            amrex::ParticleReal& uy,
+                            amrex::ParticleReal& uz,
+                            const amrex::ParticleReal Ex,
+                            const amrex::ParticleReal Ey,
+                            const amrex::ParticleReal Ez,
+                            const amrex::ParticleReal Bx,
+                            const amrex::ParticleReal By,
+                            const amrex::ParticleReal Bz,
+                            const int ion_lev,
+                            const amrex::ParticleReal m,
+                            const amrex::ParticleReal a_q,
+                            const ParticlePusherAlgo pusher_algo,
+                            const int do_crr,
+#ifdef WARPX_QED
+                            const amrex::Real t_chi_max,
+#endif
+                            const amrex::Real dt,
+                            MomentumPushType momentum_push_type, BorisRecorder const& recorder)
+{
+    recorder.Invalidate();
+    if (do_crr || pusher_algo != ParticlePusherAlgo::Boris ||
+        momentum_push_type != MomentumPushType::Full || do_sync != 0) {
+        // Preserve native unsupported dispatch, but never label it a Boris record.
+        doParticleMomentumPush<do_sync>(ux,uy,uz,Ex,Ey,Ez,Bx,By,Bz,ion_lev,m,a_q,
+            pusher_algo,do_crr,
+#ifdef WARPX_QED
+            t_chi_max,
+#endif
+            dt,momentum_push_type);
+        return;
+    }
+    amrex::ParticleReal qp = a_q;
+    qp *= ion_lev;
+    UpdateMomentumBoris(ux,uy,uz,Ex,Ey,Ez,Bx,By,Bz,qp,m,dt,momentum_push_type,recorder);
+}
+
 #endif // WARPX_PARTICLES_PUSHER_SELECTOR_H_

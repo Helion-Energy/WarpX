@@ -571,6 +571,24 @@ WarpX::UpdateAuxiliaryData ()
 }
 
 void
+WarpX::InterpolateLevelZeroFieldToAux (
+    ablastr::fields::VectorField const& auxiliary,
+    ablastr::fields::VectorField const& source) const
+{
+    AMREX_ALWAYS_ASSERT(finest_level==0);
+    for (int c=0;c<3;++c) {
+        AMREX_ALWAYS_ASSERT(auxiliary[c] && source[c] &&
+            auxiliary[c]->ixType().nodeCentered() &&
+            auxiliary[c]->DistributionMap()==source[c]->DistributionMap() &&
+            auxiliary[c]->boxArray()==amrex::convert(source[c]->boxArray(),amrex::IntVect::TheNodeVector()));
+    }
+    InterpLevelZeroStagToNodal(auxiliary,source,
+        device_field_centering_stencil_coeffs_x,
+        device_field_centering_stencil_coeffs_y,
+        device_field_centering_stencil_coeffs_z);
+}
+
+void
 WarpX::UpdateAuxiliaryDataStagToNodal ()
 {
 #ifndef WARPX_USE_FFT

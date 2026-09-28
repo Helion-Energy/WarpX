@@ -5,6 +5,8 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "HybridElectronStopping.H"
+#include "NativeStoppingMap.H"
+#include "Particles/Gather/StoppingGatherGeometry.H"
 
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -127,7 +129,7 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
         // qdsmc daughter deposit is unthreaded).
         for (WarpXParIter pti(species, lev); pti.isValid(); ++pti)
         {
-            amrex::Box const & box = pti.validbox();
+            amrex::Box const box = warpx::particles::StoppingGatherBox(pti.validbox());
             amrex::XDim3 const xyzmin = WarpX::LowerCorner(box, lev, 0._rt);
             amrex::Dim3 const lo = amrex::lbound(box);
 
@@ -180,18 +182,8 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
 
                 // G&R Eq. 14.12 slowing-down rate: the background_stopping
                 // electron branch's alpha, with the input Coulomb logarithm.
-                amrex::Real constexpr pi   = MathConst::pi;
-                amrex::Real constexpr ep0  = PhysConst::epsilon_0;
-                amrex::Real constexpr q_e2 = PhysConst::q_e * PhysConst::q_e;
-                amrex::Real constexpr ep02 = ep0 * ep0;
-
-                amrex::Real const pi32 = pi * std::sqrt(pi);
-                amrex::Real const q2   = species_charge * species_charge;
-                amrex::Real const T32  = T_e * std::sqrt(T_e);
-
-                amrex::Real const nu_s = std::sqrt(2._rt) * n_e * q2 * q_e2
-                    * std::sqrt(PhysConst::m_e) * clog
-                    / (12._rt * pi32 * ep02 * species_mass * T32);
+                amrex::Real const nu_s = warpx::particles::NativeStoppingRate(
+                    n_e, T_e, species_charge, species_mass, clog);
 
                 // u_e at the particle (Ve_fp in the E gather slot; B rides
                 // along in the B slot and is not used).
@@ -227,27 +219,13 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 // unconditionally stable at any nu_s dt. The momenta store
                 // the proper velocity u = gamma v: convert u -> v, relax,
                 // convert back (|v_new| < c since |u_e| < c).
-                amrex::ParticleReal constexpr inv_c2 =
-                    1._prt / (PhysConst::c * PhysConst::c);
-                amrex::ParticleReal const u2b = ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
-                amrex::ParticleReal const gb  = std::sqrt(1._prt + u2b*inv_c2);
-                amrex::ParticleReal const fac = std::exp(-nu_s*dt);
-                amrex::ParticleReal const vxn = Vex + (ux[ip]/gb - Vex)*fac;
-                amrex::ParticleReal const vyn = Vey + (uy[ip]/gb - Vey)*fac;
-                amrex::ParticleReal const vzn = Vez + (uz[ip]/gb - Vez)*fac;
-                amrex::ParticleReal const v2n = vxn*vxn + vyn*vyn + vzn*vzn;
-                amrex::ParticleReal const ga  = 1._prt/std::sqrt(1._prt - v2n*inv_c2);
-                ux[ip] = ga*vxn;
-                uy[ip] = ga*vyn;
-                uz[ip] = ga*vzn;
-
-                // Weighted kinetic-energy loss [J], with
-                //   KE = (gamma - 1) m c^2 = m |u|^2 / (gamma + 1)
-                // (the second form avoids the (gamma - 1) cancellation for
-                // mildly relativistic ions).
-                amrex::ParticleReal const u2a = ga*ga*v2n;
-                amrex::Real const dE = wp[ip] * species_mass
-                    * (u2b/(gb + 1._prt) - u2a/(ga + 1._prt));
+                auto const kick = warpx::particles::NativeStoppingKick(
+                    {ux[ip], uy[ip], uz[ip]}, {Vex, Vey, Vez}, nu_s, dt,
+                    wp[ip], species_mass);
+                ux[ip] = kick.proper[0];
+                uy[ip] = kick.proper[1];
+                uz[ip] = kick.proper[2];
+                amrex::Real const dE = kick.weighted_lab_loss;
 
                 // Scatter-add w dKE as an energy DENSITY [J/m^3] with the
                 // gather-conjugate linear nodal weights: each corner node

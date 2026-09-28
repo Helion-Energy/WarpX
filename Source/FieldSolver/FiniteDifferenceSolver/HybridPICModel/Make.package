@@ -1,4 +1,7 @@
 CEXE_sources += HybridPICModel.cpp
+CEXE_sources += ElectronThermalRuntime.cpp
+CEXE_sources += ElectronDensityControl.cpp
+CEXE_sources += HybridPICDensityControl.cpp
 CEXE_sources += EBJBoundary.cpp
 CEXE_sources += EBJBoundaryFold.cpp
 CEXE_sources += ExternalVectorPotential.cpp

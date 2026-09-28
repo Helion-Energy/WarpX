@@ -6,6 +6,7 @@
 #include <AMReX_MultiFabUtil.H>
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_Reduce.H>
+#include <AMReX_GpuAtomic.H>
 #include <cmath>
 
 using namespace amrex::literals;
@@ -60,9 +61,8 @@ lap (amrex::Array4<amrex::Real const> const& a, int i, int j, int c,
             v -= a(i, j, 0) / (r * r);
         }
     } else if (c == 2) {
-        // Match the native Ohm hyper-resistive axial branch at r=0.
-        v += 2._rt * (a(i - 1, j, 0) - 2._rt * a(i, j, 0) + a(i + 1, j, 0)) /
-             (dr * dr);
+        // Same control-volume limit as the physical Ohm row: no axis guard read.
+        v += 4._rt * (a(i + 1, j, 0) - a(i, j, 0)) / (dr * dr);
     } else {
         v = 0._rt;
     }
@@ -569,6 +569,7 @@ HybridPICRZOperator::Smooth (int lev, int sweeps) {
     auto const dr = l.geom.CellSize(0), dz = l.geom.CellSize(1);
     RT const l2 = 4._rt / (dr * dr) + 4._rt / (dz * dz),
              l1 = 2._rt / dr + 2._rt / dz;
+    bool const rz_symbol = rz_block_symbol;
     RT const chi = whistler_defect, damp = sigma, dampw = sigma_w;
     for (int sweep = 0; sweep < sweeps; ++sweep) {
         ApplyPair(lev, l.action, l.x);
@@ -623,12 +624,17 @@ HybridPICRZOperator::Smooth (int lev, int sweeps) {
                         hybrid_pc_rz::to_node(c0, i, j, 0, RowWeight),
                         c1(i, j, k, RowWeight),
                         hybrid_pc_rz::to_node(c2, i, j, 2, RowWeight)};
-                    RT const au = aeta + n(i, j, k, 6) + ah * l2;
-                    RT const diagonal =
-                        l1 * u + l2 * (aeta + n(i, j, k, 6) + 2._rt * ah * l2);
-                    RT const rotation =
-                        bm *
-                        (chi * l2 * (h + mm * ir * (aeta + ah * l2)) + mm * ir);
+                    // PR6613's stiff-RZ block bounds. Keep the native Yee
+                    // residual and node/edge sandwich exact; only the local
+                    // relaxation block uses these conservative symbols. The
+                    // axis curl-curl row has coefficient 4/dr^2 instead of the
+                    // interior radial second difference and needs its own bound.
+                    RT const l2n = rz_symbol ? 2.*l2+(i == 0 ? 8./(dr*dr) : 0.) : l2;
+                    RT const l2h = rz_symbol ? l2+(i == 0 ? 4./(dr*dr) : 0.) : l2;
+                    RT const au = aeta + n(i, j, k, 6) + ah * l2h;
+                    RT const diagonal = l1*u+l2n*(aeta+n(i,j,k,6)
+                        +(rz_symbol ? 1. : 2.)*ah*l2h);
+                    RT const rotation = bm*(chi*l2n*(h+mm*ir*(aeta+ah*l2h))+mm*ir);
                     RT alpha[3], beta[3];
                     for (int c = 0; c < 3; ++c) {
                         alpha[c] = 1._rt + weight[c] * diagonal;
@@ -648,7 +654,7 @@ HybridPICRZOperator::Smooth (int lev, int sweeps) {
                         int const a = (c + 1) % 3, d = (c + 2) % 3;
                         diag[c] = re[c] - weight[c] * au * rw[c];
                         s[c] = diag[c] - weight[c] * bm *
-                                             (h + mm * ir * (aeta + ah * l2)) *
+                                             (h + mm * ir * (aeta + ah * l2h)) *
                                              (rw[a] * b[d] - rw[d] * b[a]);
                     }
                     // Invert diag(alpha)+diag(beta)*(v cross b). A
@@ -693,10 +699,13 @@ HybridPICRZOperator::Smooth (int lev, int sweeps) {
                                    au * r(i, j, k, 1) / cf(i, j, k, Scale)) /
                                       alpha +
                                   hybrid_pc_rz::to_edge(sm, i, j, c, c);
+                    RT const l2n = rz_symbol
+                        ? 2.*l2+((i == 0 && c != 0) ? 8./(dr*dr) :
+                                  (i == 0 ? 4./(dr*dr) : 0.)) : l2;
                     x(i, j, k, 0) += damp * de;
                     x(i, j, k, 1) +=
                         dampw *
-                        (r(i, j, k, 1) + cf(i, j, k, Scale) * chi * l2 * de);
+                        (r(i, j, k, 1) + cf(i, j, k, Scale) * chi * l2n * de);
                 });
             }
             RestoreRows(*l.x[c], *l.b[c], lev, c);
@@ -810,9 +819,53 @@ HybridPICRZOperator::Solve (Field const& out, Field const& rhs, int inner_max,
         assign(x, levels[0]->x);
         last_iterations = vcycles;
     }
+    if (verbose > 1) { PrintResidualMap(x,b); }
     for (int c = 0; c < 3; ++c) {
         MF::Copy(*out[c], *x[c], 0, 0, 1, 0);
         RestoreRows(*out[c], *rhs[c], 0, c);
+    }
+}
+void
+HybridPICRZOperator::PrintResidualMap (Pair const& x, Pair const& rhs) {
+    auto residual = makeVecRHS();
+    ApplyPair(0,residual,x);
+    linComb(residual,1.,rhs,-1.,residual);
+    constexpr int bins = 8, count = 2*bins*bins;
+    amrex::Gpu::DeviceVector<RT> device(count,0.);
+    auto* sum = device.data();
+    auto const& l = *levels[0];
+    auto const dr = l.geom.CellSize(0), rmax = l.geom.ProbHi(0);
+    auto const nr = l.geom.Domain().length(0), nz = l.geom.Domain().length(1);
+    for (int c = 0; c < 3; ++c) {
+        for (amrex::MFIter mfi(*residual[c]); mfi.isValid(); ++mfi) {
+            auto const a = residual[c]->const_array(mfi);
+            auto const mask = l.owner[c]->const_array(mfi);
+            // Scatter histogram: For, not ParallelFor's independent SIMD loop.
+            amrex::For(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                RT const r = (i+(c == 0 ? .5 : 0.))*dr;
+                RT const low = amrex::max(0.,r-.5*dr), high = amrex::min(rmax,r+.5*dr);
+                RT const weight = mask(i,j,k)*.5*(high*high-low*low)/dr;
+                int const bin = amrex::min(bins-1,bins*i/nr)
+                    +bins*amrex::min(bins-1,bins*j/nz);
+                for (int n = 0; n < 2; ++n) {
+                    amrex::HostDevice::Atomic::Add(sum+bin+n*bins*bins,
+                        weight*a(i,j,k,n)*a(i,j,k,n));
+                }
+            });
+        }
+    }
+    amrex::Vector<RT> host(count);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost,device.begin(),device.end(),host.begin());
+    amrex::ParallelDescriptor::ReduceRealSum(host.data(),count);
+    for (int n = 0; n < 2; ++n) {
+        RT total = 0.;
+        for (int bin = 0; bin < bins*bins; ++bin) { total += host[bin+n*bins*bins]; }
+        amrex::Print() << "RZ_PC residual " << (n ? "W" : "E") << " norm="
+                       << std::sqrt(total) << " fractions r-fast,z-slow:";
+        for (int bin = 0; bin < bins*bins; ++bin) {
+            amrex::Print() << " " << (total > 0. ? host[bin+n*bins*bins]/total : 0.);
+        }
+        amrex::Print() << "\n";
     }
 }
 void

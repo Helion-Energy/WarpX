@@ -1,4 +1,8 @@
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
 #include "FlushFormatCheckpoint.H"
+#include "Circuit/CircuitCoupling.H"
+#include "FieldSolver/ImplicitSolvers/ThetaImplicitHybrid.H"
+#include "FieldSolver/ImplicitSolvers/ThermalRandomCheckpoint.H"
 
 #include "BoundaryConditions/PML.H"
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
@@ -63,6 +67,17 @@ FlushFormatCheckpoint::WriteToFile (
     ABLASTR_PROFILE("FlushFormatCheckpoint::WriteToFile()");
 
     auto & warpx = WarpX::GetInstance();
+    if (auto const* hybrid = warpx.get_pointer_HybridPICModel();
+        hybrid && hybrid->UsesEulerianElectronEnergy()) {
+        for (int lev = 0; lev < nlev; ++lev) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!hybrid->HasElectronThermalTrial(lev),
+                "Checkpoint cannot serialize an active nonlinear thermal trial");
+        }
+    }
+
+    if(auto const* implicit=dynamic_cast<ThetaImplicitHybrid const*>(warpx.get_pointer_ImplicitSolver()))
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(implicit->NativeEndpointCheckpointReady(),
+            "Checkpoint cannot serialize an unaccepted retained endpoint");
 
     const VisMF::Header::Version current_version = VisMF::GetHeaderVersion();
     VisMF::SetHeaderVersion(amrex::VisMF::Header::NoFabHeader_v1);
@@ -200,6 +215,14 @@ FlushFormatCheckpoint::WriteToFile (
     WriteReducedDiagsData(checkpointname);
 
     WriteHybridPICData(checkpointname);
+    if (auto const* implicit = dynamic_cast<ThetaImplicitHybrid const*>(warpx.get_pointer_ImplicitSolver())) {
+        implicit->WriteDarwinDriveReference(checkpointname);
+        implicit->WriteAcceptedEndpointCheckpoint(checkpointname);
+    }
+
+    if (auto* coupling = warpx.get_pointer_CircuitCoupling()) {
+        coupling->WriteCheckpointData(checkpointname);
+    }
 
     VisMF::SetHeaderVersion(current_version);
 
@@ -259,6 +282,13 @@ FlushFormatCheckpoint::CheckpointParticles (
             write_int_comps[index] = pc->h_redistribute_int_comp[i0_redist + index];
         }
 
+        if(warpx::darwin::NativeEndpointPairSelected(WarpX::GetInstance())) {
+            // Accepted owner history contains all implicit attributes; saving
+            // only ordinarily communicated components would silently drop them.
+            std::fill(write_real_comps.begin(),write_real_comps.end(),1);
+            std::fill(write_int_comps.begin(),write_int_comps.end(),1);
+        }
+
         pc->Checkpoint(dir, part_diag.getSpeciesName(),
                        write_real_comps, write_int_comps,
                        real_names, int_names);
@@ -306,6 +336,12 @@ FlushFormatCheckpoint::WriteReducedDiagsData (std::string const & dir) const
 void
 FlushFormatCheckpoint::WriteHybridPICData (std::string const & dir) const
 {
+    // All ranks own independent particle RNG streams. Only accepted step
+    // boundaries reach this writer; no RNG is copied in residuals/Jv.
+    auto const* model = WarpX::GetInstance().get_pointer_HybridPICModel();
+    if (model && model->UsesEulerianElectronEnergy()) {
+        warpx::thermal::WriteThermalRandomCheckpoint(dir);
+    }
     if (ParallelDescriptor::IOProcessor()) {
         auto & warpx = WarpX::GetInstance();
         auto const * hybrid_pic_model = warpx.get_pointer_HybridPICModel();
@@ -319,6 +355,21 @@ FlushFormatCheckpoint::WriteHybridPICData (std::string const & dir) const
             std::ofstream ofs(dir + "/hybrid_substeps.dat",
                               std::ofstream::trunc);
             ofs << "version 1\n" << hybrid_pic_model->m_substeps << "\n";
+            if (hybrid_pic_model->UsesEulerianElectronEnergy()) {
+                std::ofstream thermal(dir + "/electron_energy.dat", std::ofstream::trunc);
+                thermal << hybrid_pic_model->ElectronEnergyCheckpointMetadata();
+                std::ofstream density(dir + "/density_control.dat", std::ofstream::trunc);
+                density << hybrid_pic_model->DensityControlCheckpointMetadata();
+                density.flush();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(density.good(),
+                    "Cannot write accepted Eulerian density control state");
+                if (hybrid_pic_model->m_darwin) {
+                    std::ofstream history(dir + "/darwin_history.dat", std::ofstream::trunc);
+                    history << hybrid_pic_model->DarwinCheckpointMetadata();
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(history), "Unable to write Darwin history metadata");
+                }
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(thermal), "Unable to write electron energy metadata");
+            }
         }
     }
 }

@@ -9,3 +9,121 @@ CEXE_sources += WarpXSolverDOF.cpp
 CEXE_sources += WarpXSolverVec.cpp
 
 VPATH_LOCATIONS   += $(WARPX_HOME)/Source/FieldSolver/ImplicitSolvers
+
+CEXE_sources += EulerianThermalStage.cpp EulerianThermalResidual.cpp
+CEXE_sources += ThermalConductionPC.cpp ThermalStageSolver.cpp
+CEXE_headers += EulerianThermalStageUtils.H
+
+CEXE_sources += ThermalFiniteMaterial.cpp ThermalFiniteFluxResponse.cpp
+CEXE_headers += ThermalStageReceipt.H ThermalFiniteArithmetic.H ThermalFiniteConduction.H ThermalFiniteWall.H ThermalFiniteFluxResponse.H
+CEXE_sources += ThermalMassMatrixResponse.cpp
+CEXE_sources += KineticThermalMoments.cpp KineticThermalSpecies.cpp KineticThermalSpeciesNative.cpp
+
+CEXE_sources += EulerianThermalSources.cpp EulerianDissipation.cpp EulerianStoppingTransfer.cpp ThermalEnergyBalance.cpp
+
+CEXE_sources += DarwinThermalAdvance.cpp DarwinThermalInitialize.cpp DarwinThermalRemainder.cpp
+CEXE_sources += DarwinThermalContext.cpp DarwinThermalCommit.cpp
+
+CEXE_sources += ImplicitParticleEndpointAudit.cpp
+
+CEXE_sources += AcceptedIonExchange.cpp AcceptedIonExchangeNative.cpp FrozenPressureFieldCoupling.cpp
+
+CEXE_sources += DarwinLongitudinalSchur.cpp
+
+CEXE_sources += EulerianSourceDiagonal.cpp NativeConductionActivity.cpp ThermalStageInitialGuess.cpp
+CEXE_headers += EulerianSourceDiagonal.H NativeConductionActivity.H ThermalStageInitialGuess.H
+
+CEXE_sources += ExpectedIonExchangeSource.cpp ExpectedIonExchangeSourceNative.cpp ImplicitIonEndpointTrial.cpp ImplicitIonEndpointTrialNative.cpp ExpectedIonExchangeChannel.cpp ExpectedIonThermalPartner.cpp
+
+CEXE_sources += IonExchangeMomentAudit.cpp
+
+CEXE_headers += ExpectedIonExchangeSource.H ExpectedIonExchangeSource_K.H ImplicitIonEndpointTrial.H ExpectedIonExchangeChannel.H IonExchangeMomentAudit.H ExpectedIonThermalPartner.H
+
+CEXE_headers += ThermalSourceAcceptance.H
+
+CEXE_headers += ImplicitAbsorbingEndpoint.H
+
+CEXE_sources += DarwinThermalAbsorption.cpp
+CEXE_sources += DarwinThermalElectricWork.cpp
+
+CEXE_sources += ImplicitIonElectricWork.cpp ImplicitIonElectricWorkNative.cpp
+CEXE_headers += ImplicitIonElectricWork.H
+
+CEXE_sources += AbsorbingElectronInventory.cpp
+CEXE_headers += AbsorbingElectronInventory.H
+
+CEXE_sources += NativeInstantaneousForce.cpp
+CEXE_headers += NativeInstantaneousForce.H
+
+CEXE_sources += NativeSplitAmpere.cpp
+CEXE_headers += NativeSplitAmpere.H
+
+CEXE_sources += DarwinInitialRateSchur.cpp
+
+CEXE_sources += NativeEndpointField.cpp
+
+CEXE_sources += NativeInstantaneousIonCurrent.cpp
+
+CEXE_sources += NativeInstantaneousIonIncrement.cpp
+
+CEXE_sources += MassMatrixDensityProjection.cpp
+
+CEXE_sources += DarwinRZGreenSolver.cpp
+CEXE_sources += DarwinRZYeeGreenSolver.cpp
+CEXE_headers += DarwinRZYeeGreenSolver.H NativeVacuumGreenInterface.H
+
+CEXE_sources += NativeEndpointCurrentResponse.cpp
+
+CEXE_sources += DarwinVacuumAffineResponse.cpp
+CEXE_sources += DarwinVacuumHodgePC.cpp NativeJointCurrentArithmetic.cpp DarwinVacuumJointSolve.cpp
+CEXE_sources += NativeVacuumParticleSupport.cpp
+
+CEXE_sources += NativeJouleWork.cpp
+
+CEXE_sources += NativeInertiaSupport.cpp
+
+CEXE_sources += NativeVacuumConstraint.cpp
+CEXE_headers += NativeVacuumRetainedLinearOps.H
+
+CEXE_sources += NativeVacuumEndpoint.cpp
+
+CEXE_sources += NativeVacuumJouleError.cpp
+
+CEXE_sources += NativeBoundaryFieldRate.cpp
+
+CEXE_sources += NativeCoilField.cpp
+CEXE_headers += NativeCoilField.H
+CEXE_sources += NativeCircuitFieldRate.cpp
+CEXE_sources += NativeCircuitFieldImpulse.cpp
+CEXE_sources += NativeVacuumCircuitFieldRate.cpp
+
+CEXE_sources += NativeUniformStoppingEvent.cpp NativeSpatialStoppingEvent.cpp
+CEXE_sources += NativeRZSpatialStoppingEvent.cpp
+CEXE_sources += NativeAcceptedStoppingContext.cpp NativeStoppingReactionTranspose.cpp
+
+CEXE_sources += NativePECPlasma.cpp
+CEXE_headers += NativePECPlasma.H
+
+CEXE_headers += NativeLongitudinalAitken.H
+CEXE_headers += NativeLongitudinalIncrement.H
+
+CEXE_sources += NativeRetainedAcceptance.cpp NativeLongitudinalProducerCertificate.cpp
+CEXE_headers += NativeAcceptedStepCandidate.H NativeCandidateStopping.H NativeLongitudinalProducerCertificate.H
+
+CEXE_headers += NativeRZMidpointStoppingEvent.H NativeRZMidpointStoppingEventImpl.H NativeRZMidpointTemperaturePC.H
+
+CEXE_sources += NativePairedDarwinFields.cpp
+CEXE_headers += NativePairedDarwinFields.H NativePairedBuildCapability.H NativeEndpointParticleHandoff.H
+
+CEXE_sources += NativeStoppingMaterialSupport.cpp
+CEXE_headers += NativeStoppingMaterialSupport.H
+
+CEXE_sources += NativeStoppingCarryCertificate.cpp NativeStoppingMaterialReaction.cpp
+CEXE_sources += NativeStoppingMaterialOwner.cpp
+CEXE_headers += NativeStoppingCarryCertificate.H NativeStoppingMaterialReaction.H
+CEXE_headers += NativeStoppingMaterialOwner.H
+
+CEXE_sources += NativeStoppingMaterialSource.cpp
+CEXE_headers += NativeStoppingMaterialSource.H
+CEXE_headers += NativeJointCurrentArithmetic.H NativeJointCurlArithmetic.H
+CEXE_headers += NativeStoppingThetaRegistration.H

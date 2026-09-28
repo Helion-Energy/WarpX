@@ -176,6 +176,25 @@ void HybridPICPC<T,Ops>::SmoothLevel ( int a_lev, int a_nsweeps, bool a_x_is_zer
     const Real wdl2 = static_cast<Real>(m_pair_wdf*l2);
     const bool ionp = m_have_mm;
     const HybridPICPCGrid g = m_grid[a_lev];
+#if defined(WARPX_DIM_RZ)
+    // RZ collocated block symbols. The RZ curl-curl is the compact down/up
+    // composition with max symbol m_l2 = sum_d 4/h_d^2, whereas the Cartesian
+    // collocated l2 = sum_d 2/h_d^2 is TWICE the max symbol (sum_d 1/h_d^2) of
+    // its wide central composition: the block defect wdf*l2 that is stable
+    // under sigma = 1.3 in Cartesian geometry (0.8 x max symbol at wdf 0.4)
+    // was only 0.4 x max symbol here and the damped Jacobi over-relaxed the
+    // whistler band (RZ pair diverged for c_w l2 >~ 10: the formation coil
+    // field, the stiff mirror em-modes reproduction, 2026-09-14). The block
+    // is therefore sized on 2 m_l2 (Cartesian semantics) and the
+    // hyper-resistive Nyquist on the exact compact Laplacian symbol m_l2.
+    // Axis rows: the (1/r) d_r (r .) compositions carry the radial symbol
+    // 8/dr^2 instead of 4/dr^2 (curl-curl z-row through the J_z
+    // regularization 4 F_theta/dr, hyper-Laplacian r-row through the -1/r^2
+    // curvature term at r = dr/2): both symbols are raised accordingly there.
+    const bool has_axis = m_has_axis;
+    const int iax = m_geom[a_lev].Domain().smallEnd(0);
+    const Real wdf = static_cast<Real>(m_pair_wdf);
+#endif
 
     for (int sweep = 0; sweep < a_nsweeps; sweep++) {
 
@@ -404,8 +423,15 @@ void HybridPICPC<T,Ops>::SmoothLevel ( int a_lev, int a_nsweeps, bool a_x_is_zer
                     const Real bhx = coef(i,j,k,0);
                     const Real bhy = coef(i,j,k,1);
                     const Real bhz = coef(i,j,k,2);
-                    const Real cw = coef(i,j,k,3);
                     const Real aU = coef(i,j,k,4) + coef(i,j,k,5)*l2;
+                    // rotation coefficient of the block: the whistler plus the
+                    // Hall-folded ion response to the dissipative push-field
+                    // coupling, S (U_diss W) ~ w_iso aU (W x bhat) (isotropic
+                    // average of the deposited diagonal; the residuals carry
+                    // the exact anisotropic form)
+                    const Real cw = coef(i,j,k,3)
+                        + (coef(i,j,k,6) + coef(i,j,k,7) + coef(i,j,k,8))
+                          * (1.0_rt/3.0_rt) * aU;
                     // local W-hat scale (coef comp 14)
                     const Real swl = coef(i,j,k,14);
                     const Real isW = 1.0_rt/swl;
@@ -420,9 +446,27 @@ void HybridPICPC<T,Ops>::SmoothLevel ( int a_lev, int a_nsweeps, bool a_x_is_zer
                         coef(i,j,k,11)*coef(i,j,k,11)
                       + coef(i,j,k,12)*coef(i,j,k,12)
                       + coef(i,j,k,13)*coef(i,j,k,13));
-                    const Real aUb = coef(i,j,k,4) + coef(i,j,k,5)*(2.0_rt*l2);
-                    const Real alpha = 1.0_rt + l1p*uem + l2*aUb;
-                    const Real beta = wdl2*cw;
+#if defined(WARPX_DIM_RZ)
+                    const bool on_axis = has_axis && (i == iax);
+                    const Real l2n = 2.0_rt*static_cast<Real>(l2)
+                                   + (on_axis ? 8.0_rt*g.invdx2[0] : 0.0_rt);
+                    const Real l2h = static_cast<Real>(l2)
+                                   + (on_axis ? 4.0_rt*g.invdx2[0] : 0.0_rt);
+                    const Real wdl2n = wdf*l2n;
+                    amrex::ignore_unused(wdl2);
+#else
+                    const Real l2n = static_cast<Real>(l2);
+                    const Real l2h = 2.0_rt*static_cast<Real>(l2);
+                    const Real wdl2n = wdl2;
+#endif
+                    // Hyper-resistive part of the block diagonal: the node's own
+                    // coefficient times the Nyquist row sum of the (non-conservative)
+                    // c_i del2 stencil, which is exactly c_i l2h whatever the
+                    // neighbours' coefficients (a banded eta_H changes the block
+                    // elsewhere, not here); the RZ axis z-row carries 8/dr^2.
+                    const Real aUb = coef(i,j,k,4) + coef(i,j,k,5)*l2h;
+                    const Real alpha = 1.0_rt + l1p*uem + l2n*aUb;
+                    const Real beta = wdl2n*cw;
                     const Real sxb_x = sy*bhz - sz*bhy;
                     const Real sxb_y = sz*bhx - sx*bhz;
                     const Real sxb_z = sx*bhy - sy*bhx;
@@ -432,16 +476,18 @@ void HybridPICPC<T,Ops>::SmoothLevel ( int a_lev, int a_nsweeps, bool a_x_is_zer
                     const Real dEx = inv_a2b2*(alpha*sx - beta*sxb_x + b2oa*sdb*bhx);
                     const Real dEy = inv_a2b2*(alpha*sy - beta*sxb_y + b2oa*sdb*bhy);
                     const Real dEz = inv_a2b2*(alpha*sz - beta*sxb_z + b2oa*sdb*bhz);
-                    xEo(i,j,k,0) = xEx + sigma*dEx;
-                    xEo(i,j,k,1) = xEy + sigma*dEy;
-                    xEo(i,j,k,2) = xEz + sigma*dEz;
+                    // EB-covered nodes (row mask 0) hold zero on every level
+                    const Real mk = coef(i,j,k,15);
+                    xEo(i,j,k,0) = mk*(xEx + sigma*dEx);
+                    xEo(i,j,k,1) = mk*(xEy + sigma*dEy);
+                    xEo(i,j,k,2) = mk*(xEz + sigma*dEz);
                     // perp-b part of dE couples through the whistler
                     // defect, the par-b part through the full l2
                     const Real dEb = dEx*bhx + dEy*bhy + dEz*bhz;
-                    const Real dl = static_cast<Real>(l2) - wdl2;
-                    xWo(i,j,k,0) = xWx + sigmaw*(rWx + swl*(wdl2*dEx + dl*dEb*bhx));
-                    xWo(i,j,k,1) = xWy + sigmaw*(rWy + swl*(wdl2*dEy + dl*dEb*bhy));
-                    xWo(i,j,k,2) = xWz + sigmaw*(rWz + swl*(wdl2*dEz + dl*dEb*bhz));
+                    const Real dl = l2n - wdl2n;
+                    xWo(i,j,k,0) = mk*(xWx + sigmaw*(rWx + swl*(wdl2n*dEx + dl*dEb*bhx)));
+                    xWo(i,j,k,1) = mk*(xWy + sigmaw*(rWy + swl*(wdl2n*dEy + dl*dEb*bhy)));
+                    xWo(i,j,k,2) = mk*(xWz + sigmaw*(rWz + swl*(wdl2n*dEz + dl*dEb*bhz)));
                 });
         }
         // the partner now holds the new iterate (valid region); its
@@ -578,6 +624,9 @@ void HybridPICPC<T,Ops>::ProlongLevel ( int a_lev )
             const Box& bx = mfi.tilebox();
             Array4<const Real> const& xc = a_coarse.const_array(mfi);
             Array4<Real> const& xf = a_fine.array(mfi);
+            // fine-level row mask (coef comp 15): no correction lands on
+            // EB-covered nodes
+            Array4<const Real> const& mk = m_coef[a_lev]->const_array(mfi);
             amrex::ParallelFor(bx, 3,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
                 {
@@ -591,7 +640,7 @@ void HybridPICPC<T,Ops>::ProlongLevel ( int a_lev )
                     for (int a = 0; a <= fx; a++) {
                         acc += xc(ic+a, jc+b, kc+c, n);
                     }}}
-                    xf(i,j,k,n) += acc * (fx ? 0.5_rt : 1.0_rt)
+                    xf(i,j,k,n) += mk(i,j,k,15) * acc * (fx ? 0.5_rt : 1.0_rt)
                                        * (fy ? 0.5_rt : 1.0_rt)
                                        * (fz ? 0.5_rt : 1.0_rt);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -602,13 +651,13 @@ void HybridPICPC<T,Ops>::ProlongLevel ( int a_lev )
                     for (int a = 0; a <= fx; a++) {
                         acc += xc(ic+a, jc+b, k, n);
                     }}
-                    xf(i,j,k,n) += acc * (fx ? 0.5_rt : 1.0_rt)
+                    xf(i,j,k,n) += mk(i,j,k,15) * acc * (fx ? 0.5_rt : 1.0_rt)
                                        * (fy ? 0.5_rt : 1.0_rt);
 #else // WARPX_DIM_1D_Z
                     const int ic = i/2; const int fx = i - 2*ic;
                     Real acc = 0.0_rt;
                     for (int a = 0; a <= fx; a++) { acc += xc(ic+a, j, k, n); }
-                    xf(i,j,k,n) += acc * (fx ? 0.5_rt : 1.0_rt);
+                    xf(i,j,k,n) += mk(i,j,k,15) * acc * (fx ? 0.5_rt : 1.0_rt);
 #endif
                 });
         }

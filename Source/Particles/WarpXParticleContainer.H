@@ -216,6 +216,20 @@ public:
     WarpXParticleContainer(WarpXParticleContainer&&)                 = default;
     WarpXParticleContainer& operator=(WarpXParticleContainer&&)      = default;
 
+    /** Explicit owner transaction relocation, preserving every stored attribute.
+     * Uses the ordinary local/global native redistribution arguments while
+     * temporarily enabling all communication flags. Original flags and packet
+     * metadata are restored on success and C++ exception; particle rollback
+     * after a failed relocation remains the caller's responsibility.
+     */
+    void RedistributeAllAttributes (bool local, amrex::IntVect const& max_cells);
+
+    /** Read a complete accepted checkpoint, including the native reader's
+     * redistribution. Restore ordinary communication flags on every exit.
+     * The caller verifies the ordered component schema before entry.
+     */
+    void RestartAllAttributes (std::string const& directory, std::string const& name);
+
     virtual void InitData () = 0;
 
     virtual void InitIonizationModule () {}
@@ -572,6 +586,10 @@ public:
      *  invalid particles — double invocation double-counts.
      */
     void TallyBoundaryLostParticles ();
+
+    /** Read-only native boundary law for deterministic implicit endpoint prediction. */
+    [[nodiscard]] const ParticleBoundaries::ParticleBoundariesData&
+    GetParticleBoundaryData () const { return m_boundary_conditions.data; }
 
     /** Rank-local cumulative tallies of particles lost to Absorbing/Open
      *  domain faces; index dim*2+side. Empty until the first loss-capable

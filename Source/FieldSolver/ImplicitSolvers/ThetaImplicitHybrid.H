@@ -7,16 +7,25 @@
 #ifndef THETA_IMPLICIT_HYBRID_H_
 #define THETA_IMPLICIT_HYBRID_H_
 
+#include "NativePairedDarwinFields.H"
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 #include "ImplicitSolver.H"
+#include "NativeAcceptedStepCandidate.H"
+#include "MassMatrixDensityProjection.H"
+#include "NativeVacuumMassMatrixCapabilities.H"
 
 #include <AMReX_Array.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_REAL.H>
 #include <AMReX_MLNodeTensorLaplacian.H>
 #include <AMReX_MLMG.H>
+#include <AMReX_Parser.H>
+#include <array>
+#include <string>
 
 class HybridPICModel;
+namespace warpx::thermal { class DarwinThermalAdvance; class DarwinVacuumJointSolve; }
+namespace warpx::darwin { class NativeLongitudinalProducerCertificate; class NativeCoilField; }
 
 /** @file
  *  Theta-implicit hybrid-PIC time solver class. This is a fully implicit
@@ -69,9 +78,9 @@ class ThetaImplicitHybrid : public ImplicitSolver
 {
 public:
 
-    ThetaImplicitHybrid() = default;
+    ThetaImplicitHybrid();
 
-    ~ThetaImplicitHybrid() override = default;
+    ~ThetaImplicitHybrid() override;
 
     // Prohibit Move and Copy operations
     ThetaImplicitHybrid(const ThetaImplicitHybrid&) = delete;
@@ -82,6 +91,15 @@ public:
     void Define ( WarpX*  a_WarpX, bool  a_from_restart ) override;
 
     void PrintParameters () const override;
+
+    // Accepted external A/B split reference, preserved across restart.
+    void WriteDarwinDriveReference (std::string const& directory) const;
+    void ReadDarwinDriveReference (std::string const& directory);
+    bool NativeEndpointCheckpointReady() const;
+    void WriteAcceptedEndpointCheckpoint(std::string const& directory) const;
+    void ReadAcceptedEndpointCheckpoint(std::string const& directory);
+
+    void InitializeFields (amrex::Real time, amrex::Real dt) override;
 
     /**
      * \brief Advances the simulation one time step
@@ -148,11 +166,96 @@ public:
 
 private:
 
+    friend ThetaImplicitHybrid const* NativePrivatePMCMassMatrixOwner(WarpX&);
+    friend ThetaImplicitHybrid const* NativePrivatePMCMassMatrixOwnerLocal(WarpX&);
+    friend class warpx::thermal::DarwinThermalAdvance;
+    friend class warpx::thermal::DarwinVacuumJointSolve;
+    enum class JointStagePurpose { Standard, Residual, VerifiedPublication, PublishedCurrent };
+    JointStagePurpose m_joint_stage_purpose = JointStagePurpose::Standard;
+    warpx::thermal::DarwinVacuumJointSolve* m_joint_stage_owner = nullptr;
+    friend warpx::darwin::NativePairedDarwinFields* warpx::darwin::NativeActivePairedFields(WarpX&) noexcept;
+    friend warpx::darwin::NativePairedDarwinFields* warpx::darwin::NativeEndpointPairedFields(WarpX&) noexcept;
+    friend bool warpx::darwin::NativeEndpointPairSelected(WarpX&) noexcept;
+    friend bool warpx::darwin::NativeEndpointPairRestartContext(WarpX&) noexcept;
+    friend bool warpx::darwin::NativeEndpointPMCQualificationSelected(WarpX&);
+    friend bool warpx::darwin::NativeEndpointCudaQualificationSelected(WarpX&) noexcept;
+    friend bool warpx::darwin::BindNativeAcceptedEndpointBoundary(WarpX&);
+    friend class warpx::implicit::NativeAcceptedStepCandidate;
+    friend warpx::implicit::NativeStepCandidateResult
+        warpx::implicit::AdvanceNativeStepCandidate(WarpX&, amrex::Real, amrex::Real, int,
+            warpx::implicit::NativeSymmetricStoppingOptions const*,
+        warpx::thermal::NativeStoppingCarryRequest const*);
+    int OneStepImpl(amrex::Real, amrex::Real, int,
+        std::unique_ptr<warpx::implicit::NativeAcceptedStepCandidate>* deferred,
+        warpx::implicit::NativeSymmetricStoppingOptions const* symmetric_source=nullptr,
+        warpx::thermal::NativeStoppingCarryRequest const* stopping_carry=nullptr);
+    bool NativeRetainedScopeSupported() const;
+    // Private source-free PMC qualification. Kept separate from the shared
+    // static-vacuum predicate, which also admits the existing periodic MM path.
+    bool NativePMCJointScopeSupported() const;
+    bool NativePMCJointConfigurationValid(bool check_drive) const;
+    bool NativePMCJointRequestSelectorsCurrent() const;
+    bool NativePMCJointMassMatrixScopeSupported() const;
+    // Current+density tensors keep the original private scope. The separate
+    // finite-conduction selector requires the owned thermal companion as well.
+    bool m_native_pmc_mm_requested = false;
+    bool m_native_pmc_finite_conduction_requested = false;
+    bool m_native_pmc_joint_requested = false;
+    // Captured once at Define after rank-uniform agreement; no live ParmParse selection.
+    bool m_native_owned_endpoint_ampere_requested = false;
+    // Private thermal capability: immutable material/BC identity, not accepted
+    // physical/checkpoint state. Parser copies retain compiled shared Data.
+    bool m_native_pmc_thermal_requested = false;
+    std::string m_native_pmc_thermal_descriptor;
+    std::array<std::unique_ptr<amrex::Parser>,2> m_native_pmc_thermal_parsers;
+    std::array<char const*,4> m_native_pmc_thermal_executors{};
+    std::string NativePMCJointThermalDescriptor() const;
+    bool NativePMCJointThermalScopeSupported() const;
+    bool NativePMCJointThermalExecutorsValid() const;
+    void BindNativePMCJointThermalExecutors();
+    // Ownership only, never a physical/checkpoint state or rollback generation.
+    bool m_native_candidate_active = false;
+    bool m_native_stopping_certificate = false;
+    bool NativeStoppingCertificateScopeSupported() const;
+    bool NativePairedFieldScopeSupported() const;
+    bool NativeEndpointPairScopeSupported() const;
+    bool NativeEndpointPairMassMatrixScopeSupported() const;
+    friend ThetaImplicitHybrid const* NativeEndpointPairMassMatrixOwnerLocal(WarpX&) noexcept;
+    bool m_native_paired_requested=false;
+    std::unique_ptr<warpx::darwin::NativePairedDarwinFields> m_native_paired_fields;
+    bool m_native_endpoint_pair_requested=false;
+    bool m_native_endpoint_pair_accept_requested=false;
+    bool m_native_endpoint_restart_reconstructing=false;
+    bool m_native_endpoint_restart_validated=false;
+    // Default-OFF CPU qualification, captured collectively before initialization.
+    bool m_native_endpoint_pair_mm_requested=false;
+    std::unique_ptr<warpx::darwin::NativePairedDarwinFields> m_native_endpoint_pair;
+    // The accepted proof is immutable throughout a step. A candidate owns a
+    // private producer trace; cancel discards it and finalize alone publishes it.
+    std::shared_ptr<warpx::darwin::NativeLongitudinalProducerCertificate> m_native_longitudinal_accepted;
+    std::shared_ptr<warpx::darwin::NativeLongitudinalProducerCertificate> m_native_longitudinal_pending;
+
+    std::unique_ptr<warpx::thermal::DarwinThermalAdvance> m_eulerian_energy;
+
     /**
      * \brief Pointer to the hybrid-PIC model that computes E from Ohm's law.
      * This is owned by WarpX, not by this class.
      */
     HybridPICModel* m_hybrid_pic_model = nullptr;
+
+    /** Continuity density response during hybrid MM Jacobian evaluations.
+     * Each full particle residual rebases the predictor; every linear probe
+     * starts from that base. With the thermal split, density and pressure
+     * respond inside the field solve while temperature stays outer-iterated.
+     */
+    bool m_mass_matrices_density_projection = false;
+    bool m_continuity_density = false;
+    bool m_live_ion_density = false;
+    amrex::Vector<std::unique_ptr<MassMatrixDensityProjection>> m_mass_matrix_density;
+    void UpdateMassMatrixDensity (bool from_jacobian);
+    [[nodiscard]] bool UseMassMatrixCurrentIncrement () const override;
+    void ComposeMassMatrixCurrentIncrement () override;
+    void InvalidateMassMatrixCurrentIncrement () override;
 
     /** Owned storage and pointer view for the electron-inertia beta
      *  coefficients served by FillInertiaBetaCoeff (E-staggered, one
@@ -209,7 +312,7 @@ private:
      * Uses: F^{n+1} = (1/theta)*F^{n+theta} + (1 - 1/theta)*F^n
      * This is applied to both E and B fields.
      */
-    void FinishFieldUpdate ( amrex::Real end_time );
+    void FinishFieldUpdate ( amrex::Real end_time, bool owned_ampere = false );
 
     /** Darwin split (hybrid_pic_model.darwin): when true, the solver state
      *  is the transverse field E_T, the magnetic field is advanced through
@@ -240,9 +343,14 @@ private:
      *  does (implicit_evolve.hybrid_e_finisher = reevaluate). */
     bool m_e_finisher_reevaluate = false;
 
-    /** One-time Darwin state capture (B_static = B(t=0), A = 0), performed
-     *  at the top of the first OneStep when all fields are initialized. */
+    /** Initial moments, E/EL, Je history and magnetic reference are ready.
+     *  Set after InitializeFields, before diagnostics or the first trial push. */
     bool m_darwin_initialized = false;
+    std::unique_ptr<warpx::darwin::NativeCoilField> m_native_coil_field;
+    amrex::Array<amrex::MultiFab,3> m_native_longitudinal_gather;
+    warpx::darwin::NativeCoilField* NativeCoilCurrentContext();
+    void CalculateNativePlasmaCurrent(ablastr::fields::MultiLevelVectorField const&, amrex::Real time);
+    void DiagnosticConstrainEndpoint(amrex::Real time,bool initial);
 
     /** Cached in Define: vacuum vector-potential recovery enabled
      *  (hybrid_pic_model.darwin_vacuum_recovery), and its "half" cadence
@@ -308,11 +416,13 @@ private:
     amrex::Real m_qdsmc_outer_relative_tolerance = 1.0e-6;
     bool m_qdsmc_outer_require_convergence = true;
     bool m_qdsmc_outer_verbose = false;
+    bool m_qdsmc_outer_acceleration = false;
 
     /** Previous outer iterate of the emitted electron pressure, for the
      *  outer convergence test (allocated on first use). */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_Pe_prev;
-    /** Common Ohm/push density argument, updated only by the thermal outer loop. */
+    /** Frozen pre-push coefficient density, updated by the thermal outer loop.
+     * Also the Ohm density unless the MM density response is enabled. */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_rho_frozen;
 
     /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T

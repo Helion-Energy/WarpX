@@ -1,3 +1,4 @@
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
 /* Copyright 2019-2020 Andrew Myers, Ann Almgren, Axel Huebl
  * Burlen Loring, David Grote, Gunther H. Weber
  * Junmin Gu, Maxence Thevenet, Remi Lehe
@@ -9,6 +10,9 @@
  */
 
 #include "WarpX.H"
+#include "FieldSolver/ImplicitSolvers/NativeEndpointField.H"
+#include "Circuit/CircuitCoupling.H"
+#include "FieldSolver/ImplicitSolvers/ThetaImplicitHybrid.H"
 
 
 #include "BoundaryConditions/PML.H"
@@ -332,6 +336,30 @@ WarpX::InitFromCheckpoint ()
     // restored plasma-current components (see m_qdsmc_J_plasma_valid).
     int n_levels_with_te_restored = 0;
     int n_jplasma_components_restored = 0;
+    int n_levels_with_electron_energy_restored = 0;
+    if (m_hybrid_pic_model && m_hybrid_pic_model->UsesEulerianElectronEnergy()) {
+        std::string const thermal_file = restart_chkfile + "/electron_energy.dat";
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::FileExists(thermal_file),
+            "Eulerian energy restart requires electron_energy.dat; no silent thermal reseed");
+        Vector<char> text;
+        ParallelDescriptor::ReadAndBcastFile(thermal_file, text);
+        m_hybrid_pic_model->ValidateElectronEnergyCheckpointMetadata(std::string(text.dataPtr()));
+        std::string const density_file = restart_chkfile + "/density_control.dat";
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::FileExists(density_file),
+            "Eulerian restart requires density_control.dat; no silent live-floor reset");
+        Vector<char> density_control;
+        ParallelDescriptor::ReadAndBcastFile(density_file, density_control);
+        m_hybrid_pic_model->RestoreDensityControlCheckpointMetadata(
+            std::string(density_control.dataPtr()));
+        if (m_hybrid_pic_model->m_darwin) {
+            std::string const history_file=restart_chkfile+"/darwin_history.dat";
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::FileExists(history_file),
+                "Eulerian Darwin restart requires darwin_history.dat; no silent field/history reseed");
+            Vector<char> history;
+            ParallelDescriptor::ReadAndBcastFile(history_file,history);
+            m_hybrid_pic_model->RestoreDarwinCheckpointMetadata(std::string(history.dataPtr()));
+        }
+    }
 
     // Initialize the field data
     for (int lev = 0; lev < nlevs; ++lev)
@@ -448,8 +476,19 @@ WarpX::InitFromCheckpoint ()
         // Read any fields flagged checkpoint_restart in the field register
         // (mirrors FlushFormatCheckpoint's write_checkpoints call). Flagged
         // fields absent from older checkpoints are skipped, not errors.
+        std::function<void()> validate_native_storage;
+        if (m_hybrid_pic_model && m_hybrid_pic_model->m_darwin && NativeEndpointEnabled()) {
+            AllocateNativeEndpointStorage(*this);
+            validate_native_storage=NativeEndpointRestartStorageValidator(*this,
+                amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, ""));
+        }
         auto const restored_names = m_fields.read_restarts(
             lev, amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, ""));
+        if (m_hybrid_pic_model && m_hybrid_pic_model->UsesEulerianElectronEnergy() &&
+            m_hybrid_pic_model->m_darwin) {
+            m_hybrid_pic_model->ValidateDarwinCheckpointFields(restored_names);
+        }
+        if (validate_native_storage) { validate_native_storage(); }
         std::string const te_name =
             amrex::getEnumNameString(FieldType::hybrid_electron_temperature_fp);
         // "[" excludes fields whose name merely extends this one (e.g.
@@ -460,6 +499,10 @@ WarpX::InitFromCheckpoint ()
         for (auto const& name : restored_names) {
             if (name.rfind(te_name, 0) == 0) { ++n_levels_with_te_restored; }
             if (name.rfind(jplasma_name, 0) == 0) { ++n_jplasma_components_restored; }
+            if (name.rfind(amrex::getEnumNameString(FieldType::hybrid_electron_energy_fp) + "[", 0) == 0) {
+                ++n_levels_with_electron_energy_restored;
+                m_hybrid_pic_model->MarkEulerianElectronEnergyRestored(lev);
+            }
         }
 
     }
@@ -468,7 +511,15 @@ WarpX::InitFromCheckpoint ()
     // just above: latch the adiabat seed off so the first Evolve() entry
     // does not overwrite the restored field (the seed otherwise runs once
     // per process, unconditionally, see WarpXPushFieldsHybridPIC.cpp).
-    if (m_hybrid_pic_model && m_hybrid_pic_model->m_solve_electron_energy_equation) {
+    if (m_hybrid_pic_model && m_hybrid_pic_model->UsesEulerianElectronEnergy()) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(n_levels_with_electron_energy_restored == nlevs,
+            "Eulerian restart is missing accepted cell U; refusing to re-seed evolved energy");
+        if (m_hybrid_pic_model->m_darwin) {
+            m_hybrid_pic_model->m_darwin_checkpoint_restored=true;
+            amrex::Print()<<"restart: Darwin A/static B/longitudinal and electron-current history restored\n";
+        }
+        amrex::Print() << "restart: accepted electron cell U restored; Te/Pe rebuilt after particle deposit\n";
+    } else if (m_hybrid_pic_model && m_hybrid_pic_model->m_solve_electron_energy_equation) {
         // J_plasma is carried state under the QDSMC advance: with the full
         // vector restored, continue with the carried value like the
         // uninterrupted run instead of recomputing it from curl(B).
@@ -509,12 +560,40 @@ WarpX::InitFromCheckpoint ()
 
     reduced_diags->ReadCheckpointData(restart_chkfile);
 
-    // Initialize particles
-    mypc->Restart(restart_chkfile);
+    // Restore native scale segments before CircuitCoupling::InitData creates
+    // and restores the plugin and its accepted linkage/filter memory.
+    if (m_circuit_coupling) {
+        m_circuit_coupling->ReadCheckpointData(restart_chkfile);
+    }
 
-    if (m_implicit_solver) {
+    // The accepted pair checkpoint includes all implicit history attributes.
+    // Define their native names/communication flags before AMReX reads them;
+    // adding the same names after Restart would duplicate existing components.
+    // All ranks must choose the same entry path before Define or particle IO
+    // performs its first collective. Define's later checks cannot protect this
+    // earlier branch, including a missing implicit solver on one rank.
+    int restart_min[2]={m_implicit_solver?1:0,
+        warpx::darwin::NativePairedDarwinFields::EndpointRequested()?1:0};
+    int restart_max[2]={restart_min[0],restart_min[1]};
+    amrex::ParallelDescriptor::ReduceIntMin(restart_min,2);
+    amrex::ParallelDescriptor::ReduceIntMax(restart_max,2);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(restart_min[0]==restart_max[0]&&
+        restart_min[1]==restart_max[1],"Implicit endpoint restart selection differs across ranks");
+    bool const paired_restart=restart_min[0]&&restart_min[1];
+    if(paired_restart){
         m_implicit_solver->Define(this, /*from_restart=*/true);
         m_implicit_solver->CreateParticleAttributes();
+    }
+    mypc->Restart(restart_chkfile,paired_restart);
+
+    if (m_implicit_solver) {
+        if(!paired_restart){
+            m_implicit_solver->Define(this, /*from_restart=*/true);
+            m_implicit_solver->CreateParticleAttributes();
+        }
+        if (auto* implicit = dynamic_cast<ThetaImplicitHybrid*>(m_implicit_solver.get())) {
+            implicit->ReadDarwinDriveReference(restart_chkfile);
+        }
     }
 
 }

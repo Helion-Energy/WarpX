@@ -33,8 +33,8 @@
  * \param q            species charge.
  * \param n_rz_azimuthal_modes Number of azimuthal modes when using RZ geometry.
  */
-template <int depos_order>
-void doChargeDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
+template <int depos_order, typename Position>
+void doChargeDepositionShapeN (const Position& GetPosition,
                                const amrex::ParticleReal * const wp,
                                const int* ion_lev,
                                amrex::FArrayBox& rho_fab,

@@ -1,3 +1,5 @@
+#include "NativeImpulseRecord.H"
+#include "BorisPushRecorder.H"
 /* Copyright 2025 The WarpX Community
  *
  * This file is part of WarpX.
@@ -12,6 +14,7 @@
 #endif
 #include "CopyParticleAttribs.H"
 #include "GetAndSetPosition.H"
+#include "ImplicitFinalGather.H"
 #include "PushSelector.H"
 #include "UpdatePosition.H"
 #include "Particles/Deposition/CurrentDeposition.H"
@@ -51,6 +54,33 @@
 using namespace amrex::literals;
 
 namespace {
+
+    using warpx::particles::ImplicitGatherIssue;
+    using warpx::particles::ImplicitGatherResult;
+    using warpx::particles::FiniteParticleVector;
+
+    // Called only after the particle kernel has completed. Never proceed to
+    // deposition or suborbit fallback using a rejected gather state. This is a
+    // fail-fast safety boundary; a recoverable whole-step retry requires a
+    // separate caller transaction and is not implied by this check.
+    void CheckImplicitGatherFailures (amrex::Gpu::Buffer<amrex::Long>& failures)
+    {
+        auto const* counts = failures.copyToHost();
+        constexpr char const* names[] = {"none", "nonfinite_position", "invalid_layout",
+            "stencil_out_of_bounds", "nonfinite_field", "nonfinite_momentum"};
+        std::ostringstream message;
+        bool failed = false;
+        for (int i = 1; i < static_cast<int>(ImplicitGatherIssue::Count); ++i) {
+            if (counts[i] != 0) {
+                failed = true;
+                message << ' ' << names[i] << '=' << counts[i];
+            }
+        }
+        if (failed) {
+            amrex::Abort("Implicit particle gather rejected before unsafe grid access/deposition:" +
+                         message.str());
+        }
+    }
 
     enum exteb_flags : int { no_exteb, has_exteb };
     enum qed_flags : int { no_qed, has_qed };
@@ -256,6 +286,10 @@ namespace {
         amrex::ParticleReal const & uyp_n,
         amrex::ParticleReal const & uzp_n,
         amrex::ParticleReal & step_norm,
+        ImplicitGatherResult & gather_result,
+        warpx::particles::FinalGatherRecord const final_gather,
+        int* const orbit_iteration_count,
+        amrex::GpuArray<amrex::ParticleReal,3>& actual_chord,
         amrex::ParticleReal const & particle_tolerance,
         int const & max_iterations,
         bool const reflect_at_rmax,
@@ -303,8 +337,23 @@ namespace {
         amrex::ParticleReal * p_optical_depth_QSR,
         QuantumSynchrotronEvolveOpticalDepth const & evolve_opt
 #endif
+        , warpx::particles::NativeImpulseRecord const impulse_record = {}
     )
     {
+
+        gather_result = {};
+        final_gather.Invalidate(ip);
+        impulse_record.Invalidate(ip);
+        actual_chord={0.,0.,0.};
+        if (!FiniteParticleVector(xp_n, yp_n, zp_n)) {
+            gather_result.issue = ImplicitGatherIssue::NonFinitePosition;
+            return false;
+        }
+        if (!FiniteParticleVector(uxp_n, uyp_n, uzp_n) ||
+            !FiniteParticleVector(ux[ip], uy[ip], uz[ip])) {
+            gather_result.issue = ImplicitGatherIssue::NonFiniteMomentum;
+            return false;
+        }
 
         auto idxg2 = static_cast<amrex::ParticleReal>(dinv.x*dinv.x);
         auto idyg2 = static_cast<amrex::ParticleReal>(dinv.y*dinv.y);
@@ -333,6 +382,10 @@ namespace {
         xp = xp_n + dxp;
         yp = yp_n + dyp;
         zp = zp_n + dzp;
+        if (!FiniteParticleVector(xp, yp, zp)) {
+            gather_result.issue = ImplicitGatherIssue::NonFinitePosition;
+            return false;
+        }
         // Reflect wall-crossing orbits at r-max inside the implicit position
         // update (segmented conserving reflection, see ReflectParticleAtRmax)
         if (reflect_at_rmax) {
@@ -340,6 +393,7 @@ namespace {
                                   dxp, dyp, xp, yp, ux, uy, reflect_clamp_count);
         }
         setPosition(ip, xp, yp, zp);
+        actual_chord={2._prt*dxp,2._prt*dyp,2._prt*dzp};
 
         // Propogate ballistically if the suborbit starts out of bounds, avoiding
         // field gather and the possiblity that the particle orbit re-enters the domain.
@@ -347,6 +401,8 @@ namespace {
 
         bool convergence = false;
         for (int iter=0; iter < max_iterations; iter++) {
+            // Diagnostic-only fixture attribute; no update arithmetic changes.
+            if (orbit_iteration_count) { *orbit_iteration_count = iter + 1; }
 
             amrex::ParticleReal Exp = Ex_external_particle;
             amrex::ParticleReal Eyp = Ey_external_particle;
@@ -355,13 +411,16 @@ namespace {
             Byp = By_external_particle;
             Bzp = Bz_external_particle;
 
+            warpx::particles::FinalGatherPoint actual_gather{};
             if (do_gather) {
                 // first gather E and B to the particle positions
-                doGatherShapeNImplicit(xp_n, yp_n, zp_n, xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                gather_result = doGatherShapeNImplicit(xp_n, yp_n, zp_n, xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                        ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
                                        ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
                                        dinv, xyzmin, domain_double, do_cropping, lo, n_rz_azimuthal_modes,
-                                       depos_order, depos_type);
+                                       depos_order, depos_type,
+                                       final_gather ? &actual_gather : nullptr);
+                if (!gather_result) { return false; }
             }
 
             // Externally applied E and B-field in Cartesian co-ordinates
@@ -370,11 +429,38 @@ namespace {
                 getExternalEB(ip, Exp, Eyp, Ezp, Bxp, Byp, Bzp);
             }
 
+            if (!FiniteParticleVector(Exp, Eyp, Ezp) ||
+                !FiniteParticleVector(Bxp, Byp, Bzp)) {
+                gather_result.issue = ImplicitGatherIssue::NonFiniteField;
+                return false;
+            }
+
+            // Store the actual point used above, before this Boris push. The
+            // later position update changes the stored midpoint, so it cannot
+            // be used to reconstruct this final inner-iteration gather.
+            final_gather.Store(ip, actual_gather);
+
             // The momentum push starts with the velocity at the start of the step
             ux[ip] = uxp_n;
             uy[ip] = uyp_n;
             uz[ip] = uzp_n;
 
+            warpx::particles::BorisPushRecord actual_boris{};
+            bool const record_this_push = impulse_record &&
+                pusher_algo == ParticlePusherAlgo::Boris && !do_crr && !ion_lev
+#ifdef WARPX_QED
+                && !do_sync && qed_control == no_qed
+#endif
+                ;
+            if (record_this_push) {
+                doParticleMomentumPush<0>(ux[ip],uy[ip],uz[ip],
+                    Exp,Eyp,Ezp,Bxp,Byp,Bzp,1,mass,q,pusher_algo,do_crr,
+#ifdef WARPX_QED
+                    t_chi_max,
+#endif
+                    dt,MomentumPushType::Full,
+                    warpx::particles::ActualBorisPushRecorder{&actual_boris});
+            } else {
 #ifdef WARPX_QED
             if (!do_sync) {
                 doParticleMomentumPush<0>(ux[ip], uy[ip], uz[ip],
@@ -400,6 +486,7 @@ namespace {
                                       mass, q, pusher_algo, do_crr,
                                       dt, MomentumPushType::Full);
 #endif
+            }
 
 #ifdef WARPX_QED
             [[maybe_unused]] auto *foo_podq = p_optical_depth_QSR;
@@ -415,10 +502,30 @@ namespace {
             amrex::ignore_unused(qed_control);
 #endif
 
+            // Capture is tied to the actual native Boris execution above.
+            // No separately inlined full-momentum recomputation is required.
+            warpx::particles::NativeBorisImpulse correlated_kick{};
+            correlated_kick.full=actual_boris.full;
+            correlated_kick.impulse=actual_boris.impulse;
+            bool const correlated_ok = record_this_push && actual_boris.valid &&
+                ux[ip] == actual_boris.full[0] &&
+                uy[ip] == actual_boris.full[1] &&
+                uz[ip] == actual_boris.full[2];
+
             // Take average to get the time-centered value
             ux[ip] = 0.5_prt*(ux[ip] + uxp_n);
             uy[ip] = 0.5_prt*(uy[ip] + uyp_n);
             uz[ip] = 0.5_prt*(uz[ip] + uzp_n);
+            // Copy the actual stored mean BEFORE the position/wall operation.
+            // The exact comparison at convergence still rejects a wall impulse.
+            correlated_kick.midpoint={ux[ip],uy[ip],uz[ip]};
+            correlated_kick.finished={2._prt*ux[ip]-uxp_n,
+                2._prt*uy[ip]-uyp_n,2._prt*uz[ip]-uzp_n};
+
+            if (!FiniteParticleVector(ux[ip], uy[ip], uz[ip])) {
+                gather_result.issue = ImplicitGatherIssue::NonFiniteMomentum;
+                return false;
+            }
 
             // Save position change from previous position push for step norm calculation
             const amrex::ParticleReal dxp_save = dxp;
@@ -433,6 +540,10 @@ namespace {
             xp = xp_n + dxp;
             yp = yp_n + dyp;
             zp = zp_n + dzp;
+            if (!FiniteParticleVector(xp, yp, zp)) {
+                gather_result.issue = ImplicitGatherIssue::NonFinitePosition;
+                return false;
+            }
             // Reflect wall-crossing orbits at r-max inside the implicit
             // position update so the Picard fixed point (and everything
             // downstream: gather, deposit, step-end velocity) is the
@@ -443,17 +554,59 @@ namespace {
                                       dxp, dyp, xp, yp, ux, uy, reflect_clamp_count);
             }
             setPosition(ip, xp, yp, zp);
+        actual_chord={2._prt*dxp,2._prt*dyp,2._prt*dzp};
 
             // Check for convergence based on the step norm of the position change
             PositionNorm(dxp, dyp, dzp, dxp_save, dyp_save, dzp_save, idxg2, idyg2, idzg2, step_norm);
             if (step_norm < particle_tolerance) {
                 convergence = true;
+                // Reflection can change the completed midpoint after Boris.
+                // Never mislabel its wall impulse as the unreflected kick.
+                if(correlated_ok && ux[ip]==correlated_kick.midpoint[0] &&
+                    uy[ip]==correlated_kick.midpoint[1] &&
+                    uz[ip]==correlated_kick.midpoint[2]) {
+                    impulse_record.Store(ip,correlated_kick.impulse);
+                }
                 break;
             }
         }
 
         return convergence;
     }
+}
+
+bool PhysicalParticleContainer::ImplicitIonElectricWorkCaptureSupported () const noexcept
+{
+    auto const& names=GetIntSoANames();
+    return !do_not_push && !do_not_gather && !do_field_ionization &&
+        std::find(names.begin(),names.end(),"ionizationLevel")==names.end() &&
+        !do_classical_radiation_reaction
+#ifdef WARPX_QED
+        && !m_do_qed_quantum_sync && !m_do_qed_breit_wheeler &&
+        !m_do_qed_virtual_photons && !m_qed_virtual_photons_do_beam_size_effect
+#endif
+        ;
+}
+
+void PhysicalParticleContainer::ValidateImplicitIonElectricWorkCapture () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!do_not_push,
+        "Final ion gather audit does not support do_not_push");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!do_not_gather,
+        "Final ion gather audit does not support do_not_gather");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!do_field_ionization,
+        "Final ion gather audit does not support field ionization");
+    auto const& int_names = GetIntSoANames();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::find(int_names.begin(), int_names.end(), "ionizationLevel") == int_names.end(),
+        "Final ion gather audit requires fixed species charge (no ionizationLevel)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!do_classical_radiation_reaction,
+        "Final ion gather audit does not support classical radiation momentum changes");
+#ifdef WARPX_QED
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_do_qed_quantum_sync && !m_do_qed_breit_wheeler &&
+        !m_do_qed_virtual_photons && !m_qed_virtual_photons_do_beam_size_effect,
+        "Final ion gather audit does not support QED momentum or particle changes");
+#endif
 }
 
 /*
@@ -608,8 +761,35 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE((gather_lev==(lev-1)) ||
                                      (gather_lev==(lev  )),
                                      "Gather buffers only work for lev-1");
-    // If no particles, do not do anything
+    // Preserve the native empty-range early exit before any attribute access.
     if (np_to_push == 0) { return; }
+
+    warpx::particles::FinalGatherRecord final_gather;
+    int* const orbit_iteration_count = HasiAttrib("alpha_orbit_picard_iterations")
+        ? pti.GetiAttribs("alpha_orbit_picard_iterations").dataPtr() + offset : nullptr;
+    auto const& real_names = GetRealSoANames();
+    int capture_attributes = 0;
+    for (auto const* name : warpx::particles::FinalGatherAttributeNames) {
+        capture_attributes += std::find(real_names.begin(), real_names.end(), name) != real_names.end();
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(capture_attributes == 0 || capture_attributes == 3,
+        "Incomplete final ion gather scratch attributes");
+    if (capture_attributes) {
+        ValidateImplicitIonElectricWorkCapture();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!HasiAttrib("nsuborbits") &&
+            !implicit_options->evolve_suborbit_particles_only,
+            "Final ion gather audit does not support particle suborbits");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!implicit_options->reflect_particles_at_rmax,
+            "Final ion gather audit does not support in-push wall reflection momentum changes");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(implicit_options->max_particle_iterations > 0 &&
+            WarpX::particle_pusher_algo == ParticlePusherAlgo::Boris &&
+            WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving && WarpX::nox == 3,
+            "Final ion gather audit requires a nonempty Boris shape3 MC iteration");
+        for (int d=0; d<3; ++d) {
+            final_gather.position[d] =
+                pti.GetAttribs(warpx::particles::FinalGatherAttributeNames[d]).dataPtr() + offset;
+        }
+    }
 
     // Get cell size on gather_lev
     const amrex::XDim3 dinv = WarpX::InvCellSize(std::max(gather_lev,0));
@@ -665,7 +845,12 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
         domain_double[idim][1] = static_cast<double>(domain_box.bigEnd(idim) - box.smallEnd(idim));
     }
 
-    const auto depos_type = WarpX::current_deposition_algo;
+    // Momentum-conserving fields have already been centered onto nodal
+    // auxiliary arrays. Gather those arrays at the midpoint with the full
+    // particle shape; an Esirkepov energy-adjoint stencil assumes Yee arrays.
+    // This selects only the gather: current deposition keeps its own algorithm.
+    const auto depos_type = WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving
+        ? CurrentDepositionAlgo::Direct : WarpX::current_deposition_algo;
     const int depos_order = WarpX::nox;
     const int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
 
@@ -701,6 +886,22 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     amrex::ParticleReal* ux_n = pti.GetAttribs("ux_n").dataPtr() + offset;
     amrex::ParticleReal* uy_n = pti.GetAttribs("uy_n").dataPtr() + offset;
     amrex::ParticleReal* uz_n = pti.GetAttribs("uz_n").dataPtr() + offset;
+    amrex::ParticleReal* chord_x=pti.GetAttribs("esirkepov_chord_x").dataPtr()+offset;
+    amrex::ParticleReal* chord_y=pti.GetAttribs("esirkepov_chord_y").dataPtr()+offset;
+    amrex::ParticleReal* chord_z=pti.GetAttribs("esirkepov_chord_z").dataPtr()+offset;
+    int* chord_valid=pti.GetiAttribs("esirkepov_chord_valid").dataPtr()+offset;
+    warpx::particles::NativeImpulseRecord impulse_record;
+    if(HasiAttrib("diagnostic_impulse_valid")) {
+        ValidateImplicitIonElectricWorkCapture();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!HasiAttrib("nsuborbits") &&
+            !implicit_options->evolve_suborbit_particles_only &&
+            WarpX::particle_pusher_algo==ParticlePusherAlgo::Boris,
+            "Correlated impulse prototype requires an unsplit native Boris orbit");
+        impulse_record.valid=pti.GetiAttribs("diagnostic_impulse_valid").dataPtr()+offset;
+        impulse_record.impulse={pti.GetAttribs("diagnostic_du_x").dataPtr()+offset,
+            pti.GetAttribs("diagnostic_du_y").dataPtr()+offset,
+            pti.GetAttribs("diagnostic_du_z").dataPtr()+offset};
+    }
 
     if (m_do_back_transformed_particles) { //  Copy the old x and u for the BTD
         const auto copyAttribs = CopyParticleAttribs{*this, pti, offset};
@@ -766,6 +967,9 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     amrex::Long* reflect_clamp_ptr = (reflect_at_rmax ? reflect_clamps.data() : nullptr);
     int *nsuborbits = (HasiAttrib("nsuborbits") ? pti.GetiAttribs("nsuborbits").dataPtr() + offset: nullptr);
 
+    amrex::Gpu::Buffer<amrex::Long> gather_failures({0, 0, 0, 0, 0, 0});
+    auto* gather_failures_ptr = gather_failures.data();
+
     // Using this version of For with compile time options
     // improves performance when qed or external EB are not used by reducing
     // register pressure.
@@ -778,6 +982,7 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
                                                  auto qed_control)
     {
 
+        chord_valid[ip]=0;
         // Skip any particles that require suborbits
         if (nsuborbits && nsuborbits[ip] > 1) {
             // write signaling flag: how many particles did not converge?
@@ -819,11 +1024,15 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
         amrex::ParticleReal Bzp = 0.0_prt;
         amrex::ParticleReal step_norm = 1._prt;
 
+        ImplicitGatherResult gather_result;
+        amrex::GpuArray<amrex::ParticleReal,3> actual_chord{};
         const bool convergence =
             PushXPSingleStep<exteb_control, qed_control>(
                 ip, dt, setPosition, false,
                 xp, yp, zp, ux, uy, uz, xp_n, yp_n, zp_n, ux_n[ip], uy_n[ip], uz_n[ip],
-                step_norm, particle_tolerance, max_iterations,
+                step_norm, gather_result, final_gather,
+                orbit_iteration_count ? orbit_iteration_count + ip : nullptr,
+                actual_chord, particle_tolerance, max_iterations,
                 reflect_at_rmax, r_wall, reflect_clamp_ptr,
                 Ex_external_particle, Ey_external_particle, Ez_external_particle,
                 Bx_external_particle, By_external_particle, Bz_external_particle,
@@ -835,7 +1044,16 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
 #ifdef WARPX_QED
                 , do_sync, t_chi_max, p_optical_depth_QSR, evolve_opt
 #endif
+                , impulse_record
             );
+
+        if (!gather_result) {
+            amrex::Gpu::Atomic::Add(gather_failures_ptr + static_cast<int>(gather_result.issue), amrex::Long(1));
+            return;
+        }
+
+        chord_x[ip]=actual_chord[0];chord_y[ip]=actual_chord[1];chord_z[ip]=actual_chord[2];
+        chord_valid[ip]=1;
 
         // check if particle did not converge
         if (max_iterations > 1 && !convergence) {
@@ -872,6 +1090,8 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
 
     });
 
+    CheckImplicitGatherFailures(gather_failures);
+
     if (reflect_at_rmax) {
         const amrex::Long num_reflect_clamps = *(reflect_clamps.copyToHost());
         if (num_reflect_clamps > 0) {
@@ -885,6 +1105,12 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     // gathered, their weights saved, and their weight set to zero (so they
     // don't contribute to the current density).
     num_unconverged_particles = *(unconverged_particles.copyToHost());
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        WarpX::GetInstance().evolve_scheme != EvolveScheme::Theta_Implicit_Hybrid ||
+        WarpX::current_deposition_algo != CurrentDepositionAlgo::Esirkepov ||
+        num_unconverged_particles == 0,
+        "Implicit hybrid Esirkepov requires converged full-step particle orbits; "
+        "reduce dt or increase max_particle_iterations");
     SetupSuborbitParticles(pti, offset, np_to_push, num_unconverged_particles,
                            unconverged_indices, saved_weights);
 
@@ -953,11 +1179,21 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
     // If no particles, do not do anything
     if (num_unconverged_particles == 0) { return; }
 
+    // A suborbit has several Boris gathers, so one point cannot represent its
+    // full-step work. Keep the existing no-op exits above, then reject capture.
+    auto const& real_names = GetRealSoANames();
+    for (auto const* name : warpx::particles::FinalGatherAttributeNames) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::find(real_names.begin(), real_names.end(), name) == real_names.end(),
+            "Final ion gather audit does not support direct suborbit advancement");
+    }
+
     // Fused deposition kernels become too large when all orders/types are included.
     // Suborbit uses Villasenor current deposition only. For energy conservation,
     // the push must use the matching gather, so we override depos_type here to
     // Villasenor (instead of the runtime-selected type).
-    const auto depos_type = CurrentDepositionAlgo::Villasenor;
+    const auto depos_type = WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving
+        ? CurrentDepositionAlgo::Direct : CurrentDepositionAlgo::Villasenor;
 
     // Get cell size on gather_lev
     const amrex::XDim3 dinv = WarpX::InvCellSize(std::max(gather_lev,0));
@@ -1151,6 +1387,9 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
     long * unconverged_i = unconverged_indices.data() + index_offset;
     amrex::ParticleReal * saved_w = saved_weights.data() + index_offset;
 
+    amrex::Gpu::Buffer<amrex::Long> gather_failures({0, 0, 0, 0, 0, 0});
+    auto* gather_failures_ptr = gather_failures.data();
+
     // Using this version of For with compile time options
     // improves performance when qed or external EB are not used by reducing
     // register pressure.
@@ -1246,10 +1485,12 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
             amrex::ParticleReal step_norm = 1._prt;
 
             // Try advancing the particle one suborbit step
+            ImplicitGatherResult gather_result;
+            amrex::GpuArray<amrex::ParticleReal,3> actual_chord{};
             bool convergence = PushXPSingleStep<exteb_control, qed_control>(ip, dt_suborbit, setPosition,
                                  this_suborbit_out_of_bounds,
                                  xp, yp, zp, ux, uy, uz, xp_n, yp_n, zp_n, uxp_n, uyp_n, uzp_n,
-                                 step_norm, particle_tolerance, max_iterations,
+                                 step_norm, gather_result, {}, nullptr, actual_chord, particle_tolerance, max_iterations,
                                  reflect_at_rmax, r_wall, nullptr,
                                  Ex_external_particle, Ey_external_particle, Ez_external_particle,
                                  Bx_external_particle, By_external_particle, Bz_external_particle,
@@ -1262,6 +1503,11 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
                                  , do_sync, t_chi_max, p_optical_depth_QSR, evolve_opt
 #endif
                                  );
+            if (!gather_result) {
+                amrex::Gpu::Atomic::Add(gather_failures_ptr + static_cast<int>(gather_result.issue), amrex::Long(1));
+                return;
+            }
+
 
             // Don't change number of suborbits during linear stage of jfnk
             if (linear_stage_of_jfnk) { convergence = true; }
@@ -1468,5 +1714,6 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
 
     });
 
+    CheckImplicitGatherFailures(gather_failures);
     amrex::Gpu::streamSynchronize();
 }

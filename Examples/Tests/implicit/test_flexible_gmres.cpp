@@ -44,6 +44,17 @@ struct TestOperator
         for (std::size_t i = 0; i < x.values.size(); ++i) { sum += x.values[i] * y.values[i]; }
         return sum;
     }
+    void dotProducts (TestVector const& x, std::vector<TestVector> const& basis,
+                      int count, std::vector<RT>& result) const
+    {
+        result.resize(count);
+        for (int n = 0; n < count; ++n) { result[n] = dotProduct(x, basis[n]); }
+    }
+    void subtractProjection (TestVector& x, std::vector<TestVector> const& basis,
+                             int count, std::vector<RT> const& coefficients) const
+    {
+        for (int n = 0; n < count; ++n) { increment(x, basis[n], -coefficients[n]); }
+    }
     double norm2 (TestVector const& x) const { return std::sqrt(dotProduct(x, x)); }
     void apply (TestVector& y, TestVector const& x) const
     {
@@ -75,9 +86,9 @@ struct TestOperator
 };
 }
 
-int main (int argc, char* argv[])
+template <bool Batched>
+void RunChecks ()
 {
-    amrex::Initialize(argc, argv);
     {
         // An exact one-dimensional Krylov space exposes reconstruction with
         // a fresh, different PC action. Ordinary GMRES reports zero but x is wrong.
@@ -88,7 +99,7 @@ int main (int argc, char* argv[])
         AMREX_ALWAYS_ASSERT(ordinary.getStatus() == 0);
         AMREX_ALWAYS_ASSERT(identity.trueResidual(x, rhs) > 1.);
         identity.pc_calls = 0;
-        FlexibleGMRES<TestVector, TestOperator> flexible;
+        FlexibleGMRES<TestVector, TestOperator, Batched> flexible;
         flexible.define(identity); flexible.solve(x, rhs, 1.e-12, 1.e-14);
         AMREX_ALWAYS_ASSERT(flexible.getStatus() == 0 && flexible.getNumIters() == 1);
         AMREX_ALWAYS_ASSERT(identity.trueResidual(x, rhs) < 1.e-12);
@@ -133,5 +144,12 @@ int main (int argc, char* argv[])
         AMREX_ALWAYS_ASSERT(flexible.getStatus() != 0);
         amrex::Print() << "Flexible GMRES variable-PC, restart, residual and breakdown checks passed\n";
     }
+}
+
+int main (int argc, char* argv[])
+{
+    amrex::Initialize(argc, argv);
+    RunChecks<false>();
+    RunChecks<true>();
     amrex::Finalize();
 }

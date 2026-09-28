@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.24)
+project(ThermalCheckpointModelFixture LANGUAGES C CXX)
+find_package(AMReX CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+get_filename_component(WARPX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(THERMAL_MODEL_GEOMETRY RZ CACHE STRING "RZ or 3D")
+add_executable(test_thermal_checkpoint_model test_thermal_checkpoint_model.cpp
+ ${WARPX_SOURCE}/Source/FieldSolver/FiniteDifferenceSolver/HybridPICModel/ElectronThermalRuntime.cpp
+ ${WARPX_SOURCE}/Source/FieldSolver/ImplicitSolvers/KineticThermalMoments.cpp)
+target_compile_features(test_thermal_checkpoint_model PRIVATE cxx_std_20)
+target_link_libraries(test_thermal_checkpoint_model PRIVATE AMReX::amrex)
+target_include_directories(test_thermal_checkpoint_model PRIVATE ${WARPX_SOURCE}/Source)
+target_compile_definitions(test_thermal_checkpoint_model PRIVATE WARPX_DIM_${THERMAL_MODEL_GEOMETRY})
+enable_testing()
+foreach(case IN ITEMS same switch reverse_switch effective_partner inactive_tolerance reference defaults active_default default_matches_explicit default_budget capability_default explicit_off redirect_default)
+ add_test(NAME checkpoint_model_${case} COMMAND test_thermal_checkpoint_model test.case=${case})
+ set_tests_properties(checkpoint_model_${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+endforeach()
+foreach(case IN ITEMS partner convention relative absolute missing version model_version policy history source trailing malformed duplicate gamma floor axis legacy negative_tolerance no_channel bad_partner partner_relativistic reference_without_partner default_relativistic partner_no_relaxation default_restart_off)
+ add_test(NAME checkpoint_model_reject_${case}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/expect_reject.py $<TARGET_FILE:test_thermal_checkpoint_model> ${case})
+ set_tests_properties(checkpoint_model_reject_${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+endforeach()

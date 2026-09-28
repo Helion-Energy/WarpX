@@ -46,6 +46,7 @@ class HybridPICRZOperator {
     void Solve (Field const& out, Field const& rhs, int inner_max,
                 RT inner_rtol, int vcycles);
     void ApplyField (Field const& out, Field const& in);
+    void PrintResidualMap (Pair const& x, Pair const& rhs);
     void ApplyPair (int lev, Pair& out, Pair const& in);
     void Vcycle (int lev);
     void Smooth (int lev, int sweeps);
@@ -88,7 +89,8 @@ class HybridPICRZOperator {
     std::vector<std::unique_ptr<Level>> levels;
     BC lo, hi;
     RT sigma = RT(1.3), sigma_w = RT(1.2), whistler_defect = RT(1.);
-    bool verbose = false;
+    int verbose = 0;
+    bool rz_block_symbol = false;
     bool pin_vector_potential = false;
     bool ion_response = true;
     int last_iterations = 0;

@@ -242,7 +242,7 @@ public:
     [[nodiscard]] amrex::Box ComputeSchwingerGlobalBox () const;
 #endif
 
-    void Restart (const std::string& dir);
+    void Restart (const std::string& dir, bool preserve_all_attributes = false);
 
     void PostRestart ();
 

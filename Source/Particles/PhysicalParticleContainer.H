@@ -48,6 +48,14 @@ class PhysicalParticleContainer
     : public WarpXParticleContainer
 {
 public:
+    /** Validate native species flags for the optional final Boris gather audit.
+     * Call again before reading scratch if runtime setters could change flags.
+     * This does not attest to later collisions, boundary actions or OU kicks. */
+    void ValidateImplicitIonElectricWorkCapture () const;
+    /** Nonasserting form of the same charged-particle capability predicates.
+     * Pure setup/stale-state preflight; no state or particle data is changed. */
+    bool ImplicitIonElectricWorkCaptureSupported () const noexcept;
+
 
     PhysicalParticleContainer (amrex::AmrCore* amr_core,
                                int ispecies,

@@ -9,10 +9,22 @@
  * License: BSD-3-Clause-LBNL
  */
 
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
 #include "HybridPICModel.H"
+#include "FieldSolver/ImplicitSolvers/NativeEndpointField.H"
+#include "FieldSolver/ImplicitSolvers/NativeVacuumEndpoint.H"
+#include "FieldSolver/ImplicitSolvers/NativePECPlasma.H"
+#include "FieldSolver/ImplicitSolvers/EulerianDissipation.H"
+#include "FieldSolver/ImplicitSolvers/EulerianStoppingTransfer.H"
+
+#include "FieldSolver/ImplicitSolvers/DarwinABoundary.H"
+#include "FieldSolver/ImplicitSolvers/DarwinPoissonMG.H"
+#include "FieldSolver/ImplicitSolvers/DarwinRZGreenSolver.H"
 
 #include "BraginskiiViscosity.H"
 #include "ElectronViscosityPoint.H"
+#include "QdsmcConductionFDOperator.H"
+#include "QdsmcConductionWall.H"
 #include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
 #include "QdsmcVolumeElement.H"
@@ -53,6 +65,14 @@ using namespace amrex;
 
 namespace
 {
+bool ActualThermalAxisCorrection ()
+{
+#if defined(WARPX_DIM_RZ)
+    return WarpX::GetInstance().UseVerboncoeurAxisCorrection();
+#else
+    return false;
+#endif
+}
 /** Domain-face name for the qdsmc conduction BC prints: "<axis>_lo"
  *  / "<axis>_hi" for grid dim d, side s (0 = lo, 1 = hi). */
 std::string
@@ -75,12 +95,311 @@ using warpx::fields::FieldType;
 HybridPICModel::HybridPICModel ()
 {
     ReadParameters();
+    InitializeDensityControl();
 }
 
 HybridPICModel::~HybridPICModel () = default;
 
-void HybridPICModel::ReadParameters ()
-{
+amrex::Geometry
+HybridPICModel::ElectronThermalGeometry (int const lev) const {
+    auto const& geometry=WarpX::GetInstance().Geom(lev);
+#if defined(WARPX_DIM_RZ)
+    // WarpX RZ may retain Cartesian AMReX metadata because its field kernels
+    // carry radial metrics explicitly. Thermal MLMG needs the physical metric.
+    auto const periodic=geometry.isPeriodicArray();
+    return amrex::Geometry(geometry.Domain(),&geometry.ProbDomain(),1,periodic.data());
+#else
+    return geometry;
+#endif
+}
+
+warpx::thermal::ThermalMomentOptions
+HybridPICModel::EulerianMomentOptions (int const lev) const {
+    using warpx::thermal::MomentBoundary;
+    auto const& w = WarpX::GetInstance();
+    warpx::thermal::ThermalMomentOptions o;
+    o.number_density_floor = m_n_floor;
+    o.active_density_floor = m_qdsmc_n_floor;
+    o.gamma = m_gamma;
+    o.temperature_floor_kelvin =
+        m_cond_te_floor * PhysConst::q_e / PhysConst::kb;
+    o.halo_unfreeze = m_qdsmc_halo_unfreeze;
+    o.verboncoeur_axis_correction = ActualThermalAxisCorrection();
+    o.azimuthal_modes = WarpX::n_rz_azimuthal_modes;
+    auto const& te =
+        *w.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    auto const& pe =
+        *w.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        o.nodal_ghosts =
+            std::max({o.nodal_ghosts, te.nGrowVect()[d], pe.nGrowVect()[d]});
+        for (int side = 0; side < 2; ++side) {
+            auto const field = side ? WarpX::field_boundary_hi[d]
+                                    : WarpX::field_boundary_lo[d];
+            auto const particle = side ? WarpX::particle_boundary_hi[d]
+                                       : WarpX::particle_boundary_lo[d];
+            if (w.Geom(lev).isPeriodic(d)) {
+                o.boundary[d][side] = MomentBoundary::Periodic;
+            }
+#if defined(WARPX_DIM_RZ)
+            else if (d == 0 && side == 0 && w.Geom(lev).ProbLo(0) == 0.) {
+                o.boundary[d][side] = MomentBoundary::Axis;
+            }
+#endif
+            else if (field == FieldBoundaryType::PMC) {
+                o.boundary[d][side] = MomentBoundary::PMC;
+            } else if (field == FieldBoundaryType::PEC) {
+                o.boundary[d][side] = MomentBoundary::PEC;
+            } else {
+                amrex::Abort("Eulerian moments require qualified "
+                             "axis/PEC/PMC/periodic boundaries");
+            }
+            if (o.boundary[d][side] == MomentBoundary::Axis ||
+                o.boundary[d][side] == MomentBoundary::Periodic) {
+                o.current_boundary[d][side] = o.boundary[d][side];
+            } else if (particle == ParticleBoundaryType::Reflecting ||
+                       particle == ParticleBoundaryType::Thermal ||
+                       field == FieldBoundaryType::PMC) {
+                o.current_boundary[d][side] = MomentBoundary::PMC;
+            } else if (field == FieldBoundaryType::PEC) {
+                o.current_boundary[d][side] = MomentBoundary::PEC;
+            } else {
+                amrex::Abort("Eulerian moments require qualified "
+                             "deposition-current boundaries");
+            }
+        }
+    }
+    return o;
+}
+
+void
+HybridPICModel::InitializeEulerianElectronEnergy (int const lev,
+                                                  const amrex::MultiFab& rho) {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        UsesEulerianElectronEnergy() && !HasElectronThermalTrial(lev),
+        "InitializeEulerianElectronEnergy requires accepted Eulerian state "
+        "without a trial view");
+    auto& w = WarpX::GetInstance();
+    auto& u = *w.m_fields.get(FieldType::hybrid_electron_energy_fp, lev);
+    if (!m_eulerian_energy_initialized[lev]) {
+        auto const options = EulerianMomentOptions(lev);
+        warpx::thermal::KineticThermalMoments moments(
+            ElectronThermalGeometry(lev), u.boxArray(), u.DistributionMap(), options);
+        warpx::thermal::KineticThermalStateView density{rho};
+        density.pedestal = DensityPedestal(lev);
+        warpx::thermal::InitialElectronProfile profile;
+        profile.temperature_kelvin = m_elec_temp / PhysConst::kb;
+        profile.reference_density = m_n0_ref;
+        profile.gamma = m_initial_electron_temperature_gamma;
+        profile.number_floor = m_initial_electron_temperature_n_floor;
+        profile.include_pedestal =
+            m_initial_electron_temperature_include_pedestal;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            warpx::thermal::SeedCellElectronEnergy(moments, density, profile,
+                                                   m_gamma, u),
+            "Invalid conservative initial electron U state");
+        m_eulerian_energy_initialized[lev] = true;
+    }
+    RefreshEulerianElectronThermodynamics(lev, rho);
+}
+
+void
+HybridPICModel::RefreshEulerianElectronThermodynamics (
+    int const lev, const amrex::MultiFab& rho) const {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        UsesEulerianElectronEnergy() && !HasElectronThermalTrial(lev),
+        "Accepted thermal refresh must not run inside a nonlinear trial");
+    auto& w = WarpX::GetInstance();
+    auto const& u = *w.m_fields.get(FieldType::hybrid_electron_energy_fp, lev);
+    warpx::thermal::KineticThermalMoments moments(ElectronThermalGeometry(lev), u.boxArray(),
+                                                  u.DistributionMap(),
+                                                  EulerianMomentOptions(lev));
+    warpx::thermal::KineticThermalStateView state{rho};
+    state.pedestal = DensityPedestal(lev);
+    state.energy = &u;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        moments.Evaluate(state),
+        "Invalid accepted Eulerian thermodynamic state");
+    auto& te = *w.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    auto& pe = *w.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+    amrex::MultiFab::Copy(te, moments.NodalTemperature(), 0, 0, 1,
+                          te.nGrowVect());
+    amrex::MultiFab::Copy(pe, moments.OhmPressure(), 0, 0, 1, pe.nGrowVect());
+}
+
+void
+HybridPICModel::MarkEulerianElectronEnergyRestored (int const lev) {
+    AMREX_ALWAYS_ASSERT(UsesEulerianElectronEnergy());
+    m_eulerian_energy_initialized[lev] = true;
+    ClearElectronThermalTrials();
+}
+
+
+std::string
+HybridPICModel::DarwinCheckpointConfiguration () const {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesEulerianElectronEnergy() && m_darwin &&
+        !m_esolve_tensor && !m_esolve_curlcurl &&
+        WarpX::GetInstance().finestLevel()==0 && !EB::enabled(),
+        "Eulerian Darwin restart requires the single-level regular electric-field formulation");
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_3D)
+    amrex::Abort("Eulerian Darwin restart is implemented only in RZ and Cartesian 3D");
+#endif
+    amrex::Real theta=0.5_rt;
+    amrex::ParmParse("implicit_evolve").query("theta",theta);
+    std::ostringstream os;
+    os << std::setprecision(std::numeric_limits<amrex::Real>::max_digits10)
+       << (NativeEndpointEnabled() ? "darwin_eulerian_yee_v4 " : "darwin_eulerian_v1 ")
+       << AMREX_SPACEDIM << ' '
+#if defined(WARPX_DIM_RZ)
+       << "RZ "
+#else
+       << "Cartesian "
+#endif
+       << WarpX::n_rz_azimuthal_modes << ' ' << theta << ' '
+       << m_include_electron_inertia << ' ' << m_reduced_electron_mass_ratio << ' '
+       << m_electron_inertia_bdf2 << ' ' << m_electron_inertia_djedt_only << ' '
+       << m_electron_inertia_extrapolated_history << ' ' << m_electron_inertia_floor_taper << ' '
+       << m_darwin_vacuum_recovery << ' ' << m_darwin_vacuum_recovery_operator << ' '
+       << m_darwin_vacuum_recovery_cadence << ' ' << m_darwin_vacuum_recovery_components << ' '
+       << m_darwin_vacuum_recovery_mask << ' ' << m_darwin_vacuum_recovery_density_fraction << ' '
+       << m_darwin_vacuum_recovery_frozen_mask << ' ' << m_add_external_fields;
+    if (NativeEndpointEnabled()) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(NativeEndpointRestartSupported(),
+            "Endpoint checkpoints require direct Yee correlated instantaneous-current trapezoid");
+        os << " direct_yee_mass_v1 instantaneous_ion_trapezoid_v1 correlated_D_shared_base_v2 "
+           << m_n0_ref << ' '
+           << NativeEndpointCheckpointConfiguration(WarpX::GetInstance());
+    }
+    return os.str();
+}
+
+std::string
+HybridPICModel::DarwinCheckpointMetadata () const {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!HasElectronThermalTrial(0),
+        "Cannot checkpoint an active Darwin thermal trial");
+    std::ostringstream os;
+    os << DarwinCheckpointConfiguration() << '\n'
+       << std::setprecision(std::numeric_limits<amrex::Real>::max_digits10)
+       << m_inertia_history_initialized << ' ' << m_inertia_history_levels << ' '
+       << m_inertia_rho_n_captured << ' ' << m_inertia_jpold_captured << ' '
+       << m_electron_inertia_mass << ' ' << m_qdsmc_J_plasma_valid << '\n';
+    return os.str();
+}
+
+void
+HybridPICModel::RestoreDarwinCheckpointMetadata (const std::string& text) {
+    std::istringstream is(text);
+    std::string configuration;
+    std::getline(is,configuration);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(configuration==DarwinCheckpointConfiguration(),
+        "Darwin restart configuration differs from the saved physical history");
+    int initialized=-1,levels=-1,rho=-1,jp=-1,plasma=-1;
+    amrex::Real mass=-1;
+    is >> initialized >> levels >> rho >> jp >> mass >> plasma;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(bool(is) &&
+        (initialized==0 || initialized==1) && (rho==0 || rho==1) &&
+        (jp==0 || jp==1) && (plasma==0 || plasma==1) &&
+        std::isfinite(mass) && mass>=0 &&
+        (m_include_electron_inertia ? (initialized==1 && levels>=1 && levels<=2 && mass>0)
+                                    : (initialized==0 && levels==0)),
+        "Invalid or incomplete Darwin electron-current checkpoint history");
+    is >> std::ws;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(is.eof(),"Unexpected trailing Darwin checkpoint metadata");
+    m_inertia_history_initialized=initialized!=0;
+    m_inertia_history_levels=levels;
+    m_inertia_rho_n_captured=rho!=0;
+    m_inertia_jpold_captured=jp!=0;
+    m_electron_inertia_mass=mass;
+    m_qdsmc_J_plasma_valid=plasma!=0;
+    // The caller sets readiness only after validating every registered array.
+    m_darwin_checkpoint_restored=false;
+}
+
+void
+HybridPICModel::ValidateDarwinCheckpointFields (const std::vector<std::string>& names) const {
+    std::map<std::string,int> required{
+        {"hybrid_A_fp",3},{"hybrid_A_old_fp",3},
+        {"hybrid_E_long_fp",3},{"hybrid_E_long_old_fp",3},
+        {"hybrid_B_static_fp",3},{"hybrid_phi_darwin_fp",1},
+        {"hybrid_current_fp_plasma",3}};
+    if (m_include_electron_inertia) {
+        for (auto const* name : {"hybrid_Je_n_nodal","hybrid_Je_nm1_nodal",
+             "hybrid_E_inertial_nodal","hybrid_Je_theta_nodal","hybrid_rho_n_frozen"}) {
+            required.emplace(name,1);
+        }
+    }
+    if (NativeEndpointEnabled()) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(NativeEndpointRestartSupported(),
+            "Unsupported native endpoint checkpoint convention");
+        required.emplace("diagnostic_Je_endpoint_fp",3);
+        required.emplace("diagnostic_D_endpoint_fp",3);
+        if(warpx::darwin::NativePECPlasmaEnabled())required.emplace(warpx::darwin::PECWallCurrentName,3);
+        required.emplace("hybrid_E_inertial_fp",3);
+        if (NativeVacuumEndpointEnabled() && NativeCircuitDriveEnabled())
+            required.emplace(NativeVacuumTransverseRecordName(),3);
+    }
+    if (m_darwin_vacuum_recovery) {
+        required.emplace("hybrid_A_vac_dA_nodal",3);
+        if (m_darwin_vacuum_recovery_operator=="curlcurl") {
+            required.emplace("hybrid_A_vac_dA_edge",3);
+        }
+    }
+    for (auto const& [field,expected] : required) {
+        int count=0;
+        for (auto const& name : names) {
+            if (name.rfind(field+"[",0)==0) { ++count; }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(count==expected,
+            "Darwin restart is missing required history field "+field+"; refusing a silent reseed");
+    }
+}
+
+std::string
+HybridPICModel::ElectronEnergyCheckpointMetadata () const {
+    return warpx::thermal::ElectronEnergyMetadata{m_electron_energy_mode,
+                                                  m_gamma, m_density_control.initial_number_floor,
+                                                  ActualThermalAxisCorrection(),
+                                                  m_electron_thermal_model}
+        .Encode();
+}
+
+void
+HybridPICModel::ValidateElectronEnergyCheckpointMetadata (
+    const std::string& text) const {
+    auto const saved = warpx::thermal::ElectronEnergyMetadata::Decode(text);
+    auto const requested = warpx::thermal::ElectronEnergyMetadata::Decode(
+        ElectronEnergyCheckpointMetadata());
+    saved.ValidateRestart(requested);
+}
+
+void
+HybridPICModel::SetElectronThermalTrial (int const lev,
+                                         const amrex::MultiFab& temperature,
+                                         const amrex::MultiFab& ohm_pressure) {
+    AMREX_ALWAYS_ASSERT(UsesEulerianElectronEnergy());
+    auto const& fields = WarpX::GetInstance().m_fields;
+    m_electron_thermal_trial.Set(
+        lev, temperature, ohm_pressure,
+        *fields.get(FieldType::hybrid_electron_temperature_fp, lev),
+        *fields.get(FieldType::hybrid_electron_pressure_fp, lev));
+}
+
+const amrex::MultiFab&
+HybridPICModel::ElectronTemperatureForSolve (int const lev) const {
+    return m_electron_thermal_trial.Temperature(
+        lev, *WarpX::GetInstance().m_fields.get(
+                 FieldType::hybrid_electron_temperature_fp, lev));
+}
+
+const amrex::MultiFab&
+HybridPICModel::ElectronPressureForSolve (int const lev) const {
+    return m_electron_thermal_trial.Pressure(
+        lev, *WarpX::GetInstance().m_fields.get(
+                 FieldType::hybrid_electron_pressure_fp, lev));
+}
+
+void
+HybridPICModel::ReadParameters () {
     const ParmParse pp_hybrid("hybrid_pic_model");
 
     // The B-field update is subcycled to improve stability - the number
@@ -268,6 +587,28 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.n0_ref should be specified if hybrid_pic_model.gamma != 1");
     }
 
+    amrex::Vector<amrex::Real> end_width{0., 0.}, end_rolloff{0., 0.};
+    pp_hybrid.queryarr("end_region_width", end_width);
+    pp_hybrid.queryarr("end_region_rolloff", end_rolloff);
+    pp_hybrid.query("end_region_holmstrom", m_end_region.holmstrom);
+    utils::parser::queryWithParser(pp_hybrid, "end_region_resistivity", m_end_region.resistivity);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(end_width.size() == 2 && end_rolloff.size() == 2,
+        "end_region_width and end_region_rolloff each require zlo zhi values in metres");
+    for (int side = 0; side < 2; ++side)
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(end_width[side]) && end_width[side] >= 0.
+            && std::isfinite(end_rolloff[side]) && end_rolloff[side] >= 0.,
+            "End-region widths and rolloffs must be finite and nonnegative");
+        m_end_region.width[side] = end_width[side];
+        m_end_region.rolloff[side] = end_rolloff[side];
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(m_end_region.resistivity)
+        && m_end_region.resistivity >= 0., "end_region_resistivity must be finite and nonnegative");
+#if !(defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D))
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_end_region.holmstrom && m_end_region.resistivity == 0.,
+        "Geometric end regions currently support RZ and Cartesian 3D");
+#endif
+
     bool const has_eta_3arg = pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     std::string eta_te_expression;
     bool const has_eta_4arg = pp_hybrid.query("plasma_resistivity(rho,J,Te,t)", eta_te_expression);
@@ -301,8 +642,8 @@ void HybridPICModel::ReadParameters ()
     // via the polytropic relation; operator-split source terms are added;
     // Pe = n_e k_B T_e is emitted for the Ohm's-law E-solve. Default off
     // preserves the legacy algebraic adiabatic closure.
-    pp_hybrid.query("solve_electron_energy_equation",
-                    m_solve_electron_energy_equation);
+    m_electron_energy_mode = warpx::thermal::ParseElectronEnergyMode(
+        pp_hybrid, m_solve_electron_energy_equation);
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
 
     // Electron-energy REPRESENTATION floor, decoupled from the FIELD
@@ -323,6 +664,32 @@ void HybridPICModel::ReadParameters ()
         m_qdsmc_te_n_floor > 0.0_rt,
         "hybrid_pic_model.qdsmc_te_n_floor must be > 0 (it is a "
         "positivity floor for the electron-energy representation)");
+
+    // The loaded equilibrium need not have the energy equation's gamma.
+    // Seed its fitted profile before pressure and the initial Ohm/EL solve,
+    // without changing the subsequent entropy conversion or density floors.
+    m_initial_electron_temperature_gamma = m_gamma;
+    m_initial_electron_temperature_n_floor = m_qdsmc_te_n_floor;
+    bool const initial_gamma_given = utils::parser::queryWithParser(pp_hybrid,
+        "initial_electron_temperature_gamma", m_initial_electron_temperature_gamma);
+    bool const initial_floor_given = utils::parser::queryWithParser(pp_hybrid,
+        "initial_electron_temperature_n_floor", m_initial_electron_temperature_n_floor);
+    bool const initial_pedestal_given = pp_hybrid.query(
+        "initial_electron_temperature_include_pedestal",
+        m_initial_electron_temperature_include_pedestal);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(initial_gamma_given || initial_floor_given || initial_pedestal_given)
+            || m_solve_electron_energy_equation,
+        "Initial electron temperature parameters require solve_electron_energy_equation=1");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(m_initial_electron_temperature_gamma)
+            && std::isfinite(m_initial_electron_temperature_n_floor)
+            && m_initial_electron_temperature_n_floor > 0.0_rt,
+        "Initial electron temperature gamma must be finite and its density floor positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_initial_electron_temperature_gamma == 1.0_rt
+            || (n0_ref_given && std::isfinite(m_n0_ref) && m_n0_ref > 0.0_rt),
+        "Non-isothermal initial electron temperature requires a positive n0_ref");
 
     // Halo transport controls (see member docs). All default off and
     // bit-identical unset. qdsmc_n_floor is parsed above, so the pedestal
@@ -572,6 +939,21 @@ void HybridPICModel::ReadParameters ()
         utils::parser::queryWithParser(
             pp_hybrid, "darwin_poisson_max_iterations", m_darwin_poisson_max_iters);
         pp_hybrid.query("darwin_poisson_verbosity", m_darwin_poisson_verbosity);
+        utils::parser::queryWithParser(pp_hybrid, "darwin_poisson_semicoarsening",
+                                     m_darwin_poisson_semicoarsening);
+        pp_hybrid.query("darwin_poisson_semicoarsening_direction",
+                        m_darwin_poisson_semicoarsening_direction);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_darwin_poisson_semicoarsening >= 0 && m_darwin_poisson_semicoarsening <= 30,
+            "hybrid_pic_model.darwin_poisson_semicoarsening must be between 0 and 30");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_darwin_poisson_semicoarsening_direction >= -1 &&
+                m_darwin_poisson_semicoarsening_direction < AMREX_SPACEDIM,
+            "hybrid_pic_model.darwin_poisson_semicoarsening_direction is outside the grid dimensions");
+#if AMREX_SPACEDIM == 1
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_poisson_semicoarsening == 0,
+            "Darwin Poisson semicoarsening requires at least two grid dimensions");
+#endif
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "hybrid_pic_model.darwin is not supported in the 1D radial geometries.");
@@ -632,9 +1014,16 @@ void HybridPICModel::ReadParameters ()
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_darwin_vacuum_recovery_operator == "poisson"
                 || m_darwin_vacuum_recovery_operator == "curlcurl"
-                || m_darwin_vacuum_recovery_operator == "edge_relaxation",
+                || m_darwin_vacuum_recovery_operator == "edge_relaxation"
+                || m_darwin_vacuum_recovery_operator == "greens",
                 "hybrid_pic_model.darwin_vacuum_recovery_operator must be "
-                "'poisson', 'curlcurl' or 'edge_relaxation'");
+                "'poisson', 'curlcurl', 'edge_relaxation' or 'greens'");
+            if (m_darwin_vacuum_recovery_operator == "greens") {
+#if !defined(WARPX_DIM_RZ) || !defined(AMREX_USE_FFT)
+                WARPX_ABORT_WITH_MESSAGE(
+                    "greens recovery requires RZ and AMReX FFT support (ABLASTR_FFT=ON)");
+#endif
+            }
             utils::parser::queryWithParser(
                 pp_hybrid, "darwin_vacuum_recovery_curlcurl_beta",
                 m_darwin_vacrec_cc_beta_rel);
@@ -654,13 +1043,18 @@ void HybridPICModel::ReadParameters ()
             pp_hybrid.query("darwin_vacuum_recovery_live_probes",
                             m_vacuum_recovery_live_probes);
             if (m_darwin_vacuum_recovery_operator == "edge_relaxation") {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_vacuum_recovery_live_probes
                     && m_darwin_vacuum_recovery_cadence == "half"
                     && m_darwin_vacrec_relax_time == 0.0_rt,
                     "edge_relaxation requires live probes, half cadence and zero relaxation time");
+#if defined(WARPX_DIM_RZ)
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    m_darwin_vacuum_recovery_components == "flux",
+                    "RZ edge_relaxation currently requires flux-only recovery");
+#endif
 #else
-                WARPX_ABORT_WITH_MESSAGE("edge_relaxation requires 3D");
+                WARPX_ABORT_WITH_MESSAGE("edge_relaxation requires 3D or RZ");
 #endif
             }
 #if defined(WARPX_DIM_1D_Z)
@@ -1408,6 +1802,27 @@ void HybridPICModel::ReadParameters ()
                                   || m_solve_electron_energy_equation;
     }
 
+    if (UsesEulerianElectronEnergy()) {
+        auto const& warpx = WarpX::GetInstance();
+        warpx::thermal::ElectronEnergyRuntimeConfig config;
+        config.darwin = m_darwin;
+        amrex::ParmParse("algo").query("evolve_scheme", config.evolve_scheme);
+        config.max_level = warpx.maxLevel();
+        config.embedded_boundary = EB::enabled();
+        config.corrected_axis = ActualThermalAxisCorrection();
+        config.gamma = m_gamma;
+        config.number_floor = m_n_floor;
+        config.representation_floor = m_qdsmc_te_n_floor;
+        config.smooth_floor_width = m_n_floor_smooth_width;
+        warpx::thermal::ValidateElectronEnergyRuntime(m_electron_energy_mode, config);
+        m_electron_thermal_model = warpx::thermal::ElectronThermalModelConfig::Resolve(
+            amrex::ParmParse("implicit_evolve.thermal"), m_include_temperature_relaxation,
+            m_include_joule_heating && m_joule_redirect_to_ions);
+        amrex::Print() << "[hybrid] electron_energy_mode="
+            << warpx::thermal::ElectronEnergyModeName(m_electron_energy_mode)
+            << "; accepted coordinate cell U_e [J/m^3], no QDSMC markers\n";
+    }
+
     // convert electron temperature from eV to J
     m_elec_temp *= PhysConst::q_e;
 
@@ -1470,7 +1885,13 @@ void HybridPICModel::AllocateLevelMFs (
     fields.alloc_init(FieldType::hybrid_electron_temperature_fp,
         lev, amrex::convert(ba, rho_nodal_flag),
         dm, ncomps, ngRho, 0.0_rt,
-        true, true, m_solve_electron_energy_equation);
+        true, true, UsesQDSMC());
+    if (UsesEulerianElectronEnergy()) {
+        fields.alloc_init(FieldType::hybrid_electron_energy_fp, lev,
+            amrex::convert(ba, amrex::IntVect::TheZeroVector()), dm, 1,
+            amrex::IntVect(1), 0.0_rt, true, true, true);
+        m_eulerian_energy_initialized[lev] = false;
+    }
 
     // QDSMC electron-energy-equation working fields, only touched (and
     // therefore only allocated) when the energy equation is solved:
@@ -1481,12 +1902,14 @@ void HybridPICModel::AllocateLevelMFs (
     //     and consumed by the QDSMC particle SetV step to advect the
     //     entropy carriers.
     if (m_solve_electron_energy_equation) {
-        fields.alloc_init(FieldType::hybrid_entropy_fp,
-            lev, amrex::convert(ba, rho_nodal_flag),
-            dm, ncomps, ngRho, 0.0_rt);
-        fields.alloc_init(FieldType::hybrid_qdsmc_weights_fp,
-            lev, amrex::convert(ba, rho_nodal_flag),
-            dm, ncomps, ngRho, 0.0_rt);
+        if (UsesQDSMC()) {
+            fields.alloc_init(FieldType::hybrid_entropy_fp,
+                lev, amrex::convert(ba, rho_nodal_flag),
+                dm, ncomps, ngRho, 0.0_rt);
+            fields.alloc_init(FieldType::hybrid_qdsmc_weights_fp,
+                lev, amrex::convert(ba, rho_nodal_flag),
+                dm, ncomps, ngRho, 0.0_rt);
+        }
         fields.alloc_init(FieldType::hybrid_electron_velocity_fp, Direction{0},
             lev, amrex::convert(ba, rho_nodal_flag),
             dm, ncomps, ngRho, 0.0_rt);
@@ -1571,34 +1994,46 @@ void HybridPICModel::AllocateLevelMFs (
         const amrex::IntVect B_stag[3] = {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
         for (int dir = 0; dir < 3; ++dir) {
             fields.alloc_init("hybrid_A_fp", Direction{dir},
-                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
             fields.alloc_init("hybrid_A_old_fp", Direction{dir},
-                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
             fields.alloc_init("hybrid_E_long_fp", Direction{dir},
-                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
             fields.alloc_init("hybrid_E_long_old_fp", Direction{dir},
-                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
             fields.alloc_init("hybrid_B_static_fp", Direction{dir},
-                lev, amrex::convert(ba, B_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+                lev, amrex::convert(ba, B_stag[dir]), dm, ncomps, ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
         }
         fields.alloc_init("hybrid_phi_darwin_fp",
             lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-            dm, ncomps, ngRho, 0.0_rt);
+            dm, ncomps, ngRho, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
 
         // Vacuum A recovery: the nodal correction fields dA (persistent —
         // the previous solution warm-starts each MLMG solve) and the
         // edge-staggered scratch for the field-implied current source.
         if (m_darwin_vacuum_recovery) {
+            if (m_darwin_vacuum_recovery_operator == "greens") {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0 && ncomps == 1 && !EB::enabled(),
+                    "RZ greens recovery requires one level, m=0 and no EB");
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC,
+                    "RZ greens recovery requires a PEC radial outer wall");
+                m_darwin_rz_green_solver = std::make_unique<DarwinRZGreenSolver>(
+                    WarpX::GetInstance().Geom(lev),
+                    WarpX::field_boundary_lo[1] == FieldBoundaryType::PMC,
+                    WarpX::field_boundary_hi[1] == FieldBoundaryType::PMC,
+                    m_darwin_vacuum_recovery_components == "all");
+            }
             for (int dir = 0; dir < 3; ++dir) {
                 fields.alloc_init("hybrid_A_vac_dA_nodal", Direction{dir},
                     lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                    dm, ncomps, ngRho, 0.0_rt);
+                    dm, ncomps, ngRho, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
                 // Edge-staggered persistent correction for the "curlcurl"
                 // recovery operator (warm start across evaluations).
                 if (m_darwin_vacuum_recovery_operator == "curlcurl") {
                     fields.alloc_init("hybrid_A_vac_dA_edge", Direction{dir},
                         lev, amrex::convert(ba, E_stag[dir]), dm, ncomps,
-                        ngEB, 0.0_rt);
+                        ngEB, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
                 }
                 fields.alloc_init("hybrid_J_vac_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
@@ -1626,9 +2061,12 @@ void HybridPICModel::AllocateLevelMFs (
         }
     }
 
-    // Electron inertia: nodal 3-component Je history (per-step levels;
-    // zero init = the exact pre-history for quiescent starts) and the
-    // per-evaluation nodal scratch for the assembled inertial field.
+    // Query even when inertia is disabled so unsupported diagnostic settings
+    // reject before any step transaction or physical state mutation.
+    bool const compatible_yee_inertia = UseCompatibleYeeInertia();
+    // Electron inertia: nodal 3-component Je history and per-evaluation
+    // inertial field. Allocation zeros are placeholders; history is seeded
+    // from the committed initial current before the first particle trial.
     if (m_include_electron_inertia) {
         // One ghost cell throughout: the histories are read at valid nodes
         // only, the assembled field is consumed by valid-contained Interp
@@ -1637,13 +2075,22 @@ void HybridPICModel::AllocateLevelMFs (
         const amrex::IntVect nd = amrex::IntVect::TheNodeVector();
         const amrex::IntVect ng1 = amrex::IntVect(1);
         fields.alloc_init("hybrid_Je_n_nodal",
-            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
         fields.alloc_init("hybrid_Je_nm1_nodal",
-            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
         fields.alloc_init("hybrid_E_inertial_nodal",
-            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
+        if (compatible_yee_inertia) {
+            auto const E = fields.get_alldirs(FieldType::Efield_fp, lev);
+            for (int c = 0; c < 3; ++c) {
+                fields.alloc_init("hybrid_E_inertial_fp", ablastr::fields::Direction{c},
+                    lev, E[c]->boxArray(), dm, 1, ng1, 0.0_rt, true, true, true);
+            }
+            fields.alloc_init("diagnostic_inertia_kappa_nodal", lev,
+                amrex::convert(ba, nd), dm, 1, ng1, 0.0_rt);
+        }
         fields.alloc_init("hybrid_Je_theta_nodal",
-            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
         // Step-start density frozen for the drho/dt leg: during the
         // nonlinear iteration rho_fp component 0 is a midpoint-position
         // deposit (only the first evaluation of a step sees rho(x^n)
@@ -1652,7 +2099,7 @@ void HybridPICModel::AllocateLevelMFs (
         // family the midpoint component comes from. One mode: the inertia
         // term asserts m = 0 in RZ.
         fields.alloc_init("hybrid_rho_n_frozen",
-            lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho, 0.0_rt);
+            lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho, 0.0_rt, true, true, UsesEulerianElectronEnergy() && m_darwin);
     }
 
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
@@ -2527,11 +2974,22 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 
     // QDSMC: lazy-construct the fictitious-particle container and lay one
     // particle per grid node.
-    if (m_solve_electron_energy_equation) {
+    if (UsesQDSMC()) {
         m_qdsmc_pc = std::make_unique<QdsmcParticleContainer>(&warpx);
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             m_qdsmc_pc->InitParticles(lev);
         }
+    }
+
+    // Checkpoint arrays are read before this method initializes stagger caches
+    // and field parsers. Validate their native companion map only after those
+    // read-only dependencies exist, still before any particle or field step.
+    if (m_darwin_checkpoint_restored && NativeEndpointEnabled()) {
+        if(warpx::darwin::NativeEndpointPairSelected(warpx)){
+            std::string directory;amrex::ParmParse("amr").get("restart",directory);
+            warpx::darwin::RestoreNativeAcceptedEndpointCheckpoint(warpx,directory);
+        }
+        ValidateNativeEndpointRestart(warpx);
     }
 }
 
@@ -2969,6 +3427,11 @@ void HybridPICModel::CalculatePlasmaCurrent (
 
     auto& warpx = WarpX::GetInstance();
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    if(auto* paired=warpx::darwin::NativeActivePairedFields(warpx); paired && paired->OwnsMagnetic(Bfield)) {
+        AMREX_ALWAYS_ASSERT(lev==0 && !m_has_external_current && !EB::enabled());
+        paired->RefreshAmpere(current_fp_plasma);
+        return;
+    }
     warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
         current_fp_plasma, Bfield, eb_update_E, lev
     );
@@ -3019,13 +3482,19 @@ void HybridPICModel::HybridPICSolveE (
     amrex::MultiFab const& rhofield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
     const int lev, const bool solve_for_Faraday,
-    const std::optional<bool> include_resistivity) const
+    const std::optional<bool> include_resistivity,
+    warpx::thermal::EulerianDissipation* trial_dissipation,
+    ablastr::fields::VectorField const* ER_out,
+    const warpx::thermal::HybridOhmDampingFields* damping_out,
+    ablastr::fields::VectorField const* F_pressure_hall_out,
+    ablastr::fields::VectorField const* transverse_offset) const
 {
     ABLASTR_PROFILE("WarpX::HybridPICSolveE()");
 
     HybridPICSolveE(
         Efield, Jfield, Bfield, rhofield, eb_update_E, lev,
-        PatchType::fine, solve_for_Faraday, include_resistivity
+        PatchType::fine, solve_for_Faraday, include_resistivity, trial_dissipation,
+        ER_out, damping_out, F_pressure_hall_out, transverse_offset
     );
     if (lev > 0)
     {
@@ -3042,12 +3511,66 @@ void HybridPICModel::HybridPICSolveE (
     std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
     const int lev, PatchType patch_type,
     const bool solve_for_Faraday,
-    const std::optional<bool> include_resistivity) const
+    const std::optional<bool> include_resistivity,
+    warpx::thermal::EulerianDissipation* trial_dissipation,
+    ablastr::fields::VectorField const* ER_out,
+    const warpx::thermal::HybridOhmDampingFields* damping_out,
+    ablastr::fields::VectorField const* F_pressure_hall_out,
+    ablastr::fields::VectorField const* transverse_offset) const
 {
     auto& warpx = WarpX::GetInstance();
+    if (transverse_offset) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(UseCompatibleYeeInertia() &&
+            m_include_electron_inertia && !m_esolve_tensor && !m_esolve_curlcurl &&
+            !EB::enabled() && !m_resistive_wall && !solve_for_Faraday && lev == 0,
+            "Transverse Ohm grouping requires direct Yee inertia, homogeneous native boundaries, "
+            "and no transformed, EB or resistive-wall path");
+        // The unified native kernel consumes total B and does not subtract
+        // E_reference. On this qualified route the residual copies valid
+        // rows, then UpdateWarpXFields rebuilds transverse and full-E images
+        // before curl/aux/gather. Raw scalar-gradient EL ghosts need not be
+        // physical E images; do not change them or infer all-allocation
+        // H(EL)=EL from this admission.
+        bool unified_reference_supported = false;
+#if defined(WARPX_DIM_RZ)
+        unified_reference_supported = m_external_unified &&
+            WarpX::n_rz_azimuthal_modes == 1 && warpx.Geom(lev).ProbLo(0) == 0.0_rt &&
+            WarpX::field_boundary_lo[0] == FieldBoundaryType::None &&
+            WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC &&
+            warpx.Geom(lev).isPeriodic(1) &&
+            WarpX::field_boundary_lo[1] == FieldBoundaryType::Periodic &&
+            WarpX::field_boundary_hi[1] == FieldBoundaryType::Periodic &&
+            WarpX::field_gathering_algo == GatheringAlgo::MomentumConserving &&
+            WarpX::nox == 3 && WarpX::field_centering_nox == 2 &&
+            WarpX::field_centering_noz == 2;
+#endif
+        // A declared drive may still have an exactly zero reference. Retain
+        // that existing route and its collective checks in every geometry.
+        if (m_add_external_fields) {
+            for (auto const* f : warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external,lev)) {
+                if (unified_reference_supported) {
+                    // A maximum reduction can discard NaNs. Check every
+                    // valid reference value collectively on the new route,
+                    // replacing (not duplicating) its former norm scan.
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(f->is_finite(0,1,0),
+                        "Transverse Ohm reference must be finite on every valid cell");
+                } else {
+                    amrex::Real const reference_max = f->norminf(0,0);
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(reference_max) &&
+                        reference_max == 0.0_rt,
+                        "Nonzero transverse Ohm reference requires unified RZ m0, radial PEC, "
+                        "periodic z, shape3 MC gather and order2 centering");
+                }
+            }
+        }
+    }
+
+
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE((!ER_out && !damping_out) || (!m_esolve_tensor && !m_esolve_curlcurl),
+        "Global eta capture requires the native algebraic Ohm field; transformed solves need their own response");
 
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
-    auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+    auto const* const electron_pressure_fp = &ElectronPressureForSolve(lev);
 
 #if defined(WARPX_DIM_RZ)
     // Conductor-row treatment of the r-max PEC wall: the conductor row
@@ -3127,6 +3650,26 @@ void HybridPICModel::HybridPICSolveE (
     // coupling with solve_for_Faraday; the theta-implicit solver overrides
     // this to assemble the full Ohm E (grad(Pe) and eta*J together).
     const bool incl_eta = include_resistivity.value_or(solve_for_Faraday);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!HasElectronThermalTrial(lev) || !incl_eta ||
+        !(m_visc_in_ohms_law || m_include_hyper_resistivity_term) || trial_dissipation,
+        "Eulerian Ohm evaluation requires its explicit current trial dissipation context");
+    if (trial_dissipation && incl_eta) {
+        // Apply the conductor moment closure above first. Force and thermal
+        // work then consume the same live rho/J/Te/B and projected increments.
+        warpx::thermal::TrialDissipationState trial;
+        trial.charge=&rhofield;
+        trial.temperature_kelvin=&ElectronTemperatureForSolve(lev);
+        for (int c=0;c<3;++c) {
+            trial.plasma_current[c]=current_fp_plasma[c];
+            trial.ion_current[c]=Jfield[c];
+            trial.magnetic_field[c]=Bfield[c];
+        }
+        if (!trial_dissipation->Evaluate(trial)) {
+            for (auto* field:Efield) { field->setVal(std::numeric_limits<amrex::Real>::quiet_NaN()); }
+            return;
+        }
+    }
+
     if (m_esolve_tensor) {
         // tensor_form: the stateless Je elimination replaces the FD Ohm
         // kernel entirely (Hall/motional, inertia, resistive friction all
@@ -3154,7 +3697,7 @@ void HybridPICModel::HybridPICSolveE (
     // mu0. The kernels then add E_H in place of the truncated
     // -eta_H lap J.
     if (m_include_hyper_resistivity_term && m_hyper_resistivity_curlcurl
-        && incl_eta) {
+        && incl_eta && !trial_dissipation) {
         auto * fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
         ablastr::fields::VectorField curlJ =
             warpx.m_fields.get_alldirs("hybrid_hyperres_curlJ_fp", lev);
@@ -3218,7 +3761,8 @@ void HybridPICModel::HybridPICSolveE (
     warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
         Efield, current_fp_plasma, Jfield, Bfield, rhofield,
         *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday,
-        incl_eta
+        incl_eta, nullptr, nullptr, trial_dissipation, ER_out, damping_out,
+        F_pressure_hall_out, transverse_offset
     );
 
     // curlcurl_form (division-free) toroidal sector: the kernel above left
@@ -3385,7 +3929,8 @@ void HybridPICModel::HybridPICSolveE (
     }
     } // end !m_esolve_tensor
 
-    amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
+    // Match the time used by the Ohm kernels, including the t0 field solve.
+    amrex::Real const time = warpx.gett_new(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
 
     // Conformal wall, constitutive PEC: the Ohm E is algebraic in B, so the
@@ -3968,8 +4513,7 @@ void HybridPICModel::ComputeResistiveOverlay (
 
     amrex::MultiFab const & rho_total =
         *warpx.m_fields.get(FieldType::rho_fp, lev);
-    amrex::MultiFab const & Te_K =
-        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & Te_K = ElectronTemperatureForSolve(lev);
     ablastr::fields::VectorField J_plasma =
         warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     ablastr::fields::VectorField B_fp =
@@ -5269,9 +5813,29 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
 #endif
 }
 
+bool HybridPICModel::UseCompatibleYeeInertia () const
+{
+    bool enabled = false;
+    amrex::ParmParse pp("endpoint_diagnostic");
+    pp.query("yee_inertia", enabled);
+    if (enabled) {
+        bool endpoint = false, quadrature = false, increment = false;
+        pp.query("enable", endpoint);
+        pp.query("ion_quadrature", quadrature);
+        pp.query("correlated_increment", increment);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(endpoint && quadrature && increment &&
+            m_include_electron_inertia && m_darwin && !m_esolve_curlcurl &&
+            m_electron_inertia_djedt_only && !m_electron_inertia_bdf2,
+            "Compatible Yee inertia requires the guarded correlated endpoint "
+            "diagnostic, Darwin e-form and dJe/dt-only inertia; no default change");
+    }
+    return enabled;
+}
+
 void HybridPICModel::ComputeDarwinELong (
     ablastr::fields::MultiLevelScalarField const& rho,
-    amrex::Real const t, bool const reset_guess)
+    amrex::Real const t, bool const reset_guess,
+    ablastr::fields::MultiLevelVectorField const* full_source)
 {
     ABLASTR_PROFILE("HybridPICModel::ComputeDarwinELong()");
 
@@ -5285,6 +5849,12 @@ void HybridPICModel::ComputeDarwinELong (
         "hybrid_pic_model.darwin supports only the m = 0 azimuthal mode in RZ");
 #endif
 
+    amrex::GpuArray<int, AMREX_SPACEDIM> pmc_lo{}, pmc_hi{};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d)
+    {
+        pmc_lo[d] = WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC;
+        pmc_hi[d] = WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC;
+    }
     if (!m_darwin_bc_handler) {
         m_darwin_bc_handler = std::make_unique<PoissonBoundaryHandler>();
         m_darwin_bc_handler->DefinePhiBCs(warpx.Geom(0));
@@ -5321,10 +5891,19 @@ void HybridPICModel::ComputeDarwinELong (
     for (int lev = 0; lev <= finest; ++lev)
     {
         amrex::Geometry const & geom = warpx.Geom(lev);
+        auto const end_region = EndRegion(lev);
+        bool const density_gate = m_holmstrom_vacuum_region;
+        amrex::Real const gate_width = m_holmstrom_transition_width;
+#if defined(WARPX_DIM_RZ)
+        amrex::Real const gate_radius = m_holmstrom_axis_radius;
+        amrex::Real const gate_rolloff = m_holmstrom_axis_rolloff;
+        amrex::Real const radial_origin = geom.ProbLo(0);
+        amrex::Real const radial_spacing = geom.CellSize(0);
+#endif
         auto const* ped_mf = DensityPedestal(lev);
         auto const dx_arr = geom.CellSizeArray();
 
-        amrex::MultiFab const & Pe = *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+        amrex::MultiFab const & Pe = ElectronPressureForSolve(lev);
         ablastr::fields::VectorField E_long =
             warpx.m_fields.get_alldirs("hybrid_E_long_fp", lev);
 
@@ -5333,13 +5912,14 @@ void HybridPICModel::ComputeDarwinELong (
         // grad(phi) below). With electron inertia the inertial field joins
         // the source, so its longitudinal part lands in E_L and the
         // transverse state stays clean of gradient content (the structural
-        // cancellation this projection exists for). NOTE: the zero
-        // extension past non-periodic walls (below) truncates the inertial
-        // part of S at the wall layer; on wall-bounded decks with a
-        // floored halo at the wall this can leave a wall-sheet residue in
-        // E_T at the inertial-term amplitude -- watch wall-adjacent B in
-        // validations (proper per-boundary-type E_L conditions remain the
-        // documented follow-up).
+        // cancellation this projection exists for). PMC source ghosts use
+        // vector parity below. Other physical faces retain the zero
+        // extension and their existing scalar-potential boundary condition.
+        bool const direct_yee_inertia = UseCompatibleYeeInertia();
+        ablastr::fields::VectorField Ei_yee;
+        if (direct_yee_inertia) {
+            Ei_yee = warpx.m_fields.get_alldirs("hybrid_E_inertial_fp", lev);
+        }
         amrex::MultiFab const * Ei_nodal = m_include_electron_inertia
             ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
         const amrex::GpuArray<int, 3> E_stag_arr[3] =
@@ -5354,6 +5934,18 @@ void HybridPICModel::ComputeDarwinELong (
             amrex::Real const inv_dx = 1.0_rt / dx_arr[d];
             amrex::IntVect const off = grad_off[dir];
             amrex::GpuArray<int, 3> const Estag = E_stag_arr[dir];
+            if (full_source) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    full_source->size() == static_cast<std::size_t>(finest + 1),
+                    "Darwin full longitudinal source level count mismatch");
+                auto const* source = (*full_source)[lev][dir];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(source && source != &Sd &&
+                    source->boxArray() == Sd.boxArray() &&
+                    source->DistributionMap() == Sd.DistributionMap() &&
+                    source->nComp() == Sd.nComp(),
+                    "Darwin full longitudinal source must be a separate native Yee field");
+                amrex::MultiFab::Copy(Sd, *source, 0, 0, Sd.nComp(), 0);
+            } else {
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -5368,7 +5960,8 @@ void HybridPICModel::ComputeDarwinELong (
                 }
                 bool const use_ped = ped_mf != nullptr;
                 amrex::Array4<amrex::Real const> ei;
-                if (Ei_nodal) { ei = Ei_nodal->const_array(mfi); }
+                if (direct_yee_inertia) { ei = Ei_yee[dir]->const_array(mfi); }
+                else if (Ei_nodal) { ei = Ei_nodal->const_array(mfi); }
                 const bool add_inertia = (Ei_nodal != nullptr);
                 const int comp = dir;
                 amrex::ParallelFor(mfi.tilebox(),
@@ -5381,21 +5974,45 @@ void HybridPICModel::ComputeDarwinELong (
                                                     (use_ped ? ped(iv) + ped(ivp) : 0.0_rt)),
                                           rho_floor, floor_w);
                     S_arr(iv) = -(Pe_arr(ivp) - Pe_arr(iv)) * inv_dx / rho_edge;
+                    if (end_region.holmstrom)
+                    {
+                        amrex::Real weight = 1. - end_region.Weight(i, j, k, Estag);
+                        if (density_gate)
+                        {
+                            amrex::Real const raw = .5_rt * (rho_arr(iv) + rho_arr(ivp));
+                            amrex::Real const plasma = gate_width > 0.
+                                ? .5_rt * (1. + std::tanh((raw - rho_floor) /
+                                                         (gate_width * rho_floor)))
+                                : (raw < rho_floor ? 0. : 1.);
+                            amrex::Real eligible = 1.;
+#if defined(WARPX_DIM_RZ)
+                            if (gate_radius > 0.)
+                            {
+                                amrex::Real const radius = radial_origin +
+                                    (i + .5_rt * (1 - Estag[0])) * radial_spacing;
+                                eligible = gate_rolloff > 0. && gate_width > 0.
+                                    ? .5_rt * (1. - std::tanh((radius - gate_radius) / gate_rolloff))
+                                    : (radius < gate_radius ? 1. : 0.);
+                            }
+#endif
+                            weight *= 1. - (1. - plasma) * eligible;
+                        }
+                        S_arr(iv) *= weight;
+                    }
                     if (add_inertia) {
-                        S_arr(iv) += Interp(ei, nodal_st, Estag, coarsen_rr,
-                                            i, j, k, comp);
+                        S_arr(iv) += direct_yee_inertia ? ei(iv)
+                            : Interp(ei, nodal_st, Estag, coarsen_rr, i, j, k, comp);
                     }
                 });
             }
-            // Zero-extend past non-periodic physical boundaries (setBndry
-            // zeroes all ghosts, FillBoundary then restores the interior and
-            // periodic ones): the divergence below reads the ghost layer at
-            // the walls, and the nodal Dirichlet phi solve constrains the
-            // wall nodes anyway. Proper per-boundary-type E_L conditions are
-            // a follow-up.
+            }
+            // Restore interior/periodic ghosts, then reflect PMC sources
+            // with vector parity for the divergence at the end nodes.
+            // PEC faces retain zero extension and Dirichlet phi.
             Sd.setBndry(0.0_rt);
             if (m_darwin_periodic_projection) { Sd.OverrideSync(geom.periodicity()); }
             Sd.FillBoundary(geom.periodicity());
+            ApplyDarwinPMCVectorBoundary(Sd, geom, pmc_lo, pmc_hi);
         }
 
         // Step 2: nodal div(S) via the geometry-aware finite-difference
@@ -5425,7 +6042,15 @@ void HybridPICModel::ComputeDarwinELong (
     amrex::ignore_unused(t);
     for (int lev = 0; lev <= finest; ++lev)
     {
-        amrex::LPInfo const info;
+        amrex::LPInfo info;
+        int const semi_levels = ConfigureDarwinPoissonSemicoarsening(
+            info, warpx.Geom(lev), m_darwin_poisson_semicoarsening,
+            m_darwin_poisson_semicoarsening_direction);
+        if (m_darwin_poisson_verbosity > 0)
+        {
+            amrex::Print() << "[darwin] E_L multigrid: semicoarsening_levels=" << semi_levels
+                           << " retained_direction=" << info.semicoarsening_direction << "\n";
+        }
         std::unique_ptr<amrex::MLNodeLinOp> linop;
 #if defined(WARPX_DIM_1D_Z)
         // The FD nodal operator does not support 1D; the tensor nodal
@@ -5490,10 +6115,22 @@ void HybridPICModel::ComputeDarwinELong (
         amrex::MultiFab & phi = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
         // A canonical initial potential avoids retaining an arbitrary constant
         // and a warm-start roundoff floor when a Jacobian probe has tiny RHS.
-        if (m_darwin_periodic_projection || reset_guess) { phi.setVal(0.0_rt); }
+        bool canonical_fd_nullspace = false;
+#if defined(WARPX_DIM_3D)
+        canonical_fd_nullspace = !EB::enabled() && !m_darwin_periodic_projection;
+        for (int d=0;d<AMREX_SPACEDIM;++d) {
+            auto const low=m_darwin_bc_handler->lobc[d];
+            auto const high=m_darwin_bc_handler->hibc[d];
+            canonical_fd_nullspace = canonical_fd_nullspace &&
+                (low==amrex::LinOpBCType::Neumann || low==amrex::LinOpBCType::Periodic) &&
+                (high==amrex::LinOpBCType::Neumann || high==amrex::LinOpBCType::Periodic);
+        }
+#endif
+        if (m_darwin_periodic_projection || reset_guess || canonical_fd_nullspace) { phi.setVal(0.0_rt); }
         amrex::MLMG mlmg(*linop);
         mlmg.setVerbose(m_darwin_poisson_verbosity);
         mlmg.setMaxIter(m_darwin_poisson_max_iters);
+        if (canonical_fd_nullspace) { mlmg.setBottomSolver(amrex::BottomSolver::smoother); }
         mlmg.solve({&phi}, {rhs_store[lev].get()},
                    m_darwin_poisson_rtol, m_darwin_poisson_atol);
     }
@@ -5533,9 +6170,11 @@ void HybridPICModel::ComputeDarwinELong (
             // the (ghost-including) push field.
             Ed.setBndry(0.0_rt);
             Ed.FillBoundary(geom.periodicity());
+            ApplyDarwinPMCVectorBoundary(Ed, geom, pmc_lo, pmc_hi);
         }
 
-        if (m_darwin_poisson_verbosity > 0) {
+        if (m_darwin_poisson_verbosity > 0)
+        {
             amrex::Print() << "[darwin] lev " << lev
                 << " max|E_L| = (" << E_long[0]->norminf()
                 << ", " << E_long[1]->norminf()
@@ -5616,20 +6255,21 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
 
     // The field-implied current J_imp = curl(curl A)/mu0 on the E staggering.
     // Bfield_fp is curl scratch here (the caller rebuilds B = B_static +
-    // curl A right after the recovery); zero-extension past non-periodic
-    // walls mirrors the E_L source convention.
+    // curl A right after the recovery). Derive the PMC curl guards from
+    // reflected A so the next Ampere curl preserves its boundary stencil.
     // FD-Jacobian probes must not difference through the iterative solve
     // (its rtol-level noise is amplified by the 1/(theta dt) scaling of the
     // band field rows): they reuse the correction from the last
     // non-Jacobian evaluation, keeping the probed map smooth and affine.
     // (Unless WARPX_VACREC_LIVE_PROBES is set -- see above.)
     if (!frozen_probe) {
-    warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
-        B, A, warpx.GetEBUpdateBFlag()[lev], lev);
-    for (int dir = 0; dir < 3; ++dir) {
-        B[dir]->setBndry(0.0_rt);
-        B[dir]->FillBoundary(geom.periodicity());
-    }
+        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
+            B, A, warpx.GetEBUpdateBFlag()[lev], lev,
+            DarwinPMCCurlGrow(WarpX::field_boundary_lo, WarpX::field_boundary_hi));
+        for (int dir = 0; dir < 3; ++dir)
+        {
+            B[dir]->FillBoundary(geom.periodicity());
+        }
     warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
         Jvac, B, warpx.GetEBUpdateEFlag()[lev], lev);
     for (int dir = 0; dir < 3; ++dir) {
@@ -5643,6 +6283,10 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
         {Ex_IndexType, Ey_IndexType, Ez_IndexType};
 
     if (m_darwin_vacuum_recovery_operator == "edge_relaxation") {
+#if defined(WARPX_DIM_RZ)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(geom.ProbLo(0) == 0.0_rt && !EB::enabled(),
+            "RZ edge_relaxation requires an r=0 axis and no embedded boundary");
+#endif
         // A Richardson correction on exactly the native edge current space:
         // dA = -omega * mu0 J / (4 sum_d 1/dx_d^2). Its fixed point is
         // masked curl(curl A) = 0, without edge-to-node interpolation or an
@@ -5655,6 +6299,12 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
         }
         amrex::Real const factor = omega * PhysConst::mu0 / inverse_scale;
         for (int dir = 0; dir < 3; ++dir) {
+#if defined(WARPX_DIM_RZ)
+            // The native cylindrical curls carry the metric. Recover only
+            // A_theta, matching the vacuum electric rows selected below.
+            // The caller restores the exact axis and prescribed wall trace.
+            if (dir != 1) { continue; }
+#endif
             auto& Ad = *A[dir];
             auto const stag = A_stag[dir];
             auto const* eb_flag = EB::enabled()
@@ -5683,12 +6333,14 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
         return;
     }
 
-    // Domain BCs for the correction: homogeneous Dirichlet on non-periodic
-    // faces (the evolved A already carries the boundary pin there, so the
-    // correction vanishes), periodic where periodic, Neumann at the RZ axis
-    // (required by the RZ FD nodal operator).
+    // Homogeneous response BCs: PEC is Dirichlet; PMC is Neumann for
+    // tangential A and Dirichlet for normal A. The RZ axis uses the nodal
+    // operator's regularity condition. The imposed drive stays in evolved A.
     amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> lobc, hibc;
+    amrex::GpuArray<int, AMREX_SPACEDIM> pmc_lo{}, pmc_hi{};
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        pmc_lo[d] = WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC;
+        pmc_hi[d] = WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC;
         if (geom.isPeriodic(d)) {
             lobc[d] = amrex::LinOpBCType::Periodic;
             hibc[d] = amrex::LinOpBCType::Periodic;
@@ -5740,6 +6392,34 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
 
     for (int dir = 0; dir < 3; ++dir) {
         if (flux_only && dir != 1) { continue; }
+        amrex::GpuArray<int, AMREX_SPACEDIM> dirichlet_lo{}, dirichlet_hi{};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d)
+        {
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+            int const component = d == 0 ? 0 : 2;
+#else
+            int const component = d;
+#endif
+            bool const tangent = dir != component;
+            if (!geom.isPeriodic(d))
+            {
+                lobc[d] = pmc_lo[d] && tangent ? amrex::LinOpBCType::Neumann
+                                               : amrex::LinOpBCType::Dirichlet;
+                hibc[d] = pmc_hi[d] && tangent ? amrex::LinOpBCType::Neumann
+                                               : amrex::LinOpBCType::Dirichlet;
+            }
+            dirichlet_lo[d] = !geom.isPeriodic(d) && !(pmc_lo[d] && tangent);
+            dirichlet_hi[d] = !geom.isPeriodic(d) && !(pmc_hi[d] && tangent);
+        }
+#if defined(WARPX_DIM_RZ)
+        lobc[0] = amrex::LinOpBCType::Neumann;
+        if (geom.ProbLo(0) == 0.0_rt) {
+            // Regularity fixes the radial and azimuthal vector components
+            // at the axis. A_z has an even scalar row there and must retain
+            // its current source under the Neumann boundary condition.
+            dirichlet_lo[0] = dir < 2;
+        }
+#endif
         amrex::MultiFab & dAd = *dA[dir];
         amrex::MultiFab const & Jd = *Jvac[dir];
         amrex::GpuArray<int, 3> const Jstag = A_stag[dir];
@@ -5765,7 +6445,9 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
             {
                 const int idx[3] = {i, j, k};
                 for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                    if (!per[d] && (idx[d] <= dlo[d] || idx[d] >= dhi[d])) {
+                    if ((dirichlet_lo[d] && idx[d] <= dlo[d]) ||
+                        (dirichlet_hi[d] && idx[d] >= dhi[d]))
+                    {
                         rhs_arr(i, j, k) = 0.0_rt;
                         return;
                     }
@@ -5794,6 +6476,11 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
             continue;
         }
 
+        if (m_darwin_vacuum_recovery_operator == "greens") {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_darwin_rz_green_solver != nullptr,
+                "RZ Green response must be initialized with the level fields");
+            m_darwin_rz_green_solver->SolveComponent(dAd, rhs, dir);
+        } else {
         amrex::LPInfo info;
 #if defined(WARPX_DIM_RZ)
         // Coarsen the more strongly coupled radial direction first. AMReX's
@@ -5895,6 +6582,7 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
                 << "\n";
         }
         if (!solve_ok) { continue; }
+        } // iterative Poisson backend
         dAd.FillBoundary(geom.periodicity());
         } // !a_from_jacobian
 
@@ -5980,9 +6668,11 @@ void HybridPICModel::VacuumRecoveryCurlCurlSolve (bool a_frozen_probe,
     // homogeneous-Dirichlet correction rows carry no source, matching the
     // Poisson path's boundary-node convention).
     const amrex::Box dom_cc = geom.Domain();
-    amrex::GpuArray<int, 3> per{{1, 1, 1}};
+    amrex::GpuArray<int, 3> per{{1, 1, 1}}, pmc_lo{}, pmc_hi{};
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
         per[d] = geom.isPeriodic(d) ? 1 : 0;
+        pmc_lo[d] = WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC;
+        pmc_hi[d] = WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC;
     }
 
     const amrex::Real rho_floor = a_rho_floor;
@@ -6030,8 +6720,9 @@ void HybridPICModel::VacuumRecoveryCurlCurlSolve (bool a_frozen_probe,
                         // Dirichlet rows: edge points lying in a
                         // non-periodic domain-boundary face (nodal index
                         // at either end).
-                        if (!per[d] && is_nd[d]
-                            && (idx[d] <= dlo[d] || idx[d] >= dhi[d])) {
+                        if (!per[d] && is_nd[d] &&
+                            ((idx[d] <= dlo[d] && !pmc_lo[d]) || (idx[d] >= dhi[d] && !pmc_hi[d])))
+                        {
                             rhs_arr(i, j, k) = 0.0_rt;
                             return;
                         }
@@ -6063,8 +6754,13 @@ void HybridPICModel::VacuumRecoveryCurlCurlSolve (bool a_frozen_probe,
         amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> lobc, hibc;
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
             lobc[d] = geom.isPeriodic(d) ? amrex::LinOpBCType::Periodic
-                                         : amrex::LinOpBCType::Dirichlet;
-            hibc[d] = lobc[d];
+                                         : (WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC
+                                                ? amrex::LinOpBCType::symmetry
+                                                : amrex::LinOpBCType::Dirichlet);
+            hibc[d] = geom.isPeriodic(d) ? amrex::LinOpBCType::Periodic
+                                         : (WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC
+                                                ? amrex::LinOpBCType::symmetry
+                                                : amrex::LinOpBCType::Dirichlet);
         }
 
         amrex::LPInfo const info;
@@ -8066,17 +8762,94 @@ void HybridPICModel::SolveETensorRZ (
 #endif
 }
 
+void HybridPICModel::ComputeElectronCurrentNodal (amrex::MultiFab& Je_th) const
+{
+    using namespace ablastr::coarsen::sample;
+    auto& warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    auto const& geom = warpx.Geom(lev);
+    auto const Jp = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    auto const Ji = warpx.m_fields.get_alldirs(FieldType::current_fp, lev);
+    amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+    const amrex::GpuArray<int, 3> J_stag[3] =
+        {Jx_IndexType, Jy_IndexType, Jz_IndexType};
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Je_th, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const & je   = Je_th.array(mfi);
+        auto const & jpx  = Jp[0]->const_array(mfi);
+        auto const & jpy  = Jp[1]->const_array(mfi);
+        auto const & jpz  = Jp[2]->const_array(mfi);
+        auto const & jix  = Ji[0]->const_array(mfi);
+        auto const & jiy  = Ji[1]->const_array(mfi);
+        auto const & jiz  = Ji[2]->const_array(mfi);
+        amrex::GpuArray<int, 3> const sx = J_stag[0];
+        amrex::GpuArray<int, 3> const sy = J_stag[1];
+        amrex::GpuArray<int, 3> const sz = J_stag[2];
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            je(i,j,k,0) = Interp(jpx, sx, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jix, sx, nodal, coarsen_rr, i, j, k, 0);
+            je(i,j,k,1) = Interp(jpy, sy, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jiy, sy, nodal, coarsen_rr, i, j, k, 0);
+            je(i,j,k,2) = Interp(jpz, sz, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jiz, sz, nodal, coarsen_rr, i, j, k, 0);
+        });
+    }
+    // Zero-extend past physical boundaries (the E_L source convention);
+    // interior/periodic ghosts from the exchange.
+    Je_th.setBndry(0.0_rt);
+    Je_th.FillBoundary(geom.periodicity());
+
+}
+
+void HybridPICModel::InitializeElectronInertiaHistory ()
+{
+    if (!m_include_electron_inertia || m_inertia_history_initialized) { return; }
+    auto& fields = WarpX::GetInstance().m_fields;
+    auto& current = *fields.get("hybrid_Je_n_nodal", 0);
+    ComputeElectronCurrentNodal(current);
+    for (auto const* name : {"hybrid_Je_nm1_nodal", "hybrid_Je_theta_nodal"}) {
+        auto& history = *fields.get(name, 0);
+        amrex::MultiFab::Copy(history, current, 0, 0, 3, history.nGrowVect());
+    }
+    m_inertia_history_initialized = true;
+    m_inertia_history_levels = 1;
+}
+
 void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                                                   amrex::Real a_dt,
                                                   bool a_from_jacobian)
 {
+    ComputeElectronInertiaNodal(a_theta, a_dt, a_from_jacobian, nullptr);
+}
+
+void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
+                                                  amrex::Real a_dt,
+                                                  bool a_from_jacobian,
+                                                  amrex::MultiFab const* inertia_stage_current)
+{
+    ComputeElectronInertiaNodal(a_theta,a_dt,a_from_jacobian,inertia_stage_current,nullptr);
+}
+
+void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
+                                                  amrex::Real a_dt,
+                                                  bool a_from_jacobian,
+                                                  amrex::MultiFab const* inertia_stage_current,
+                                                  amrex::MultiFab const* inertia_stage_rate)
+{
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    amrex::ignore_unused(a_theta, a_dt, a_from_jacobian);
+    amrex::ignore_unused(a_theta, a_dt, a_from_jacobian, inertia_stage_current, inertia_stage_rate);
     WARPX_ABORT_WITH_MESSAGE(
         "hybrid_pic_model.include_electron_inertia is not supported in 1D "
         "radial geometries.");
 #else
     ABLASTR_PROFILE("HybridPICModel::ComputeElectronInertiaNodal()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_inertia_history_initialized,
+        "Electron-current history must be initialized before evaluating electron inertia");
 
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
@@ -8137,8 +8910,6 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
 
     ablastr::fields::VectorField Jp =
         warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
-    ablastr::fields::VectorField Ji =
-        warpx.m_fields.get_alldirs(FieldType::current_fp, lev);
     amrex::MultiFab const & Je_n =
         *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
     amrex::MultiFab const & Je_nm1 =
@@ -8154,35 +8925,29 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     // the advection differences).
     amrex::MultiFab Je_th(Ei.boxArray(), Ei.DistributionMap(), 3,
                           amrex::IntVect(1));
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-    for (MFIter mfi(Je_th, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        auto const & je   = Je_th.array(mfi);
-        auto const & jpx  = Jp[0]->const_array(mfi);
-        auto const & jpy  = Jp[1]->const_array(mfi);
-        auto const & jpz  = Jp[2]->const_array(mfi);
-        auto const & jix  = Ji[0]->const_array(mfi);
-        auto const & jiy  = Ji[1]->const_array(mfi);
-        auto const & jiz  = Ji[2]->const_array(mfi);
-        amrex::GpuArray<int, 3> const sx = J_stag[0];
-        amrex::GpuArray<int, 3> const sy = J_stag[1];
-        amrex::GpuArray<int, 3> const sz = J_stag[2];
-        amrex::ParallelFor(mfi.tilebox(),
-        [=] AMREX_GPU_DEVICE (int i, int j, int k)
-        {
-            je(i,j,k,0) = Interp(jpx, sx, nodal, coarsen_rr, i, j, k, 0)
-                        - Interp(jix, sx, nodal, coarsen_rr, i, j, k, 0);
-            je(i,j,k,1) = Interp(jpy, sy, nodal, coarsen_rr, i, j, k, 0)
-                        - Interp(jiy, sy, nodal, coarsen_rr, i, j, k, 0);
-            je(i,j,k,2) = Interp(jpz, sz, nodal, coarsen_rr, i, j, k, 0)
-                        - Interp(jiz, sz, nodal, coarsen_rr, i, j, k, 0);
-        });
+    if (inertia_stage_current != nullptr) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_electron_inertia_djedt_only &&
+            !m_electron_inertia_bdf2 && !m_esolve_curlcurl &&
+            m_electron_inertia_extrapolated_history && a_theta == 0.5_rt,
+            "Endpoint-quadrature inertia override requires one-step theta=.5 dJe-only e-form history");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            inertia_stage_current->boxArray() == Je_th.boxArray() &&
+            inertia_stage_current->DistributionMap() == Je_th.DistributionMap() &&
+            inertia_stage_current->nComp() == 3 &&
+            inertia_stage_current->nGrowVect().allGE(amrex::IntVect(1)),
+            "Endpoint-quadrature inertia current must share the native nodal layout and ghosts");
+        amrex::MultiFab::Copy(Je_th, *inertia_stage_current, 0, 0, 3, 1);
+    } else {
+        ComputeElectronCurrentNodal(Je_th);
     }
-    // Zero-extend past physical boundaries (the E_L source convention);
-    // interior/periodic ghosts from the exchange.
-    Je_th.setBndry(0.0_rt);
-    Je_th.FillBoundary(geom.periodicity());
+
+    if(inertia_stage_rate) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(inertia_stage_current &&
+            inertia_stage_rate->boxArray()==Je_th.boxArray() &&
+            inertia_stage_rate->DistributionMap()==Je_th.DistributionMap() &&
+            inertia_stage_rate->nComp()==3,
+            "Correlated inertia rate requires matching guarded nodal stage current");
+    }
 
     // Save the theta-stage assembly for the end-of-step history rotation
     // (non-Jacobian evaluations only: probe states are perturbed). The last
@@ -8193,25 +8958,6 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         amrex::MultiFab::Copy(Je_sv, Je_th, 0, 0, 3,
                               amrex::min(Je_sv.nGrowVect(),
                                          Je_th.nGrowVect()));
-    }
-
-    // First evaluation ever: seed the history with the initial electron
-    // current (see m_inertia_history_initialized) so the quiescent start
-    // carries no fake dJe/dt impulse. Never seed from a perturbed
-    // Jacobian-probe state.
-    if (!m_inertia_history_initialized && !a_from_jacobian) {
-        amrex::MultiFab & Je_n_mut =
-            *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
-        amrex::MultiFab & Je_nm1_mut =
-            *warpx.m_fields.get("hybrid_Je_nm1_nodal", lev);
-        amrex::MultiFab::Copy(Je_n_mut, Je_th, 0, 0, 3,
-                              amrex::min(Je_n_mut.nGrowVect(),
-                                         Je_th.nGrowVect()));
-        amrex::MultiFab::Copy(Je_nm1_mut, Je_th, 0, 0, 3,
-                              amrex::min(Je_nm1_mut.nGrowVect(),
-                                         Je_th.nGrowVect()));
-        m_inertia_history_initialized = true;
-        m_inertia_history_levels = 1;
     }
 
     // curlcurl_form: capture the step-start plasma current (curl B_old) once
@@ -8310,6 +9056,8 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         auto const & je     = Je_th.const_array(mfi);
         auto const & jen    = Je_n.const_array(mfi);
         auto const & jenm1  = Je_nm1.const_array(mfi);
+        amrex::Array4<amrex::Real const> const stable_rate = inertia_stage_rate
+            ? inertia_stage_rate->const_array(mfi) : amrex::Array4<amrex::Real const>{};
         auto const & rhoa   = rho.const_array(mfi);
         amrex::Array4<amrex::Real const> ped;
         if (ped_mf)
@@ -8483,10 +9231,10 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                 // the two-point form when electron_inertia_bdf2 = 0.
                 amrex::Real const je1 =
                     (je(i,j,k,c) - (1.0_rt - a_theta) * jen(i,j,k,c)) * inv_th;
-                amrex::Real const djedt = bdf2
+                amrex::Real const djedt = stable_rate ? stable_rate(i,j,k,c) : (bdf2
                     ? (c_p1 * je1 + c_0 * jen(i,j,k,c)
                        + c_m1 * jenm1(i,j,k,c))
-                    : (je1 - jen(i,j,k,c)) * inv_dt;
+                    : (je1 - jen(i,j,k,c)) * inv_dt);
                 ei(i,j,k,c) = w_taper * me_over_e
                     * (djedt_only ? djedt
                                   : (djedt - u[c] * drhodt - adv[c]))
@@ -9330,6 +10078,31 @@ void HybridPICModel::QDSMCApplyInsulatingEBFill (int const lev) const
 }
 
 
+HybridEndRegion HybridPICModel::EndRegion (int const lev) const
+{
+    auto result = m_end_region;
+    auto const& geom = WarpX::GetInstance().Geom(lev);
+    constexpr int axial = AMREX_SPACEDIM - 1;
+    result.zlo = geom.ProbLo(axial);
+    result.zhi = geom.ProbHi(axial);
+    result.dz = geom.CellSize(axial);
+    result.index_lo = geom.Domain().smallEnd(axial);
+    if (result.holmstrom || result.resistivity > 0.)
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!geom.isPeriodic(axial),
+            "End regions require nonperiodic z boundaries");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(result.width[0] + result.width[1] > 0.
+            && result.width[0] + result.width[1] < result.zhi - result.zlo,
+            "End-region widths must be positive in total and leave an interior region");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(result.resistivity == 0.
+            || m_implicit_push_excludes_resistive_field,
+            "Numerical end resistivity requires implicit_push_excludes_resistive_field=1");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_esolve_curlcurl && !m_esolve_tensor,
+            "End regions currently require the standard Ohm/implicit-Je form");
+    }
+    return result;
+}
+
 void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                                            amrex::MultiFab * const redirect_E) const
 {
@@ -9373,6 +10146,7 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
     auto const eta           = m_eta;
+    auto const end_region = EndRegion(lev);
     // ETATE: the 4-argument E-solve resistivity (Te in KELVIN, no conversion)
     // when the heating falls back to the E-solve eta; Te_arr is nodal here,
     // like rho, so no interpolation is needed.
@@ -9561,6 +10335,10 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                                             : (eta_has_Te ? eta_te(rho_val, Jmag, Te_arr(i, j, k),
                                                                    t_new) // ETATE: Te in K
                                                           : eta(rho_val, Jmag, t_new));
+                if (end_region.resistivity > 0.)
+                {
+                    eta_s_eff += end_region.resistivity * end_region.Weight(i, j, k, nodal);
+                }
 
                 // e-i relative drift = J_plasma/(e n_e), from the nodal plasma
                 // current and n_e. Energy-consistent with the eta*J dissipation
@@ -11087,6 +11865,53 @@ HybridPICModel::FinishImplicitStopping ()
         "Implicit stopping heat requires its prepared endpoint background");
     auto& warpx = WarpX::GetInstance();
     auto const& rho = GetStoppingChargeDensity(0);
+    if (UsesEulerianElectronEnergy()) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!HasElectronThermalTrial(0),
+            "Accepted stopping cannot run inside an Eulerian thermal trial");
+        auto& energy=*warpx.m_fields.get(FieldType::hybrid_electron_energy_fp,0);
+        auto const geometry=ElectronThermalGeometry(0);
+        warpx::thermal::KineticThermalMoments moments(geometry,energy.boxArray(),
+            energy.DistributionMap(),EulerianMomentOptions(0));
+        warpx::thermal::KineticThermalStateView state{rho};
+        state.pedestal=DensityPedestal(0);
+        state.energy=&energy;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(moments.Evaluate(state),
+            "Invalid actual endpoint capacity before Eulerian stopping");
+        if (!m_fast_ion_heating_mf.empty() && m_fast_ion_heating_mf[0]) {
+            auto& staging=*m_fast_ion_heating_mf[0];
+            // Collision nodes contain partial sums. Consolidate a private copy
+            // exactly once; the accepted staging remains untouched on failure.
+            amrex::MultiFab impulse(staging.boxArray(),staging.DistributionMap(),1,0);
+            amrex::MultiFab::Copy(impulse,staging,0,0,1,0);
+            impulse.SumBoundary(warpx.Geom(0).periodicity());
+            warpx::thermal::StoppingTransferOptions options;
+            options.gamma=m_gamma;
+            options.raw_density_floor=m_n_floor;
+            options.temperature_floor_ev=m_cond_te_floor;
+            warpx::thermal::EulerianStoppingTransfer transfer(geometry,energy.boxArray(),
+                energy.DistributionMap(),options);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(transfer.Evaluate(moments,impulse,rho,
+                moments.NumberDensity(),energy),"Invalid accepted Eulerian stopping impulse");
+            // Validate all derived mirrors BEFORE any accepted U/Te/Pe write.
+            state.energy=&transfer.CandidateEnergy();
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(moments.Evaluate(state),
+                "Eulerian stopping candidate thermodynamics failed");
+            auto const ledger=transfer.Ledger();
+            amrex::MultiFab::Copy(energy,transfer.CandidateEnergy(),0,0,1,0);
+            auto& te=*warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp,0);
+            auto& pe=*warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp,0);
+            amrex::MultiFab::Copy(te,moments.NodalTemperature(),0,0,1,te.nGrowVect());
+            amrex::MultiFab::Copy(pe,moments.OhmPressure(),0,0,1,pe.nGrowVect());
+            m_stopping_declined_J+=ledger.density_declined+ledger.floor_declined;
+            staging.setVal(0);
+            amrex::Print()<<"Eulerian accepted stopping [J]: requested="<<ledger.requested
+                <<" delivered="<<ledger.delivered<<" density_declined="<<ledger.density_declined
+                <<" floor_declined="<<ledger.floor_declined<<" map_defect="<<ledger.map_defect
+                <<" exchange_defect="<<ledger.exchange_defect<<"\n";
+        }
+        m_implicit_stopping_active=false;
+        return;
+    }
     std::array<amrex::Real, 2> before{}, after_heat{};
     if (m_energy_budget)
     {
@@ -12839,7 +13664,6 @@ HybridPICModel::ApplyQdsmcConductionWallBCs (int const lev, amrex::Real const dt
     }
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
-    amrex::Real const me = PhysConst::m_e;
     // cap speed by form (member doc of m_cond_wall_flux_cap_form)
     bool const sonic = (m_cond_wall_flux_cap_form == 1);
     amrex::Real const gam = m_gamma;
@@ -12918,32 +13742,20 @@ HybridPICModel::ApplyQdsmcConductionWallBCs (int const lev, amrex::Real const dt
                                {
                                    // thermal bath: pin the row, tally the exchange
                                    amrex::Real const T0 = Te_arr(i, j, k);
-                                   amrex::Real du = 1.5_rt * kb * ne * (Te_wall_K - T0);
-                                   if (cap_dt_dx > 0.0_rt && T0 > Te_wall_K)
-                                   {
-                                       // cooling toward the wall: cap the drain at the
-                                       // free-streaming flux through the dual-cell face,
-                                       // du_max = f n_e v_te kB T0 dt/dx; as a temperature
-                                       // drop (n_e cancels against 1.5 n_e kB) that is
-                                       // dT_max = f v_te T0 dt / (1.5 dx). Never below
-                                       // Te_wall; the tally books the applied change.
-                                       amrex::Real const vte = sonic ? std::sqrt(gam * kb * T0 / mi)
-                                                                     : std::sqrt(kb * T0 / me);
-                                       amrex::Real const T1 = amrex::max(
-                                           Te_wall_K, T0 - cap_dt_dx * vte * T0 / 1.5_rt);
-                                       du = 1.5_rt * kb * ne * (T1 - T0);
-                                       Te_arr(i, j, k) = T1;
-                                   }
-                                   else
-                                   {
-                                       Te_arr(i, j, k) = Te_wall_K;
-                                   }
+                                   amrex::Real const T1 = warpx::thermal::
+                                       IsothermalWallTemperature(
+                                           T0, Te_wall_K, cap_dt_dx, sonic, gam,
+                                           mi);
+                                   amrex::Real const du =
+                                       1.5_rt * kb * ne * (T1 - T0);
+                                   Te_arr(i, j, k) = T1;
                                    return {w_v * du};
                                }
                                // prescribed flux: inject, clamp cooling at Te = 0,
                                // tally what was actually applied
-                               amrex::Real const dTe =
-                                   amrex::max(du_flux / (1.5_rt * kb * ne), -Te_arr(i, j, k));
+                               amrex::Real const dTe = warpx::thermal::
+                                   PrescribedWallTemperatureChange(
+                                       Te_arr(i, j, k), ne, du_flux);
                                Te_arr(i, j, k) += dTe;
                                return {w_v * (1.5_rt * kb * ne * dTe)};
                            });
@@ -12999,7 +13811,6 @@ HybridPICModel::ApplyQdsmcConductionLegBC (int const lev, int const d, int const
                                      "along the leg direction");
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
-    amrex::Real const me = PhysConst::m_e;
     auto const kappa_par_ex = m_kappa_par;
     // the FD operator's Pass A floors: b_ne = max(n, n_floor) for every
     // conductance, the open set n > n_open for the interior face
@@ -13124,52 +13935,17 @@ HybridPICModel::ApplyQdsmcConductionLegBC (int const lev, int const d, int const
                 {
                     return skip;
                 }
-                amrex::Real const Te1_eV = amrex::max(Te1, 0.0_rt) * kb / qe;
-                amrex::Real const kappa_1 = amrex::max(kappa_par_ex(ne_1, Te1_eV, t_now), 0.0_rt);
-                amrex::Real Tf = amrex::max(T0, T_min_K);
-                amrex::Real G_int = 0.0_rt, G_leg = 0.0_rt;
-                for (int it = 0; it < n_iter; ++it)
-                {
-                    amrex::Real const Tf_eV = Tf * kb / qe;
-                    amrex::Real const kappa_f =
-                        amrex::max(kappa_par_ex(ne_w, Tf_eV, t_now), 0.0_rt);
-                    // face kappa as face_flux forms it: kfac 1.5 kB ne_f times
-                    // the arithmetic mean of chi = kappa/(1.5 kB ne)
-                    amrex::Real const kappa_face =
-                        face_open ? ne_f * 0.5_rt * (kappa_1 / ne_1 + kappa_f / ne_w) : 0.0_rt;
-                    G_int = kappa_face * inner_area_ratio / dx_d;
-                    G_leg = kappa_f / L_leg;
-                    amrex::Real const G_sum = G_int + G_leg;
-                    Tf = (G_sum > 0.0_rt) ? (G_int * Te1 + G_leg * T_wall_K) / G_sum : T_wall_K;
-                    Tf = amrex::max(Tf, T_min_K);
-                }
-                // Lumped row update over the stage: the row (capacity C_row =
-                // 1.5 kB ne_w dx per unit face area, the operator's floored
-                // capacity) sits between the interior (G_int, Te_1 frozen over
-                // the stage) and the wall (G_leg), so T(dt) = Tf + (T0 - Tf)
-                // exp(-dt (G_int + G_leg)/C_row). An open face relaxes in
-                // dx^2/chi << dt and lands on the Robin pin Tf; a CLOSED face
-                // (G_int = 0: the row or its neighbour is a floored/frozen
-                // node) relaxes toward T_min at the leg's own rate G_leg/C_row
-                // = chi_leg/(L dx) -- the MHD halo-outlet rate form -- instead
-                // of being pinned there.
-                amrex::Real const C_row = 1.5_rt * kb * ne_w / area_over_volume;
-                amrex::Real const relax = std::exp(-dt_c * (G_int + G_leg) / C_row);
-                amrex::Real T1 = Tf + (T0 - Tf) * relax;
-                // drain only, at the row too: a row below the series value
-                // (e.g. rewritten by the transport half) is left to the
-                // operator's interior flux rather than lifted by the reset,
-                // so the tally is monotone (<= 0) and the row reaches Te_f
-                // from below by conduction alone
-                if (T1 >= T0)
-                {
+                auto const target = warpx::thermal::EvaluateLegTarget(
+                    T0, Te1, ne_w, ne_1, ne_f, face_open, dx_d,
+                    inner_area_ratio, L_leg, T_wall_K, T_min_K, n_iter,
+                    kappa_par_ex, t_now);
+                amrex::Real const G_int = target.interior_conductance;
+                amrex::Real const G_leg = target.leg_conductance;
+                amrex::Real const T1 = warpx::thermal::LegWallTemperature(
+                    T0, target, ne_w, area_over_volume, dt_c, cap_dt_dx, sonic,
+                    gam, mi);
+                if (T1 >= T0) {
                     return skip;
-                }
-                if (cap_dt_dx > 0.0_rt)
-                {
-                    amrex::Real const vte =
-                        sonic ? std::sqrt(gam * kb * T0 / mi) : std::sqrt(kb * T0 / me);
-                    T1 = amrex::max(T1, T0 - cap_dt_dx * vte * T0 / 1.5_rt);
                 }
                 amrex::Real const du = 1.5_rt * kb * ne_raw * (T1 - T0);
                 Te_arr(i, j, k) = T1;
@@ -13295,27 +14071,12 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     amrex::MultiFab const* const ped_mf = DensityPedestal(lev);
     bool const use_ped = (ped_mf != nullptr);
     amrex::Real const n_open = (m_qdsmc_halo_unfreeze || use_ped) ? 0.0_rt : n_floor;
-    amrex::Real const f_lim   = m_cond_flux_limit_factor;
-    bool const iso_full       = m_cond_isotropic;
-    amrex::Real const iso_B   = m_cond_iso_B;
-    bool const iso_any        = iso_full || (iso_B > 0.0_rt);
-    bool const fd4            = (m_cond_fd_order == 4);
-    int const fd_limiter      = m_cond_fd_limiter;
-    amrex::Real const fd_lim_width = m_cond_fd_limiter_width;
     amrex::Real const fd_cfl  = m_cond_fd_cfl;
     int const max_sub         = m_cond_fd_max_subcycles;
     bool const use_rkf45      = (m_cond_fd_time == 1);
 
     auto const dual_volume = MakeQdsmcVolumeElement(geom, Te.ixType());
 
-    // Grid-dim bookkeeping (same conventions as the SDE kernels).
-#if defined(WARPX_DIM_3D)
-    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 1, 2};
-#elif (AMREX_SPACEDIM == 2)
-    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 2};
-#else
-    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {2};
-#endif
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxi_g;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) { dxi_g[d] = dxi_arr[d]; }
     amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
@@ -13351,8 +14112,7 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     // chi tensor does. Ghosts = 3 for the isothermal ring scan (eb_ring
     // <= 3); mask comps default OPEN so unset non-periodic domain ghosts
     // never read as walls (the SDE kin convention).
-    enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ebm,
-                     b_ncomp };
+    using BNE = warpx::thermal::ConductionState;
     amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 3);
     bne.setVal(0.0_rt);
     bne.setVal(1.0_rt, BNE::b_open, 1, bne.nGrow());
@@ -13413,131 +14173,25 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     T_cur.setVal(0.0_rt);
     amrex::MultiFab::Copy(T_cur, Te, 0, 0, 1, 0);
 
-    // 4th-order coefficient tables (Chacon et al. Appendix A): face
-    // interpolation C0 over the middle-4 nodes of the 6-point window, and
-    // the A-matrix derivative rows at window positions 1..4.
-    amrex::GpuArray<amrex::Real, 4> const c0 =
-        {-1.0_rt/12.0_rt, 7.0_rt/12.0_rt, 7.0_rt/12.0_rt, -1.0_rt/12.0_rt};
-    amrex::GpuArray<amrex::Real, 24> A6{};   // rows 1..4 of A_6x6, flattened
-    {
-        amrex::Real const a[4][6] = {
-            {-12.0_rt, -65.0_rt, 120.0_rt,  -60.0_rt,  20.0_rt,  -3.0_rt},
-            {  3.0_rt, -30.0_rt, -20.0_rt,   60.0_rt, -15.0_rt,   2.0_rt},
-            { -2.0_rt,  15.0_rt, -60.0_rt,   20.0_rt,  30.0_rt,  -3.0_rt},
-            {  3.0_rt, -20.0_rt,  60.0_rt, -120.0_rt,  65.0_rt,  12.0_rt}};
-        for (int r = 0; r < 4; ++r) {
-            for (int m = 0; m < 6; ++m) { A6[6*r + m] = a[r][m]/60.0_rt; }
-        }
-    }
-    // D0 5-point 4th-order central first derivative (transverse cross term)
-    amrex::GpuArray<amrex::Real, 5> const d0 =
-        {1.0_rt/12.0_rt, -8.0_rt/12.0_rt, 0.0_rt, 8.0_rt/12.0_rt,
-         -1.0_rt/12.0_rt};
-
     // --- chi tensor build on grown(2) boxes (per stage): the kappa
     // parsers and the free-streaming limiter depend on the evolving T_e,
     // so this is rebuilt for every SSP-RK2 stage. Computed straight into
     // the ghost ring (no comm) from Tin/bne ghosts.
-    auto build_xi = [&] (amrex::MultiFab const & Tin)
-    {
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            amrex::Box const box = mfi.growntilebox(2);
-            amrex::Array4<amrex::Real>       const & x_arr = xi.array(mfi);
-            amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
-            amrex::Array4<amrex::Real const> const & T_arr = Tin.const_array(mfi);
-
-            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                amrex::Real const ne  = b_arr(i,j,k,BNE::b_ne);
-                // Closed (floored/covered) nodes carry a ZERO tensor: their
-                // faces carry no flux, so no consumer may ever see a value
-                // there -- and this is also the guard that keeps unfilled
-                // non-periodic domain ghosts (b_ne = 0 setVal default, T
-                // ghosts unspecified on integrator stage arrays) from
-                // minting inf/nan chi that the stability bound could read.
-                // With a constant-kappa parser over a floored region the
-                // old build produced chi = kappa/(1.5 n_floor kB) there
-                // (huge) and chi = kappa/0 = inf at unfilled ghosts, which
-                // pinned the Gershgorin cap to zero: the integrator then
-                // accepted its whole attempts budget in zero-length
-                // substeps and dropped the entire conduction step
-                // (measured on the RZ cylinder-compression EE deck;
-                // kappa ~ n parsers masked the same defect as 0/0 = nan).
-                if (ne <= 0.0_rt || b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
-                    for (int c = 0; c < NXI; ++c) { x_arr(i,j,k,c) = 0.0_rt; }
-                    return;
-                }
-                amrex::Real const TeK = amrex::max(T_arr(i,j,k), 0.0_rt);
-                amrex::Real const Te_eV = TeK * kb / qe;
-                amrex::Real const B2 = b_arr(i,j,k,BNE::b_B2);
-                bool const unmag = (B2 <= 0.0_rt);
-                amrex::Real const ubx = b_arr(i,j,k,BNE::b_bx);
-                amrex::Real const uby = b_arr(i,j,k,BNE::b_by);
-                amrex::Real const ubz = b_arr(i,j,k,BNE::b_bz);
-
-                amrex::Real chi_par =
-                    kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
-                amrex::Real chi_perp = (unmag && !iso_any) ? chi_par :
-                    kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
-                chi_par  = amrex::max(chi_par,  0.0_rt);
-                chi_perp = amrex::max(chi_perp, 0.0_rt);
-
-                // iso options: same semantics as the SDE path
-                if (iso_full) {
-                    chi_par = chi_perp;
-                } else if (iso_B > 0.0_rt) {
-                    amrex::Real const s = B2 / (B2 + iso_B*iso_B);
-                    chi_par = chi_perp + (chi_par - chi_perp) * s;
-                }
-
-                // Free-streaming limiter (longitudinal), same form as the
-                // SDE path but on the subcycle-current T_e.
-                bool const open = (b_arr(i,j,k,BNE::b_open) > 0.5_rt);
-                if (f_lim > 0.0_rt && TeK > 0.0_rt && open &&
-                    chi_par > 0.0_rt)
-                {
-                    amrex::Real gT[3] = {0.0_rt, 0.0_rt, 0.0_rt};
-                    int const node[3] = {i, j, k};
-                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                        int cp = node[g] + 1, cm = node[g] - 1;
-                        if (!is_per[g]) {
-                            cp = amrex::min(cp, dom_hi[g]);
-                            cm = amrex::max(cm, dom_lo[g]);
-                        }
-                        if (cp == cm) { continue; }
-                        int p[3] = {i, j, k}, m[3] = {i, j, k};
-                        p[g] = cp; m[g] = cm;
-                        gT[gd2ax[g]] =
-                            (T_arr(p[0],p[1],p[2]) - T_arr(m[0],m[1],m[2]))
-                            * dxi_g[g] / amrex::Real(cp - cm);
-                    }
-                    amrex::Real const gparT =
-                        std::abs(ubx*gT[0] + uby*gT[1] + ubz*gT[2]);
-                    amrex::Real const q_sp = 1.5_rt*ne*kb*chi_par*gparT;
-                    amrex::Real const q_fs = ne*kb*TeK*std::sqrt(kb*TeK/me);
-                    chi_par /= (1.0_rt + q_sp / (f_lim * q_fs));
-                }
-                // No hop cap and no vacuum fast front here: subcycling
-                // handles stability and closed floor faces handle vacuum.
-
-                amrex::Real const dchi = chi_par - chi_perp;
-                amrex::Real const ub3[3] = {ubx, uby, ubz};
-                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                    for (int h = g; h < AMREX_SPACEDIM; ++h) {
-                        int const sidx = g*AMREX_SPACEDIM - g*(g-1)/2 + (h-g);
-                        amrex::Real const del =
-                            (gd2ax[g] == gd2ax[h]) ? 1.0_rt : 0.0_rt;
-                        x_arr(i,j,k,sidx) = chi_perp*del
-                            + dchi*ub3[gd2ax[g]]*ub3[gd2ax[h]];
-                    }
-                }
-            });
-        }
-
+    warpx::thermal::ConductionFDGeometry const fd_geometry(geom);
+    warpx::thermal::ConductionFDOptions fd_options;
+    fd_options.flux_limit = m_cond_flux_limit_factor;
+    fd_options.isotropic = m_cond_isotropic;
+    fd_options.isotropic_B = m_cond_iso_B;
+    fd_options.fourth_order = m_cond_fd_order == 4;
+    fd_options.limiter = m_cond_fd_limiter;
+    fd_options.limiter_width = m_cond_fd_limiter_width;
+    fd_options.flux_budget = m_cond_flux_budget && m_cond_te_floor > 0.0_rt;
+    fd_options.budget_floor_K = m_cond_te_floor * qe / kb;
+    fd_options.budget_dt = dt_c > 0.0_rt ? dt_c : 1.0_rt;
+    auto build_xi = [&] (amrex::MultiFab const& Tin) {
+        warpx::thermal::BuildConductionTensor(Tin, bne, xi, fd_geometry,
+                                              fd_options, kappa_par_ex,
+                                              kappa_perp_ex, t_now);
     };
 
     // --- stability: Gershgorin bound, neighbor-max chi, n-ratio ----------
@@ -13663,8 +14317,6 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     // evaluation is the expensive part, and the cache also lets the second
     // pass read the neighbour's face without re-deriving it.
     bool const flux_budget = m_cond_flux_budget && (m_cond_te_floor > 0.0_rt);
-    amrex::Real const budget_floor_K = m_cond_te_floor * qe / kb;
-    amrex::Real const budget_dt = (dt_c > 0.0_rt) ? dt_c : 1.0_rt;
     amrex::MultiFab fcache, rbud;
     if (flux_budget) {
         // SPACEDIM face components (F at the node's HI face in each
@@ -13674,340 +14326,13 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
         fcache.setVal(0.0_rt);
         rbud.setVal(1.0_rt);
     }
-    auto eval_rhs = [&] (amrex::MultiFab & Tin, amrex::MultiFab & Kout)
-    {
+    auto eval_rhs = [&] (amrex::MultiFab& Tin, amrex::MultiFab& Kout) {
         ablastr::utils::communication::FillBoundary(
             Tin, WarpX::do_single_precision_comms, period, true);
         build_xi(Tin);
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for (MFIter mfi(Kout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            amrex::Box const box = mfi.tilebox();
-            amrex::Array4<amrex::Real>       const & tn    = Kout.array(mfi);
-            amrex::Array4<amrex::Real const> const & tc    = Tin.const_array(mfi);
-            amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
-            amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
-            // Null (falsy) Array4s when the budget bound is off, so the
-            // kernel below compiles to the unbounded path exactly.
-            amrex::Array4<amrex::Real> const fc_arr = flux_budget
-                ? fcache.array(mfi) : amrex::Array4<amrex::Real>{};
-            amrex::Array4<amrex::Real> const rb_arr = flux_budget
-                ? rbud.array(mfi) : amrex::Array4<amrex::Real>{};
-
-            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
-                    tn(i,j,k) = 0.0_rt;   // floored nodes keep their T_e
-                    // A closed node is held fixed, so it has no budget to
-                    // exceed: R = 1 leaves its faces unthrottled.
-                    if (rb_arr) { rb_arr(i,j,k) = 1.0_rt; }
-                    if (fc_arr) {
-                        for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                            fc_arr(i,j,k,g) = 0.0_rt;
-                        }
-                    }
-                    return;
-                }
-
-                auto Tat = [&] (int const p[3]) {
-                    return tc(p[0], p[1], p[2]);
-                };
-                // clamped shift along grid dim g (non-periodic walls)
-                auto shift = [&] (int const p[3], int const g, int const off,
-                                  int q[3]) {
-                    q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
-                    int idx = p[g] + off;
-                    if (!is_per[g]) {
-                        idx = amrex::min(amrex::max(idx, dom_lo[g]),
-                                         dom_hi[g]);
-                    }
-                    q[g] = idx;
-                };
-                // central transverse derivative of T at node p along h
-                auto dTh2 = [&] (int const p[3], int const h) {
-                    int qp[3], qm[3];
-                    shift(p, h, +1, qp);
-                    shift(p, h, -1, qm);
-                    if (qp[h] == qm[h]) { return 0.0_rt; }
-                    return (Tat(qp) - Tat(qm)) * dxi_g[h]
-                           / amrex::Real(qp[h] - qm[h]);
-                };
-                // 4th-order D0 transverse derivative (interior only)
-                auto dTh4 = [&] (int const p[3], int const h) {
-                    amrex::Real der = 0.0_rt;
-                    for (int m = 0; m < 5; ++m) {
-                        if (m == 2) { continue; }
-                        int q[3] = {p[0], p[1], p[2]};
-                        q[h] += (m - 2);
-                        der += d0[m]*tc(q[0], q[1], q[2]);
-                    }
-                    return der*dxi_g[h];
-                };
-
-#ifdef WARPX_DIM_RZ
-                // J = r at a node index along grid dim g: folded into
-                // radial (g = 0) node fluxes; z fluxes carry J = 1
-                auto Jn = [&] (int const p[3], int const g) {
-                    return (g == 0)
-                        ? r_edge0 + amrex::Real(p[0] - dom_lo[0])*dr_rz
-                        : 1.0_rt;
-                };
-#else
-                auto Jn = [] (int const [3], int const) {
-                    return 1.0_rt;
-                };
-#endif
-
-                // flux through the face between node m0 and m0 + e_g,
-                // positive along +g, in u units [W/m^2]
-                auto face_flux = [&] (int const m0[3], int const g) {
-                    // outside a non-periodic wall: no face (adiabatic)
-                    if (!is_per[g] &&
-                        (m0[g] < dom_lo[g] || m0[g] + 1 > dom_hi[g])) {
-                        return 0.0_rt;
-                    }
-                    int m1[3] = {m0[0], m0[1], m0[2]};
-                    m1[g] += 1;
-                    if (b_arr(m0[0],m0[1],m0[2],BNE::b_open) <= 0.5_rt ||
-                        b_arr(m1[0],m1[1],m1[2],BNE::b_open) <= 0.5_rt) {
-                        return 0.0_rt;   // closed floor faces
-                    }
-                    // Harmonic (series-conductance) face density: with the
-                    // n-proportional kappa cap the face conductance then
-                    // scales with the SMALL side across a density cliff,
-                    // capping the tail-node rate at 2 chi/dx^2 -- the
-                    // arithmetic mean carries the dense side's kappa into
-                    // the tiny heat capacity (rate ~ nrat chi/dx^2, an
-                    // explicit-stability wall at deposit-tail nodes).
-                    amrex::Real const ne_0 =
-                        b_arr(m0[0],m0[1],m0[2],BNE::b_ne);
-                    amrex::Real const ne_1 =
-                        b_arr(m1[0],m1[1],m1[2],BNE::b_ne);
-                    amrex::Real const ne_f = (ne_0 + ne_1 > 0.0_rt)
-                        ? 2.0_rt*ne_0*ne_1/(ne_0 + ne_1) : 0.0_rt;
-                    amrex::Real const kfac = 1.5_rt*kb*ne_f;
-                    int const sgg = g*AMREX_SPACEDIM - g*(g-1)/2;
-
-                    // 4th-order stencils need the full interior window;
-                    // near non-periodic walls fall back to 2nd order.
-                    bool use4 = fd4;
-                    if (use4 && !is_per[g]) {
-                        use4 = (m0[g] - 2 >= dom_lo[g]) &&
-                               (m0[g] + 3 <= dom_hi[g]);
-                    }
-                    if (use4) {
-                        for (int h = 0; h < AMREX_SPACEDIM; ++h) {
-                            if (h == g || is_per[h]) { continue; }
-                            use4 = use4 &&
-                                   (m0[h] - 2 >= dom_lo[h]) &&
-                                   (m0[h] + 2 <= dom_hi[h]);
-                        }
-                    }
-
-                    amrex::Real F = 0.0_rt;    // chi-units flux [K m/s]
-                    if (use4) {
-                        // co-derivative: C0 over A-row node fluxes
-                        for (int l = 0; l < 4; ++l) {
-                            int q[3] = {m0[0], m0[1], m0[2]};
-                            q[g] += (l - 1);
-                            amrex::Real der = 0.0_rt;
-                            for (int m = 0; m < 6; ++m) {
-                                int w[3] = {m0[0], m0[1], m0[2]};
-                                w[g] += (m - 2);
-                                der += A6[6*(l) + m]*tc(w[0], w[1], w[2]);
-                            }
-                            F += c0[l]*Jn(q,g)*x_arr(q[0],q[1],q[2],sgg)
-                                 *der*dxi_g[g];
-                        }
-                    } else {
-                        F = 0.5_rt*(Jn(m0,g)*x_arr(m0[0],m0[1],m0[2],sgg) +
-                                    Jn(m1,g)*x_arr(m1[0],m1[1],m1[2],sgg))
-                            * (Tat(m1) - Tat(m0)) * dxi_g[g];
-                    }
-
-                    // cross-derivative fluxes: Sharma-Hammett limited
-                    // transverse face gradient (sh modes) or the
-                    // SMART-limited pseudo-advection recast
-                    for (int h = 0; h < AMREX_SPACEDIM; ++h) {
-                        if (h == g) { continue; }
-                        int const gg = amrex::min(g, h);
-                        int const hh = amrex::max(g, h);
-                        int const sgh =
-                            gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
-                        if (fd_limiter == 3 || fd_limiter == 4)
-                        {
-                            // Sharma-Hammett (JCP 227, 2007) flux-level
-                            // extrema bound: nested-limited combination
-                            // of the one-sided transverse differences at
-                            // the two face nodes (2nd-order form
-                            // regardless of fd_order). A shift clamped
-                            // at a non-periodic wall contributes a zero
-                            // one-sided difference, which zeroes the
-                            // face's cross flux (adiabatic-consistent).
-                            // Reads only face-adjacent values, so both
-                            // neighbors compute the identical flux and
-                            // the telescoping sum is preserved.
-                            auto osd = [&] (int const p[3], int const sgn)
-                                -> amrex::Real {
-                                int q[3];
-                                shift(p, h, sgn, q);
-                                if (q[h] == p[h]) { return 0.0_rt; }
-                                return amrex::Real(sgn)*(Tat(q) - Tat(p))
-                                       *dxi_g[h];
-                            };
-                            amrex::Real const gf = qdsmc_sh_face_gradient(
-                                osd(m0, +1), osd(m0, -1),
-                                osd(m1, +1), osd(m1, -1),
-                                fd_limiter == 3);
-                            F += 0.5_rt*(Jn(m0,g)
-                                    *x_arr(m0[0],m0[1],m0[2],sgh) +
-                                Jn(m1,g)
-                                    *x_arr(m1[0],m1[1],m1[2],sgh)) * gf;
-                            continue;
-                        }
-                        amrex::Real raw;
-                        if (use4) {
-                            raw = 0.0_rt;
-                            for (int l = 0; l < 4; ++l) {
-                                int q[3] = {m0[0], m0[1], m0[2]};
-                                q[g] += (l - 1);
-                                raw += c0[l]*Jn(q,g)
-                                       *x_arr(q[0],q[1],q[2],sgh)
-                                       *dTh4(q, h);
-                            }
-                        } else {
-                            raw = 0.5_rt*(Jn(m0,g)
-                                    *x_arr(m0[0],m0[1],m0[2],sgh)
-                                    *dTh2(m0, h) +
-                                Jn(m1,g)
-                                    *x_arr(m1[0],m1[1],m1[2],sgh)
-                                    *dTh2(m1, h));
-                        }
-                        if (raw == 0.0_rt) { continue; }
-                        amrex::Real Tf = 0.5_rt*(Tat(m0) + Tat(m1));
-                        if (Tf <= 0.0_rt) { continue; }
-                        Tf = amrex::max(Tf,
-                            1.0e-4_rt*amrex::max(Tat(m0), Tat(m1)));
-                        amrex::Real const v = raw / Tf;
-                        int uu[3];
-                        amrex::Real tU, tD;
-                        // F is +Xi*grad(T), and the temperature RHS is
-                        // +div(F): the equivalent advective velocity is
-                        // -v. Thus positive F takes its donor from m1.
-                        // Selecting along +v would downwind this term.
-                        if (v < 0.0_rt) {
-                            tU = Tat(m0); tD = Tat(m1);
-                            shift(m0, g, -1, uu);
-                        } else {
-                            tU = Tat(m1); tD = Tat(m0);
-                            shift(m1, g, +1, uu);
-                        }
-                        F += v * qdsmc_fd_face_value(Tat(uu), tU, tD, fd_limiter, fd_lim_width);
-                    }
-                    return kfac*F;
-                };
-
-                int const node[3] = {i, j, k};
-                amrex::Real div = 0.0_rt;
-                // Energy density per unit time LEAVING this node, summed
-                // over its faces (budget path only). The hi face enters
-                // div as +F and the lo face as -F, so a negative hi
-                // contribution and a positive lo contribution are both
-                // outflow.
-                amrex::Real out_rate = 0.0_rt;
-                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                    int lo[3] = {i, j, k};
-                    lo[g] -= 1;
-                    amrex::Real const f_hi = face_flux(node, g);
-                    amrex::Real const f_lo = face_flux(lo, g);
-                    if (fc_arr) { fc_arr(i,j,k,g) = f_hi; }
-#ifdef WARPX_DIM_RZ
-                    if (g == 0) {
-                        // radial: J-folded face fluxes over the dual-
-                        // cell measure Vr (finite-volume form; regular
-                        // at the axis, whose inner face is absent)
-                        amrex::Real const Vr = dual_volume.radial_measure(i);
-                        div += (f_hi - f_lo) / Vr;
-                        out_rate += (amrex::max(-f_hi, 0.0_rt)
-                                   + amrex::max( f_lo, 0.0_rt)) / Vr;
-                        continue;
-                    }
-#endif
-                    div += (f_hi - f_lo) / dual_volume.width(g, node[g]);
-                    out_rate += (amrex::max(-f_hi, 0.0_rt) + amrex::max(f_lo, 0.0_rt)) /
-                                dual_volume.width(g, node[g]);
-                }
-                amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
-                tn(i,j,k) = div/(1.5_rt*kb*ne0);
-
-                if (rb_arr) {
-                    // Energy density this node holds ABOVE the floor,
-                    // spread over the substep: the most it may shed.
-                    amrex::Real const avail = 1.5_rt*kb*ne0
-                        * amrex::max(tc(i,j,k) - budget_floor_K, 0.0_rt)
-                        / budget_dt;
-                    rb_arr(i,j,k) = (out_rate > avail && out_rate > 0.0_rt)
-                        ? avail/out_rate : 1.0_rt;
-                }
-            });
-        }
-
-        // ---- budget pass: rescale each face by its DONOR's ratio -------
-        // Face F(m,g) enters node m as +F and node m+e_g as -F. So the
-        // donor -- the node energy leaves -- is m when F < 0 and m+e_g
-        // when F > 0. Scaling the face ONCE by that node's R keeps both
-        // neighbours reading the identical value, which is what preserves
-        // the telescoping sum. Nothing is injected; the heat the bound
-        // withholds simply stays in the donor.
-        if (flux_budget) {
-            ablastr::utils::communication::FillBoundary(
-                fcache, WarpX::do_single_precision_comms, period, true);
-            ablastr::utils::communication::FillBoundary(
-                rbud, WarpX::do_single_precision_comms, period, true);
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-            for (MFIter mfi(Kout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                amrex::Box const box = mfi.tilebox();
-                amrex::Array4<amrex::Real>       const & tn = Kout.array(mfi);
-                amrex::Array4<amrex::Real const> const & fc = fcache.const_array(mfi);
-                amrex::Array4<amrex::Real const> const & rb = rbud.const_array(mfi);
-                amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
-                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                {
-                    if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return; }
-                    amrex::Real div = 0.0_rt;
-                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                        int hi[3] = {i, j, k}; hi[g] += 1;
-                        int lo[3] = {i, j, k}; lo[g] -= 1;
-                        amrex::Real const f_hi = fc(i,j,k,g);
-                        amrex::Real const f_lo = fc(lo[0],lo[1],lo[2],g);
-                        // donor of the hi face: this node if F<0, else hi
-                        amrex::Real const r_hi = (f_hi < 0.0_rt)
-                            ? rb(i,j,k) : rb(hi[0],hi[1],hi[2]);
-                        // donor of the lo face: lo node if F<0, else this
-                        amrex::Real const r_lo = (f_lo < 0.0_rt)
-                            ? rb(lo[0],lo[1],lo[2]) : rb(i,j,k);
-                        amrex::Real const fh = f_hi*r_hi;
-                        amrex::Real const fl = f_lo*r_lo;
-#ifdef WARPX_DIM_RZ
-                        if (g == 0) {
-                            amrex::Real const Vr = dual_volume.radial_measure(i);
-                            div += (fh - fl) / Vr;
-                            continue;
-                        }
-#endif
-                        int const node[3] = {i, j, k};
-                        div += (fh - fl) / dual_volume.width(g, node[g]);
-                    }
-                    amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
-                    tn(i,j,k) = div/(1.5_rt*kb*ne0);
-                });
-            }
-        }
+        warpx::thermal::EvaluateConductionFDRHS(
+            Tin, bne, xi, Kout, fcache, rbud, fd_geometry, fd_options,
+            WarpX::do_single_precision_comms);
     };
 
     // Stability ceiling for the adaptive integrator (valid after each
@@ -16824,16 +17149,16 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
 
-    auto const n0_ref    = m_n0_ref;
-    auto const gamma     = m_gamma;
-    // SITE 1 of qdsmc_te_n_floor (the adiabat T_e seed): representation
-    // positivity, not the Ohm's-law vacuum floor. Defaults to n_floor,
-    // so this is bit-identical unless the deck sets the knob.
-    auto const rho_floor = PhysConst::q_e * m_qdsmc_te_n_floor;
+    auto const n0_ref = m_n0_ref;
+    auto const gamma = m_initial_electron_temperature_gamma;
+    // Defaults to the energy representation's floor. An independently fitted
+    // initial profile may override it without changing any evolution floor.
+    auto const rho_floor = PhysConst::q_e * m_initial_electron_temperature_n_floor;
     // m_elec_temp is k_B T_e0 [J]; the T_e field is in K.
     auto const Te0_K     = m_elec_temp / PhysConst::kb;
     amrex::MultiFab const* const ped_mf = DensityPedestal(lev);
-    bool const use_ped = (ped_mf != nullptr);
+    bool const use_ped = m_initial_electron_temperature_include_pedestal
+        && (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -16868,6 +17193,9 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
 
 void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesQDSMC(),
+        "Legacy QDSMC driver called for Eulerian electron energy; the selected JFNK driver must own this advance");
+
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC()");
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -17110,7 +17438,10 @@ HybridPICModel::FillDensityPedestal (int const lev) const
         "density_pedestal_profile(x,y,z) used before HybridPICModel::InitData "
         "compiled it");
     auto const profile = m_density_pedestal_profile;
-    amrex::Real const n_uniform = m_n_floor;
+    // An untracked uniform pedestal remains at its original input value
+    // across a live common-floor change and checkpoint restart.
+    amrex::Real const n_uniform = UsesEulerianElectronEnergy() && !m_density_pedestal_track_floor
+        ? m_density_control.initial_number_floor : m_n_floor;
     amrex::Real const qe = PhysConst::q_e;
     auto const plo_arr = geom.ProbLoArray();
     auto const dx_arr = geom.CellSizeArray();
@@ -17304,6 +17635,9 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCCompressionEnergy (
 
 void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesQDSMC(),
+        "Legacy QDSMC driver called for Eulerian electron energy; the selected JFNK driver must own this advance");
+
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC_PC()");
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -17570,6 +17904,9 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
 void
 HybridPICModel::QDSMCSaveImplicitStepStart (amrex::Real const dt, amrex::Real const time) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesQDSMC(),
+        "Legacy QDSMC driver called for Eulerian electron energy; the selected JFNK driver must own this advance");
+
     ABLASTR_PROFILE("HybridPICModel::QDSMCSaveImplicitStepStart()");
 
     using ablastr::fields::Direction;
@@ -17658,6 +17995,9 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
                                                       amrex::Real const theta,
                                                       bool const refresh_species_deposits) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesQDSMC(),
+        "Legacy QDSMC driver called for Eulerian electron energy; the selected JFNK driver must own this advance");
+
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMCTheta()");
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -17696,7 +18036,9 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         }
     }
 
-    // Midpoint-position density deposited through the same
+    // For Esirkepov, reuse the conservative endpoint-averaged midpoint
+    // density assembled by the field residual. Otherwise deposit the
+    // midpoint-position density through the same
     // MultiParticleContainer path as rho^n (QDSMCSaveImplicitStepStart) and
     // rho^{n+1} (QDSMCFinishImplicitStep). The nonlinear-solver deposit in
     // rho_fp treats the boundary nodes differently in the radial geometries
@@ -17715,14 +18057,21 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         }
         rho_mid_levels.push_back(slot.get());
     }
-    warpx.GetPartContainer().DepositCharge(rho_mid_levels, 0.0_rt);
-    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        amrex::MultiFab & rho_mid_mf = *rho_mid_levels[lev];
-        ablastr::utils::communication::SumBoundary(
-            rho_mid_mf, 0, rho_mid_mf.nComp(), rho_mid_mf.nGrowVect(), rho_mid_mf.nGrowVect(),
-            WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
-        warpx.ApplyRhofieldBoundary(lev, &rho_mid_mf, PatchType::fine);
-        rho_mid_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    if (m_implicit_continuity_density) {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            auto const& rho = *warpx.m_fields.get(FieldType::rho_fp,lev);
+            amrex::MultiFab::Copy(*rho_mid_levels[lev],rho,rho.nComp()/2,0,1,rho.nGrowVect());
+        }
+    } else {
+        warpx.GetPartContainer().DepositCharge(rho_mid_levels, 0.0_rt);
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            amrex::MultiFab & rho_mid_mf = *rho_mid_levels[lev];
+            ablastr::utils::communication::SumBoundary(
+                rho_mid_mf, 0, rho_mid_mf.nComp(), rho_mid_mf.nGrowVect(), rho_mid_mf.nGrowVect(),
+                WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+            warpx.ApplyRhofieldBoundary(lev, &rho_mid_mf, PatchType::fine);
+            rho_mid_mf.FillBoundary(warpx.Geom(lev).periodicity());
+        }
     }
 
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
@@ -17912,6 +18261,9 @@ void
 HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt, amrex::Real const theta,
                                          amrex::Real const time) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(UsesQDSMC(),
+        "Legacy QDSMC driver called for Eulerian electron energy; the selected JFNK driver must own this advance");
+
     ABLASTR_PROFILE("HybridPICModel::QDSMCFinishImplicitStep()");
 
     using ablastr::fields::Direction;
@@ -19455,5 +19807,5 @@ HybridPICModel::ResistivityTe (int const lev) const
     {
         return nullptr;
     }
-    return WarpX::GetInstance().m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    return &ElectronTemperatureForSolve(lev);
 }

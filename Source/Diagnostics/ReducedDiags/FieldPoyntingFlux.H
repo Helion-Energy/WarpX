@@ -441,6 +441,8 @@ public:
 
 private:
 
+    friend class MultiReducedDiags;
+
     bool use_mid_step_value = false;
 
 };

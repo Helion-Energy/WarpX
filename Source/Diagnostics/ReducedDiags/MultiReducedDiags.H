@@ -37,6 +37,48 @@ public:
     /// constructor
     MultiReducedDiags ();
 
+    /** Owned state of the supported midpoint diagnostics. The handle is local
+     *  to one MultiReducedDiags instance and must not outlive that instance.
+     *  Destruction only discards the saved data; it never restores implicitly.
+     */
+    class MidStepSnapshot
+    {
+    public:
+        MidStepSnapshot ();
+        ~MidStepSnapshot ();
+        MidStepSnapshot (MidStepSnapshot&&) noexcept;
+        MidStepSnapshot& operator= (MidStepSnapshot&&) = delete;
+        MidStepSnapshot (MidStepSnapshot const&) = delete;
+        MidStepSnapshot& operator= (MidStepSnapshot const&) = delete;
+
+    private:
+        friend class MultiReducedDiags;
+        struct State;
+        std::unique_ptr<State> m_state;
+    };
+
+    /** Collective, observation-only capture. Rejects an active snapshot or an
+     *  unsupported diagnostic without replacing an existing saved state.
+     *  The schema covers all registered data vectors and the FieldPoyntingFlux
+     *  midpoint flag. Other supported native types have no midpoint override.
+     */
+    bool CaptureMidStepState (MidStepSnapshot& snapshot) const;
+
+    /** Collective, pure owner/schema/order/size preflight. */
+    bool CanRestoreMidStepState (MidStepSnapshot const& snapshot) const;
+
+    /** Collective restore after the complete all-rank preflight succeeds.
+     *  Failure changes neither diagnostic data nor the snapshot. Success
+     *  restores exact stored data and consumes the snapshot.
+     */
+    bool RestoreMidStepState (MidStepSnapshot& snapshot);
+
+    /** Discard this instance's snapshot after the caller's final collective
+     *  acceptance preflight. No sampling, I/O, or collective is performed.
+     */
+    void CommitMidStepState (MidStepSnapshot& snapshot) noexcept;
+
+
     /** Loop over all ReducedDiags and call their InitData
      */
     void InitData ();

@@ -1,0 +1,7 @@
+version 1
+eps_filt 2
+c0 0x1.4p+1
+c1 -0x1.8p+0
+lambda_accepted 2
+c0 0x1p-2
+c1 -0x1p-3

@@ -19,6 +19,7 @@
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "Utils/Parser/ParserUtils.H"
+#include "Utils/Parser/PrescribedTimeProfile.H"
 #include "Utils/WarpXConst.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
@@ -31,6 +32,7 @@
 #include <AMReX_DistributionMapping.H>
 
 #include <optional>
+#include <cmath>
 
 /**
  * \brief This class contains the parameters needed to evaluate a
@@ -93,6 +95,15 @@ protected:
      * external is added to form the total (the original convention). */
     std::vector<bool> m_in_initial_field;
 
+    // Optional analytic companions of the prescribed native scale. These do
+    // not alter the maintained scale/E assembly or any circuit segment.
+    std::vector<std::string> m_time_derivative_function, m_time_increment_function;
+    std::vector<bool> m_time_companions_declared, m_has_time_profile;
+    std::vector<std::unique_ptr<amrex::Parser>> m_time_derivative_parser;
+    std::vector<std::unique_ptr<amrex::Parser>> m_time_increment_parser;
+    std::vector<amrex::ParserExecutor<1>> m_time_derivative;
+    std::vector<amrex::ParserExecutor<2>> m_time_increment;
+
 public:
     [[nodiscard]] warpx::circuit::DeviceScaleView DeviceScales () const { return m_device_scales; }
     [[nodiscard]] bool DeviceDriven (int field) const
@@ -133,6 +144,44 @@ public:
 
     [[nodiscard]] bool UsesPythonScale (int i) const { return m_use_python_scale[i]; }
 
+    /** Exact resolved zero-drive profile, after InitData. This inspects the
+     * owned parsers, not mutable input text or samples of a varying profile.
+     * Optional derivative/increment companions keep their native defaults;
+     * when declared, both must themselves be constant finite zero. */
+    [[nodiscard]] bool HasConstantZeroTimeProfile (int i) const {
+        if (i < 0 || i >= m_nFields) { return false; }
+        auto const size = static_cast<std::size_t>(m_nFields);
+        if (m_use_python_scale.size() != size || m_has_time_profile.size() != size ||
+            m_A_external_time_parser.size() != size || m_A_time_scale.size() != size ||
+            m_time_derivative_parser.size() != size || m_time_derivative.size() != size ||
+            m_time_increment_parser.size() != size || m_time_increment.size() != size ||
+            (m_device_scales.start != nullptr && m_device_driven.size() != size)) {
+            return false;
+        }
+        if (DeviceDriven(i) || UsesPythonScale(i) || !m_has_time_profile[i]) { return false; }
+        auto const& value = m_A_external_time_parser.at(i);
+        auto const& derivative = m_time_derivative_parser.at(i);
+        auto const& increment = m_time_increment_parser.at(i);
+        if (!value || !derivative || !increment ||
+            !value->symbols().empty() || !derivative->symbols().empty() ||
+            !increment->symbols().empty()) { return false; }
+        auto const v = m_A_time_scale.at(i)(0.);
+        auto const d = m_time_derivative.at(i)(0.);
+        auto const q = m_time_increment.at(i)(0., 0.);
+        return std::isfinite(v) && v == 0. && std::isfinite(d) && d == 0. &&
+               std::isfinite(q) && q == 0.;
+    }
+
+    [[nodiscard]] bool HasAnalyticTimeProfile (int i) const {
+        return !DeviceDriven(i) && !UsesPythonScale(i) && m_has_time_profile.at(i);
+    }
+    [[nodiscard]] warpx::external::PrescribedTimeProfile TimeProfile (int i) const {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(HasAnalyticTimeProfile(i),
+            "Prescribed drive requires explicit analytic derivative and finite increment");
+        return {m_A_time_scale.at(i),m_time_derivative.at(i),m_time_increment.at(i)};
+    }
+
+
     bool GetScaleSegment (int i, amrex::Real& s_old, amrex::Real& s_new,
                           amrex::Real& t_old, amrex::Real& t_new) const
     {
@@ -163,6 +212,12 @@ public:
     ExternalVectorPotential ();
 
     void ReadParameters ();
+
+    // Immutable field model for protected native-circuit restart. Painted fields
+    // are bound by the caller's resolved coil geometry. File-backed unpainted
+    // fields have no content identity in this interface and explicitly refuse.
+    [[nodiscard]] std::string NativeCircuitFieldIdentity (
+        std::vector<std::string> const& painted_fields) const;
 
     void AllocateLevelMFs (
         ablastr::fields::MultiFabRegister & fields,

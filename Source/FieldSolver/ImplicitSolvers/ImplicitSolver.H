@@ -10,6 +10,7 @@
 #include "ImplicitSolver_fwd.H"
 
 #include "FieldSolver/ImplicitSolvers/ImplicitOptions.H"
+#include "FieldSolver/ImplicitSolvers/NativeEndpointCurrentResponse.H"
 
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 #include "NonlinearSolvers/NonlinearSolverLibrary.H"
@@ -53,6 +54,11 @@ public:
      */
     virtual void Define (WarpX* a_WarpX, bool from_restart) = 0;
 
+    /** Initialize algebraic fields after particles and external fields are loaded,
+     *  before iteration-zero diagnostics. Electromagnetic solvers keep their
+     *  prescribed initial fields. This hook does not advance particles or time. */
+    virtual void InitializeFields (amrex::Real /*time*/, amrex::Real /*dt*/) {}
+
     [[nodiscard]] bool IsDefined () const { return m_is_defined; }
 
     virtual void PrintParameters () const = 0;
@@ -60,6 +66,8 @@ public:
     void CreateParticleAttributes () const;
 
     bool DoParticleSuborbits () const { return m_particle_suborbits; }
+
+    [[nodiscard]] bool ReflectsParticlesInsidePush () const { return m_reflect_particles_at_rmax; }
 
     /**
      * \brief Advance fields and particles by one time step using the specified implicit algorithm
@@ -93,7 +101,26 @@ public:
     /**
      * Prepare for the linear solve. This includes depositing the mass matrices and updating the PC.
      */
-    void PreLinearSolve ();
+    // Public because this member contains an extended CUDA device lambda.
+    void ResizeEsirkepovMassMatrices ();
+
+    void PreLinearSolve (int a_newton_iter = -1);
+    void InvalidateMassMatrices () {
+        m_mass_matrices_cached = false;
+        m_mass_matrices_current = false;
+        InvalidateMassMatrixCurrentIncrement();
+        if (m_endpoint_current_response) { m_endpoint_current_response->Invalidate(); }
+    }
+
+    // Esirkepov's PC diagonal is a projection of the complete nonsymmetric
+    // current response, even when Jv materializes particles and species data.
+    [[nodiscard]] bool NeedFullCurrentResponse () const {
+        return m_use_mass_matrices_jacobian ||
+            (m_esirkepov_mass_matrices && m_use_mass_matrices_pc);
+    }
+
+    // Public for the CUDA extended device lambda in the Esirkepov reduction.
+    void SyncMassMatricesPCAndApplyBCs ();
 
     /** Nonlinear-solver hook: whether the next residual evaluation should
      *  deposit the mass matrices (fused path). */
@@ -266,6 +293,15 @@ public:
 
     void ComputeJfromMassMatrices (bool a_J_from_MM_only);
 
+    /** A correlated hybrid response may keep the small physical current
+     * increment through native guard sums, then compose it with the captured
+     * nonlinear base. The density owner also retains this increment for its
+     * continuity action. Other solvers retain their original raw-base path. */
+    [[nodiscard]] virtual bool UseMassMatrixCurrentIncrement () const { return false; }
+    virtual void ComposeMassMatrixCurrentIncrement () {}
+    virtual void InvalidateMassMatrixCurrentIncrement () {}
+
+
     /**
      * \brief Finish filling the mass matrices after deposit
      */
@@ -356,6 +392,12 @@ protected:
      */
     bool m_use_mass_matrices = false;
 
+    /** Esirkepov current rows with full-order nodal momentum-gather columns.
+     * All bands are stored, and their reach is sized from each reference orbit.
+     */
+    bool m_esirkepov_mass_matrices = false;
+
+
     /**
      * \brief Deposit the mass matrices inside the particle push-and-deposit pass
      *        (fused with the current deposit: one pass over the particles, the
@@ -380,6 +422,13 @@ protected:
     /**
      * \brief Whether to use mass matrices to compute J during linear stage of JFNK
      */
+    int m_mass_matrices_deposit_interval = 1;
+    std::unique_ptr<warpx::particles::NativeEndpointCurrentResponse> m_endpoint_current_response;
+    bool m_mass_matrices_cached = false;
+    bool m_mass_matrices_reuse_within_step = false;
+    int m_mass_matrices_calls_since_deposit = 0;
+    amrex::Real m_mass_matrices_cached_dt = -1.;
+    amrex::Real m_mass_matrices_cached_time = -1.;
     bool m_use_mass_matrices_jacobian = false;
 
     /**
@@ -509,7 +558,6 @@ protected:
     /**
      * \brief Communicate Mass Matrices used for PC and apply boundary conditions
      */
-    void SyncMassMatricesPCAndApplyBCs ();
 
     /**
      * \brief Scale mass matrices used for PC by c^2*mu0*theta*dt and add 1 to diagonal terms

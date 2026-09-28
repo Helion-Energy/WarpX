@@ -1,0 +1,6 @@
+# Independent block acceptance regression
+This manufactured native Yee/cell system has a representable field correction and a thermal roundoff floor already below its own physical gate. Ordinary aggregate Armijo rejects the candidate although both blocks pass. The default correction must accept only after a second fresh physical evaluation. `test.final_failure=invalid` and `thermal` independently test invalid reevaluation and a newly failing thermal gate; both must reject and restore input.
+
+Include CMakeLists from a coherent full RZ WarpX build. Supply any valid source-free implicit electron-energy initialization input, with `endpoint_diagnostic.accept_converged_trial=0` for the retained old rejection or omit the selector for the default correction. The fixture initializes native layouts but does not advance physical time. Run fresh serial and MPI directories; single/multiple-box input layouts are supported.
+
+The final-verification receipt also covers `test.final_failure=field` and `nonfinite`. A valid failed verification must report its fresh block norms; a false callback must report unavailable (NaN) norms. The attempted/valid/finite flags distinguish those outcomes from failures before verification. All failure controls retain the original status and restore the input exactly; no retry or additional physical residual evaluation is introduced.

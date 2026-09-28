@@ -9,6 +9,7 @@
 #define WARPX_FIELDGATHER_H_
 
 #include "Particles/Gather/GetExternalFields.H"
+#include "Particles/Gather/ImplicitGatherSafety.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/ShapeFactors.H"
 #include "Utils/WarpX_Complex.H"
@@ -2242,9 +2243,10 @@ void doGatherShapeN (const amrex::ParticleReal xp,
  * \param n_rz_azimuthal_modes    Number of azimuthal modes when using RZ geometry
  * \param nox                     order of the particle shape function
  * \param depos_type              current deposition algorithm (e.g., direct, Esirkepov, Vay, Villasenor, etc.)
+ * \param actual_gather_position  Optional actual post-crop Cartesian point (Direct only).
  */
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void doGatherShapeNImplicit (
+[[nodiscard]] AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+warpx::particles::ImplicitGatherResult doGatherShapeNImplicit (
                      const amrex::ParticleReal xp_n,
                      const amrex::ParticleReal yp_n,
                      const amrex::ParticleReal zp_n,
@@ -2276,8 +2278,20 @@ void doGatherShapeNImplicit (
                      const amrex::Dim3& lo,
                      const int n_rz_azimuthal_modes,
                      const int nox,
-                     const CurrentDepositionAlgo depos_type )
+                     const CurrentDepositionAlgo depos_type,
+                     amrex::GpuArray<amrex::ParticleReal,3>* const actual_gather_position = nullptr )
 {
+    using warpx::particles::ImplicitGatherIssue;
+    // Only the point gather has one physical coordinate. Other stencils must
+    // never produce a purported exact point-gather receipt.
+    if (actual_gather_position && depos_type != CurrentDepositionAlgo::Direct) {
+        return {ImplicitGatherIssue::InvalidLayout};
+    }
+    using warpx::particles::FiniteParticleVector;
+    if (!FiniteParticleVector(xp_n, yp_n, zp_n) ||
+        !FiniteParticleVector(xp_nph, yp_nph, zp_nph)) {
+        return {ImplicitGatherIssue::NonFinitePosition};
+    }
     if (depos_type == CurrentDepositionAlgo::Esirkepov) {
         if (nox == 1) {
             doGatherShapeNEsirkepovStencilImplicit<1>(xp_n, yp_n, zp_n, xp_nph, yp_nph, zp_nph,
@@ -2456,6 +2470,19 @@ void doGatherShapeNImplicit (
         }
 #endif
 
+        // Cropping must precede the support test, since the actual gather
+        // uses the cropped physical point. The validator repeats the native
+        // shape arithmetic and checks all six staggerings before any grid read.
+        auto const check = warpx::particles::CheckMomentumGather(
+            xp_gather, yp_gather, zp_gather,
+            {ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr},
+            {ex_type, ey_type, ez_type, bx_type, by_type, bz_type},
+            dinv, xyzmin, lo, n_rz_azimuthal_modes, nox);
+        if (!check) { return check; }
+        if (actual_gather_position) {
+            *actual_gather_position = {xp_gather, yp_gather, zp_gather};
+        }
+
         if (nox == 1) {
             doGatherShapeN<1,0>(xp_gather, yp_gather, zp_gather, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                 ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
@@ -2478,6 +2505,10 @@ void doGatherShapeNImplicit (
                                 dinv, xyzmin, lo, n_rz_azimuthal_modes);
         }
     }
+    if (!FiniteParticleVector(Exp, Eyp, Ezp) || !FiniteParticleVector(Bxp, Byp, Bzp)) {
+        return {ImplicitGatherIssue::NonFiniteField};
+    }
+    return {};
 }
 
 #endif // WARPX_FIELDGATHER_H_

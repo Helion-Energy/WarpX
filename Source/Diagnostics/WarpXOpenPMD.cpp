@@ -14,6 +14,7 @@
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 #include "WarpX.H"
+#include "FieldSolver/ImplicitSolvers/NativePairedDarwinFields.H"
 #include "OpenPMDHelpFunction.H"
 
 #include <ablastr/profiler/ProfilerWrapper.H>
@@ -604,6 +605,26 @@ for (const auto & particle_diag : particle_diags) {
                         * parser_filter(p, engine) * geometry_filter(p, engine);
             }, true);
         particlesConvertUnits(ConvertDirection::SI_to_WarpX, pinned_pc, mass);
+    } else if(warpx::darwin::NativeEndpointPairSelected(WarpX::GetInstance())) {
+        // Unit conversion is an output operation. A multiply/divide round trip
+        // on the physical population can change its represented momenta and
+        // invalidate the accepted endpoint before its field gather. Preserve
+        // the actual particles; filter the independently converted copy using
+        // the same SI parser and random-filter call as the ordinary path.
+        auto converted=pc->make_alike<>();
+        converted.SetArena(pc->arena());
+        converted.copyParticles(*pc,true);
+        particlesConvertUnits(ConvertDirection::WarpX_to_SI,&converted,mass);
+        using SrcData = WarpXParticleContainer::ParticleTileType::ConstParticleTileDataType;
+        tmp.copyParticles(converted,
+            [random_filter,uniform_filter,parser_filter,geometry_filter]
+            AMREX_GPU_HOST_DEVICE
+            (const SrcData& src,int ip,const amrex::RandomEngine& engine)
+            {
+                const SuperParticleType& p=src.getSuperParticle(ip);
+                return random_filter(p,engine)*uniform_filter(p,engine)*
+                    parser_filter(p,engine)*geometry_filter(p,engine);
+            },true);
     } else {
         particlesConvertUnits(ConvertDirection::WarpX_to_SI, pc, mass);
         using SrcData = WarpXParticleContainer::ParticleTileType::ConstParticleTileDataType;

@@ -313,20 +313,7 @@ void init_WarpX (py::module& m)
         )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
-                auto * const model = wx.get_pointer_HybridPICModel();
-                model->m_n_floor = n_floor;
-                // hybrid_pic_model.density_pedestal_track_floor: keep the
-                // density pedestal on the floor the deck just set. Marking
-                // the image stale is enough -- the next
-                // EnsureDensityPedestal refills it, and the refill of an
-                // empty density_pedestal_profile uses n_uniform = m_n_floor
-                // (an empty profile is required by the input's init assert),
-                // so the new pedestal IS the new floor and the inventory is
-                // retallied with it. Off by default: the pedestal then stays
-                // static at its boot value, as before.
-                if (model->m_density_pedestal_track_floor) {
-                    model->m_density_pedestal_stale = true;
-                }
+                wx.get_pointer_HybridPICModel()->SetHybridDensityFloor(n_floor);
             },
             py::arg("n_floor"),
             "Sets the density floor to use in the hybrid solver. When "
@@ -342,7 +329,7 @@ void init_WarpX (py::module& m)
         )
         .def("set_qdsmc_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
-                wx.get_pointer_HybridPICModel()->m_qdsmc_n_floor = n_floor;
+                wx.get_pointer_HybridPICModel()->SetQdsmcDensityFloor(n_floor);
             },
             py::arg("n_floor"),
             "Sets the QDSMC electron-energy density floor "
@@ -361,6 +348,22 @@ void init_WarpX (py::module& m)
             },
             "Gets the QDSMC electron-energy density floor."
         )
+        .def("uses_eulerian_electron_energy", [](WarpX& wx) {
+            return wx.get_pointer_HybridPICModel()->UsesEulerianElectronEnergy();
+        })
+        .def("configure_hybrid_pic_density_controller", [](WarpX& wx, const std::string& configuration) {
+            auto const& c=wx.get_pointer_HybridPICModel()->ConfigureDensityFloorController(configuration);
+            py::dict result;
+            result["last"]=c.controller_last;result["ema"]=c.controller_ema;
+            result["has_ema"]=c.controller_has_ema;result["step"]=c.controller_step;
+            return result;
+        }, py::arg("configuration"))
+        .def("commit_hybrid_pic_density_controller", [](WarpX& wx, const std::string& configuration,
+            amrex::Real last, amrex::Real ema, bool has_ema, std::int64_t step, amrex::Real gate) {
+            wx.get_pointer_HybridPICModel()->CommitDensityFloorController(
+                configuration,last,ema,has_ema,step,gate);
+        }, py::arg("configuration"), py::arg("last"), py::arg("ema"), py::arg("has_ema"),
+           py::arg("step"), py::arg("gate")=-1.)
         .def("get_qdsmc_wall_tally",
             [](WarpX& wx, int dim, int side) {
                 return wx.get_pointer_HybridPICModel()
