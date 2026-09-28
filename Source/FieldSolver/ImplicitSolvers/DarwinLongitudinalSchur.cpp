@@ -775,6 +775,34 @@ DarwinLongitudinalSchur::ApplyPotential (amrex::MultiFab& out,
                                          const amrex::MultiFab& phi) {
     m_impl->Apply(out, phi);
 }
+void
+DarwinLongitudinalSchur::ApplyDivergence (amrex::MultiFab& out, const ConstVector& field)
+{
+    auto& s = *m_impl;
+    s.Layout(out, s.nodes);
+    for (int c = 0; c < 3; ++c) {
+        AMREX_ALWAYS_ASSERT(field[c]);
+        s.Layout(*field[c], s.flux[c].boxArray());
+        amrex::MultiFab::Copy(s.flux[c], *field[c], 0, 0, 1, 0);
+        s.Images(s.flux[c]);
+    }
+    s.Divergence(out, s.flux);
+}
+bool
+DarwinLongitudinalSchur::PreconditionPotential (amrex::MultiFab& out,
+                                               const amrex::MultiFab& rhs)
+{
+    auto& s = *m_impl;
+    AMREX_ALWAYS_ASSERT(s.frozen && &out != &rhs);
+    s.Layout(out, s.nodes);
+    s.Layout(rhs, s.nodes);
+    if (!rhs.is_finite(0, 1, 0)) { return false; }
+    amrex::MultiFab::Copy(s.scratch_phi, rhs, 0, 0, 1, 0);
+    s.Canonical(s.scratch_phi, false);
+    Impl::Ops ops{s};
+    ops.precond(out, s.scratch_phi);
+    return out.is_finite(0, 1, 0);
+}
 LongitudinalSchurResult
 DarwinLongitudinalSchur::SolvePotential (const amrex::MultiFab& rhs) {
     return m_impl->Solve(rhs);
@@ -854,6 +882,16 @@ DarwinLongitudinalSchur::Correct (const ConstVector&, const ConstVector&) {
 }
 LongitudinalSchurResult
 DarwinLongitudinalSchur::CorrectDefect (const ConstVector&) { return {}; }
+void
+DarwinLongitudinalSchur::ApplyDivergence (amrex::MultiFab&, const ConstVector&)
+{
+    amrex::Abort("Unsupported geometry");
+}
+bool
+DarwinLongitudinalSchur::PreconditionPotential (amrex::MultiFab&, const amrex::MultiFab&)
+{
+    return false;
+}
 LongitudinalSchurResult
 DarwinLongitudinalSchur::SolvePotential (const amrex::MultiFab&) {
     return {};

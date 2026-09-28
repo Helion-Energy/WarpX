@@ -97,6 +97,7 @@ DarwinVacuumJointSolve::DarwinVacuumJointSolve(DarwinThermalAdvance& owner)
  :a(owner),s(owner.m_solver),w(owner.m_simulation) {}
 DarwinVacuumJointSolve::~DarwinVacuumJointSolve()=default;
 void DarwinVacuumJointSolve::InvalidateConvergenceReceipt() noexcept {
+ m_projection_checked=false;
  m_endpoint_ampere.reset();m_endpoint_ampere_generation=0;
  InvalidateAxialReflection();
  m_convergence_input=nullptr;m_convergence_generation=0;m_convergence_part=-1;
@@ -568,12 +569,31 @@ bool DarwinVacuumJointSolve::Prepare() {
  warpx::darwin::LongitudinalSchurOptions options;options.compatible_yee=true;options.output_ghosts=ng;options.max_semicoarsening_levels=model.m_darwin_poisson_semicoarsening;options.semicoarsening_direction=model.m_darwin_poisson_semicoarsening_direction;
  amrex::ParmParse pp("implicit_evolve");pp.query("darwin_schur_relative_tolerance",options.relative_tolerance);pp.query("darwin_schur_absolute_tolerance",options.absolute_tolerance);pp.query("darwin_schur_max_iterations",options.max_iterations);pp.query("darwin_schur_restart_length",options.restart_length);pp.query("darwin_schur_pc_cycles",options.preconditioner_cycles);
  for(int d=0;d<AMREX_SPACEDIM;++d){auto map=[](warpx::darwin::InitialRateBoundary q){using A=warpx::darwin::InitialRateBoundary;using B=warpx::darwin::LongitudinalBoundary;return q==A::Axis?B::Axis:q==A::PEC?B::PEC:q==A::PMC?B::PMC:B::Periodic;};options.lower[d]=map(so.lower[d]);options.upper[d]=map(so.upper[d]);}
+ // These are PC accuracy controls, independent of the physical Schur solve.
+ options.relative_tolerance=1.e-3;options.absolute_tolerance=0.;
+ options.max_iterations=32;options.restart_length=32;
+ pp.query("darwin_joint_pc_relative_tolerance",options.relative_tolerance);
+ pp.query("darwin_joint_pc_absolute_tolerance",options.absolute_tolerance);
+ pp.query("darwin_joint_pc_max_iterations",options.max_iterations);
+ pp.query("darwin_joint_pc_restart_length",options.restart_length);
+ pp.query("darwin_joint_direct_constraint",m_direct_constraint);
+ if(m_direct_constraint) {
+  auto laplace_options=options;
+  pp.query("darwin_joint_constraint_pc_cycles",laplace_options.preconditioner_cycles);
+  m_laplacian=std::make_unique<warpx::darwin::DarwinLongitudinalSchur>(
+      g,w.boxArray(0),w.DistributionMap(0),laplace_options);
+  Define(m_constraint_rhs,phi,ng);Define(m_constraint_potential,phi,ng);
+  if(!m_laplacian->Freeze(m_constraint_rhs))return false;
+ }
  m_schur=std::make_unique<warpx::darwin::DarwinLongitudinalSchur>(g,w.boxArray(0),w.DistributionMap(0),options);
  warpx::darwin::DarwinVacuumHodgePC::Options ho;ho.b=m_b;ho.length=m_length;ho.relative_tolerance=options.relative_tolerance;ho.absolute_tolerance=options.absolute_tolerance;ho.max_iterations=options.max_iterations;ho.restart_length=options.restart_length;ho.use_auxiliary_preconditioner=true;pp.query("darwin_schur_green_auxiliary",ho.use_green_auxiliary_inverse);
  pp.query("darwin_schur_yee_green_interface",ho.use_yee_green_interface_inverse);
  pp.query("darwin_schur_interface_max_dofs",ho.max_interface_dofs);
  m_hodge=std::make_unique<warpx::darwin::DarwinVacuumHodgePC>(w,e,mag,ho);std::string error;
  if(!m_hodge->Prepare({&m_P[0],&m_P[1],&m_P[2]},{&m_V[0],&m_V[1],&m_V[2]},error)){amrex::Print()<<"JOINT_VACUUM topology rejected "<<error<<'\n';return false;}
+ amrex::Print()<<"JOINT_VACUUM constraint direct="<<m_direct_constraint
+     <<" PC_rtol="<<options.relative_tolerance<<" PC_atol="<<options.absolute_tolerance
+     <<" PC_cap="<<options.max_iterations<<'\n';
  amrex::Print()<<"JOINT_VACUUM prepared V="<<m_hodge->Stats().vacuum_edges<<" W="<<m_hodge->Stats().potential_dofs<<" floating="<<m_hodge->Stats().floating_components<<" Hodge_bytes="<<m_hodge->Stats().local_owned_bytes<<" cap="<<ho.max_iterations<<" bottom_sweeps=8 green_auxiliary="<<ho.use_green_auxiliary_inverse<<" yee_green_interface="<<ho.use_yee_green_interface_inverse<<" interface_dofs="<<m_hodge->Stats().interface_dofs<<"\n";
  return true;
 }
@@ -737,7 +757,7 @@ bool DarwinVacuumJointSolve::Transform(MF& output,View const& current,MF const& 
  return output.is_finite();
 }
 
-bool DarwinVacuumJointSolve::Project(Vec& out) {
+bool DarwinVacuumJointSolve::Project(Vec& out, bool verification_only) {
  using namespace warpx::darwin::increment;
  auto E=w.m_fields.get_alldirs(FT::Efield_fp,0);auto EL=w.m_fields.get_alldirs("hybrid_E_long_fp",0);
  Copy(m_saved_E,E);Copy(m_held_EL,EL);Copy(m_held_phi,*w.m_fields.get(Phi,0));Copy(m_held_phi_low,*w.m_fields.get(scalar_low,0));
@@ -751,17 +771,46 @@ bool DarwinVacuumJointSolve::Project(Vec& out) {
   for(amrex::MFIter it(*E[c]);it.isValid();++it){auto src=E[c]->array(it);auto full=m_delta[c].const_array(it);auto mask=m_V[c].const_array(it);amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){if(mask(i,j,k))src(i,j,k)=full(i,j,k);});}
   Images(w,*E[c]);
  }
+ if(m_direct_constraint && !verification_only) {
+  // D(S-G phi) is the native local constraint. Compensated subtraction
+  // retains the held longitudinal low part before taking the divergence.
+  Real scale=0.;
+  for(int c=0;c<3;++c) {
+   for(amrex::MFIter it(m_delta[c]);it.isValid();++it) {
+    auto q=m_delta[c].array(it);auto src=E[c]->const_array(it);
+    auto h=m_held_EL[c].const_array(it);auto l=m_held_low[c].const_array(it);
+    amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k) {
+     auto value=arithmetic::Add(arithmetic::Sum(src(i,j,k),-h(i,j,k)),{-l(i,j,k),0.});
+     q(i,j,k)=value.hi+value.lo;
+    });
+   }
+   scale=std::max(scale,m_held_EL[c].norminf(0));
+  }
+  auto& residual=out.getMultiFabBlock(Phi,0);
+  m_laplacian->ApplyDivergence(residual,{&m_delta[0],&m_delta[1],&m_delta[2]});
+  // Preserve potential units in the block vector; this is not an inverse.
+  residual.mult(m_length*m_length,0,1,0);
+  m_raw_h=residual.norminf(0)/m_length;
+  m_h_target=s.m_darwin_outer_atol+s.m_darwin_outer_rtol*scale;
+  return residual.is_finite()&&std::isfinite(m_raw_h);
+ }
  ablastr::fields::MultiLevelVectorField source{E};ablastr::fields::MultiLevelScalarField densities{&rho};
+ ++m_projection_solves;
  a.m_model.ComputeDarwinELong(densities,m_time+m_h,true,&source);
  m_raw_h=0.;Real scale=0.;
  for(int c=0;c<3;++c){auto& defect=m_delta[c];auto const& projected=*EL[c];
   for(amrex::MFIter it(defect);it.isValid();++it){auto q=defect.array(it);auto p=projected.const_array(it);auto h=m_held_EL[c].const_array(it);auto l=m_held_low[c].const_array(it);amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){auto x=arithmetic::Add(arithmetic::Sum(p(i,j,k),-h(i,j,k)),{-l(i,j,k),0.});q(i,j,k)=x.hi+x.lo;});}
   m_raw_h=std::max(m_raw_h,defect.norminf(0));scale=std::max({scale,projected.norminf(0),m_held_EL[c].norminf(0)});
  }
- auto& residual=out.getMultiFabBlock(Phi,0);auto const& projected=*w.m_fields.get(Phi,0);
- for(amrex::MFIter it(residual);it.isValid();++it){auto r=residual.array(it);auto p=projected.const_array(it);auto h=m_held_phi.const_array(it);auto l=m_held_phi_low.const_array(it);amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){auto x=arithmetic::Add(arithmetic::Sum(p(i,j,k),-h(i,j,k)),{-l(i,j,k),0.});r(i,j,k)=x.hi+x.lo;});}
- CanonicalScalar(residual);m_h_target=s.m_darwin_outer_atol+s.m_darwin_outer_rtol*scale;
- return residual.is_finite()&&std::isfinite(m_raw_h);
+ auto& residual=out.getMultiFabBlock(Phi,0);
+ if(!verification_only) {
+  auto const& projected=*w.m_fields.get(Phi,0);
+  for(amrex::MFIter it(residual);it.isValid();++it){auto r=residual.array(it);auto p=projected.const_array(it);auto h=m_held_phi.const_array(it);auto l=m_held_phi_low.const_array(it);amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){auto x=arithmetic::Add(arithmetic::Sum(p(i,j,k),-h(i,j,k)),{-l(i,j,k),0.});r(i,j,k)=x.hi+x.lo;});}
+  CanonicalScalar(residual);
+ }
+ m_h_target=s.m_darwin_outer_atol+s.m_darwin_outer_rtol*scale;
+ m_projection_checked=residual.is_finite()&&std::isfinite(m_raw_h);
+ return m_projection_checked;
 }
 
 bool DarwinVacuumJointSolve::Residual(Vec& out,Vec const& x,int iteration,bool probe) {
@@ -810,6 +859,12 @@ bool DarwinVacuumJointSolve::Residual(Vec& out,Vec const& x,int iteration,bool p
  MF::Copy(out.getMultiFabBlock(U,0),m_raw_u_field,0,0,1,0);
  if(!Project(out))return false;
  m_raw.Copy(out);auto const norms=m_raw.blockNorms();m_raw_e=norms[0]*a.m_electric_scale;m_raw_u=norms[1];
+ // A root candidate must also pass the original projected-field gate. This
+ // check never changes the direct residual and never runs in a Jv sample.
+ if(m_direct_constraint && !probe && m_raw_e<=m_field_target &&
+    (m_part==1 || m_raw_u<=m_energy_target) && m_raw_h<=m_h_target) {
+  if(!Project(out,true))return false;
+ }
  Copy(m_U_images,x.getMultiFabBlock(U,0));stage_detail::fill_images(m_U_images,a.m_geometry);
  if(!Transform(m_correction,V(m_current),m_U_images,a.m_stage->Density()))return false;
  auto& ru=out.getMultiFabBlock(U,0);MF::Add(ru,m_correction,0,0,1,0);
@@ -990,14 +1045,14 @@ bool DarwinVacuumJointSolve::CompleteResidualRemainder(Vec const& represented) {
  m_remainder_generation=m_generation;return true;
 }
 Real DarwinVacuumJointSolve::StepBound(Vec const& state,Vec const& direction) const {return a.StepBound(state,direction);}
-bool DarwinVacuumJointSolve::RawAccepted() const {return std::isfinite(m_raw_e)&&std::isfinite(m_raw_u)&&std::isfinite(m_raw_h)&&m_raw_e<=m_field_target&&m_raw_u<=m_energy_target&&m_raw_h<=m_h_target;}
+bool DarwinVacuumJointSolve::RawAccepted() const {return m_projection_checked&&std::isfinite(m_raw_e)&&std::isfinite(m_raw_u)&&std::isfinite(m_raw_h)&&m_raw_e<=m_field_target&&m_raw_u<=m_energy_target&&m_raw_h<=m_h_target;}
 bool DarwinVacuumJointSolve::PhysicalConverged(Vec const& input) const {
  bool ready=m_active && m_support_ready && m_particle_phase==ParticlePhase::Trial &&
      m_convergence_input==&input && m_convergence_generation!=0 &&
      m_convergence_generation==m_generation && m_convergence_part==m_part &&
      a.m_open && m_time==a.m_time && m_dt==a.m_dt &&
      m_physical_step==w.getistep(0) && w.gett_new(0)==m_time &&
-     std::isfinite(m_raw_e) && std::isfinite(m_raw_h) &&
+     m_projection_checked && std::isfinite(m_raw_e) && std::isfinite(m_raw_h) &&
      m_raw_e<=m_field_target && m_raw_h<=m_h_target &&
      (m_part==1 || (m_part==0 && std::isfinite(m_raw_u) && m_raw_u<=m_energy_target));
  // Addresses/generations are local identities; only validity is reduced.
@@ -1074,7 +1129,16 @@ bool DarwinVacuumJointSolve::Precondition(Vec& out,Vec const& rhs) {
  for(int c=0;c<3;++c)for(amrex::MFIter it(*out.getArrayVec()[0][c]);it.isValid();++it){auto f=out.getArrayVec()[0][c]->array(it);auto p=m_P[c].const_array(it);amrex::ParallelFor(it.validbox(),[=]AMREX_GPU_DEVICE(int i,int j,int k){if(!p(i,j,k))f(i,j,k)=0.;});}
  // Complementary nodal auxiliary response. Approximation belongs only to PC;
  // the saddle RHS below retains its complete gradient and K_VP contribution.
- auto const& hrhs=rhs.getMultiFabBlock(Phi,0);
+ auto const* potential_rhs=&rhs.getMultiFabBlock(Phi,0);
+ if(m_direct_constraint) {
+  // The old block factorization expects L^{-1} of this direct scalar row.
+  // Only the PC applies an inverse, using a fixed number of MG cycles.
+  MF::Copy(m_constraint_rhs,*potential_rhs,0,0,1,0);
+  m_constraint_rhs.mult(1./(m_length*m_length),0,1,0);
+  if(!m_laplacian->PreconditionPotential(m_constraint_potential,m_constraint_rhs))return false;
+  potential_rhs=&m_constraint_potential;
+ }
+ auto const& hrhs=*potential_rhs;
  m_hodge->CanonicalPotential(m_phi_w,hrhs);
  MF::LinComb(m_phi_a,1.,hrhs,0,-1.,m_phi_w,0,0,1,0);CanonicalScalar(m_phi_a);Gradient(V(m_pc_h),m_phi_a);
  auto auxiliary=m_schur->Correct({&m_pc_h[0],&m_pc_h[1],&m_pc_h[2]},{&m_zero[0],&m_zero[1],&m_zero[2]});m_auxiliary_iterations+=auxiliary.iterations;
@@ -1106,7 +1170,7 @@ int DarwinVacuumJointSolve::Solve(int step) {
   options.block_relative_tolerances={field_rtol,part==1?0.:a.m_options.relative_tolerance,0.};
   options.block_absolute_tolerances={field_atol/a.m_electric_scale,part==1?1.:a.m_options.absolute_tolerance,m_h_target/a.m_electric_scale};
   auto result=SolveThermalSystem(*this,m_state,options);
-  amrex::Print()<<"JOINT_VACUUM solve part="<<part<<" status="<<int(result.status)<<" Newton="<<result.newton_iterations<<" GMRES="<<result.linear_iterations<<" maps="<<m_maps<<" PC_calls="<<m_pc_calls<<" scalar_iterations="<<m_auxiliary_iterations<<" saddle_iterations="<<m_saddle_iterations<<'\n';
+  amrex::Print()<<"JOINT_VACUUM solve part="<<part<<" status="<<int(result.status)<<" Newton="<<result.newton_iterations<<" GMRES="<<result.linear_iterations<<" maps="<<m_maps<<" PC_calls="<<m_pc_calls<<" scalar_iterations="<<m_auxiliary_iterations<<" saddle_iterations="<<m_saddle_iterations<<" projection_solves="<<m_projection_solves<<'\n';
   return result.status==ThermalSolveStatus::Converged;
  };
  bool converged=false;

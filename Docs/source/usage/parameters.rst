@@ -4598,6 +4598,39 @@ Maxwell solver: kinetic-fluid hybrid
          - ``30``
          - Maximum thermal multigrid coarsening depth.
 
+.. pp:param:: implicit_evolve.darwin_joint_direct_constraint
+
+    ``bool`` (default ``true``)
+    In the admitted joint vacuum field/energy solve, assemble the native nodal
+    constraint ``length^2 D(S - E_L)`` directly. Here ``S`` is the full Ohm source
+    in plasma and the trial total field in true vacuum, and ``length`` is the
+    largest domain extent. This uses the same Yee divergence, axis metric, PEC
+    potential rows and PMC images as the longitudinal projection. No Poisson
+    inversion occurs in Jacobian-vector samples. A candidate root still receives
+    the original projected-field check with unchanged physical tolerances.
+    ``false`` retains the inverse-based potential residual for comparison.
+    This switch does not expand the joint solver's geometry or physics scope.
+
+.. pp:param:: implicit_evolve.darwin_joint_pc_relative_tolerance
+             implicit_evolve.darwin_joint_pc_absolute_tolerance
+             implicit_evolve.darwin_joint_pc_max_iterations
+             implicit_evolve.darwin_joint_pc_restart_length
+
+    Defaults ``1.e-3``, ``0``, ``32``, ``32``, respectively.
+    Accuracy and iteration limits for the longitudinal auxiliary and vacuum Hodge
+    preconditioner solves inside the joint solver. These are independent of the
+    physical ``darwin_schur_*`` solve tolerances. Incomplete or nonfinite block
+    solves still reject the preconditioner application; the outer field, energy
+    and longitudinal acceptance gates are unchanged. Both coupled and decoupled
+    energy modes use these controls when the joint vacuum stage is active.
+
+.. pp:param:: implicit_evolve.darwin_joint_constraint_pc_cycles
+
+    ``int`` (default inherited from ``darwin_schur_pc_cycles``, normally ``2``)
+    Fixed multigrid cycles, starting from zero, for the scalar Laplacian inverse
+    used only to precondition the direct constraint. The approximate inverse is
+    never used as a physical acceptance test. Must be positive.
+
 .. pp:param:: implicit_evolve.thermal.expected_ou_thermal_partner
     :type: ``string``
     :default: ``population_bounded_nr`` with active relaxation, otherwise ``off``

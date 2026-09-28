@@ -451,6 +451,41 @@ main (int argc, char* argv[]) {
             raw_view[c] = &raw[c];
             held_view[c] = &held[c];
         }
+        // The direct joint row must agree with an independent Yee D(G phi),
+        // including axis4, finite PMC ends, PEC elimination and poisoned guards.
+        auto direct_options = options;
+        direct_options.compatible_yee = true;
+        DarwinLongitudinalSchur direct(geometry, cells, dm, direct_options);
+        amrex::MultiFab zero(nodes, dm, 1, 0), direct_rhs(nodes, dm, 1, 0),
+            direct_exact(nodes, dm, 1, 0), approximate(nodes, dm, 1, 3),
+            repeat(nodes, dm, 1, 3);
+        zero.setVal(0.);
+        check(direct.Freeze(zero), "Direct Laplacian freeze failed");
+        direct.ApplyDivergence(direct_rhs, held_view);
+        for (amrex::MFIter mfi(direct_exact); mfi.isValid(); ++mfi) {
+            auto exact = direct_exact.array(mfi);
+            amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                exact(i,j,k) = .37 * reference.Action(i,j,k,false);
+            });
+        }
+        check(difference(direct_rhs, direct_exact) / direct_exact.norminf() < 2.e-12,
+              "Direct divergence disagrees with independent native reference");
+        direct.ApplyPotential(out, phi);
+        out.mult(.37, 0, 1, 0);
+        check(difference(out, direct_rhs) / direct_rhs.norminf() < 2.e-12,
+              "Direct constraint is not the native D/G pair");
+        check(direct.PreconditionPotential(approximate, direct_rhs),
+              "Fixed-cycle constraint PC produced a nonfinite result");
+        direct.ApplyPotential(out, approximate);
+        Real const pc_ratio = difference(out, direct_rhs) / direct_rhs.norminf();
+        check(pc_ratio < 1., "Fixed-cycle constraint PC did not reduce the residual");
+        check(direct.PreconditionPotential(repeat, zero), "Zero RHS PC failed");
+        check(repeat.norminf() == 0., "Constraint PC reused a stale solution");
+        check(direct.PreconditionPotential(repeat, direct_rhs), "Repeated PC failed");
+        check(difference(approximate, repeat) == 0., "Constraint PC A/B/A mismatch");
+        check(difference(direct_rhs, direct_exact) / direct_exact.norminf() < 2.e-12,
+              "Constraint PC mutated its RHS");
+        amrex::Print() << "DIRECT_CONSTRAINT_PASS pc_residual_ratio=" << pc_ratio << "\n";
         auto fixed = schur.Correct(raw_view, held_view);
         check(fixed.converged,
               "Frozen physical fixed-point correction solve failed");

@@ -95,6 +95,12 @@ class DarwinLongitudinalSchur {
      */
     void ApplyPotential (amrex::MultiFab& out,
                          const amrex::MultiFab& potential);
+    /** Native divergence with owned boundary images and eliminated PEC rows.
+     * No elliptic inversion is performed. Input guards are never consumed. */
+    void ApplyDivergence (amrex::MultiFab& out, const ConstVector& field);
+    /** Apply exactly preconditioner_cycles multigrid cycles from zero.
+     * This is an approximate inverse, never a physical convergence receipt. */
+    bool PreconditionPotential (amrex::MultiFab& out, const amrex::MultiFab& rhs);
     /** Solve this same potential equation from a nodal scalar RHS. */
     LongitudinalSchurResult SolvePotential (const amrex::MultiFab& rhs);
     const amrex::MultiFab& CorrectionPotential () const;

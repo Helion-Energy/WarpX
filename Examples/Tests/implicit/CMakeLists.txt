@@ -1617,3 +1617,29 @@ foreach(D IN LISTS WarpX_DIMS)
         set_tests_properties(native_current_tolerance_${SD} PROPERTIES TIMEOUT 30 ENVIRONMENT "OMP_NUM_THREADS=1")
     endif()
 endforeach()
+
+# The direct longitudinal row preserves the native Yee metric and boundaries.
+foreach(D IN LISTS WarpX_DIMS)
+    if(D STREQUAL "RZ" OR D STREQUAL "3")
+        warpx_set_suffix_dims(SD ${D})
+        add_executable(test_direct_constraint_${SD}
+            longitudinal_schur_fixture/test_longitudinal_schur.cpp)
+        target_link_libraries(test_direct_constraint_${SD} PRIVATE lib_${SD})
+        target_include_directories(test_direct_constraint_${SD} PRIVATE ${WarpX_SOURCE_DIR}/Source)
+        if(WarpX_COMPUTE STREQUAL "CUDA")
+            setup_target_for_cuda_compilation(test_direct_constraint_${SD})
+        endif()
+        foreach(wall IN ITEMS pec pmc)
+            foreach(cap IN ITEMS periodic pmc pec)
+                foreach(box IN ITEMS 4 64)
+                    set(test_name direct_constraint_${SD}_${wall}_${cap}_box${box})
+                    add_test(NAME ${test_name} COMMAND test_direct_constraint_${SD}
+                        test.wall=${wall} test.cap=${cap} test.box=${box}
+                        amrex.verbose=0 tiny_profiler.enabled=0)
+                    set_tests_properties(${test_name} PROPERTIES TIMEOUT 30
+                        ENVIRONMENT "OMP_NUM_THREADS=1")
+                endforeach()
+            endforeach()
+        endforeach()
+    endif()
+endforeach()

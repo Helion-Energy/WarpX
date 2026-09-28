@@ -91,7 +91,7 @@ public:
     void CanonicalScalar(MF&);
     void Gradient(View const&,MF const&);
     void Materialize(Vec const&);
-    bool Project(Vec&);
+    bool Project(Vec&, bool verification_only=false);
     bool Transform(MF&,View const&,MF const&,MF const&);
     bool RawAccepted() const;
     void CaptureReceipt(bool include_fields=true);
@@ -145,6 +145,10 @@ private:
     mutable std::map<Vec const*,std::array<std::uint64_t,3>> m_mm_thermal_copies;
     int m_part=0; // 0 coupled; 1 E/phi at held U. Scalar thermal uses native stage.
     int m_maps=0,m_step=0;
+    bool m_direct_constraint=true,m_projection_checked=false;
+    long m_projection_solves=0;
+    MF m_constraint_rhs,m_constraint_potential;
+    std::unique_ptr<warpx::darwin::DarwinLongitudinalSchur> m_laplacian;
     Real m_h=0,m_alpha=0,m_b=0,m_length=0,m_field_target=0,m_energy_target=0,m_h_target=0;
     Real m_raw_e=0,m_raw_u=0,m_raw_h=0,m_inverse_error=0;
     std::chrono::steady_clock::time_point m_started;
