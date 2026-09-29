@@ -662,7 +662,11 @@ public:
      *        with the e-i relative drift dV = J_plasma/(e n_e) and eta from the
      *        Ohm's-law parser. Summed over species,
      *           S_e = e^2 eta n_e * Sigma_s Z_s n_s |dV|^2,
-     *        which reduces to eta J^2 for a single species. n_s is recovered from
+     *        which reduces to eta J^2 for a single species. With an additive
+     *        density pedestal, the electron-received temperature increment is
+     *        multiplied by n_e/(n_e+n_ped), so its state-energy increment is S_e dt.
+     *        Source gates, drift, coefficients and ion redirection continue to
+     *        use deposited density. n_s is recovered from
      *        the species charge fraction f_s = rho_fp_s / Sigma_t rho_fp_t
      *        = Z_s n_s/n_e (2pi*r-cancelling) -> n_s = f_s n_e/Z_s, with n_e from
      *        the total rho_fp. Deterministic, no per-particle scatter. Called
@@ -890,8 +894,8 @@ public:
      * U_e = 1.5 (n_e + n_ped) kB Te (QDSMCClassEnergy). \c pedestal_state =
      * true converts the deposit with that n_eff, so the bracketed dU equals
      * the deposited energy to round-off;
-     * false keeps the n_e-only conversion the Joule / relaxation / sink
-     * sources still use (their pedestal weighting awaits a ruling).
+     * false explicitly requests an n_e-only conversion. Other source models
+     * have their own receiving-capacity contracts.
      *
      * \param lev   AMR refinement level.
      * \param dt    source-stage timestep [s].

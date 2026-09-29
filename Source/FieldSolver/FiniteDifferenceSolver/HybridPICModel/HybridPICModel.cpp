@@ -9784,6 +9784,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = rho_in;
+    auto const* const pedestal = DensityPedestal(lev);
+    bool const use_pedestal = pedestal != nullptr;
     ablastr::fields::VectorField J_plasma =
         warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     // B field on Yee staggering; needed (as |B|) only when a per-species
@@ -9929,6 +9931,9 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
         {
             amrex::Array4<amrex::Real>       const & Te_arr     = Te.array(mfi);
             amrex::Array4<amrex::Real const> const & rho_arr    = rho.const_array(mfi);
+            auto const ped_arr = use_pedestal
+                                     ? pedestal->const_array(mfi)
+                                     : amrex::Array4<amrex::Real const>{};
             amrex::Array4<amrex::Real const> const & rhos_arr   = rho_s.const_array(mfi);
             amrex::Array4<amrex::Real const> const & rhosum_arr = rhos_sum.const_array(mfi);
             amrex::Array4<amrex::Real const> const & Jpx        = J_plasma[0]->const_array(mfi);
@@ -10076,7 +10081,16 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                                                           eta_s_eff * dv2 * dt;
                     }
                 } else {
-                    Te_arr(i, j, k) += wJ * dTe_s;
+                    // The source and its gates use physical deposited density.
+                    // Convert electron-received energy with the additive state's
+                    // heat capacity, Ue = (ne + nped) kB Te / (gamma - 1).
+                    // Redirected ion energy and the physical-source tallies above
+                    // do not acquire a pedestal contribution.
+                    amrex::Real dTe_e = dTe_s;
+                    if (use_pedestal) {
+                        dTe_e *= rho_val / (rho_val + ped_arr(i, j, k));
+                    }
+                    Te_arr(i, j, k) += wJ * dTe_e;
                     if (thin)
                     {
                         dropped_arr(i, j, k, 3) += wJ * du_s;

@@ -908,3 +908,21 @@ if(TARGET test_viscous_decay_rz)
         endforeach()
     endforeach()
 endif()
+
+# Independent physical-energy regression for the additive-state Joule receiver.
+if(TARGET lib_rz)
+    add_executable(test_joule_pedestal_rz test_joule_pedestal.cpp)
+    target_link_libraries(test_joule_pedestal_rz PRIVATE lib_rz)
+    target_include_directories(test_joule_pedestal_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_joule_pedestal_rz)
+    endif()
+    find_package(Python COMPONENTS Interpreter REQUIRED)
+    add_test(NAME test_rz_joule_pedestal_capacity
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_joule_pedestal.py
+            --executable $<TARGET_FILE:test_joule_pedestal_rz>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/joule_pedestal_capacity)
+    set_tests_properties(test_rz_joule_pedestal_capacity PROPERTIES
+        TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()
