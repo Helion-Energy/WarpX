@@ -189,9 +189,16 @@ void CurlCurlMLMGPC<T,Ops>::readParameters()
     pp.query("agglomeration", m_agglomeration);
     pp.query("consolidation", m_consolidation);
     pp.query("max_coarsening_level", m_max_coarsening_level);
+    pp.query("use_gmres",  m_use_gmres);
+    if (m_use_gmres) {
+        // Inner GMRES needs a convergence tolerance. Zero tolerances are only
+        // the default for the fixed-cycle MLMG application; retain the circuit
+        // GMRES defaults before honoring any explicit tolerance overrides.
+        m_atol = 1.0e-16;
+        m_rtol = 1.0e-4;
+    }
     pp.query("absolute_tolerance",  m_atol);
     pp.query("relative_tolerance",  m_rtol);
-    pp.query("use_gmres",  m_use_gmres);
     pp.query("use_gmres_pc",  m_use_gmres_pc);
     pp.query("preserve_dirichlet_rows", m_preserve_dirichlet_rows);
 }
