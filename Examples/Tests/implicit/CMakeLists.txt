@@ -929,3 +929,6 @@ endif()
 
 # At-rest entropy transport and particle-precision boundary ownership.
 include(${CMAKE_CURRENT_SOURCE_DIR}/qdsmc_marker_identity.cmake)
+
+# Common particles/markers and independent viscous source bookkeeping.
+include(${CMAKE_CURRENT_SOURCE_DIR}/viscous_common_state.cmake)
