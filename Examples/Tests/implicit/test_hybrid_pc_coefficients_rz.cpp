@@ -343,7 +343,7 @@ main (int argc, char** argv) {
                     });
                 }
             }
-            pc.Update(state);
+            pc.Update();
             auto const par = p;
             auto const& l = *pc.op.levels[0];
             for (int n = 0; n < Op::NN; ++n) {

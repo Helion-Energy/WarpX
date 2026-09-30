@@ -93,7 +93,7 @@ main (int argc, char** argv) {
         pc.Define(exact, &ops);
         amrex::Real const cw = .05, dt = 2. * PhysConst::mu0 * cw;
         pc.CurTimeStep(dt);
-        pc.Update(exact);
+        pc.Update();
         amrex::Vector<int> mode{0, 0, 1};
         int gradient = 0;
         amrex::ParmParse("hall_test").queryarr("mode", mode);
