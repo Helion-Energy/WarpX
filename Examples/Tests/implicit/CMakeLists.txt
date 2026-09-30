@@ -926,3 +926,6 @@ if(TARGET lib_rz)
     set_tests_properties(test_rz_joule_pedestal_capacity PROPERTIES
         TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1")
 endif()
+
+# At-rest entropy transport and particle-precision boundary ownership.
+include(${CMAKE_CURRENT_SOURCE_DIR}/qdsmc_marker_identity.cmake)
