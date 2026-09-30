@@ -13,6 +13,7 @@
 #   include "BoundaryConditions/PML_RZ.H"
 #endif
 #include "Fields.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "Filter/BilinearFilter.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
@@ -1482,13 +1483,26 @@ void WarpX::ApplyFilterMF (
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
 amrex::IntVect WarpX::ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amrex::MultiFab& src_mf,
                                        const int lev,
-                                       const int scomp, const int dcomp, const int ncomp)
+                                       const int scomp, const int dcomp, const int ncomp,
+                                       const int current_dir)
 {
     using namespace amrex::literals;
     constexpr int NODE = amrex::IndexType::NODE;
 
     const std::array<amrex::Real,3>& dx = CellSize(lev);
     const amrex::Real dr = dx[0];
+#ifdef WARPX_DIM_RZ
+    if (m_rz_continuity_filter) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            n_rz_azimuthal_modes == 1 && grid_type == GridType::Staggered
+            && finest_level == 0 && Geom(lev).ProbLo(0) == 0.0_rt
+            && electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+            && !EB::enabled() && evolve_scheme == EvolveScheme::Explicit,
+            "rz_continuity_filter requires single-level staggered m=0 explicit RZ hybrid PIC with r_lo=0 and no EB");
+    }
+#else
+    amrex::ignore_unused(current_dir);
+#endif
 
     // Same volume conventions as ApplyInverseVolumeScalingToChargeDensity
     // and ...ToCurrentDensity (Verboncoeur JCP 174, 421-427 (2001) for the
@@ -1588,7 +1602,55 @@ amrex::IntVect WarpX::ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amr
             const int dom_lo = domain_t.smallEnd(dir);
             const int dom_hi = domain_t.bigEnd(dir);
 
+#ifdef WARPX_DIM_RZ
+            // For nodal density A = I - D H. For normal current use B = I - H D,
+            // so D B = A D with the *deposition* divergence D. Transverse
+            // components retain A. Radial and axial tensor sweeps then commute
+            // with the full divergence. H vanishes on exterior domain edges.
+            if (current_dir == 0 && dir == 0) {
+                const int axis = domain.smallEnd(0);
+                const int last_face = domain.bigEnd(0);
+                amrex::ParallelFor(tb, ncomp,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                {
+                    if (i < axis || i > last_face) {
+                        v(i,j,k,n) = u(i,j,k,n);
+                        return;
+                    }
+                    // Divide all cylindrical weights by pi*dr. rho's axis
+                    // weight is a; away from the axis its weight is 2*i.
+                    const amrex::Real x = static_cast<amrex::Real>(i-axis);
+                    const amrex::Real w0 = i == axis ? axis_volume_factor : 2._rt*x;
+                    const amrex::Real w1 = 2._rt*(x+1._rt);
+                    const amrex::Real a = 2._rt*x+1._rt;
+                    const amrex::Real d0 = (a*u(i,j,k,n)
+                        - (i == axis ? 0._rt : (a-2._rt)*u(i-1,j,k,n)))/w0;
+                    const amrex::Real d1 = ((a+2._rt)*u(i+1,j,k,n)
+                        - a*u(i,j,k,n))/w1;
+                    // Same first-face cap as A below: without the axis
+                    // correction, the uncapped density stencil has a
+                    // negative diagonal (-1/8) at the origin.
+                    const amrex::Real conductance = i == axis
+                        ? amrex::min(0.125_rt*(w0+w1), w0) : 0.125_rt*(w0+w1);
+                    v(i,j,k,n) = u(i,j,k,n) + conductance/a*(d1-d0);
+                });
+            } else if (current_dir == 2 && dir == 1) {
+                amrex::ParallelFor(tb, ncomp,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                {
+                    // rho's nonperiodic end nodes retain their exterior
+                    // physical flux; no smoothing flux crosses those nodes.
+                    v(i,j,k,n) = (!dir_periodic && (j < dom_lo || j > dom_hi))
+                        ? u(i,j,k,n)
+                        : u(i,j,k,n) + 0.25_rt*(u(i,j+1,k,n)
+                            - 2._rt*u(i,j,k,n) + u(i,j-1,k,n));
+                });
+            } else
+#endif
             if (dir == 0) {
+#ifdef WARPX_DIM_RZ
+                const bool compatible_nodal = m_rz_continuity_filter && in.ixType().nodeCentered(0);
+#endif
                 amrex::ParallelFor(tb, ncomp,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
                 {
@@ -1604,6 +1666,17 @@ amrex::IntVect WarpX::ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amr
                         ? 0._rt : 0.5_rt*(point_weight(i-1) + w0);
                     amrex::Real w_hi = (r_hi_face <= 0._rt)
                         ? 0._rt : 0.5_rt*(w0 + point_weight(i+1));
+#ifdef WARPX_DIM_RZ
+                    if (compatible_nodal) {
+                        // Limit the *shared face* conductance, preserving
+                        // conservation while keeping A positivity preserving
+                        // for both supported deposition axis volumes.
+                        if (i == dom_lo) { w_hi = amrex::min(w_hi, 4._rt*w0); }
+                        if (i == dom_lo+1) {
+                            w_lo = amrex::min(w_lo, 4._rt*point_weight(i-1));
+                        }
+                    }
+#endif
                     if (i >= dom_hi) { w_hi = 0._rt; }
                     if (i > dom_hi)  { w_lo = 0._rt; }
                     v(i,j,k,n) = u(i,j,k,n) + 0.25_rt/w0 *
@@ -1659,7 +1732,8 @@ void WarpX::ApplyFilterJ (
     const int ncomp = J.nComp();
     amrex::MultiFab J_filtered(J.boxArray(), J.DistributionMap(), ncomp, J.nGrowVect());
     const amrex::IntVect ng_filled =
-        ApplyVolumeWeightedFilter(J_filtered, J, lev, 0, 0, ncomp);
+        ApplyVolumeWeightedFilter(J_filtered, J, lev, 0, 0, ncomp,
+            m_rz_continuity_filter ? idim : -1);
     amrex::MultiFab::Copy(J, J_filtered, 0, 0, ncomp, ng_filled);
 #else
     ApplyFilterMF(current, lev, idim);

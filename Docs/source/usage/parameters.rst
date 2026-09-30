@@ -3978,14 +3978,44 @@ Filtering
     Number of passes along each direction for the bilinear filter.
     In 2D simulations, only the first two values are read.
 
-    .. warning::
+.. pp:param:: warpx.rz_continuity_filter
+    :type: ``bool``
+    :default: ``0``
 
-       In RZ geometry with the FDTD/hybrid solvers, the default single pass
-       (``1 1``) is currently a silent no-op: ``warpx.use_filter = 1`` with
-       the default ``filter_npass_each_dir`` leaves every deposit and field
-       bit-identical to the unfiltered run. Set
-       ``warpx.filter_npass_each_dir = 2 2`` (or higher) for the filter to
-       engage in RZ.
+    Experimental compatible moment filter for explicit, single-level, staggered, axisymmetric
+    (one azimuthal mode) RZ hybrid PIC with ``geometry.prob_lo[0] = 0`` and no
+    embedded boundary. Requires :pp:param:`warpx.use_filter` to engage filtering.
+    Density uses the volume-weighted scalar filter, with the first radial smoothing
+    flux capped to prevent a negative density when the axis correction is off.
+    This cap is inactive with the default axis correction. The normal current component
+    in each sweep uses its compatible flux filter, so filtering commutes with the
+    divergence of the deposited moments. Tangential components retain scalar filtering.
+    With this option off the historical scalar current filter is retained.
+
+    The compatible divergence uses the charge-deposition axis volume, including
+    :pp:param:`boundary.verboncoeur_axis_correction`; it is not necessarily the
+    field solver's axis divergence. This option changes neither the electron
+    density floor/pedestal nor entropy-marker transport. Charge sources and physical
+    boundary operations require separate accounting.
+
+.. pp:param:: warpx.rz_continuity_audit_interval
+    :type: ``int``
+    :default: ``0``
+
+    A positive value enables a read-only continuity audit at this step interval in
+    explicit RZ hybrid PIC, without embedded boundaries, fluid species, current
+    centering, or mesh refinement. It retains consecutive density endpoints even
+    between output steps. Initialization/restart and a changed grid distribution
+    seed a new endpoint and skip that comparison.
+
+    ``RZ_CONTINUITY`` records compare raw and post-sync deposited charge/current,
+    including their physical boundary operations, before applying any electron
+    floor/pedestal. Each record includes the maximum absolute residual in C/m^3/s,
+    the residual times dt normalized by the larger endpoint density maximum,
+    and a separate residual using the Yee axis coefficient. Particle injection,
+    absorption, or other charge sources are not subtracted. A nonzero residual
+    therefore measures a balance requiring explanation, not necessarily a filter
+    defect. The diagnostic allocates scratch moments and adds communication.
 
 .. pp:param:: warpx.use_filter_compensation
     :type: ``0`` or ``1``

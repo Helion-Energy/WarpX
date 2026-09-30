@@ -1021,3 +1021,31 @@ if(TARGET lib_rz)
     set_tests_properties(test_rz_holmstrom_axis_attribution PROPERTIES
         TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;ohm;native")
 endif()
+
+# Native shape-3 deposition and cylindrical filter continuity.
+if(TARGET lib_rz)
+    add_executable(test_rz_continuity test_rz_continuity.cpp)
+    target_link_libraries(test_rz_continuity PRIVATE lib_rz)
+    target_include_directories(test_rz_continuity PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_rz_continuity)
+    endif()
+    # Fixed roundoff bounds and bitwise diagnostic-isolation comparisons below
+    # qualify CPU double precision. GPU/float qualification is separate.
+    if((WarpX_COMPUTE STREQUAL "NOACC" OR WarpX_COMPUTE STREQUAL "OMP")
+       AND WarpX_PRECISION STREQUAL "DOUBLE" AND WarpX_PARTICLE_PRECISION STREQUAL "DOUBLE")
+        find_package(Python REQUIRED COMPONENTS Interpreter)
+        add_test(NAME test_rz_continuity
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_rz_continuity.py
+                --executable $<TARGET_FILE:test_rz_continuity>
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_continuity
+                --output-parent ${CMAKE_CURRENT_BINARY_DIR}/continuity)
+        add_test(NAME test_rz_continuity_evolve
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_rz_continuity_evolve.py
+                --executable $<TARGET_FILE:test_rz_continuity>
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_continuity
+                --output-parent ${CMAKE_CURRENT_BINARY_DIR}/continuity_evolve)
+        set_tests_properties(test_rz_continuity test_rz_continuity_evolve PROPERTIES TIMEOUT 120
+            ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "continuity;native")
+    endif()
+endif()

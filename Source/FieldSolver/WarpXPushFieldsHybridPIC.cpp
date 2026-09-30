@@ -439,6 +439,10 @@ void WarpX::HybridPICDepositRhoAndJ ()
             lev);
     }
 
+#ifdef WARPX_DIM_RZ
+    if (m_rz_continuity_audit_interval > 0) { AuditRZContinuity(false); }
+#endif
+
     // Synchronize J and rho:
     // filter (if used), exchange guard cells, interpolate across MR levels
     // and apply boundary conditions
@@ -494,6 +498,9 @@ void WarpX::HybridPICDepositRhoAndJ ()
                 /*odd=*/true);
         }
     }
+#ifdef WARPX_DIM_RZ
+    if (m_rz_continuity_audit_interval > 0) { AuditRZContinuity(true); }
+#endif
 }
 
 void WarpX::HybridPICInitializeRhoJandB ()

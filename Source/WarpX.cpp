@@ -932,6 +932,20 @@ WarpX::ReadParameters ()
         // proper size for AMREX_SPACEDIM
         pp_warpx.query("use_filter", use_filter);
         pp_warpx.query("use_filter_compensation", use_filter_compensation);
+        pp_warpx.query("rz_continuity_filter", m_rz_continuity_filter);
+        pp_warpx.query("rz_continuity_audit_interval", m_rz_continuity_audit_interval);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_rz_continuity_audit_interval >= 0,
+            "warpx.rz_continuity_audit_interval must be nonnegative");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (!m_rz_continuity_filter && m_rz_continuity_audit_interval == 0)
+            || (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+                && evolve_scheme == EvolveScheme::Explicit),
+            "RZ continuity options require explicit hybrid PIC");
+#if !defined(WARPX_DIM_RZ)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_rz_continuity_filter && m_rz_continuity_audit_interval == 0,
+            "RZ continuity options require geometry.dims = RZ");
+#endif
         Vector<int> parse_filter_npass_each_dir(AMREX_SPACEDIM,1);
         utils::parser::queryArrWithParser(
             pp_warpx, "filter_npass_each_dir", parse_filter_npass_each_dir, 0, AMREX_SPACEDIM);

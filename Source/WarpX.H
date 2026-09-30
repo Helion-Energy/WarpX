@@ -966,7 +966,7 @@ public:
         int lev);
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    /** Charge/current-conserving binomial smoothing in radial geometry.
+    /** Volume-conserving scalar binomial smoothing in radial geometry.
      *
      * Filtering a density with the plain index-space binomial stencil does
      * not conserve its volume integral on cells of unequal volume (and an
@@ -976,14 +976,32 @@ public:
      * volume factors (conventions of the inverse-volume-scaling routines),
      * which conserves the volume integral exactly, leaves constants
      * untouched, has zero flux through the axis, and reduces to the
-     * standard bilinear filter where the volumes are uniform. */
+     * standard bilinear filter where the volumes are uniform.
+     * With current_dir=0 or 2 in RZ, use the compatible normal-current
+     * filter in that direction. current_dir=-1 retains scalar filtering. */
     /** \returns the guard-cell width over which dst holds filtered data. */
     amrex::IntVect ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amrex::MultiFab& src_mf,
-                                    int lev, int scomp, int dcomp, int ncomp);
+                                    int lev, int scomp, int dcomp, int ncomp,
+                                    int current_dir = -1);
 #endif
 
-    /** Filter a current density. In radial geometries this dispatches to
-     * the volume-weighted (charge/current conserving) filter; in Cartesian
+#ifdef WARPX_DIM_RZ
+    /** Residual of the m=0 deposited-charge continuity equation, in C/m^3/s.
+     * rho is nodal; J has Yee staggering and already summed guards. The axis
+     * coefficient follows deposition's volume normalization, not curl(E)'s.
+     * With yee_axis=true use 4 Jr/dr at the axis for a separate comparison.
+     */
+    void ComputeRZContinuityResidual (amrex::MultiFab& residual,
+        const amrex::MultiFab& rho_old, const amrex::MultiFab& rho_new,
+        const std::array<amrex::MultiFab*, 3>& current, amrex::Real delta_t,
+        bool yee_axis = false) const;
+
+    /** Read-only, optional raw/post-sync hybrid moment audit. */
+    void AuditRZContinuity (bool filtered);
+#endif
+
+    /** Filter a current density. Radial geometries use scalar volume-weighted
+     * filtering, or its optional compatible RZ normal-current variant. In Cartesian
      * geometries the cell volumes are uniform and it reduces to
      * ApplyFilterMF. */
     void ApplyFilterJ (
@@ -1447,6 +1465,13 @@ private:
     //! Flag whether the Verboncoeur correction is applied to the current and charge density
     //! on the axis when using RZ.
     bool m_verboncoeur_axis_correction = true;
+
+    // Experimental compatible RZ m=0 moment filter. Historical filter is default.
+    bool m_rz_continuity_filter = false;
+    int m_rz_continuity_audit_interval = 0;
+#ifdef WARPX_DIM_RZ
+    std::array<std::unique_ptr<amrex::MultiFab>, 2> m_rz_continuity_old_rho;
+#endif
 
     // Macroscopic properties
     std::unique_ptr<MacroscopicProperties> m_macroscopic_properties;
