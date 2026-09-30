@@ -79,7 +79,8 @@ void QdsmcParticleContainer::InitParticles (int lev)
     amrex::Geometry const & geom = Geom(lev);
     auto const dx_arr = geom.CellSizeArray();
     auto const plo    = geom.ProbLoArray();
-    auto const phi    = geom.ProbHiArray();
+    auto const rlo    = geom.ProbLoArrayInParticleReal();
+    auto const rhi    = geom.ProbHiArrayInParticleReal();
 
     // Define particle tiles for every (grid, tile) pair on this level.
     for (auto mfi = MakeMFIter(lev); mfi.isValid(); ++mfi) {
@@ -213,15 +214,16 @@ void QdsmcParticleContainer::InitParticles (int lev)
             // dimension determines which axis indices are physically
             // meaningful; missing axes are set to 0 on the particle's home
             // record. At a non-periodic domain-top node the position is
-            // pulled just inside the boundary (positions at or beyond
-            // ProbHi count as outside and Redistribute would delete the
-            // marker) -- same guard as the PushX clamp; interior nodes are
-            // unaffected by the min().
+            // placed at AMReX's ParticleReal roundoff-domain bound. This
+            // bound survives coordinate-to-cell rounding in Redistribute.
+            // A fixed fraction-of-cell inset would mix adjacent entropy
+            // values on every at-rest gather/deposit, independent of dt.
+            // Use the same precision-scale bounds as the PushX clamp.
             auto const node_pos = [&] (int d_field, int d_iv)
             {
-                return amrex::min(
+                return amrex::Clamp(
                     plo[d_field] + iv[d_iv] * dx_arr[d_field],
-                    phi[d_field] - amrex::Real(1.e-6) * dx_arr[d_field]);
+                    amrex::Real(rlo[d_field]), amrex::Real(rhi[d_field]));
             };
 #if defined(WARPX_DIM_3D)
             amrex::Real const x_pos = node_pos(0, 0);
@@ -594,9 +596,9 @@ QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
     auto & warpx = WarpX::GetInstance();
     amrex::Geometry const & geom = warpx.Geom(lev);
     auto const plo = geom.ProbLoArray();
-    auto const phi = geom.ProbHiArray();
+    auto const rlo = geom.ProbLoArrayInParticleReal();
+    auto const rhi = geom.ProbHiArrayInParticleReal();
     auto const dxi = geom.InvCellSizeArray();
-    auto const dx_arr = geom.CellSizeArray();
 
     // Same clamp policy as PushX: keep the sample point just inside the
     // domain in non-periodic directions; periodic directions gather through
@@ -605,8 +607,8 @@ QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> hi_bnd;
     amrex::GpuArray<int, AMREX_SPACEDIM> is_periodic;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-        lo_bnd[d] = plo[d];
-        hi_bnd[d] = phi[d] - 1.e-6_rt * dx_arr[d];
+        lo_bnd[d] = amrex::Real(rlo[d]);
+        hi_bnd[d] = amrex::Real(rhi[d]);
         is_periodic[d] = geom.isPeriodic(d);
     }
 
@@ -717,8 +719,8 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac,
 
     amrex::Geometry const & geom = Geom(lev);
     auto const plo = geom.ProbLoArray();
-    auto const phi = geom.ProbHiArray();
-    auto const dx_arr = geom.CellSizeArray();
+    auto const rlo = geom.ProbLoArrayInParticleReal();
+    auto const rhi = geom.ProbHiArrayInParticleReal();
     auto const dxi = geom.InvCellSizeArray();
 
     // Effective displacement time: frac*dt of the full-step characteristic.
@@ -737,8 +739,8 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac,
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> hi_bnd;
     amrex::GpuArray<int, AMREX_SPACEDIM> is_periodic;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-        lo_bnd[d] = plo[d];
-        hi_bnd[d] = phi[d] - 1.e-6_rt * dx_arr[d];
+        lo_bnd[d] = amrex::Real(rlo[d]);
+        hi_bnd[d] = amrex::Real(rhi[d]);
         is_periodic[d] = geom.isPeriodic(d);
     }
 
