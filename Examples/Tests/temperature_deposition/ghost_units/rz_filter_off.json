@@ -1,0 +1,22 @@
+{
+  "name": "rz_filter_off",
+  "dim": "rz",
+  "periodic": [
+    false,
+    false
+  ],
+  "passes": 2,
+  "profile": true,
+  "grid": 8,
+  "ranks": 1,
+  "threads": 2,
+  "filter": false,
+  "particles": false,
+  "inject": false,
+  "positions": {
+    "middle": [
+      8.25,
+      8.25
+    ]
+  }
+}

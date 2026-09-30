@@ -1,0 +1,22 @@
+{
+  "name": "reject_nan_ghost_gate",
+  "dim": "rz",
+  "periodic": [
+    false,
+    false
+  ],
+  "passes": 2,
+  "profile": true,
+  "grid": 8,
+  "ranks": 1,
+  "threads": 2,
+  "filter": true,
+  "particles": false,
+  "inject": true,
+  "positions": {
+    "middle": [
+      8.25,
+      8.25
+    ]
+  }
+}

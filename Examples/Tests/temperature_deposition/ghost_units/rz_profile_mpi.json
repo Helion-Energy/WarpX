@@ -1,0 +1,22 @@
+{
+  "name": "rz_profile_mpi",
+  "dim": "rz",
+  "periodic": [
+    false,
+    false
+  ],
+  "passes": 2,
+  "profile": true,
+  "grid": 8,
+  "ranks": 2,
+  "threads": 2,
+  "filter": true,
+  "particles": false,
+  "inject": false,
+  "positions": {
+    "middle": [
+      8.25,
+      8.25
+    ]
+  }
+}

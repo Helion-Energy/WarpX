@@ -18,3 +18,5 @@ add_warpx_test(
     "OFF"
     OFF
 )
+
+include(${CMAKE_CURRENT_LIST_DIR}/ghost_units.cmake)
