@@ -22,7 +22,6 @@ particles.species_names = equal macro shape small large axis nearaxis single zer
 diagnostics.diags_names = diag1
 diag1.intervals = 2
 diag1.diag_type = Full
-diag1.fields_to_plot = Tx_equal Ty_equal Tz_equal Tx_macro Ty_macro Tz_macro Tx_shape Ty_shape Tz_shape Tx_small Ty_small Tz_small Tx_large Ty_large Tz_large Tx_axis Ty_axis Tz_axis Tx_nearaxis Ty_nearaxis Tz_nearaxis Tx_single Ty_single Tz_single Tx_zero Ty_zero Tz_zero Tx_dominant Ty_dominant Tz_dominant
 
 # equal: independently checks this weighting/low-support case.
 equal.mass = m_p
