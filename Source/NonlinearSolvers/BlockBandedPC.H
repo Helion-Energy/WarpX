@@ -2543,8 +2543,8 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
     for (int dim = 0; dim < 3; dim++) {
         const amrex::MultiFab& d_mf = *(diff.getArrayVec()[0][dim]);
         const amrex::MultiFab& j_mf = *(Jd.getArrayVec()[0][dim]);
-        const RT dn = d_mf.norm2(0);
-        const RT jn = j_mf.norm2(0);
+        const RT dn = d_mf.norm2(0, geomv.periodicity());
+        const RT jn = j_mf.norm2(0, geomv.periodicity());
         RT dmax = RT(0.0);
         int imax = -1, jmax = -1;
         for (amrex::MFIter mfi(d_mf); mfi.isValid(); ++mfi) {
