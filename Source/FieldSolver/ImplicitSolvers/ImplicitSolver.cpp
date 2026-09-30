@@ -822,7 +822,14 @@ void ImplicitSolver::InitializeMassMatrices ()
                 "Mass matrices for Jacobian with Villasenor deposition are not yet implemented "
                 "in 3D. Use algo.current_deposition = direct.");
 #else
-            const int max_grid_crossings = ngJ[0] - shape + 1;
+            // Match the allocation policy: only the named implicit EM schemes
+            // use the reduced guards. Preserve the other schemes' convention.
+            const bool reduced_deposition_guards =
+                m_WarpX->evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+                m_WarpX->evolve_scheme == EvolveScheme::Semi_Implicit_EM ||
+                m_WarpX->evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM;
+            const int max_grid_crossings =
+                ngJ[0] - (reduced_deposition_guards ? shape / 2 : shape - 1);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(max_grid_crossings > 0,
                 "Mass Matrices for Jacobian with Villasenor deposition requires particles.max_grid_crossings > 0.");
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(max_grid_crossings == WarpX::particle_max_grid_crossings,

@@ -77,7 +77,7 @@ if current_deposition == "villasenor":
     assert drho_rms < tolerance_rel_charge
 
 if use_mass_matrices_jacobian:
-    newton_solver = np.loadtxt("diags/newton_solver.txt", skiprows=1)
+    newton_solver = np.atleast_2d(np.loadtxt("diags/newton_solver.txt", skiprows=1))
     num_steps = newton_solver[-1, 0]
     total_newton_iters = newton_solver[-1, 3]
     total_gmres_iters = newton_solver[-1, 7]

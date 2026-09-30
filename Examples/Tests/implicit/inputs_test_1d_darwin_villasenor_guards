@@ -1,0 +1,53 @@
+# Initialize the custom Darwin mass matrices with higher-order Villasenor shapes.
+# Two boxes exercise guard allocation; no time advance or diagnostic checksum is needed.
+max_step = 0
+amr.n_cell = 16
+amr.max_grid_size = 8
+amr.blocking_factor = 8
+amr.max_level = 0
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = 1.0e-2
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+boundary.particle_lo = periodic
+boundary.particle_hi = periodic
+warpx.verbose = 1
+warpx.serialize_initial_conditions = 1
+warpx.const_dt = 1.0e-14
+warpx.use_filter = 0
+warpx.do_electrostatic = labframe
+algo.maxwell_solver = yee
+algo.evolve_scheme = semi_implicit_darwin
+algo.current_deposition = villasenor
+algo.field_gathering = energy-conserving
+algo.particle_pusher = boris
+algo.particle_shape = 3
+# max_grid_crossings deliberately uses the existing global default1;
+# the parser does not read that option for Semi_Implicit_Darwin.
+particles.species_names = electrons protons
+
+electrons.species_type = electron
+electrons.injection_style = NUniformPerCell
+electrons.num_particles_per_cell_each_dim = 2
+electrons.profile = constant
+electrons.density = 1.0e12
+electrons.momentum_distribution_type = constant
+electrons.ux = 0
+electrons.uy = 0
+electrons.uz = 0
+
+protons.species_type = proton
+protons.injection_style = NUniformPerCell
+protons.num_particles_per_cell_each_dim = 2
+protons.profile = constant
+protons.density = 1.0e12
+protons.momentum_distribution_type = constant
+protons.ux = 0
+protons.uy = 0
+protons.uz = 0
+
+# Diagnostics are omitted; an empty assignment is invalid ParmParse syntax.
+
+# Disable only slow symbolic stack rendering; all native assertions remain enabled.
+amrex.signal_handling = 0

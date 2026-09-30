@@ -1,6 +1,22 @@
 # Add tests (alphabetical order) ##############################################
 #
 
+# Custom Darwin keeps its own guard allocation when implicit-EM guards change.
+foreach(shape IN ITEMS 2 3 4)
+    add_warpx_test(
+        test_1d_darwin_villasenor_guard_shape${shape}
+        1 1
+        "inputs_test_1d_darwin_villasenor_guards algo.particle_shape=${shape}"
+        OFF OFF OFF
+    )
+endforeach()
+add_warpx_test(
+    test_1d_darwin_villasenor_guard_mpi
+    1 2
+    "inputs_test_1d_darwin_villasenor_guards algo.particle_shape=3"
+    OFF OFF OFF
+)
+
 add_warpx_test(
     test_1d_theta_implicit_planar_pinch  # name
     1  # dims
@@ -140,6 +156,17 @@ add_warpx_test(
     inputs_test_3d_theta_implicit_jfnk_direct  # inputs
     "analysis_implicit_jfnk.py diags/diag1000010"  # analysis
     "analysis_default_regression.py --path diags/diag1000010"  # checksum
+    OFF  # dependency
+)
+
+# Exercise the stationary-particle deposition guard floor with cubic shapes.
+add_warpx_test(
+    test_3d_theta_implicit_jfnk_direct_zero_crossing  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_theta_implicit_jfnk_direct algo.particle_shape=3 particles.max_grid_crossings=0 max_step=1 diag1.intervals=1 newton.diagnostic_interval=1"  # inputs
+    "analysis_implicit_jfnk.py diags/diag1000001"  # analysis
+    OFF  # checksum
     OFF  # dependency
 )
 
