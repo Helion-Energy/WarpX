@@ -1,5 +1,5 @@
 # Deterministic native two-particle temperature deposition regression.
-# Particle momenta stay fixed; fields do not act on these neutral test species.
+# Particle momenta stay fixed by disabling the push and gather.
 # The exact unbiased two-sample variance is (v1-v2)^2/2 at each grid point
 # receiving both particles, regardless of their positive effective weights.
 max_step = 2
@@ -26,7 +26,8 @@ diag1.fields_to_plot = Tx_equal Ty_equal Tz_equal Tx_macro Ty_macro Tz_macro Tx_
 
 # equal: independently checks this weighting/low-support case.
 equal.mass = m_p
-equal.charge = 0.
+equal.charge = q_e
+equal.do_not_gather = 1
 equal.do_not_push = 1
 equal.do_temperature_deposition = 1
 equal.injection_style = MultipleParticles
@@ -40,7 +41,8 @@ equal.multiple_particles_weight = 1.0 1.0
 
 # macro: independently checks this weighting/low-support case.
 macro.mass = m_p
-macro.charge = 0.
+macro.charge = q_e
+macro.do_not_gather = 1
 macro.do_not_push = 1
 macro.do_temperature_deposition = 1
 macro.injection_style = MultipleParticles
@@ -54,7 +56,8 @@ macro.multiple_particles_weight = 1.0 9.0
 
 # shape: independently checks this weighting/low-support case.
 shape.mass = m_p
-shape.charge = 0.
+shape.charge = q_e
+shape.do_not_gather = 1
 shape.do_not_push = 1
 shape.do_temperature_deposition = 1
 shape.injection_style = MultipleParticles
@@ -68,7 +71,8 @@ shape.multiple_particles_weight = 1.0 1.0
 
 # small: independently checks this weighting/low-support case.
 small.mass = m_p
-small.charge = 0.
+small.charge = q_e
+small.do_not_gather = 1
 small.do_not_push = 1
 small.do_temperature_deposition = 1
 small.injection_style = MultipleParticles
@@ -82,7 +86,8 @@ small.multiple_particles_weight = 1e-25 9e-25
 
 # large: independently checks this weighting/low-support case.
 large.mass = m_p
-large.charge = 0.
+large.charge = q_e
+large.do_not_gather = 1
 large.do_not_push = 1
 large.do_temperature_deposition = 1
 large.injection_style = MultipleParticles
@@ -96,7 +101,8 @@ large.multiple_particles_weight = 1e+25 9e+25
 
 # axis: independently checks this weighting/low-support case.
 axis.mass = m_p
-axis.charge = 0.
+axis.charge = q_e
+axis.do_not_gather = 1
 axis.do_not_push = 1
 axis.do_temperature_deposition = 1
 axis.injection_style = MultipleParticles
@@ -110,7 +116,8 @@ axis.multiple_particles_weight = 1.0 9.0
 
 # nearaxis: independently checks this weighting/low-support case.
 nearaxis.mass = m_p
-nearaxis.charge = 0.
+nearaxis.charge = q_e
+nearaxis.do_not_gather = 1
 nearaxis.do_not_push = 1
 nearaxis.do_temperature_deposition = 1
 nearaxis.injection_style = MultipleParticles
@@ -124,7 +131,8 @@ nearaxis.multiple_particles_weight = 1.0 1.0
 
 # single: independently checks this weighting/low-support case.
 single.mass = m_p
-single.charge = 0.
+single.charge = q_e
+single.do_not_gather = 1
 single.do_not_push = 1
 single.do_temperature_deposition = 1
 single.injection_style = MultipleParticles
@@ -138,7 +146,8 @@ single.multiple_particles_weight = 1.0
 
 # zero: independently checks this weighting/low-support case.
 zero.mass = m_p
-zero.charge = 0.
+zero.charge = q_e
+zero.do_not_gather = 1
 zero.do_not_push = 1
 zero.do_temperature_deposition = 1
 zero.injection_style = MultipleParticles
@@ -152,7 +161,8 @@ zero.multiple_particles_weight = 0.0 0.0
 
 # dominant: independently checks this weighting/low-support case.
 dominant.mass = m_p
-dominant.charge = 0.
+dominant.charge = q_e
+dominant.do_not_gather = 1
 dominant.do_not_push = 1
 dominant.do_temperature_deposition = 1
 dominant.injection_style = MultipleParticles
