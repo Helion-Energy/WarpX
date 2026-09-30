@@ -14361,13 +14361,15 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
                     amrex::Real const kfac = 1.5_rt*kb*ne_f;
                     int const sgg = g*AMREX_SPACEDIM - g*(g-1)/2;
 
-                    // 4th-order stencils need the full interior window;
-                    // near non-periodic walls fall back to 2nd order.
+                    // The normal co-derivative only reads the normal window.
+                    // A short transverse window must not downgrade this term.
+                    // Mixed terms retain their separate transverse-window guard.
                     bool use4 = fd4;
                     if (use4 && !is_per[g]) {
                         use4 = (m0[g] - 2 >= dom_lo[g]) &&
                                (m0[g] + 3 <= dom_hi[g]);
                     }
+                    bool const use4_normal = use4;
                     if (use4) {
                         for (int h = 0; h < AMREX_SPACEDIM; ++h) {
                             if (h == g || is_per[h]) { continue; }
@@ -14378,7 +14380,7 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
                     }
 
                     amrex::Real F = 0.0_rt;    // chi-units flux [K m/s]
-                    if (use4) {
+                    if (use4_normal) {
                         // co-derivative: C0 over A-row node fluxes
                         for (int l = 0; l < 4; ++l) {
                             int q[3] = {m0[0], m0[1], m0[2]};
