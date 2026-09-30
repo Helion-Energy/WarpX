@@ -239,8 +239,9 @@ void HybridPICPC<T,Ops>::SmoothLevel ( int a_lev, int a_nsweeps, bool a_x_is_zer
             // Computing a negative halo here would gather a second negative
             // residual ghost, outside the one-ring residual allocation.
             for (MFIter mfi(*m_coef[a_lev], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box tile = mfi.tilebox();
                 Box bx = mfi.growntilebox(1);
-                bx.setSmall(mfi.tilebox().smallEnd());
+                bx.setSmall(tile.smallEnd());
                 Array4<const Real> const& coef = m_coef[a_lev]->const_array(mfi);
                 Array4<const Real> const& rE = m_rF[a_lev]->const_array(mfi);
                 Array4<const Real> const& rW = m_rW[a_lev]->const_array(mfi);
