@@ -929,3 +929,65 @@ endif()
 
 # At-rest entropy transport and particle-precision boundary ownership.
 include(${CMAKE_CURRENT_SOURCE_DIR}/qdsmc_marker_identity.cmake)
+
+# Native nodal conduction probe. Numerical convergence is checked by the Python
+# driver, which runs fixed physical profiles at multiple resolutions.
+if(TARGET lib_rz)
+    add_executable(test_conduction_order_rz test_conduction_order_rz.cpp)
+    target_link_libraries(test_conduction_order_rz PRIVATE lib_rz)
+    target_include_directories(test_conduction_order_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_conduction_order_rz)
+    endif()
+endif()
+
+if(TARGET lib_3d)
+    add_executable(test_conduction_order_3d test_conduction_order_rz.cpp)
+    target_link_libraries(test_conduction_order_3d PRIVATE lib_3d)
+    target_include_directories(test_conduction_order_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_conduction_order_3d)
+    endif()
+endif()
+
+# This gate is intentionally the normal-eligibility correction only. The full
+# axis/wall upgrade is not certified by an axial-mode test.
+if(TARGET test_conduction_order_rz OR TARGET test_conduction_order_3d)
+    find_package(Python REQUIRED COMPONENTS Interpreter)
+endif()
+foreach(dim IN ITEMS rz 3d)
+    if(TARGET test_conduction_order_${dim})
+        if(dim STREQUAL "rz")
+            set(conduction_order_input inputs_test_rz_implicit_thermal)
+        else()
+            set(conduction_order_input inputs_test_3d_conduction_order)
+        endif()
+        add_test(NAME test_${dim}_conduction_fd4_normal_edge_order
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_conduction_order_rz.py
+                --executable $<TARGET_FILE:test_conduction_order_${dim}>
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/${conduction_order_input}
+                --geometry ${dim} --profiles axial --sizes 32 64 128
+                --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_order_${dim})
+        set_tests_properties(test_${dim}_conduction_fd4_normal_edge_order PROPERTIES
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;fd4;native")
+    endif()
+endforeach()
+
+if(TARGET lib_rz)
+    add_executable(test_holmstrom_axis_rz test_holmstrom_axis.cpp)
+    target_link_libraries(test_holmstrom_axis_rz PRIVATE lib_rz)
+    target_include_directories(test_holmstrom_axis_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_holmstrom_axis_rz)
+    endif()
+    add_test(NAME test_rz_holmstrom_axis_attribution
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_holmstrom_axis.py
+            --baseline $<TARGET_FILE:test_holmstrom_axis_rz>
+            --candidate $<TARGET_FILE:test_holmstrom_axis_rz>
+            --size 32
+            --output-parent ${CMAKE_CURRENT_BINARY_DIR}/holmstrom_axis)
+    set_tests_properties(test_rz_holmstrom_axis_attribution PROPERTIES
+        TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;ohm;native")
+endif()
