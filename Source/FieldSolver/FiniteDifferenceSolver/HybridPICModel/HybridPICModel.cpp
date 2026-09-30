@@ -4113,7 +4113,11 @@ void HybridPICModel::RefreshIonFluidMoments (
             for (int lev = 0; lev <= finest; ++lev) {
                 for (WarpXParIter pti(pc, lev); pti.isValid(); ++pti) {
                     auto const get_position = GetParticlePosition<PIdx>(pti, 0);
-                    auto const box = pti.tilebox();
+                    // Match native DepositCurrent's guarded coordinate origin.
+                    // Shape factors use integer truncation, so the unpadded
+                    // origin would give negative cell-centered coordinates
+                    // and an incorrect stencil near every tile's lower edge.
+                    auto const box = amrex::grow(pti.tilebox(), warpx.get_ng_depos_J());
                     auto const lo = amrex::lbound(box);
                     auto const xyzmin = WarpX::LowerCorner(box, lev, 0.0_rt);
                     auto const dinv = WarpX::InvCellSize(lev);
