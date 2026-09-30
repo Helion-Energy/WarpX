@@ -192,16 +192,16 @@ namespace
             const amrex::Array4<int> &flag_ext_face_max_lev_idim = flag_ext_face[max_level][idim]->array(mfi);
             const amrex::Array4<int> &flag_info_face_max_lev_idim = flag_info_face[max_level][idim]->array(mfi);
             const amrex::Array4<amrex::Real> &S =  all_fields.get(FieldType::face_areas, Direction{idim}, max_level)->array(mfi);
-            const amrex::Array4<amrex::Real> &lx = all_fields.get(FieldType::face_areas, Direction{0}, max_level)->array(mfi);
-            const amrex::Array4<amrex::Real> &ly = all_fields.get(FieldType::face_areas, Direction{1}, max_level)->array(mfi);
-            const amrex::Array4<amrex::Real> &lz = all_fields.get(FieldType::face_areas, Direction{2}, max_level)->array(mfi);
+            const amrex::Array4<amrex::Real> &lx = all_fields.get(FieldType::edge_lengths, Direction{0},  max_level)->array(mfi);
+            const amrex::Array4<amrex::Real> &ly = all_fields.get(FieldType::edge_lengths, Direction{1},  max_level)->array(mfi);
+            const amrex::Array4<amrex::Real> &lz = all_fields.get(FieldType::edge_lengths, Direction{2},  max_level)->array(mfi);
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
                 if (flag_ext_face_max_lev_idim(i, j, k)) {
                     // Modify the area according to the BCK algorithm
                     S(i, j, k) = ::ComputeSStab<idim>(i, j, k, lx, ly, lz, dx, dy, dz);
                     // Update the face info so that the solver doesn't think that this face is being extended
-                    flag_info_face_max_lev_idim(i, j, k) = -1;
+                    flag_info_face_max_lev_idim(i, j, k) = FaceInfo::bck_stabilized;
                 }
             });
         }
@@ -409,6 +409,9 @@ namespace
         return nullptr;
     }
 
+
+
+
 #ifdef AMREX_USE_EB
 
 #ifndef WARPX_DIM_RZ
@@ -446,9 +449,10 @@ namespace
                     // has given away already some area, so we use Sz_red rather than Sz.
                     // If no face is available we don't do anything and we will need to use the
                     // multi-face extensions.
+                    const int flag_neigh = GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim);
                     if (GetNeighbor(S_red, i, j, k, i_n, j_n, idim) > S_ext
-                        && (GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim) == 1
-                        || GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim) == 2)
+                        && (flag_neigh == FaceInfo::available
+                            || flag_neigh == FaceInfo::intruded)
                         && flag_ext_face(i, j, k) && ! stop) {
                         n_borrow += 1;
                         stop = true;
@@ -489,7 +493,8 @@ namespace
         for(int i_loc = 0; i_loc <= 2; i_loc++){
             for(int j_loc = 0; j_loc <= 2; j_loc++){
                 const int flag = GetNeighbor(flag_info_face, i, j, k, i_loc - 1, j_loc - 1, idim);
-                local_avail(i_loc, j_loc) = flag == 1 || flag == 2;
+                local_avail(i_loc, j_loc) = flag == FaceInfo::available
+                                            || flag == FaceInfo::intruded;
             }
         }
 
@@ -854,15 +859,26 @@ WarpX::ComputeOneWayExtensions (
                                 // The area is taken with an atomic test-and-subtract: on GPU
                                 // several faces can try to borrow from the same intruded face
                                 // concurrently, and a plain read-test-write lets the intruded
-                                // face give the same area away more than once (issue #2257;
-                                // equivalent to the fix proposed in PR #2298)
+                                // face give the same area away more than once.
+                                //
+                                // *Atomically* decrement `S_mod` of the neighboring cell by
+                                // `S_ext` under the condition that this is possible (i.e. that
+                                // S_mod-S_ext is positive, and the cell is marked as available
+                                // for borrowing). If this indeed updated `S_mod`, it returns
+                                // `true` for `borrowed`. For the syntax, see
+                                // https://amrex-codes.github.io/amrex/doxygen/namespaceamrex_1_1Gpu_1_1Atomic.html
                                 const bool borrowed = amrex::Gpu::Atomic::If(
-                                    ::GetNeighborPtr(S_mod, i, j, k, i_n, j_n, idim),
-                                    S_ext, amrex::Minus<amrex::Real>(),
+                                    ::GetNeighborPtr(S_mod, i, j, k, i_n, j_n, idim), // address to atomically update
+                                    S_ext, // value to combine
+                                    amrex::Minus<amrex::Real>(), // operation to perform when combining the value
+                                    // condition: callable that gets called with rem=S_mod-S_ext.
+                                    // The `flag_ext_face` test also stops this loop after the
+                                    // first successful borrow, as it is cleared just below.
                                     [=] (amrex::Real rem) {
+                                        const int flag_neigh = ::GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim);
                                         return rem > amrex::Real(0.)
-                                            && (::GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim) == 1
-                                                || ::GetNeighbor(flag_info_face, i, j, k, i_n, j_n, idim) == 2)
+                                            && (flag_neigh == FaceInfo::available
+                                                || flag_neigh == FaceInfo::intruded)
                                             && flag_ext_face(i, j, k);
                                     });
 
@@ -875,7 +891,9 @@ WarpX::ComputeOneWayExtensions (
                                                                       borrowing_neighbor_faces);
                                     borrowing_area[ps] = S_ext;
 
-                                    ::SetNeighbor(flag_info_face, 2, i, j, k, i_n, j_n, idim);
+                                    ::SetNeighbor(flag_info_face,
+                                               static_cast<int>(FaceInfo::intruded),
+                                               i, j, k, i_n, j_n, idim);
                                     // Record the lent area and the intruded mark for the
                                     // cross-box reduction (the lender may live in a ghost
                                     // entry or a non-owned copy of a shared nodal plane)
@@ -1015,7 +1033,8 @@ WarpX::ComputeEightWaysExtensions (
                     for(int i_loc = 0; i_loc <= 2; i_loc++){
                         for(int j_loc = 0; j_loc <= 2; j_loc++){
                             auto const flag = ::GetNeighbor(flag_info_face, i, j, k, i_loc - 1, j_loc - 1, idim);
-                            local_avail(i_loc, j_loc) = flag == 1 || flag == 2;
+                            local_avail(i_loc, j_loc) = flag == FaceInfo::available
+                                                        || flag == FaceInfo::intruded;
                         }
                     }
 
@@ -1057,15 +1076,26 @@ WarpX::ComputeEightWaysExtensions (
                     if(denom >= S_ext){
                         S_mod(i, j, k) = S(i, j, k);
                         int count = 0;
+                        // The extension is all-or-nothing: a face that got only some of its
+                        // patches would not reach its stable area, and the area it did take
+                        // would be lost to the faces that lent it, since the ECT update of an
+                        // intruded face assumes that the area it lent is accounted for by the
+                        // face that borrowed it (see EvolveBCartesianECT).
                         bool all_borrowed = true;
                         for (int i_n = -1; i_n < 2; i_n++) {
                             for (int j_n = -1; j_n < 2; j_n++) {
-                                if(local_avail(i_n + 1, j_n + 1) != 0_rt && count < nborrow){
+                                if(local_avail(i_n + 1, j_n + 1) != 0_rt){
+                                    if (count == nborrow) {
+                                        // The borrowing pass found more available neighbors
+                                        // than the counting pass reserved slots for
+                                        all_borrowed = false;
+                                        continue;
+                                    }
                                     const amrex::Real patch = S_ext * ::GetNeighbor(S, i, j, k, i_n, j_n, idim) / denom;
                                     // Atomic test-and-subtract, for the same reason as in
                                     // ComputeOneWayExtensions: an intruded face shared by
                                     // concurrently extended faces must not give the same
-                                    // area away more than once (issue #2257, PR #2298)
+                                    // area away more than once
                                     const bool borrowed = amrex::Gpu::Atomic::If(
                                         ::GetNeighborPtr(S_mod, i, j, k, i_n, j_n, idim),
                                         patch, amrex::Minus<amrex::Real>(),
@@ -1081,7 +1111,9 @@ WarpX::ComputeEightWaysExtensions (
                                                                       borrowing_neighbor_faces);
                                     borrowing_area[ps + count] = patch;
 
-                                    ::SetNeighbor(flag_info_face, 2, i, j, k, i_n, j_n, idim);
+                                    ::SetNeighbor(flag_info_face,
+                                               static_cast<int>(FaceInfo::intruded),
+                                               i, j, k, i_n, j_n, idim);
                                     // Record the lent area and the intruded mark for the
                                     // cross-box reduction
                                     amrex::Gpu::Atomic::AddNoRet(
@@ -1093,22 +1125,37 @@ WarpX::ComputeEightWaysExtensions (
                                 }
                             }
                         }
-                        // Keep the recorded size consistent with the entries actually
-                        // written; only a fully extended face is unflagged (a partially
-                        // extended face would not reach its stable area and is reported
-                        // by the unstable-faces check)
+                        if (!all_borrowed) {
+                            // Give the area of the successful patches back, and leave the face
+                            // flagged so that it is stabilized by the BCK correction instead
+                            for (int n = 0; n < count; n++) {
+                                auto const vec =
+                                    FaceInfoBox::uint8_to_inds(borrowing_neigh_faces[ps + n]);
+                                amrex::Gpu::Atomic::AddNoRet(
+                                    ::GetNeighborPtr(S_mod, i, j, k, vec(0), vec(1), idim),
+                                    borrowing_area[ps + n]);
+                                // Cancel the corresponding cross-box loan record too.
+                                amrex::Gpu::Atomic::AddNoRet(
+                                    ::GetNeighborPtr(lent, i, j, k, vec(0), vec(1), idim),
+                                    -borrowing_area[ps + n]);
+                            }
+                            count = 0;
+                            S_mod(i, j, k) = S(i, j, k);
+                        }
+                        // The recorded size has to match the entries actually written, since
+                        // the solver reads `borrowing_size` entries starting at
+                        // `*borrowing_inds_pointer` (see EvolveBCartesianECT)
                         borrowing_size(i, j, k) = count;
                         if (count == 0) {
                             borrowing_inds_pointer(i, j, k) = nullptr;
-                        }
-                        if (all_borrowed) {
+                        } else {
                             flag_ext_face(i, j, k) = false;
                         }
                     }
                     else {
-                        // The face could not be extended after all (the area
-                        // available shrank between the counting and the
-                        // borrowing pass): record that nothing was borrowed
+                        // The area available shrank between the counting and the borrowing
+                        // pass: the face cannot be extended after all, and has to report
+                        // that it borrowed nothing
                         borrowing_size(i, j, k) = 0;
                         borrowing_inds_pointer(i, j, k) = nullptr;
                     }

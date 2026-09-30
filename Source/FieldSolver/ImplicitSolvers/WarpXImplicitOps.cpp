@@ -24,7 +24,6 @@
 
 #include <ablastr/profiler/ProfilerWrapper.H>
 #include <ablastr/utils/SignalHandling.H>
-#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX.H>
 #include <AMReX_Array.H>

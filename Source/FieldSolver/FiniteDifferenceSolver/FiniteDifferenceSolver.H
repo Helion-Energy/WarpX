@@ -270,7 +270,19 @@ class FiniteDifferenceSolver
            std::array<std::unique_ptr<amrex::iMultiFab>, 3> const& eb_update,
            int lev);
 
-     private:
+         void ComputeCurlB (
+            ablastr::fields::VectorField& Efield,
+            ablastr::fields::VectorField const& Bfield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev );
+
+        void ComputeVectorBiLaplacian (
+            ablastr::fields::VectorField& out_field,
+            ablastr::fields::VectorField const& in_field,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+            int lev );
+
+    private:
        ElectromagneticSolverAlgo m_fdtd_algo;
        ablastr::utils::enums::GridType m_grid_type;
 
@@ -364,6 +376,14 @@ class FiniteDifferenceSolver
             amrex::IntVect const& ngrow );
 
         template<typename T_Algo>
+        void ComputeCurlBCylindrical (
+            ablastr::fields::VectorField& Efield,
+            ablastr::fields::VectorField const& Bfield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev
+        );
+
+        template<typename T_Algo>
         void ComputeGradientCylindrical (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::ScalarField const& in_field,
@@ -381,6 +401,14 @@ class FiniteDifferenceSolver
 
         template<typename T_Algo>
         void ComputeVectorLaplacianCylindrical (
+            ablastr::fields::VectorField& out_field,
+            ablastr::fields::VectorField const& in_field,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+            int lev
+        );
+
+        template<typename T_Algo>
+        void ComputeVectorBiLaplacianCylindrical (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::VectorField const& in_field,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
@@ -446,6 +474,14 @@ class FiniteDifferenceSolver
         );
 
         template<typename T_Algo>
+        void ComputeCurlBSpherical (
+            ablastr::fields::VectorField& Efield,
+            ablastr::fields::VectorField const& Bfield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev
+        );
+
+        template<typename T_Algo>
         void ComputeGradientSpherical (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::ScalarField const& in_field,
@@ -463,6 +499,14 @@ class FiniteDifferenceSolver
 
         template<typename T_Algo>
         void ComputeVectorLaplacianSpherical (
+            ablastr::fields::VectorField& out_field,
+            ablastr::fields::VectorField const& in_field,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+            int lev
+        );
+
+        template<typename T_Algo>
+        void ComputeVectorBiLaplacianSpherical (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::VectorField const& in_field,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
@@ -584,6 +628,14 @@ class FiniteDifferenceSolver
             amrex::IntVect const& ngrow );
 
         template<typename T_Algo>
+        void ComputeCurlBCartesian (
+            ablastr::fields::VectorField & Efield,
+            ablastr::fields::VectorField const& Bfield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev
+        );
+
+        template<typename T_Algo>
         void ComputeGradientCartesian (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::ScalarField const& in_field,
@@ -601,6 +653,14 @@ class FiniteDifferenceSolver
 
         template<typename T_Algo>
         void ComputeVectorLaplacianCartesian (
+            ablastr::fields::VectorField& out_field,
+            ablastr::fields::VectorField const& in_field,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+            int lev
+        );
+
+        template<typename T_Algo>
+        void ComputeVectorBiLaplacianCartesian (
             ablastr::fields::VectorField& out_field,
             ablastr::fields::VectorField const& in_field,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,

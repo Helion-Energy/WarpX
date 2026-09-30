@@ -10,6 +10,12 @@ transport requires, at every cell and time,
 Low-density cells (below the n_floor used by the solver) are masked, since
 T_e is gated there.
 
+The reference state (Te0, n0) is taken from the first post-step dump. The
+iteration-0 dump is skipped: it is written before the first field solve, when
+T_e is not yet the density-closure state (the first deposit/closure runs
+at the first step). The adiabat relation holds from any point on the adiabat, so
+the check itself is unchanged.
+
 Produces:
   * left  : T_e(x) measured (solid) vs Te0 (n/n0)^(gamma-1) (dashed) at
             several times;
@@ -61,10 +67,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     ts = OpenPMDTimeSeries(args.diag_dir)
-    its = list(ts.iterations)
-    times = np.asarray(ts.t, dtype=float)
+    # Skip iteration 0, before the initial density-closure evaluation.
+    post = np.asarray(ts.iterations) > 0
+    its = np.asarray(ts.iterations)[post]
+    times = np.asarray(ts.t, dtype=float)[post]
     if len(its) < 2:
-        raise SystemExit(f"Need >=2 dumps in {args.diag_dir}")
+        raise SystemExit(f"Need >=2 post-step dumps in {args.diag_dir}")
     g1 = args.gamma - 1.0
 
     def zavg(name, it):

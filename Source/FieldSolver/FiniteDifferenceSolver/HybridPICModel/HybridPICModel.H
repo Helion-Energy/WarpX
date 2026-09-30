@@ -37,6 +37,7 @@
 #include <AMReX_BoxArray.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
+#include <AMReX_Enum.H>
 
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_Periodicity.H>
@@ -47,6 +48,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -84,6 +86,17 @@ amrex::Real HybridExtSubWeight (amrex::Real rho, amrex::Real rho_floor,
 }
 
 class PoissonBoundaryHandler;
+
+/** Sampling of the density that decides the vacuum-seam treatment of the
+ *  generalized Ohm's law: the holmstrom vacuum branch when
+ *  hybrid_pic_model.holmstrom_vacuum_region is on and the density-floor
+ *  selection of the guarded Hall term otherwise. Node and Cell are
+ *  vacuum-favoring and supported in Cartesian geometry only. */
+AMREX_ENUM(VacuumSeamSwitchMode,
+    Edge, /**< legacy per-component edge average; the E components of a cell can take inconsistent branches at the plasma/vacuum seam */
+    Node, /**< minimum over the component's edge-endpoint nodes */
+    Cell  /**< minimum over the component's adjacent cells of the node-averaged density: a single decision for all three components of an index */
+);
 
 /**
  * \brief This class contains the parameters needed to evaluate hybrid field
@@ -448,11 +461,19 @@ public:
      * \brief Compute the per-species ion bulk velocity Vs = Js/rhos on the
      * grid for every charged species. Output is stored in Vs_fp_{species}
      * (face-staggered like J). Used by the resistive-drag operator to
-     * apply a per-cell uniform shift (V_s - V_e)(1 - exp(-nu dt)) to every
-     * particle, leaving the thermal moment intact.
+     * apply a velocity-independent shift (V_s - V_e)(1 - exp(-nu dt)),
+     * gathered at each particle position, preserving the thermal moment to
+     * leading order in resolved drift gradients.
      */
     void CalculateIonFluidVelocity () const;
     void CalculateIonFluidVelocity (int lev) const;
+
+    /** Refresh species SI moments at the current implicit particle stage.
+     * At an accepted endpoint use native instantaneous velocity moments.
+     * preserve_source_moments retains only Vs and restores the accepted
+     * midpoint rho/Js used by electron source coefficients and fractions. */
+    void RefreshIonFluidMoments (amrex::Real dt, bool implicit_stage,
+                                bool preserve_source_moments = false) const;
 
     /**
      * \brief Fill the electron pressure multifab given the kinetic particle
@@ -928,11 +949,11 @@ public:
      * \brief Ion-heating operator: a stochastic drag-diffusion applied to
      *        every ion. It delivers both electron-ion energy channels:
      *
-     *   dv_p = -nu_ei (v_p - u_e) dt + sqrt(2 D dt) R,   D = D_qei + D_redir,
+     *   dv_p = -nu_ei (v_p - u_i) dt + sqrt(2 D dt) R,   D = D_qei + D_redir,
      *
      * with R a unit-variance Gaussian vector. The Q_ei conjugate (when
-     * m_include_temperature_relaxation) supplies the drag toward the electron
-     * fluid u_e and the thermal diffusion D_qei = nu_ei k_B T_e / m_i, relaxing
+     * m_include_temperature_relaxation) acts about the ion bulk u_i and supplies
+     * thermal diffusion D_qei = nu_ei k_B T_e / m_i, relaxing
      * the ions toward a Maxwellian at T_e (T_i -> T_e at rate 2 nu_ei). The
      * Te-threshold Joule redirection (when \c redirect_E is non-null) supplies
      * an additional pure-diffusion heating sig_redir^2 = E_s/m_i that injects,
@@ -950,7 +971,7 @@ public:
      */
     void QDSMCApplyIonHeating (int lev, amrex::Real dt,
                                amrex::MultiFab const * redirect_E = nullptr,
-                               std::map<std::string, amrex::MultiFab*> const * Ti_dep_by_species = nullptr) const;
+                               std::map<std::string, amrex::MultiFab*> const * Ti_dep_by_species = nullptr, bool refresh_ion_velocity = true) const;
 
     /**
      * \brief Fill hybrid_electron_pressure_fp from T_e and n_e using the
@@ -1084,42 +1105,57 @@ public:
     void QDSMCFinishImplicitStep (amrex::Real dt, amrex::Real theta, amrex::Real time) const;
 
     /**
-     * \brief Compute the per-species resistive overlay vector field added to
-     *        Ohm's-law E alongside the existing +eta_global * J term:
+     * \brief Compute the per-species resistive friction added to Ohm's-law E
+     *        alongside the global +eta_global * J term:
      *
-     *           overlay_d(i,j,k) = Sigma_s [ eta_s_per * rho_s * rho / rho_sum
-     *                                       * (V_s_d - V_e_d) ]
+     *           F_d(i,j,k) = Sigma_s [ eta_s_per * rho_s * rho / rho_sum
+     *                                  * (V_s_d - V_e_d) ]
      *
      *        summed over charged species that have a per-species
      *        resistivity parser registered. The total friction term that
      *        Ohm's law sees becomes
      *
-     *           E_friction = +eta_global * J + overlay
+     *           E_friction = +eta_global * J + F
      *                      = +e * Sigma_s Z_s * (eta_global + eta_s_per) * n_s
      *                                       * (V_s - V_e)
      *
      *        i.e. effectively eta_s_eff = eta_global + eta_s_per per species.
      *
-     *        Output multifabs are at the Jx/Jy/Jz staggering (== E
-     *        component staggering). When m_has_per_species_eta is false
-     *        the overlay is set to zero and the function returns early
-     *        (single-eta behaviour is exactly recovered when callers add
-     *        a field of zeros to E).
+     *        Because V_e = (J_i - J_plasma)/rho and the subcycled B-field
+     *        integration re-evaluates J_plasma from the live B at every
+     *        stage, F is stored in two parts so that its J_plasma response
+     *        stays live inside the substep loop while the slow, per-step
+     *        moments (V_s, J_i, rho_s, T_e) stay lagged:
      *
-     *        Computed once per step (from HybridPICEvolveFields, into the
-     *        registered hybrid_eta_overlay_fp fields) and held frozen across
-     *        the subcycled E-solves, which only read it. Its inputs (Vs_fp,
-     *        Ve_fp, rho_fp_{spec}, T_e) are per-step quantities anyway; only
-     *        the |J| and |B| parser arguments would vary per substep, and
-     *        those are frozen along with the rest. Caller passes
-     *        pre-allocated Yee-staggered MultiFabs (one per direction) sized
-     *        to match Jx/Jy/Jz at this level.
+     *          hybrid_eta_overlay_coef_fp:
+     *              eta_coef = Sigma_s max(eta_s_per, 0) * max(rho_s, 0) / rho_sum,
+     *              the lagged per-species resistivity coefficient that the
+     *              E-solve multiplies by the live plasma current, exactly
+     *              like the global eta;
+     *          hybrid_eta_overlay_fp:
+     *              F - eta_coef * J_plasma, the ion-drift remainder, frozen
+     *              like the deposited ion moments themselves.
+     *
+     *        The E-solve applies overlay_d + eta_coef_d * J_d, which equals
+     *        F exactly at the J_plasma this function was called with and
+     *        responds dissipatively (like +eta*J) as J_plasma evolves
+     *        through the substeps. Applying F as a fixed vector instead
+     *        would act as a constant source over the half-step: in high-eta
+     *        regions it would keep driving B long after the current it was
+     *        computed from has relaxed, anti-damping the whistler modes the
+     *        friction is meant to damp and collapsing the adaptive substep
+     *        size at plasma-vacuum interfaces.
+     *
+     *        Outputs are the registered hybrid_eta_overlay_fp and
+     *        hybrid_eta_overlay_coef_fp fields at the Jx/Jy/Jz staggering
+     *        (== E component staggering). Returns early when
+     *        m_has_per_species_eta is false (the fields are then not
+     *        allocated). Called from HybridPICEvolveFields before each
+     *        half-step B-advance, so each half integrates about the most
+     *        recent J_plasma linearization point.
      */
-    void ComputeResistiveOverlay (
-        int lev,
-        amrex::MultiFab & overlay_x,
-        amrex::MultiFab & overlay_y,
-        amrex::MultiFab & overlay_z) const;
+    void ComputeResistiveOverlay () const;
+    void ComputeResistiveOverlay (int lev) const;
 
     /**
      * \brief pc-mode corrector: single transport T_e^n -> T_e^{n+1} using the
@@ -1147,6 +1183,11 @@ public:
 
     /** Check if rkf45 should be used */
     [[nodiscard]] bool DoRKF45(int step) const { return m_rkf45_intervals.contains(step); }
+
+    /** True after HybridPICInitializeRhoJandB() completes for this model.
+     *  Preserve the initialized state across repeated Evolve() calls, while
+     *  allowing the first deposition on a newly constructed restart instance. */
+    bool m_evolve_initialized = false;
 
     // Declare variables to hold hybrid-PIC model parameters
     /** Number of substeps to take when evolving B (also used as initial substep
@@ -1290,6 +1331,9 @@ public:
     int m_substep_finite_check_interval = 1;
 
     bool m_holmstrom_vacuum_region = false;
+
+    /** Density sampling for the Cartesian vacuum-seam decision. */
+    VacuumSeamSwitchMode m_vacuum_seam_switch_mode = VacuumSeamSwitchMode::Edge;
 
     /** Smooth transition width of the Holmstrom vacuum gate, as a fraction
      * of n_floor. With width w > 0 the Hall + grad-Pe part of the Ohm's-law
@@ -3597,6 +3641,24 @@ public:
      *  gate the overlay fields) and confirmed in InitData when the parsers
      *  are compiled. */
     bool m_has_per_species_eta = false;
+
+    /** True when a hybrid_resistive_drag collision is present in the input
+     *  deck. Set in ReadParameters. When true, the resistive terms of Ohm's
+     *  law (eta*J and the per-species overlay) are included in EVERY E-solve,
+     *  including the particle-push field: the drag supplies the
+     *  species-resolved -R_s half of the electron-ion friction and the
+     *  resistive push-field E supplies the +(rho_s/rho) Sum_t R_t half; only
+     *  their sum conserves momentum. */
+    bool m_has_resistive_drag = false;
+
+    /** Names of the species that have a hybrid_resistive_drag collision
+     *  registered. Filled in ReadParameters; InitData requires this to cover
+     *  every charged species when the drag is used at all (a species without
+     *  the drag would feel the resistive push-field force with no
+     *  compensating friction). */
+    std::set<std::string> m_resistive_drag_species;
+
+
 
     /** True when the gridded fluid velocities Ve_fp / Vs_fp_{spec} are
      *  needed, i.e. when a per-species resistivity parser is registered or

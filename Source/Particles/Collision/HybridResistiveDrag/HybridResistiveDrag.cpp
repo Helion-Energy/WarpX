@@ -29,22 +29,27 @@ HybridResistiveDrag::HybridResistiveDrag (std::string const& collision_name)
 }
 
 void
-HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, MultiParticleContainer* mypc)
+HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt,
+                                   MultiParticleContainer* mypc)
 {
     ABLASTR_PROFILE("HybridResistiveDrag::doCollisions()");
     using namespace amrex::literals;
     using warpx::fields::FieldType;
 
-    // Drag-only operator: relax the ion bulk velocity toward the electron
-    // fluid V_e at the eta-derived rate
+#if defined(WARPX_DIM_RSPHERE)
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_resistive_drag is not implemented for RSPHERE geometry "
+        "(the collision-frame momentum rotation is not handled).");
+#endif
+
+    // Relax the ion bulk velocity toward the electron fluid V_e at
     //     nu_{s,e} = Z_s e^2 eta_s_eff n_e / m_s
-    // via a uniform per-cell shift, applied identically to every particle so
-    // the thermal spread (T_i) is preserved:
-    //     v_p -= (V_s - V_e)(1 - exp(-nu dt)).
-    // No heat is deposited here; the eta J^2 source on T_e is the separate
-    // gridded HybridPICModel::QDSMCAddJouleHeating call. Registering this
-    // operator gives ions the back-reaction to the eta*J term in Ohm's law
-    // (cancels the anti-friction), independently of include_joule_heating.
+    // via a velocity-independent shift gathered at each particle's position,
+    //     v_p -= (V_s - V_e)(1 - exp(-nu dt)),
+    // decelerating the bulk drift while preserving the thermal spread. This
+    // is the -R_s half of the electron-ion friction; the other half reaches
+    // the ions through the resistive terms of the particle-push E-field (see
+    // HybridPICSolveE and the class docstring).
 
     auto & warpx = WarpX::GetInstance();
     auto & species = mypc->GetParticleContainerFromName(m_species_names[0]);
@@ -54,16 +59,12 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
         "HybridResistiveDrag requires the hybrid-PIC solver to be active.");
 
     auto const eta_func = hybrid_model->m_eta;
-    // ETATE: 4-argument resistivity -- Te [K] gathered at the particle from
-    // the nodal Te field, as the per-species overlay below does.
     auto const eta_te_func = hybrid_model->m_eta_te;
     bool const eta_has_Te = hybrid_model->m_resistivity_has_Te_dependence;
     auto const t_now    = warpx.gett_new(0);
 
-    // Per-species resistivity overlay (Phys. Plasmas 31, 012902 (2024), Eq. 10):
-    // if registered, added to the global eta in the kernel so the drag uses
-    //   eta_s_eff = eta_global + eta_s_per
-    // (the same effective resistivity Ohm's law and QDSMCAddJouleHeating use).
+    // Optional per-species resistivity overlay: the drag rate uses the same
+    // eta_s_eff = eta_global + eta_s_per as Ohm's law and the Joule source.
     auto const eta_per_it     = hybrid_model->m_eta_per_species.find(m_species_names[0]);
     bool const has_eta_per    = (eta_per_it != hybrid_model->m_eta_per_species.end());
     amrex::ParserExecutor<7> eta_s_per{};
@@ -85,17 +86,20 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
 
     for (int lev = 0; lev <= species.finestLevel(); ++lev) {
         ablastr::fields::VectorField Ve_fp  = warpx.m_fields.get_alldirs("Ve_fp", lev);
-        ablastr::fields::VectorField Vs_fp  = warpx.m_fields.get_alldirs("Vs_fp_" + m_species_names[0], lev);
+        ablastr::fields::VectorField Vs_fp  =
+            warpx.m_fields.get_alldirs("Vs_fp_" + m_species_names[0], lev);
         ablastr::fields::VectorField B_fp   = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
-        ablastr::fields::VectorField J_fp   = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
-        // Per-species J_s and rho_s, plus T_e (nodal). Only consulted inside
-        // the kernel when has_eta_per is true; looked up here unconditionally
-        // so the kernel can capture their arrays cheaply (the lookup is a
-        // const-time field-registry query).
-        ablastr::fields::VectorField Js_fp  = warpx.m_fields.get_alldirs("current_fp_" + m_species_names[0], lev);
+        ablastr::fields::VectorField J_fp   =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+        // Per-species J_s and rho_s, plus T_e (nodal); only read in the
+        // kernel when has_eta_per is true.
+        ablastr::fields::VectorField Js_fp  =
+            warpx.m_fields.get_alldirs("current_fp_" + m_species_names[0], lev);
         amrex::MultiFab const & rho_fp      = *warpx.m_fields.get(FieldType::rho_fp, lev);
-        amrex::MultiFab const & rhos_fp     = *warpx.m_fields.get("rho_fp_" + m_species_names[0], lev);
-        amrex::MultiFab const & Te_fp       = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        amrex::MultiFab const & rhos_fp     =
+            *warpx.m_fields.get("rho_fp_" + m_species_names[0], lev);
+        amrex::MultiFab const & Te_fp       =
+            *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
 
         amrex::XDim3 const dinv = WarpX::InvCellSize(lev);
         auto const dxi = warpx.Geom(lev).InvCellSizeArray();
@@ -149,6 +153,10 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
             amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
             amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
             amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+            amrex::ParticleReal const* const AMREX_RESTRICT thetap =
+                attribs[PIdx::theta].dataPtr();
+#endif
 
             auto const getPosition = GetParticlePosition<PIdx>(pti);
             long const np = pti.numParticles();
@@ -192,19 +200,18 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
                                              t_now)
                                : eta_func(rho_val, Jmag, t_now);
 
-                // Per-species overlay: add eta_s_per(rho_s, rho, Te, |J|,
-                // |J_s|, |B|, t) to eta_s_eff when registered for this
-                // species. When not registered, eta_s_eff stays at the
-                // global eta and the drag rate matches the pre-Phase-4
-                // path exactly.
+                // Per-species overlay eta_s_per(rho_s, rho, Te, |J|, |J_s|,
+                // |B|, t), added to the global eta.
                 if (has_eta_per) {
                     amrex::Real const rhos_val = ablastr::particles::doGatherScalarFieldNodal(
                         xp, yp, zp, rhos_arr, dxi, plo);
                     amrex::Real const Te_val   = ablastr::particles::doGatherScalarFieldNodal(
                         xp, yp, zp, Te_arr, dxi, plo);
                     amrex::ParticleReal Jsxp = 0._prt, Jsyp = 0._prt, Jszp = 0._prt;
-                    amrex::ParticleReal _dx = 0._prt, _dy = 0._prt, _dz = 0._prt;
-                    doGatherShapeN(xp, yp, zp, Jsxp, Jsyp, Jszp, _dx, _dy, _dz,
+                    // Discarded B-slot outputs of the gather (B was already
+                    // gathered above).
+                    amrex::ParticleReal dummy_x = 0._prt, dummy_y = 0._prt, dummy_z = 0._prt;
+                    doGatherShapeN(xp, yp, zp, Jsxp, Jsyp, Jszp, dummy_x, dummy_y, dummy_z,
                                    Jsx_arr, Jsy_arr, Jsz_arr, Bx_arr, By_arr, Bz_arr,
                                    Jsx_type, Jsy_type, Jsz_type, Bx_type, By_type, Bz_type,
                                    dinv, xyzmin, lo, n_rz_azimuthal_modes,
@@ -221,12 +228,24 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
 
                 amrex::Real const one_minus_fac = -std::expm1(-nu * dt);
 
-                // Uniform per-cell shift toward V_e; preserves thermal moment.
+                // Velocity-independent bulk shift toward V_e; preserves the
+                // thermal moment. The gather returns lab-Cartesian components.
                 amrex::ParticleReal const dVx = Vsx - Vex;
                 amrex::ParticleReal const dVy = Vsy - Vey;
                 amrex::ParticleReal const dVz = Vsz - Vez;
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                // Inside doCollisions the momenta are in the curvilinear
+                // frame (CollisionHandler wraps every collision operator in
+                // TransformMomentumToCurvilinear): ux = u_r, uy = u_theta,
+                // so rotate the lab-Cartesian shift by -theta to match.
+                amrex::ParticleReal const costheta = std::cos(thetap[ip]);
+                amrex::ParticleReal const sintheta = std::sin(thetap[ip]);
+                ux[ip] -= ( dVx*costheta + dVy*sintheta) * one_minus_fac;
+                uy[ip] -= (-dVx*sintheta + dVy*costheta) * one_minus_fac;
+#else
                 ux[ip] -= dVx * one_minus_fac;
                 uy[ip] -= dVy * one_minus_fac;
+#endif
                 uz[ip] -= dVz * one_minus_fac;
             });
         }

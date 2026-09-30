@@ -411,4 +411,13 @@ guardCellManager::Init (
         ng_FieldGather.max( ng_alloc_J );
     }
 
+    if (evolve_scheme == EvolveScheme::Semi_Implicit_Darwin) {
+        // The semi-implicit Darwin scheme sums the guard cells of the mass
+        // matrices into the valid cells before applying them to the E-field
+        // (and dA) in the linear solve. The stencil of a valid cell then
+        // reaches one cell beyond the guard cells of J, and would otherwise be
+        // silently clipped by ApplyMassMatrices.
+        ng_alloc_EB.max( ng_alloc_J + 1 );
+    }
+
 }

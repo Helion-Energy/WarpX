@@ -94,12 +94,14 @@ public:
 
     /** Serve the orbit-averaged current instead of an instantaneous deposit.
      *
-     * If a valid orbit average is available (i.e. Evolve ran this step with
-     * orbit-averaged deposition enabled), the accumulated J_avg is added to
-     * J. Otherwise falls back to the standard instantaneous deposition.
+     * For an explicit push, if a valid orbit average is available (i.e.
+     * Evolve ran this step with orbit-averaged deposition enabled), the
+     * accumulated J_avg is added to J. Otherwise falls back to standard
+     * deposition with the requested push type.
      */
     void DepositCurrent (ablastr::fields::MultiLevelVectorField const & J,
-                         amrex::Real dt, amrex::Real relative_time) override;
+                         amrex::Real dt, amrex::Real relative_time,
+                         PushType push_type = PushType::Explicit) override;
 
     /** Serve the orbit-averaged charge density instead of an instantaneous
      * deposit. Falls back to the standard deposition when no valid orbit

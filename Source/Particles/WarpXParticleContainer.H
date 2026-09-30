@@ -308,13 +308,16 @@ public:
      *                          current positions of the particles. When different than 0,
      *                          the particle position will be temporarily modified to match
      *                          the time of the deposition.
+     * \param[in] push_type Type of particle push used with the deposition. With
+     *                      PushType::Implicit the time-centered velocities are used.
      *
      * Virtual so that containers with non-standard deposition (e.g. the
      * orbit-averaged deposition of SubcycledParticleContainer) can serve
      * their own moments to any caller.
      */
     virtual void DepositCurrent (ablastr::fields::MultiLevelVectorField const & J,
-                                 amrex::Real dt, amrex::Real relative_time);
+                                 amrex::Real dt, amrex::Real relative_time,
+                                 PushType push_type = PushType::Explicit);
 
     /**
      * \brief Deposit current density, sum guard values, and apply boundary conditions.
@@ -487,7 +490,7 @@ public:
 
     std::array<amrex::ParticleReal, 3> meanParticleVelocity(bool local = false);
 
-    amrex::ParticleReal maxParticleVelocity(bool local = false);
+    amrex::ParticleReal maxParticleDtInv(bool local = false);
 
     /**
      * \brief Map the momentum of the particles to and from the curvilinear frame.
@@ -582,6 +585,7 @@ public:
     amrex::Real GetBoundaryAbsorbedEnergy (int dim, int iside) const;
 
     bool do_splitting = false;
+
     int do_not_deposit = 0;
     bool initialize_self_fields = false;
     amrex::Real self_fields_required_precision = amrex::Real(1.e-11);
@@ -614,6 +618,14 @@ public:
     amrex::ParticleReal getCharge () const {return m_charge;}
 
     amrex::ParticleReal getMass () const {return m_mass;}
+
+    /** Thermal velocity (normalized by c) used by thermal particle boundaries
+     *  for this species, parsed from ``boundary.\<species_name\>.u_th``.
+     */
+    amrex::ParticleReal getBoundaryThermalVelocity () const
+    {
+        return static_cast<amrex::ParticleReal>(m_boundary_conditions.data.m_uth);
+    }
 
     int DoFieldIonization() const { return do_field_ionization; }
 

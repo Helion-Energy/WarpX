@@ -597,9 +597,10 @@ SubcycledParticleContainer::PushP (int /*lev*/, amrex::Real /*dt*/,
 
 void
 SubcycledParticleContainer::DepositCurrent (ablastr::fields::MultiLevelVectorField const & J,
-                                            const amrex::Real dt, const amrex::Real relative_time)
+                                            const amrex::Real dt, const amrex::Real relative_time,
+                                            const PushType push_type)
 {
-    if (m_moments_valid && m_average_j && m_j_avg[0])
+    if (push_type == PushType::Explicit && m_moments_valid && m_average_j && m_j_avg[0])
     {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             static_cast<int>(J.size()) == 1,
@@ -621,7 +622,7 @@ SubcycledParticleContainer::DepositCurrent (ablastr::fields::MultiLevelVectorFie
     // writes) while linearly back-extrapolating a strongly curved orbit.
     // Deposit at the instantaneous positions instead.
     amrex::ignore_unused(relative_time);
-    WarpXParticleContainer::DepositCurrent(J, dt, 0._rt);
+    WarpXParticleContainer::DepositCurrent(J, dt, 0._rt, push_type);
 }
 
 void

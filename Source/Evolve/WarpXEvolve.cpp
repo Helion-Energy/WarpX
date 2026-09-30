@@ -199,7 +199,7 @@ WarpX::Evolve (int numsteps)
         // (electrostatic and theta-implicit EM), provided const_dt is not specified.
         if (m_dt_update_interval.contains(step+1) || (step == 0 && m_max_dt.has_value())) {
             SynchronizeVelocityWithPosition();
-            ApplyDtLimiters();
+            ApplyDtLimiters(step);
             if (verbose_step) {
                 std::ostringstream oss;
                 oss << "updating timestep to DT = " << std::scientific << std::setprecision(6) << dt[0];
@@ -214,11 +214,16 @@ WarpX::Evolve (int numsteps)
         }
 
         // If needed, deposit the initial ion charge and current densities that
-        // will be used to update the E-field in Ohm's law.
-        if (step == step_begin &&
-            electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+        // will be used to update the E-field in Ohm's law.  Evolve() can be
+        // called repeatedly by a Python co-simulation.  This initialization is
+        // once per WarpX instance, not once per Evolve() call: repeating it can
+        // re-add split external fields and, with the QDSMC electron equation,
+        // replace the evolved electron temperature by its initial closure.
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+            !m_hybrid_pic_model->m_evolve_initialized
         ) {
             HybridPICInitializeRhoJandB();
+            m_hybrid_pic_model->m_evolve_initialized = true;
         }
 
         // multi-physics: field ionization
@@ -234,7 +239,7 @@ WarpX::Evolve (int numsteps)
         ExecutePythonCallback("particleinjection");
 
         // perform collisions and advance fields and particles by one time step
-        OneStep(cur_time, dt[0], step);
+        OneStep(cur_time, dt[0], step, verbose_step);
 
         // Resample particles
         // +1 is necessary here because value of step seen by user (first step is 1) is different than
@@ -304,48 +309,35 @@ WarpX::Evolve (int numsteps)
             ExecutePythonCallback("aftercollisions");
         }
 
-        // Field solve step for electrostatic or hybrid-PIC solvers
-        if( electrostatic_solver_id != ElectrostaticSolverAlgo::None ||
-            electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC )
+        // Explicit electrostatic and semi-implicit Darwin schemes finish the
+        // longitudinal field here. Fully implicit schemes already completed
+        // their field update in OneStep.
+        if (electrostatic_solver_id != ElectrostaticSolverAlgo::None &&
+            (!m_implicit_solver || evolve_scheme == EvolveScheme::Semi_Implicit_Darwin))
         {
-            // Skip if using implicit solver (fields already evolved in OneStep)
-            if (!m_implicit_solver) {
-                ExecutePythonCallback("beforeEsolve");
-
-                if (electrostatic_solver_id != ElectrostaticSolverAlgo::None) {
-                    // Electrostatic solver:
-                    // The E-field is always reset to hold just the electrostatic component
-                    bool const reset_E_field = true;
-                    // The B-field is also reset unless the Darwin solver is used
-                    bool const reset_B_field = true;
-
-                    // For each species: deposit charge and add the associated space-charge
-                    // E and B field to the grid ; this is done at the end of the PIC
-                    // loop (i.e. immediately after a `Redistribute` and before particle
-                    // positions are next pushed) so that the particles do not deposit out of bounds
-                    // and so that the fields are at the correct time in the output.
-                    ComputeSpaceChargeField( reset_E_field, reset_B_field );
-                    if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) {
-                        // Call Magnetostatic Solver to solve for the vector potential A and compute the
-                        // B field.  Time varying A contribution to E field is neglected.
-                        // This is currently a lab frame calculation.
-                        ComputeMagnetostaticField();
-                    }
-                    // Since the fields were reset above, the external fields are added
-                    // back on to the fine patch fields. This make it so that the net fields
-                    // are the sum of the field solution and any external field.
-                    for (int lev = 0; lev <= max_level; ++lev) {
-                        AddExternalFields(lev);
-                    }
-                } else if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
-                    // Hybrid-PIC case:
-                    // The particles are now at p^{n+1/2} and x^{n+1}. The fields
-                    // are updated according to the hybrid-PIC scheme (Ohm's law
-                    // and Ampere's law).
-                    HybridPICEvolveFields();
-                }
-                ExecutePythonCallback("afterEsolve");
+            ExecutePythonCallback("beforeEsolve");
+            bool const reset_E_field = true;
+            bool const reset_B_field = (evolve_scheme != EvolveScheme::Semi_Implicit_Darwin);
+            ComputeSpaceChargeField(reset_E_field, reset_B_field, verbose_step);
+            if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) {
+                ComputeMagnetostaticField();
             }
+            // Darwin treats these as initial conditions and retains its
+            // evolved inductive fields instead of adding external fields again.
+            if (evolve_scheme != EvolveScheme::Semi_Implicit_Darwin) {
+                for (int lev = 0; lev <= max_level; ++lev) {
+                    AddExternalFields(lev);
+                }
+            }
+            ExecutePythonCallback("afterEsolve");
+        }
+
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+            !m_implicit_solver)
+        {
+            ExecutePythonCallback("beforeEsolve");
+            HybridPICEvolveFields();
+            ExecutePythonCallback("afterEsolve");
         }
 
         bool const do_diagnostic = (multi_diags->DoComputeAndPack(step) || reduced_diags->DoDiags(step));
@@ -417,7 +409,8 @@ WarpX::Evolve (int numsteps)
 void WarpX::OneStep (
     amrex::Real a_cur_time,
     amrex::Real a_dt,
-    int a_step
+    int a_step,
+    bool verbose_step
 )
 {
     ABLASTR_PROFILE("WarpX::OneStep()");
@@ -433,12 +426,12 @@ void WarpX::OneStep (
         // iteration, not before it), and afterEpush/afterBpush (plus
         // afterEsolve for the hybrid solver) with the converged t^{n+1}
         // state.
-        const bool fire_esolve_callbacks =
-            (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC);
+        const bool fire_esolve_callbacks = evolve_scheme != EvolveScheme::Semi_Implicit_Darwin && (
+            (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC));
         if (fire_esolve_callbacks) { ExecutePythonCallback("beforeEsolve"); }
 
         // advance fields and particles by one time step
-        const int exit_status = m_implicit_solver->OneStep(a_cur_time, a_dt, a_step);
+        const int exit_status = m_implicit_solver->OneStep(a_cur_time, a_dt, a_step, verbose_step);
         if (exit_status < 0) {
             std::stringstream solverMsg;
             solverMsg << "ImplicitSolver::OneStep() failed at step = " << a_step

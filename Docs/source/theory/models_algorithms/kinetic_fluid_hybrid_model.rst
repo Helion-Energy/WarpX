@@ -203,8 +203,8 @@ The second source is the electron-ion temperature relaxation
 
 with the rate :math:`\nu_{ei}(\rho, T_e, T_i, t)` given by a user expression.
 The sink on the electron fluid is paired with a matching thermal-velocity
-kick on the ion macro-particles of each species so that the exchange
-conserves energy exactly.
+kick about each ion species' bulk velocity so that the exchange conserves
+thermal energy without changing the ion bulk momentum.
 
 With an embedded boundary present, the recommended wall model for the energy
 equation is the insulating wall (``boundary.eb_type = insulating``): the
@@ -441,6 +441,31 @@ heating of the :ref:`electron energy equation
 Lastly, if an electron temperature is given from which the electron pressure can
 be calculated, the model is fully constrained and can be evolved given initial
 conditions.
+
+Multi-species resistivity
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The single resistivity :math:`\eta` above assumes the electron drag is the
+same against every ion species. Following :cite:t:`kfhm-Belyaev2024`, the drag
+can instead be resolved per species by adding to Ohm's law the overlay
+
+    .. math::
+
+        \vec{E} \mathrel{+}= \sum_s \eta_s\, f_s\, e n_e \left( \vec{V}_s - \vec{V}_e \right),
+        \qquad f_s = \frac{\rho_s}{\sum_t \rho_t},
+
+where :math:`f_s` is the charge-density fraction of species :math:`s`,
+:math:`\vec{V}_s` its fluid velocity, and each :math:`\eta_s` is a user
+expression of :math:`(\rho_s, \rho, T_e, |\vec{J}|, |\vec{J}_s|, |\vec{B}|, t)`
+(``hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)``).
+This permits, for example, a temperature-dependent Spitzer drag against one
+species on top of a constant background resistivity. When all ion species
+drift together the overlay reduces to
+:math:`\left(\sum_s f_s \eta_s\right)\vec{J}`, i.e. an effective resistivity
+:math:`\eta_{\mathrm{eff}} = \eta + \sum_s f_s \eta_s`. The same
+:math:`\eta_{s,\mathrm{eff}} = \eta + \eta_s` enters the per-species Joule
+heating of the :ref:`electron energy equation
+<theory-hybrid-model-electron-energy-eq>`.
 
 .. bibliography::
     :keyprefix: kfhm-

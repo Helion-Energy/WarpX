@@ -119,6 +119,14 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
 
 }
 
+/* \brief Allocate any data needed for the collision */
+void CollisionHandler::AllocData ()
+{
+    for (auto& collision : allcollisions) {
+        collision->AllocData();
+    }
+}
+
 /** Perform all collisions
  *
  * @param step Current iteration
@@ -129,6 +137,13 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
  */
 void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc)
 {
+
+    if (m_use_global_debye_length) {
+        // Temperature/mean deposition expects Cartesian particle momenta and
+        // performs its own curvilinear conversion. Compute these moments before
+        // the collision-stage rotation to avoid rotating them a second time.
+        mypc->GenerateGlobalDebyeLength();
+    }
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     /* In RZ and RCYLINDER geometry, macroparticles can collide with other macroparticles
@@ -152,13 +167,11 @@ void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Rea
     }
 #endif
 
-    if (m_use_global_debye_length) {
-        // This will calculate the temperature, Vbar, and particle number that are needed by
-        // the various collision algorithms
-        mypc->GenerateGlobalDebyeLength();
-    }
-
     for (auto& collision : allcollisions) {
+        // Skip collisions before their start step
+        const int start_step = collision->get_start_step();
+        if (step < start_step) { continue; }
+
         const int ndt = collision->get_ndt();
         const auto collision_stepping_mode = collision->get_collision_stepping_mode();
 
@@ -170,8 +183,9 @@ void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Rea
                 collision->doCollisions(sub_time, dt_sub, mypc);
             }
         } else {
-            // Supercycle: run once every ndt PIC steps, with dt_collision = dt * ndt
-            if ( step % ndt == 0 ) {
+            // Supercycle: run once every ndt PIC steps (counted from start_step),
+            // with dt_collision = dt * ndt
+            if ( (step - start_step) % ndt == 0 ) {
                 collision->doCollisions(cur_time, dt*ndt, mypc);
             }
         }

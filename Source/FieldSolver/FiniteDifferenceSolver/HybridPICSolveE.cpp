@@ -30,6 +30,77 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+namespace
+{
+    /** Endpoint-min nodal decision density for vacuum_seam_switch_mode =
+     *  "node": the minimum nodal rho over the staggered component's edge
+     *  endpoints (the same nodes the legacy edge average reads).
+     *  Vacuum-favoring: the unguarded Hall branch runs only where every
+     *  endpoint is above the floor. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real NodalSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        const int ni = (stag[0] == 0) ? 2 : 1;
+        const int nj = (stag[1] == 0) ? 2 : 1;
+        const int nk = (stag[2] == 0) ? 2 : 1;
+        amrex::Real r = rho(i, j, k);
+        for (int kk = 0; kk < nk; ++kk) {
+        for (int jj = 0; jj < nj; ++jj) {
+        for (int ii = 0; ii < ni; ++ii) {
+            r = amrex::min(r, rho(i+ii, j+jj, k+kk));
+        }}}
+        return r;
+    }
+
+    /** Adjacent-cell decision density for vacuum_seam_switch_mode = "cell":
+     *  the minimum over the component's adjacent cells of the node-averaged
+     *  rho -- one piecewise-constant-per-cell decision for all three E
+     *  components, reflection- and C4-equivariant, vacuum-favoring like
+     *  "node". */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real CellSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        using namespace amrex::literals;
+        int off_lo[3] = {0, 0, 0};
+        int span[3] = {1, 1, 1};
+        int const ic[3] = {i, j, k};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            off_lo[d] = (stag[d] == 1) ? -1 : 0;
+            span[d] = 2;
+        }
+        // Running minimum over the adjacent cells: max() is the identity
+        // element for min (no cell average can exceed it), not an overflow
+        // guard. The outer loops visit every cell that touches this E
+        // component (two per direction where the component is nodal, one
+        // where it is cell-centered); the inner loops form each cell's
+        // node-averaged rho (sum/cnt, cnt = 2^AMREX_SPACEDIM); the result is
+        // the minimum of those cell averages -- vacuum-favoring.
+        amrex::Real rho_cell_min = std::numeric_limits<amrex::Real>::max();
+        for (int ok = off_lo[2]; ok <= 0; ++ok) {
+        for (int oj = off_lo[1]; oj <= 0; ++oj) {
+        for (int oi = off_lo[0]; oi <= 0; ++oi) {
+            amrex::Real sum = 0.0_rt;
+            int cnt = 0;
+            for (int kk = 0; kk < span[2]; ++kk) {
+            for (int jj = 0; jj < span[1]; ++jj) {
+            for (int ii = 0; ii < span[0]; ++ii) {
+                sum += rho(ic[0]+oi+ii, ic[1]+oj+jj, ic[2]+ok+kk);
+                cnt += 1;
+            }}}
+            rho_cell_min = amrex::min(rho_cell_min, sum/static_cast<amrex::Real>(cnt));
+        }}}
+        return rho_cell_min;
+    }
+}
+#endif
+
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
     ablastr::fields::VectorField const& Bfield,
@@ -635,14 +706,14 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     //  * grad Pe stays in the FARADAY solves too when the Biermann battery
     //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
     //    once Te decouples from n);
-    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //  * eta J enters the PUSH solve when hybrid_resistive_drag is on --
     //    dropping it is itself the single-species ion-side friction, so
     //    E* + drag would book the friction twice. Hyper-resistivity is a
     //    numerical B smoother and stays Faraday-only in either mode.
     const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
         && hybrid_model->m_include_electron_pressure_term;
     const bool add_resistivity_push =
-        hybrid_model->m_include_temperature_relaxation;
+        hybrid_model->m_has_resistive_drag;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -704,8 +775,10 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // bit-identical to the single-eta path.
     const bool has_eta_overlay = hybrid_model->m_has_per_species_eta;
     ablastr::fields::VectorField eta_overlay_mf = {nullptr, nullptr, nullptr};
+    ablastr::fields::VectorField eta_coef_mf = {nullptr, nullptr, nullptr};
     if (has_eta_overlay) {
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+        eta_coef_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_coef_fp", lev);
     }
 
     // Adjoint-paired curl-curl hyper-resistivity (see the
@@ -1015,10 +1088,14 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
         // per-species resistivity is registered -- the kernels gate the read
         // on has_eta_overlay.
         Array4<Real const> eta_overlay_r, eta_overlay_t, eta_overlay_z;
+        Array4<Real const> eta_coef_r, eta_coef_t, eta_coef_z;
         if (has_eta_overlay) {
             eta_overlay_r = eta_overlay_mf[0]->const_array(mfi);
+            eta_coef_r = eta_coef_mf[0]->const_array(mfi);
             eta_overlay_t = eta_overlay_mf[1]->const_array(mfi);
+            eta_coef_t = eta_coef_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+            eta_coef_z = eta_coef_mf[2]->const_array(mfi);
         }
         Array4<Real const> eHr, eHt, eHz;
         if (hyperres_curlcurl) {
@@ -1178,7 +1255,7 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Resistivity: whenever the caller kept eta in this solve
                 // (always true for the Faraday solves; the push/stored-E
-                // solve follows the caller), or when the Q_ei drag operator
+                // solve follows the caller), or when hybrid_resistive_drag
                 // carries the ion-side friction (dropping eta J from the
                 // push field IS the friction, so E* + drag would book it
                 // twice).
@@ -1200,7 +1277,8 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         Jr(i, j, 0);
                     // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
                     // when no per-species eta is registered.
-                    if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
+                    if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0)
+                        + eta_coef_r(i, j, 0) * Jr(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
                         // Exact operator: E_H = +curl(eta_H curl J), the
@@ -1357,7 +1435,7 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Resistivity: whenever the caller kept eta in this solve
                 // (always true for the Faraday solves; the push/stored-E
-                // solve follows the caller), or when the Q_ei drag operator
+                // solve follows the caller), or when hybrid_resistive_drag
                 // carries the ion-side friction (dropping eta J from the
                 // push field IS the friction, so E* + drag would book it
                 // twice).
@@ -1377,7 +1455,8 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                       Interp(te_K, nodal, Etheta_stag, coarsen, i, j, 0, 0), t_new)
                              : eta(rho_val, jtot_val, t_new)) *
                         Jtheta(i, j, 0);
-                    if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
+                    if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0)
+                        + eta_coef_t(i, j, 0) * Jtheta(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
                         // Exact operator: E_H = +curl(eta_H curl J), the
@@ -1531,7 +1610,7 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Resistivity: whenever the caller kept eta in this solve
                 // (always true for the Faraday solves; the push/stored-E
-                // solve follows the caller), or when the Q_ei drag operator
+                // solve follows the caller), or when hybrid_resistive_drag
                 // carries the ion-side friction (dropping eta J from the
                 // push field IS the friction, so E* + drag would book it
                 // twice).
@@ -1551,7 +1630,8 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                       Interp(te_K, nodal, Ez_stag, coarsen, i, j, 0, 0), t_new)
                              : eta(rho_val, jtot_val, t_new)) *
                         Jz(i, j, 0);
-                    if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
+                    if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0)
+                        + eta_coef_z(i, j, 0) * Jz(i, j, 0); }
 
                     if (hyperres_curlcurl && include_resistivity) {
                         // Exact operator: E_H = +curl(eta_H curl J), the
@@ -1716,6 +1796,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool external_split = hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    const auto switch_mode = hybrid_model->m_vacuum_seam_switch_mode;
     // Smooth Hall/grad-Pe turn-off across the vacuum gate: the binary branch
     // makes the residual discontinuous in the state exactly where cells
     // straddle the gate (Newton limit-cycles and grid-scale E jumps at the
@@ -1733,14 +1814,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     //  * grad Pe stays in the FARADAY solves too when the Biermann battery
     //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
     //    once Te decouples from n);
-    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //  * eta J enters the PUSH solve when hybrid_resistive_drag is on --
     //    dropping it is itself the single-species ion-side friction, so
     //    E* + drag would book the friction twice. Hyper-resistivity is a
     //    numerical B smoother and stays Faraday-only in either mode.
     const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
         && hybrid_model->m_include_electron_pressure_term;
     const bool add_resistivity_push =
-        hybrid_model->m_include_temperature_relaxation;
+        hybrid_model->m_has_resistive_drag;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -1801,8 +1882,10 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     // single-eta path).
     const bool has_eta_overlay = hybrid_model->m_has_per_species_eta;
     ablastr::fields::VectorField eta_overlay_mf = {nullptr, nullptr, nullptr};
+    ablastr::fields::VectorField eta_coef_mf = {nullptr, nullptr, nullptr};
     if (has_eta_overlay) {
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+        eta_coef_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_coef_fp", lev);
     }
 
     // Exact-operator hyper-resistivity: E_H = +curl(eta_H curl J) with the
@@ -1979,10 +2062,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         // per-species resistivity is registered -- the kernels gate the read
         // on has_eta_overlay.
         Array4<Real const> eta_overlay_x, eta_overlay_y, eta_overlay_z;
+        Array4<Real const> eta_coef_x, eta_coef_y, eta_coef_z;
         if (has_eta_overlay) {
             eta_overlay_x = eta_overlay_mf[0]->const_array(mfi);
+            eta_coef_x = eta_coef_mf[0]->const_array(mfi);
             eta_overlay_y = eta_overlay_mf[1]->const_array(mfi);
+            eta_coef_y = eta_coef_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+            eta_coef_z = eta_coef_mf[2]->const_array(mfi);
         }
         Array4<Real const> eHx, eHy, eHz;
         if (hyperres_curlcurl) {
@@ -2048,8 +2135,16 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
+            const Real rho_dec =
+                (switch_mode == VacuumSeamSwitchMode::Node) ? NodalSwitchRho(rho, Ex_stag, i, j, k) :
+                (switch_mode == VacuumSeamSwitchMode::Cell) ? CellSwitchRho(rho, Ex_stag, i, j, k) :
+                rho_val;
+            // Only the optional decision modes replace the physical density
+            // used for floor selection. The pedestal remains receiving state.
+            const Real rho_div = (switch_mode != VacuumSeamSwitchMode::Edge && rho_dec < rho_floor)
+                ? rho_floor : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ex(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -2065,14 +2160,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(
-                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ex_stag, coarsen, i, j, k, 0)
+                    rho_div + (use_pedestal ? Interp(rho_ped, nodal, Ex_stag, coarsen, i, j, k, 0)
                                             : 0.0_rt),
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
-                        (rho_val - rho_floor) * holmstrom_inv_width));
+                        (rho_dec - rho_floor) * holmstrom_inv_width));
                 }
                 Ex(i, j, k) = ohm_val;
             }
@@ -2083,7 +2178,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Resistivity: whenever the caller kept eta in this solve
             // (always true for the Faraday solves; the push/stored-E
-            // solve follows the caller), or when the Q_ei drag operator
+            // solve follows the caller), or when hybrid_resistive_drag
             // carries the ion-side friction (dropping eta J from the
             // push field IS the friction, so E* + drag would book it
             // twice).
@@ -2102,7 +2197,8 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                                          Interp(te_K, nodal, Ex_stag, coarsen, i, j, k, 0), t_new)
                                 : eta(rho_val, jtot_val, t_new)) *
                     Jx(i, j, k);
-                if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
+                if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k)
+                        + eta_coef_x(i, j, k) * Jx(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
                     // Exact operator: E_H = +curl(eta_H curl J), the
@@ -2162,8 +2258,16 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
+            const Real rho_dec =
+                (switch_mode == VacuumSeamSwitchMode::Node) ? NodalSwitchRho(rho, Ey_stag, i, j, k) :
+                (switch_mode == VacuumSeamSwitchMode::Cell) ? CellSwitchRho(rho, Ey_stag, i, j, k) :
+                rho_val;
+            // Only the optional decision modes replace the physical density
+            // used for floor selection. The pedestal remains receiving state.
+            const Real rho_div = (switch_mode != VacuumSeamSwitchMode::Edge && rho_dec < rho_floor)
+                ? rho_floor : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ey(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -2179,14 +2283,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(
-                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ey_stag, coarsen, i, j, k, 0)
+                    rho_div + (use_pedestal ? Interp(rho_ped, nodal, Ey_stag, coarsen, i, j, k, 0)
                                             : 0.0_rt),
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
-                        (rho_val - rho_floor) * holmstrom_inv_width));
+                        (rho_dec - rho_floor) * holmstrom_inv_width));
                 }
                 Ey(i, j, k) = ohm_val;
             }
@@ -2197,7 +2301,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Resistivity: whenever the caller kept eta in this solve
             // (always true for the Faraday solves; the push/stored-E
-            // solve follows the caller), or when the Q_ei drag operator
+            // solve follows the caller), or when hybrid_resistive_drag
             // carries the ion-side friction (dropping eta J from the
             // push field IS the friction, so E* + drag would book it
             // twice).
@@ -2216,7 +2320,8 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                                          Interp(te_K, nodal, Ey_stag, coarsen, i, j, k, 0), t_new)
                                 : eta(rho_val, jtot_val, t_new)) *
                     Jy(i, j, k);
-                if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
+                if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k)
+                        + eta_coef_y(i, j, k) * Jy(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
                     // Exact operator: E_H = +curl(eta_H curl J), the
@@ -2274,8 +2379,16 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+            const Real rho_dec =
+                (switch_mode == VacuumSeamSwitchMode::Node) ? NodalSwitchRho(rho, Ez_stag, i, j, k) :
+                (switch_mode == VacuumSeamSwitchMode::Cell) ? CellSwitchRho(rho, Ez_stag, i, j, k) :
+                rho_val;
+            // Only the optional decision modes replace the physical density
+            // used for floor selection. The pedestal remains receiving state.
+            const Real rho_div = (switch_mode != VacuumSeamSwitchMode::Edge && rho_dec < rho_floor)
+                ? rho_floor : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ez(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -2291,14 +2404,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(
-                    rho_val + (use_pedestal ? Interp(rho_ped, nodal, Ez_stag, coarsen, i, j, k, 0)
+                    rho_div + (use_pedestal ? Interp(rho_ped, nodal, Ez_stag, coarsen, i, j, k, 0)
                                             : 0.0_rt),
                     rho_floor, floor_w);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
                     ohm_val *= 0.5_rt * (1._rt + std::tanh(
-                        (rho_val - rho_floor) * holmstrom_inv_width));
+                        (rho_dec - rho_floor) * holmstrom_inv_width));
                 }
                 Ez(i, j, k) = ohm_val;
             }
@@ -2309,7 +2422,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Resistivity: whenever the caller kept eta in this solve
             // (always true for the Faraday solves; the push/stored-E
-            // solve follows the caller), or when the Q_ei drag operator
+            // solve follows the caller), or when hybrid_resistive_drag
             // carries the ion-side friction (dropping eta J from the
             // push field IS the friction, so E* + drag would book it
             // twice).
@@ -2328,7 +2441,8 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                                          Interp(te_K, nodal, Ez_stag, coarsen, i, j, k, 0), t_new)
                                 : eta(rho_val, jtot_val, t_new)) *
                     Jz(i, j, k);
-                if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
+                if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k)
+                        + eta_coef_z(i, j, k) * Jz(i, j, k); }
 
                 if (hyperres_curlcurl && include_resistivity) {
                     // Exact operator: E_H = +curl(eta_H curl J), the
