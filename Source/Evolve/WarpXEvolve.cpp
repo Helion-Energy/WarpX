@@ -299,7 +299,15 @@ WarpX::Evolve (int numsteps)
             bool const stopping = m_hybrid_pic_model && m_hybrid_pic_model->m_has_electron_stopping;
             if (stopping)
             {
+                // Also refreshes the endpoint moments shared with resistive drag.
                 m_hybrid_pic_model->PrepareImplicitStopping(dt[0]);
+            }
+            else if (m_hybrid_pic_model && m_hybrid_pic_model->m_has_resistive_drag)
+            {
+                // OneStep completed Qei and the delivered plasma current;
+                // resampling, boundary processing and beforecollisions may
+                // subsequently change particles. Refresh at this final stage.
+                m_hybrid_pic_model->RefreshImplicitCollisionMoments(dt[0]);
             }
             mypc->doCollisions(step, cur_time, dt[0]);
             if (stopping)

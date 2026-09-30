@@ -4178,6 +4178,55 @@ void HybridPICModel::RefreshIonFluidMoments (
     }
 }
 
+void HybridPICModel::RefreshImplicitCollisionMoments (amrex::Real const dt) const
+{
+    ABLASTR_PROFILE("HybridPICModel::RefreshImplicitCollisionMoments()");
+    if (!m_need_fluid_velocities) { return; }
+    auto& warpx = WarpX::GetInstance();
+    auto& mypc = warpx.GetPartContainer();
+    // Callbacks may have changed particles after the normal boundary pass.
+    // Re-bin before the instantaneous shape-moment deposit.
+    mypc.Redistribute();
+    RefreshIonFluidMoments(dt, /*implicit_stage=*/false);
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        auto const Jp = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+        ablastr::fields::VectorField Ji{};
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> storage;
+        for (int d = 0; d < 3; ++d) {
+            storage[d] = std::make_unique<amrex::MultiFab>(
+                Jp[d]->boxArray(), Jp[d]->DistributionMap(),
+                Jp[d]->nComp(), Jp[d]->nGrowVect());
+            Ji[d] = storage[d].get();
+            Ji[d]->setVal(0.0_rt);
+        }
+        for (auto const& name : mypc.GetSpeciesNames()) {
+            auto const& pc = mypc.GetParticleContainerFromName(name);
+            if (pc.getCharge() == 0._prt || pc.do_not_deposit) { continue; }
+            auto const Js = warpx.m_fields.get_alldirs("current_fp_" + name, lev);
+            for (int d = 0; d < 3; ++d) {
+                amrex::MultiFab::Add(*Ji[d], *Js[d], 0, 0,
+                                    Ji[d]->nComp(), Ji[d]->nGrowVect());
+            }
+        }
+        // Jp is the delivered Ampere/Darwin current from OneStep. Only
+        // refresh gather guards here; do not rebuild it from total B.
+        for (int d = 0; d < 3; ++d) {
+            ablastr::utils::communication::FillBoundary(
+                *Jp[d], Jp[d]->nGrowVect(), WarpX::do_single_precision_comms,
+                warpx.Geom(lev).periodicity());
+        }
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        warpx.ApplyFieldBoundaryOnAxis(Jp[0], Jp[1], Jp[2], lev);
+#endif
+        // The species sum and Ji come from identical endpoint particles
+        // and SI normalization. The existing Ve routine supplies the
+        // configured pedestal, velocity filter and physical ghost images.
+        // Global rho_fp/current_fp remain the accepted theta deposit family.
+        CalculateElectronFluidVelocity(
+            lev, *warpx.m_fields.get("hybrid_rho_species_sum_fp", lev), Ji);
+    }
+}
+
 void HybridPICModel::CalculateIonFluidVelocity () const
 {
     auto& warpx = WarpX::GetInstance();
@@ -11513,34 +11562,24 @@ HybridPICModel::PrepareImplicitStopping (amrex::Real const dt)
         "Implicit electron stopping currently requires a fixed grid distribution");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_implicit_stopping_active,
                                      "Implicit stopping background is already active");
-    using ablastr::fields::Direction;
+    RefreshImplicitCollisionMoments(dt);
     auto& fields = warpx.m_fields;
     auto const& rho = *fields.get(FieldType::rho_fp, 0);
     if (!fields.has("hybrid_collision_rho_fp", 0))
     {
         fields.alloc_init("hybrid_collision_rho_fp", 0, rho.boxArray(), rho.DistributionMap(), 1,
                           rho.nGrowVect(), 0.0_rt);
-        for (int d = 0; d < 3; ++d)
-        {
-            auto const& J = *fields.get(FieldType::current_fp, Direction{d}, 0);
-            fields.alloc_init("hybrid_collision_current_fp", Direction{d}, 0, J.boxArray(),
-                              J.DistributionMap(), J.nComp(), J.nGrowVect(), 0.0_rt);
-        }
     }
     auto const charge = fields.get_mr_levels("hybrid_collision_rho_fp", 0);
-    auto const current = fields.get_mr_levels_alldirs("hybrid_collision_current_fp", 0);
-    // The accepted particles are boundary-processed and redistributed by the
-    // caller. Deposit at their actual endpoint, without a half-step shift.
+    // Preserve the stopping source/receiver's existing endpoint charge
+    // and boundary convention. Ve and species moments are already refreshed
+    // together above; do not overwrite Ve using a fictitious endpoint orbit.
     warpx.GetPartContainer().DepositCharge(charge, 0.0_rt);
-    warpx.GetPartContainer().DepositCurrent(current, dt, 0.0_rt);
     warpx.SyncRho(charge, {}, {});
-    warpx.SyncCurrent("hybrid_collision_current_fp");
     warpx.ApplyRhofieldBoundary(0, charge[0], PatchType::fine);
-    warpx.ApplyJfieldBoundary(0, current[0][0], current[0][1], current[0][2], PatchType::fine);
     ablastr::utils::communication::FillBoundary(
-        {charge[0], current[0][0], current[0][1], current[0][2]}, WarpX::do_single_precision_comms,
+        *charge[0], WarpX::do_single_precision_comms,
         warpx.Geom(0).periodicity(), true);
-    CalculateElectronFluidVelocity(0, *charge[0], current[0]);
     m_implicit_stopping_active = true;
 }
 

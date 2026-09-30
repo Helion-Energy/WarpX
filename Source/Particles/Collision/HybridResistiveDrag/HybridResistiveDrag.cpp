@@ -12,6 +12,7 @@
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
+#include "Utils/WarpXAlgorithmSelection.H"
 #include "Utils/WarpXConst.H"
 #include "WarpX.H"
 
@@ -95,7 +96,12 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt,
         // kernel when has_eta_per is true.
         ablastr::fields::VectorField Js_fp  =
             warpx.m_fields.get_alldirs("current_fp_" + m_species_names[0], lev);
-        amrex::MultiFab const & rho_fp      = *warpx.m_fields.get(FieldType::rho_fp, lev);
+        // Implicit collisions run after the accepted endpoint refresh;
+        // global rho_fp still belongs to the field solver's theta stage.
+        amrex::MultiFab const & rho_fp =
+            (WarpX::evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid)
+                ? *warpx.m_fields.get("hybrid_rho_species_sum_fp", lev)
+                : *warpx.m_fields.get(FieldType::rho_fp, lev);
         amrex::MultiFab const & rhos_fp     =
             *warpx.m_fields.get("rho_fp_" + m_species_names[0], lev);
         amrex::MultiFab const & Te_fp       =

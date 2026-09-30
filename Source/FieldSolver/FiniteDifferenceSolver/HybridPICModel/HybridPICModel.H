@@ -475,6 +475,11 @@ public:
     void RefreshIonFluidMoments (amrex::Real dt, bool implicit_stage,
                                 bool preserve_source_moments = false) const;
 
+    /** Refresh accepted endpoint species moments and Ve immediately before
+     * implicit collisions, after resampling and particle boundary processing.
+     * Does not overwrite the theta-stage global current_fp/rho_fp registers. */
+    void RefreshImplicitCollisionMoments (amrex::Real dt) const;
+
     /**
      * \brief Fill the electron pressure multifab given the kinetic particle
      * charge density (and assumption of quasi-neutrality) using the user
