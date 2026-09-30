@@ -2390,13 +2390,9 @@ WarpX::BackwardCompatibility ()
             ablastr::warn_manager::WarnPriority::low);
     }
 
-    const ParmParse pp_hybrid("hybrid_pic_model");
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !pp_hybrid.query("qdsmc_n_floor", backward_Real),
-        "hybrid_pic_model.qdsmc_n_floor is no longer used: the QDSMC electron-energy "
-        "update floors the density with hybrid_pic_model.n_floor and skips only the "
-        "cells that received no marker weight at all. Please remove it."
-    );
+    // This branch retains qdsmc_n_floor as the independently configured
+    // deposited-weight and halo-conduction gate. HybridPICModel still parses
+    // and uses it, so the upstream deprecation check does not apply here.
 }
 
 // This is a virtual function.
