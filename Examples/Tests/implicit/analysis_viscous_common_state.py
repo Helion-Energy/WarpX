@@ -37,12 +37,113 @@ def complete_state(a, b):
         "exact_clock": (a / "clock.txt").read_bytes() == (b / "clock.txt").read_bytes(),
         "particles": [particle_compare(a, b, p) for p in ["particles_ions", "markers"]],
     }
-    result["passed"] = all(
-        x["exact_all_fabs_with_ghosts"] for x in result["fields"]
-    ) and all(
-        x["exact_ids"] and x["exact_all_real"] and x["exact_all_int"] and x["finite"]
-        for x in result["particles"]
+    result["passed"] = (
+        result["exact_clock"]
+        and all(
+            x["exact_all_fabs_with_ghosts"] and x["finite_all_fabs"]
+            for x in result["fields"]
+        )
+        and all(
+            x["exact_ids"]
+            and x["exact_all_real"]
+            and x["exact_all_int"]
+            and x["finite"]
+            for x in result["particles"]
+        )
     )
+    return result
+
+
+def validate_receipt(case, producer_receipt):
+    receipt = json.loads((case / "RESULT.json").read_text())
+    assert receipt["exit_code"] == 0
+    assert (
+        receipt["input_sha256"]
+        == producer_receipt["input_sha256"]
+        == sha(case / "inputs")
+    )
+    assert (
+        receipt["exe_sha256"] == producer_receipt["exe_sha256"]
+    ), "replay executable differs"
+
+
+def acceptance_guards(root):
+    """Negative controls use copies; the native producer/replay data stay intact."""
+    import shutil
+    import struct
+
+    control = root / (
+        "acceptance-guards-"
+        + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    )
+    control.mkdir()
+    common = root / "producer/common"
+    name = "hybrid_electron_temperature_fp[level=0]"
+    copies = [control / "a", control / "b"]
+    for destination in copies:
+        (destination / "fields").mkdir(parents=True)
+        (destination / "field_names.txt").write_text(name + "\n")
+        shutil.copyfile(common / "clock.txt", destination / "clock.txt")
+        for f in (common / "fields").iterdir():
+            if f.name.startswith(name + "_"):
+                shutil.copyfile(f, destination / "fields" / f.name)
+        for prefix in ["particles_ions", "markers"]:
+            for f in common.glob(prefix + "_rank*.bin"):
+                shutil.copyfile(f, destination / f.name)
+    a, b = copies
+    assert complete_state(a, b)["passed"]
+    original_clock = (b / "clock.txt").read_text()
+    clock = original_clock.split()
+    clock[2] = str(2 * float(clock[2]))
+    bad_clock = " ".join(clock) + "\n"
+    (b / "clock.txt").write_text(bad_clock)
+    clock_check = complete_state(a, b)
+    assert not clock_check["exact_clock"] and not clock_check["passed"]
+    (b / "clock.txt").write_text(original_clock)
+    # Identical NaN bytes in BOTH copies avoid a false pass from the ordinary
+    # byte-difference guard: rejection must specifically depend on finiteness.
+    for destination in copies:
+        header = (destination / "fields" / (name + "_H")).read_text().splitlines()
+        record = next(line for line in header if line.startswith("FabOnDisk:"))
+        filename, offset = record.split()[1:]
+        with (destination / "fields" / filename).open("r+b") as f:
+            f.seek(int(offset))
+            f.readline()
+            f.write(struct.pack("<d", float("nan")))
+    finite_check = complete_state(a, b)
+    assert finite_check["exact_clock"]
+    assert all(x["exact_all_fabs_with_ghosts"] for x in finite_check["fields"])
+    assert not all(x["finite_all_fabs"] for x in finite_check["fields"])
+    assert not finite_check["passed"]
+    producer = json.loads((root / "producer/RESULT.json").read_text())
+    receipt_case = control / "receipt"
+    receipt_case.mkdir()
+    shutil.copyfile(root / "producer/inputs", receipt_case / "inputs")
+    (receipt_case / "RESULT.json").write_text(json.dumps(producer) + "\n")
+    validate_receipt(receipt_case, producer)
+    bad_receipt = dict(producer, exe_sha256="0" * 64)
+    assert bad_receipt["exe_sha256"] != producer["exe_sha256"]
+    (receipt_case / "RESULT.json").write_text(json.dumps(bad_receipt) + "\n")
+    rejected = False
+    try:
+        validate_receipt(receipt_case, producer)
+    except AssertionError as exc:
+        rejected = str(exc) == "replay executable differs"
+    assert rejected
+    result = {
+        "passed": True,
+        "copied_minimal_field": name,
+        "clock_mismatch_rejected": not clock_check["passed"],
+        "original_clock": original_clock,
+        "changed_clock": bad_clock,
+        "identical_nan_copies_rejected": not finite_check["passed"],
+        "nan_copies_byte_identical": True,
+        "mismatched_executable_rejected": rejected,
+        "clock_state": clock_check,
+        "nonfinite_state": finite_check,
+        "path": str(control),
+    }
+    (control / "RESULT.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 
@@ -196,13 +297,7 @@ def analyze(root):
     producer_receipt = json.loads((root / "producer/RESULT.json").read_text())
     assert producer_receipt["exit_code"] == 0
     for case in cases:
-        receipt = json.loads((case / "RESULT.json").read_text())
-        assert receipt["exit_code"] == 0
-        assert (
-            receipt["input_sha256"]
-            == producer_receipt["input_sha256"]
-            == sha(case / "inputs")
-        )
+        validate_receipt(case, producer_receipt)
     loads = {p.name: complete_state(common, p / "before") for p in cases}
     assert all(x["passed"] for x in loads.values())
     source = {p.name: source_bracket(p) for p in cases if p.name.startswith("source-")}
@@ -362,6 +457,7 @@ def main():
                         launcher,
                     )
     result = analyze(root)
+    result["acceptance_guard_controls"] = acceptance_guards(root)
     (root / "ANALYSIS.json").write_text(json.dumps(result, indent=2) + "\n")
     print(
         json.dumps(

@@ -40,8 +40,9 @@ Joule heating, Qei, alpha stopping, pedestal, shunt or active floor band. A
 nonzero clamp fails this fixture rather than inventing a spatial attribution.
 
 The fixture then evolves two ten-step continuations with instrumentation off/on.
-Every loaded field FAB, every real/integer particle component and every ID must
-match the producer exactly. Each instrumentation pair must remain byte-identical,
+Every replay receipt must use the producer executable hash and unchanged input
+hash. Every loaded field FAB, every real/integer particle component and every ID
+must match the producer exactly. Each instrumentation pair must remain byte-identical,
 including per-box ghosts. Clock and progress checks prevent a zero-step false
 pass. All serialized fields and particle data must be finite. The MPI extension
 replays the same serial-produced state on two ranks; source states must agree
@@ -70,7 +71,10 @@ python3 Examples/Tests/implicit/analysis_viscous_common_state.py \
 ```
 
 Commands, input/executable hashes, logs, native snapshots and `ANALYSIS.json`
-remain in the output directory. Existing output is never overwritten. Registered
+remain in the output directory. Each analysis also exercises rejection of a
+changed clock, identical NaN field copies, and a mismatched executable receipt
+using separate copies; original simulation data remain intact. Existing output
+is never overwritten. Registered
 CTest runs use fresh timestamped subdirectories. The optional reader mode
 `--analyze-existing --output OUTPUT_DIRECTORY` repeats only the analysis.
 
