@@ -1,0 +1,11 @@
+# RZ axis, near-axis, and off-axis shapes, with multiple boxes in r and z.
+geometry.dims = RZ
+amr.n_cell = 16 16
+geometry.prob_lo = 0. 0.
+geometry.prob_hi = 16. 16.
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+boundary.particle_lo = none periodic
+boundary.particle_hi = reflecting periodic
+my_constants.y0 = 0.
+FILE = inputs_base
