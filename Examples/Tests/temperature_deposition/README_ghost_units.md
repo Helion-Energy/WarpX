@@ -7,7 +7,8 @@ or fields. The source repair is a separate commit.
 
 Normal WarpX builds register `test_temperature_ghost_units_rz` and
 `test_temperature_ghost_units_3d`, plus26 small CTests, when the corresponding
-libraries exist. For example:
+libraries exist and both `WarpX_PRECISION` and `WarpX_PARTICLE_PRECISION` are
+`DOUBLE`. Single/mixed precision configurations do not register this DP-only reader. For example:
 
 ```sh
 cmake --build build --target test_temperature_ghost_units_rz -j 2

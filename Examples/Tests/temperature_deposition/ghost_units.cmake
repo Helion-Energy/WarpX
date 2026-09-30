@@ -1,3 +1,9 @@
+# Native FAB reader and qualification are currently double precision only.
+if(NOT WarpX_PRECISION STREQUAL "DOUBLE" OR
+   NOT WarpX_PARTICLE_PRECISION STREQUAL "DOUBLE")
+    return()
+endif()
+
 # Private native qualification of unit conversion on existing ghost support.
 set(_temperature_ghost_dir "${CMAKE_CURRENT_LIST_DIR}")
 foreach(_dim IN ITEMS rz 3d)
