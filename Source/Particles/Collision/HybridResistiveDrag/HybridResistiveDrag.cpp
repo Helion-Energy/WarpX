@@ -99,7 +99,7 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt,
         // Implicit collisions run after the accepted endpoint refresh;
         // global rho_fp still belongs to the field solver's theta stage.
         amrex::MultiFab const & rho_fp =
-            (WarpX::evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid)
+            (warpx.evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid)
                 ? *warpx.m_fields.get("hybrid_rho_species_sum_fp", lev)
                 : *warpx.m_fields.get(FieldType::rho_fp, lev);
         amrex::MultiFab const & rhos_fp     =
