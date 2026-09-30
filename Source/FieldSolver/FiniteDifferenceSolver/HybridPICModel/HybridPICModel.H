@@ -693,7 +693,8 @@ public:
      */
     void QDSMCAddJouleHeating (int lev, amrex::Real dt,
                                amrex::MultiFab const & rho,
-                               amrex::MultiFab * redirect_E) const;
+                               amrex::MultiFab * redirect_E,
+                               amrex::MultiFab const* heat_capacity_rho = nullptr) const;
 
     /**
      * \brief PHYSICAL Braginskii electron viscous heating source (companion
@@ -2129,6 +2130,16 @@ public:
      *  the #6982 first-order control. */
     enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
     QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::PC;
+    /** Match volumetric-source heat capacity to the PC temperature time level.
+     *  False retains the legacy source calls for controlled comparisons. */
+    bool m_qdsmc_source_stage_density = true;
+    /** Optional passive source-stage snapshots and all-node energy integrals. */
+    int m_qdsmc_source_stage_audit_interval = 0;
+    void AuditQdsmcSourceStage (int lev, int half, amrex::MultiFab const& Te_before,
+                                amrex::MultiFab const& rho_state,
+                                amrex::MultiFab const& rho_receiver) const;
+
+
 
     /** Half-gradient-corrected QDSMC deposit: markers carry
      *  limited MC slopes of their content and the scatter deposits
@@ -2154,6 +2165,19 @@ public:
      *  cells only and the subsequent K_e init reads ghosts). */
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
                                   bool fill_te_ghosts) const;
+
+    /** Source stage with an explicit receiving temperature state. Coefficients,
+     *  physical gates and species moments retain their existing rho_fp state.
+     *  The receiving capacity uses max(rho_state + pedestal, q_e*n_floor),
+     *  matching the pressure state's regularization, without adding particles.
+     *  PC passes old density before transport and new density afterward. */
+    void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
+                                  bool fill_te_ghosts,
+                                  amrex::MultiFab const& rho_state) const;
+
+    void ApplyQdsmcEnergySourcesImpl (int lev, amrex::Real dt_src,
+                                      bool fill_te_ghosts,
+                                      amrex::MultiFab const* rho_state) const;
 
     /** One Ito tensor-conduction substep on level lev over dt_c,
      *  operating on the energy density u = 3/2 n_e k_B T_e (NOT on the
@@ -2337,7 +2361,8 @@ public:
      * m_has_energy_sink). Runs inside ApplyQdsmcEnergySources between the
      * Q_ei relaxation (6b) and the ion-heating operator (6c), so one call
      * site covers every explicit time-advance scheme. */
-    void QDSMCApplyEnergySink (int lev, amrex::Real dt_src) const;
+    void QDSMCApplyEnergySink (int lev, amrex::Real dt_src,
+                               amrex::MultiFab const* heat_capacity_rho = nullptr) const;
 
     /** True when a hybrid_electron_stopping collision is registered: fast
      * ions drag against the electron fluid (Goldston & Rutherford
@@ -2373,7 +2398,9 @@ public:
      * staging field. Runs inside ApplyQdsmcEnergySources after the energy
      * sink; on the twice-per-step source schemes the second call finds the
      * staging already zeroed and no-ops. */
-    void QDSMCApplyFastIonHeating (int lev, amrex::MultiFab const* rho_state = nullptr) const;
+    void QDSMCApplyFastIonHeating (
+        int lev, amrex::MultiFab const* rho_state = nullptr,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
 
     /** Freeze endpoint collision coefficients and consume stopping heat once,
      * outside the implicit field/energy residual. Single-level grids only. */

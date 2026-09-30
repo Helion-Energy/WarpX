@@ -4590,6 +4590,38 @@ Maxwell solver: kinetic-fluid hybrid
     continuation of the energy-equation evolution across a restart is not yet guaranteed (the
     entropy-marker stage re-initializes on re-entry); field/particle restart is unaffected.
 
+.. pp:param:: hybrid_pic_model.qdsmc_source_stage_density
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    For the explicit ``pc`` QDSMC time advance, use the density associated with
+    the receiving temperature when converting volumetric source energy into a
+    temperature increment: old density before transport and new density after
+    transport. The receiving capacity includes the stationary density pedestal
+    and is bounded below by ``n_floor``. Physical source coefficients, species
+    moments and source gates retain their existing evaluation density. This
+    applies to Joule, viscous, booked hyper-resistive, parser sink and fast-ion
+    stopping energy; the electron-ion temperature-relaxation model is unchanged.
+    Set to ``false`` only to reproduce the legacy source stages in a controlled
+    comparison. Other time advances are unaffected.
+
+.. pp:param:: hybrid_pic_model.qdsmc_source_stage_audit_interval
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    A positive interval enables passive source-stage diagnostics for the explicit
+    ``pc`` QDSMC advance. At that step interval, emit ``QDSMC_SOURCE_STAGE`` records
+    and retain the nodal ``hybrid_qdsmc_source_stage_audit`` field. Each source half
+    stores eight components: temperature before and after [K], energy-density
+    increment using the temperature-state and receiving capacities [J/m^3],
+    temperature-state density, new density and pedestal density [C/m^3], and
+    temperature increment [K]. The second half occupies components 8--15.
+    The integrated increments include all valid nodes under the regularized
+    pressure-state capacity; they are not an independent physical-source or total
+    energy-conservation ledger. Zero disables the diagnostic.
+
 .. pp:param:: implicit_evolve.qdsmc_segregated_solve
     :type: ``bool``
     :default: ``true`` with live-temperature resistivity, otherwise ``false``

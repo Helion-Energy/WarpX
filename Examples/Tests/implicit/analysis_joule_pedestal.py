@@ -14,6 +14,13 @@ import tempfile
 from pathlib import Path
 
 cases = {
+    "receiving-thin": ["joule_test.receiving_density_ratio=0.2"],
+    "receiving-dense": ["joule_test.receiving_density_ratio=10"],
+    "receiving-redirect": [
+        "joule_test.receiving_density_ratio=10", "joule_test.redirect=1",
+        "hybrid_pic_model.joule_redirect_Te_threshold=50",
+        "joule_test.accepted_fraction=0", "joule_test.redirected_fraction=1",
+    ],
     "pedestal-off": ["hybrid_pic_model.density_pedestal=0"],
     "pedestal-zero": ["joule_test.pedestal_fraction=0"],
     "pedestal-p2": [],

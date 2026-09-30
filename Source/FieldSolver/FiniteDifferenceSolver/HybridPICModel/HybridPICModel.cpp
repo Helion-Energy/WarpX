@@ -746,6 +746,10 @@ void HybridPICModel::ReadParameters ()
     {
         std::string advance_str = "pc";
         pp_hybrid.query("qdsmc_time_advance", advance_str);
+        pp_hybrid.query("qdsmc_source_stage_density", m_qdsmc_source_stage_density);
+        pp_hybrid.query("qdsmc_source_stage_audit_interval", m_qdsmc_source_stage_audit_interval);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_qdsmc_source_stage_audit_interval >= 0,
+            "qdsmc_source_stage_audit_interval must be nonnegative");
         if (advance_str == "euler") {
             m_qdsmc_time_advance = QdsmcTimeAdvance::Euler;
         } else if (advance_str == "leapfrog") {
@@ -9763,7 +9767,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 
 void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                                            amrex::MultiFab const & rho_in,
-                                           amrex::MultiFab * const redirect_E) const
+                                           amrex::MultiFab * const redirect_E,
+                                           amrex::MultiFab const* heat_capacity_rho) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCAddJouleHeating()");
 
@@ -9931,6 +9936,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
         {
             amrex::Array4<amrex::Real>       const & Te_arr     = Te.array(mfi);
             amrex::Array4<amrex::Real const> const & rho_arr    = rho.const_array(mfi);
+            auto const capacity_rho =
+                (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
             auto const ped_arr = use_pedestal
                                      ? pedestal->const_array(mfi)
                                      : amrex::Array4<amrex::Real const>{};
@@ -10087,8 +10094,10 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                     // Redirected ion energy and the physical-source tallies above
                     // do not acquire a pedestal contribution.
                     amrex::Real dTe_e = dTe_s;
-                    if (use_pedestal) {
-                        dTe_e *= rho_val / (rho_val + ped_arr(i, j, k));
+                    if (heat_capacity_rho != nullptr || use_pedestal) {
+                        amrex::Real const receiving_rho = capacity_rho(i, j, k) +
+                            (use_pedestal ? ped_arr(i, j, k) : 0.0_rt);
+                        dTe_e *= rho_val / receiving_rho;
                     }
                     Te_arr(i, j, k) += wJ * dTe_e;
                     if (thin)
@@ -10440,6 +10449,8 @@ HybridPICModel::QDSMCDepositDragWork (
 
     auto& warpx = WarpX::GetInstance();
     amrex::Periodicity const& period = warpx.Geom(lev).periodicity();
+    amrex::MultiFab const* const ped_mf = DensityPedestal(lev);
+    bool const use_ped = (ped_mf != nullptr);
 
     amrex::MultiFab& Te =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
@@ -10495,10 +10506,14 @@ HybridPICModel::QDSMCDepositDragWork (
         auto const t = Te.const_array(mfi);
         auto const capacity =
             (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
+        auto const ped = use_ped && pedestal_state
+            ? ped_mf->const_array(mfi) : amrex::Array4<amrex::Real const>{};
         amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+            amrex::Real const receiving_rho = capacity(i,j,k) +
+                (use_ped && pedestal_state ? ped(i,j,k) : 0.0_rt);
             dst(i,j,k) = r(i,j,k) > source_floor && t(i,j,k) > 0.0_rt &&
-                         capacity(i,j,k) > 0.0_rt && std::isfinite(t(i,j,k)) &&
-                         std::isfinite(capacity(i,j,k)) ? 1.0_rt : 0.0_rt;
+                         receiving_rho > 0.0_rt && std::isfinite(t(i,j,k)) &&
+                         std::isfinite(receiving_rho) ? 1.0_rt : 0.0_rt;
         });
     }
     eligible.FillBoundary(period);
@@ -10605,9 +10620,6 @@ HybridPICModel::QDSMCDepositDragWork (
     amrex::MultiFab clamp_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
     clamp_mf.setVal(0.0_rt);
 
-    // Density pedestal (the state's heat capacity, see the kernel comment).
-    amrex::MultiFab const* const ped_mf = DensityPedestal(lev);
-    bool const use_ped = (ped_mf != nullptr);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -10687,13 +10699,11 @@ HybridPICModel::QDSMCDepositDragWork (
                 // Use the heat capacity of the state measured by the
                 // energy ledger, including its stationary pedestal.
                 amrex::Real const capacity = capacity_rho(i, j, k);
-                if (capacity <= 0.0_rt) {
-                    return;
-                }
                 amrex::Real const n_u =
                     (capacity +
                      (use_ped && pedestal_state ? ped_arr(i, j, k) : 0.0_rt)) /
                     PhysConst::q_e;
+                if (n_u <= 0.0_rt) { return; }
 
                 amrex::Real Te_new =
                     Te_K + dt * gamma_minus_1 * Q / (n_u * PhysConst::kb);
@@ -11465,7 +11475,8 @@ HybridPICModel::QDSMCRelaxPedestalTe (int const lev, amrex::Real const dt_src) c
     m_te_pedestal_J += EnergyVolumeIntegral(tally_mf, 0, lev);
 }
 
-void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_src) const
+void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_src,
+                                            amrex::MultiFab const* heat_capacity_rho) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCApplyEnergySink()");
 
@@ -11484,6 +11495,8 @@ void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_s
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    auto const* pedestal = heat_capacity_rho ? DensityPedestal(lev) : nullptr;
+    bool const use_ped = pedestal != nullptr;
     // B field on Yee staggering, interpolated to the nodal Te grid inside
     // the kernel (|B| is the parser's B argument).
     ablastr::fields::VectorField B_fp =
@@ -11521,13 +11534,18 @@ void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_s
         amrex::Array4<amrex::Real const> const & By_arr   = B_fp[1]->const_array(mfi);
         amrex::Array4<amrex::Real const> const & Bz_arr   = B_fp[2]->const_array(mfi);
         amrex::Array4<amrex::Real>       const & decl_arr = declined_mf.array(mfi);
+        auto const capacity =
+            (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
+        auto const ped = use_ped ? pedestal->const_array(mfi)
+                                : amrex::Array4<amrex::Real const>{};
 
         amrex::Box const & tbox = mfi.tilebox();
         amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             amrex::Real const rho_val = rho_arr(i,j,k);
             if (rho_val <= rho_floor) { return; }
-            amrex::Real const ne = rho_val / PhysConst::q_e;
+            amrex::Real const ne = (capacity(i,j,k) +
+                (use_ped ? ped(i,j,k) : 0.0_rt)) / PhysConst::q_e;
 
             // |B| at the nodal grid (where Te lives), Yee -> nodal interp
             // as in the per-species-resistivity kernel.
@@ -11679,7 +11697,8 @@ amrex::MultiFab & HybridPICModel::GetFastIonHeatingStaging (int const lev) const
 }
 
 void
-HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* rho_state) const
+HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* rho_state,
+                                       amrex::MultiFab const* heat_capacity_rho) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCApplyFastIonHeating()");
 
@@ -11737,6 +11756,8 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
         amrex::Array4<amrex::Real>       const & E_arr    = Estage.array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr  = rho.const_array(mfi);
         amrex::Array4<amrex::Real>       const & decl_arr = declined_mf.array(mfi);
+        auto const capacity =
+            (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
 
         auto const ped = pedestal
                              ? warpx.m_fields.get("hybrid_rho_pedestal_fp", lev)->const_array(mfi)
@@ -11758,7 +11779,8 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
             // Use the same capacity as the electron energy, including the
             // stationary pedestal; the availability gate above remains raw.
             amrex::Real const ne =
-                rho_val / PhysConst::q_e + (pedestal ? ped(i, j, k) / PhysConst::q_e : 0.0_rt);
+                capacity(i,j,k) / PhysConst::q_e +
+                (pedestal ? ped(i, j, k) / PhysConst::q_e : 0.0_rt);
 
             amrex::Real const Te_K = Te_arr(i,j,k);
             // dTe = (gamma-1) E / (n_e k_B), added.
@@ -12768,9 +12790,49 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
 void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const dt_src,
                                               bool const fill_te_ghosts) const
 {
+    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, nullptr);
+}
+
+void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const dt_src,
+                                              bool const fill_te_ghosts,
+                                              amrex::MultiFab const& rho_state) const
+{
+    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, &rho_state);
+}
+
+void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real const dt_src,
+                                                  bool const fill_te_ghosts,
+                                                  amrex::MultiFab const* rho_state) const
+{
     ABLASTR_PROFILE("HybridPICModel::ApplyQdsmcEnergySources()");
 
     auto & warpx = WarpX::GetInstance();
+    auto const& rho_eval = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    // Only the receiving capacity changes time level. Keep the physical
+    // coefficients, source gates, current and species moments at rho_eval.
+    // Regularize the represented state exactly as pressure does. Store the
+    // deposited part here because each receiver adds the stationary pedestal.
+    amrex::MultiFab capacity;
+    amrex::MultiFab const* heat_capacity_rho = nullptr;
+    if (rho_state != nullptr) {
+        capacity.define(rho_state->boxArray(), rho_state->DistributionMap(),
+                        1, rho_state->nGrowVect());
+        auto const* pedestal = DensityPedestal(lev);
+        bool const use_ped = pedestal != nullptr;
+        amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+        for (amrex::MFIter mfi(capacity); mfi.isValid(); ++mfi) {
+            auto const dst = capacity.array(mfi);
+            auto const src = rho_state->const_array(mfi);
+            auto const ped = use_ped ? pedestal->const_array(mfi)
+                                    : amrex::Array4<amrex::Real const>{};
+            amrex::ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                amrex::Real const p = use_ped ? ped(i,j,k) : 0.0_rt;
+                dst(i,j,k) = amrex::max(src(i,j,k), rho_floor - p);
+            });
+        }
+        heat_capacity_rho = &capacity;
+    }
+
 
     // Step 6: Joule-heating source on T_e (Phys. Plasmas 31, 012902 (2024), Eq. 12), per-cell from
     // rho_fp(_s), the plasma current, and the Ohm's-law eta parser. With the
@@ -12794,7 +12856,8 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         ion_redirect_E.setVal(0.0_rt);
     }
     if (m_include_joule_heating) {
-        QDSMCAddJouleHeating(lev, dt_src, redirect_active ? &ion_redirect_E : nullptr);
+        QDSMCAddJouleHeating(lev, dt_src, rho_eval,
+                              redirect_active ? &ion_redirect_E : nullptr, heat_capacity_rho);
         QdsmcPhaseMinTe(lev, "sources_joule");
     }
     // PHYSICAL Braginskii viscous dissipation. Placed before the shunt so
@@ -12809,19 +12872,20 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // probe, so this dU is the viscous channel and nothing else.
     if (m_include_electron_viscosity) {
         std::array<amrex::Real, 2> uv0{}, uv1{};
-        if (m_energy_budget) { uv0 = QDSMCClassEnergy(lev); }
+        if (m_energy_budget) { uv0 = QDSMCClassEnergy(lev, rho_state); }
         amrex::MultiFab const& rho_src =
             *warpx.m_fields.get(FieldType::rho_fp, lev);
         // Strain form deposits Q_nu; the work form only measures it and
         // deposits the drag work J . E_visc instead (QDSMCAddViscousDragWork,
         // which also measures both channels for the ledger in either form).
         QDSMCAddViscousHeating(lev, dt_src, rho_src,
-                               /*deposit=*/!m_visc_heating_work);
+                               /*deposit=*/!m_visc_heating_work, heat_capacity_rho);
         if (m_visc_in_ohms_law) {
-            QDSMCAddViscousDragWork(lev, dt_src, rho_src, /*account=*/true);
+            QDSMCAddViscousDragWork(lev, dt_src, rho_src, /*account=*/true,
+                                      heat_capacity_rho);
         }
         if (m_energy_budget) {
-            uv1 = QDSMCClassEnergy(lev);
+            uv1 = QDSMCClassEnergy(lev, rho_state);
             m_ebud_visc_bulk += uv1[0] - uv0[0];
             m_ebud_visc_band += uv1[1] - uv0[1];
         }
@@ -12834,11 +12898,12 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     if (m_hyper_res_heating) {
         std::array<amrex::Real, 2> uh0{}, uh1{};
         if (m_energy_budget) {
-            uh0 = QDSMCClassEnergy(lev);
+            uh0 = QDSMCClassEnergy(lev, rho_state);
         }
-        QDSMCAddHyperResistiveHeating(lev, dt_src);
+        QDSMCAddHyperResistiveHeating(lev, dt_src, rho_eval, /*account=*/true,
+                                     heat_capacity_rho);
         if (m_energy_budget) {
-            uh1 = QDSMCClassEnergy(lev);
+            uh1 = QDSMCClassEnergy(lev, rho_state);
             m_ebud_hyp_bulk += uh1[0] - uh0[0];
             m_ebud_hyp_band += uh1[1] - uh0[1];
         }
@@ -12961,10 +13026,10 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // span this whole function.
     if (m_has_energy_sink) {
         std::array<amrex::Real, 2> us0{}, us1{};
-        if (m_energy_budget) { us0 = QDSMCClassEnergy(lev); }
-        QDSMCApplyEnergySink(lev, dt_src);
+        if (m_energy_budget) { us0 = QDSMCClassEnergy(lev, rho_state); }
+        QDSMCApplyEnergySink(lev, dt_src, heat_capacity_rho);
         if (m_energy_budget) {
-            us1 = QDSMCClassEnergy(lev);
+            us1 = QDSMCClassEnergy(lev, rho_state);
             m_ebud_sink_bulk += us1[0] - us0[0];
             m_ebud_sink_band += us1[1] - us0[1];
         }
@@ -12983,10 +13048,10 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // creates is capped at the next source application.
     if (m_has_electron_stopping) {
         std::array<amrex::Real, 2> up0{}, up1{};
-        if (m_energy_budget) { up0 = QDSMCClassEnergy(lev); }
-        QDSMCApplyFastIonHeating(lev);
+        if (m_energy_budget) { up0 = QDSMCClassEnergy(lev, rho_state); }
+        QDSMCApplyFastIonHeating(lev, nullptr, heat_capacity_rho);
         if (m_energy_budget) {
-            up1 = QDSMCClassEnergy(lev);
+            up1 = QDSMCClassEnergy(lev, rho_state);
             m_ebud_stopping_bulk += up1[0] - up0[0];
             m_ebud_stopping_band += up1[1] - up0[1];
         }
@@ -17875,6 +17940,56 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCCompressionEnergy (
 }
 
 
+void HybridPICModel::AuditQdsmcSourceStage (
+    int const lev, int const half, amrex::MultiFab const& Te_before,
+    amrex::MultiFab const& rho_state, amrex::MultiFab const& rho_receiver) const
+{
+    auto& warpx = WarpX::GetInstance();
+    auto const& Te = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    if (!warpx.m_fields.has("hybrid_qdsmc_source_stage_audit", lev)) {
+        warpx.m_fields.alloc_init("hybrid_qdsmc_source_stage_audit", lev,
+            Te.boxArray(), Te.DistributionMap(), 16, amrex::IntVect(0), 0.0_rt);
+    }
+    auto& out = *warpx.m_fields.get("hybrid_qdsmc_source_stage_audit", lev);
+    auto const* pedestal = DensityPedestal(lev);
+    bool const use_ped = pedestal != nullptr;
+    auto const& rho_new = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::Real const scale = PhysConst::kb / (PhysConst::q_e * (m_gamma - 1.0_rt));
+    int const off = half * 8;
+    for (amrex::MFIter mfi(out); mfi.isValid(); ++mfi) {
+        auto const dst = out.array(mfi);
+        auto const before = Te_before.const_array(mfi), after = Te.const_array(mfi);
+        auto const state = rho_state.const_array(mfi), receiver = rho_receiver.const_array(mfi);
+        auto const rn = rho_new.const_array(mfi);
+        auto const ped = use_ped ? pedestal->const_array(mfi)
+                                : amrex::Array4<amrex::Real const>{};
+        amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+            amrex::Real const p = use_ped ? ped(i,j,k) : 0.0_rt;
+            amrex::Real const dT = after(i,j,k) - before(i,j,k);
+            dst(i,j,k,off) = before(i,j,k);
+            dst(i,j,k,off+1) = after(i,j,k);
+            dst(i,j,k,off+2) = scale * amrex::max(state(i,j,k) + p, rho_floor) * dT;
+            dst(i,j,k,off+3) = scale * amrex::max(receiver(i,j,k) + p, rho_floor) * dT;
+            dst(i,j,k,off+4) = state(i,j,k);
+            dst(i,j,k,off+5) = rn(i,j,k);
+            dst(i,j,k,off+6) = p;
+            dst(i,j,k,off+7) = dT;
+        });
+    }
+    // These are measured temperature increments under two stated capacities,
+    // not an independent physical-source or complete electron-energy ledger.
+    std::ostringstream line;
+    line << std::setprecision(17) << "QDSMC_SOURCE_STAGE {\"step\":" << warpx.getistep(0)
+         << ",\"half\":" << half << ",\"stage_density\":" << m_qdsmc_source_stage_density
+         << ",\"delta_u_state_J\":" << EnergyVolumeIntegral(out, off+2, lev)
+         << ",\"delta_u_receiver_J\":" << EnergyVolumeIntegral(out, off+3, lev)
+         << ",\"delta_T_max_abs_K\":" << out.norminf(off+7)
+         << ",\"n_floor_m3\":" << m_n_floor << "}\n";
+    amrex::Print() << line.str();
+}
+
+
 void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC_PC()");
@@ -17903,6 +18018,8 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
     // the final E-solve.
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
+        auto const& rho_old = *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+        auto const& rho_new = *warpx.m_fields.get(FieldType::rho_fp, lev);
         QDSMCInitializeUe(lev, QdsmcUeMode::JiNewRhoHalf);
         QdsmcPhaseMinTe(lev, "pc_enter");
 
@@ -17914,14 +18031,30 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         // attribute each stage's dU (transport carries advection AND the
         // polytropic compression signal).
         bool const ebud = m_energy_budget;
+        bool const audit = m_qdsmc_source_stage_audit_interval > 0 &&
+            warpx.getistep(0) % m_qdsmc_source_stage_audit_interval == 0;
+        auto const& Te_state = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        amrex::MultiFab source_before;
+        if (audit) {
+            source_before.define(Te_state.boxArray(), Te_state.DistributionMap(), 1, 0);
+        }
         std::array<amrex::Real, 2> ub0{}, ub1{}, ub2{}, ub3{}, ub4{}, ub5{};
-        if (ebud) { ub0 = QDSMCClassEnergy(lev); }
+        if (ebud) { ub0 = QDSMCClassEnergy(lev, &rho_old); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
         QdsmcPhaseMinTe(lev, "pc_conduction_half1");
-        if (ebud) { ub1 = QDSMCClassEnergy(lev); }
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (ebud) { ub1 = QDSMCClassEnergy(lev, &rho_old); }
+        if (audit) { amrex::MultiFab::Copy(source_before, Te_state, 0, 0, 1, 0); }
+        if (m_qdsmc_source_stage_density) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true, rho_old);
+        } else {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        }
+        if (audit) {
+            AuditQdsmcSourceStage(lev, 0, source_before, rho_old,
+                                 m_qdsmc_source_stage_density ? rho_old : rho_new);
+        }
         QdsmcPhaseMinTe(lev, "pc_sources1");
-        if (ebud) { ub2 = QDSMCClassEnergy(lev); }
+        if (ebud) { ub2 = QDSMCClassEnergy(lev, &rho_old); }
         // Pre-transport Te snapshot for the compression split of the
         // transport-stage dU (instrument only).
         amrex::MultiFab te_pre;
@@ -17939,7 +18072,13 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             m_ebud_comp_bulk += comp[0];
             m_ebud_comp_band += comp[1];
         }
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (audit) { amrex::MultiFab::Copy(source_before, Te_state, 0, 0, 1, 0); }
+        if (m_qdsmc_source_stage_density) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true, rho_new);
+        } else {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        }
+        if (audit) { AuditQdsmcSourceStage(lev, 1, source_before, rho_new, rho_new); }
         QdsmcPhaseMinTe(lev, "pc_sources2");
         if (ebud) { ub4 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
@@ -17953,7 +18092,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             m_ebud_adv_bulk  += ub3[0] - ub2[0];
             m_ebud_adv_band  += ub3[1] - ub2[1];
             PrintEnergyBudget(ub5[0], ub5[1],
-                "TOTAL = adv+cond+src; comp is a SUBSET of adv;"
+                "TOTAL = adv+cond+src; adv includes density/class changes; comp is a SUBSET of adv;"
                 " sink, stopping and visc are SUBSETS of src"
                 " -- do not add the subsets to the total");
         }

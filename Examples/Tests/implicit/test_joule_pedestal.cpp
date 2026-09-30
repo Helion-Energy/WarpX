@@ -25,6 +25,8 @@ main (int argc, char** argv) {
         amrex::Real ne = 1.e19_rt, pedfrac = .2_rt, dt = 1.e-7_rt;
         amrex::Real accepted = 1._rt, redirected = 0._rt, declined = 0._rt;
         bool variable = false, redirect = false;
+        amrex::Real receiving_ratio = 1._rt;
+        test.query("receiving_density_ratio", receiving_ratio);
         test.query("ne", ne);
         test.query("pedestal_fraction", pedfrac);
         test.query("dt", dt);
@@ -90,10 +92,15 @@ main (int argc, char** argv) {
         MultiFab redirect_energy(te.boxArray(), te.DistributionMap(), 2,
                                  te.nGrowVect());
         redirect_energy.setVal(0._rt);
-        auto const before = hp.QDSMCClassEnergy(0, &rho);
+        MultiFab receiving(rho.boxArray(), rho.DistributionMap(), 1,
+                           rho.nGrowVect());
+        MultiFab::Copy(receiving, rho, 0, 0, 1, rho.nGrowVect());
+        receiving.mult(receiving_ratio, 0, 1, receiving.nGrow());
+        auto const before = hp.QDSMCClassEnergy(0, &receiving);
         hp.QDSMCAddJouleHeating(0, dt, rho,
-                                redirect ? &redirect_energy : nullptr);
-        auto const after = hp.QDSMCClassEnergy(0, &rho);
+                               redirect ? &redirect_energy : nullptr,
+                               receiving_ratio == 1._rt ? nullptr : &receiving);
+        auto const after = hp.QDSMCClassEnergy(0, &receiving);
         // Independent physical dual-ring measure. The periodic high-z image
         // is excluded; duplicate inter-box nodes use sum_unique below.
         MultiFab diagnostic(te.boxArray(), te.DistributionMap(), 4, 0);
@@ -115,7 +122,8 @@ main (int argc, char** argv) {
                     j == z_hi ? 0._rt
                               : MathConst::pi * (vh * vh - vl * vl) * dx[1];
                 auto const capacity =
-                    1.5_rt * (rr(i, j, k) + (use_ped ? pp(i, j, k) : 0._rt)) /
+                    1.5_rt * (receiving_ratio * rr(i, j, k) +
+                              (use_ped ? pp(i, j, k) : 0._rt)) /
                     PhysConst::q_e * PhysConst::kb;
                 out(i, j, k, 0) = volume * capacity * (tt(i, j, k) - t0);
                 // Redirect stores mass-independent energy per ion; this is

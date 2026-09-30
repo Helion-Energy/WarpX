@@ -1049,3 +1049,25 @@ if(TARGET lib_rz)
             ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "continuity;native")
     endif()
 endif()
+
+# Source capacities must follow the temperature's PC stage density.
+if(TARGET lib_rz)
+    foreach(fixture IN ITEMS order capacity)
+        add_executable(test_qdsmc_source_stage_${fixture}_rz
+            test_qdsmc_source_stage_${fixture}.cpp)
+        target_link_libraries(test_qdsmc_source_stage_${fixture}_rz PRIVATE lib_rz)
+        target_include_directories(test_qdsmc_source_stage_${fixture}_rz
+            PRIVATE ${WarpX_SOURCE_DIR}/Source)
+        if(WarpX_COMPUTE STREQUAL "CUDA")
+            setup_target_for_cuda_compilation(test_qdsmc_source_stage_${fixture}_rz)
+        endif()
+    endforeach()
+    add_test(NAME test_rz_qdsmc_source_stage
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_qdsmc_source_stage.py
+            --order-exe $<TARGET_FILE:test_qdsmc_source_stage_order_rz>
+            --capacity-exe $<TARGET_FILE:test_qdsmc_source_stage_capacity_rz>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/qdsmc_source_stage)
+    set_tests_properties(test_rz_qdsmc_source_stage PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ")
+endif()
