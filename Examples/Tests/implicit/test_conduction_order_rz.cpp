@@ -9,6 +9,7 @@
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_Reduce.H>
+#include <AMReX_VisMF.H>
 
 #include <array>
 #include <cmath>
@@ -135,6 +136,16 @@ main (int argc, char** argv) {
                 amrex::max(max_energy_relative, std::abs(energy() - e0) / e0);
             evolved[step].define(te.boxArray(), te.DistributionMap(), 1, 0);
             amrex::MultiFab::Copy(evolved[step], te, 0, 0, 1, 0);
+        }
+        // Optional native-state evidence for deterministic unchanged-path checks.
+        // Output occurs only after all three advances, with no solver mutation.
+        bool write_fields = false;
+        pp.query("write_fields", write_fields);
+        if (write_fields) {
+            amrex::VisMF::Write(initial, "T0");
+            for (int step = 0; step < 3; ++step) {
+                amrex::VisMF::Write(evolved[step], "T" + std::to_string(step + 1));
+            }
         }
         auto owner = te.OwnerMask(geom.periodicity());
         amrex::ReduceOps<
