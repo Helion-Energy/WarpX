@@ -1,0 +1,11 @@
+# Cartesian control with particle pairs straddling a box boundary.
+geometry.dims = 3
+amr.n_cell = 16 16 16
+geometry.prob_lo = 0. 0. 0.
+geometry.prob_hi = 16. 16. 16.
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+my_constants.y0 = 8.25
+FILE = inputs_base
