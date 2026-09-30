@@ -142,7 +142,7 @@ class HallJacobiPC : public Preconditioner<T,Ops>
 
         void Define (const T&, Ops*) override;
 
-        void Update (const T& a_U) override;
+        void UpdateAt (const T& a_U) override;
 
         /**
          * \brief Apply x = P^{-1} b per cell via the closed-form rotation
@@ -276,7 +276,7 @@ void HallJacobiPC<T,Ops>::Define ( const T& a_U,
 }
 
 template <class T, class Ops>
-void HallJacobiPC<T,Ops>::Update (const T& a_U)
+void HallJacobiPC<T,Ops>::UpdateAt (const T& a_U)
 {
     BL_PROFILE("HallJacobiPC::Update()");
     using namespace amrex;

@@ -94,7 +94,8 @@ public:
      */
     int OneStep ( amrex::Real  start_time,
                   amrex::Real  a_dt,
-                  int          a_step ) override;
+                  int          a_step,
+                  bool         verbose_step ) override;
 
     void ComputeRHS ( WarpXSolverVec&  a_RHS,
                 const WarpXSolverVec&  a_E,
@@ -228,7 +229,7 @@ private:
     bool m_darwin_outer_verbose = false;
     amrex::Real m_darwin_outer_relaxation = 1.0;
     int m_darwin_outer_relaxation_start = 0;
-    int SolveDarwinSegregated (amrex::Real start_time, int a_step);
+    int SolveDarwinSegregated (amrex::Real start_time, int a_step, bool verbose_step);
     void RefreshDarwinELong (amrex::Real theta_time);
 
     /** End-of-step E finisher: false (default) extrapolates the algebraic
@@ -333,7 +334,8 @@ private:
      *  \return the inner solver's exit status, or -7 if the outer loop
      *          reached qdsmc_outer_max_iterations with
      *          qdsmc_outer_require_convergence set. */
-    int SolveSegregated (amrex::Real start_time, int a_step, amrex::Real field_reference = 0.0);
+    int SolveSegregated (amrex::Real start_time, int a_step, bool verbose_step,
+                         amrex::Real field_reference = 0.0);
 
     /** Unified external drive on the Darwin path: impose the (gauge-shifted)
      * external vector potential as the boundary value of the evolved A on

@@ -349,7 +349,8 @@ void ThetaImplicitHybrid::PrintParameters () const
 
 int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
                                    const amrex::Real  a_dt,
-                                   const int          a_step )
+                                   const int          a_step,
+                                   const bool         verbose_step )
 {
     BL_PROFILE("ThetaImplicitHybrid::OneStep()");
 
@@ -605,11 +606,11 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // Solve nonlinear system for E^{n+theta} (and eventually Pe^{n+theta})
     int exit_status = 0;
     if (m_darwin_segregated_solve) {
-        exit_status = SolveDarwinSegregated(start_time, a_step);
+        exit_status = SolveDarwinSegregated(start_time, a_step, verbose_step);
     } else if (m_qdsmc_segregated_solve) {
-        exit_status = SolveSegregated( start_time, a_step );
+        exit_status = SolveSegregated( start_time, a_step, verbose_step );
     } else {
-        m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
+        m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step, verbose_step );
         exit_status = m_nlsolver->GetExitStatus();
     }
     if (exit_status < 0) { return exit_status; }
@@ -625,7 +626,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     const amrex::Real new_time = start_time + m_dt;
 
     // Advance particles from t^{n+1/2} to t^{n+1}
-    m_WarpX->FinishImplicitParticleUpdate(new_time);
+    FinishImplicitParticleUpdate(new_time, a_step);
 
     if (m_circuit_native) { CommitNativeCircuitStage(start_time); }
 
@@ -860,7 +861,7 @@ void ThetaImplicitHybrid::RefreshDarwinELong (amrex::Real theta_time)
         rho_half_alias, theta_time, m_darwin_segregated_solve);
 }
 
-int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_step)
+int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_step, bool verbose_step)
 {
     BL_PROFILE("ThetaImplicitHybrid::SolveDarwinSegregated()");
     // The density mask is frozen only within this step. Rebuild its scalar
@@ -907,7 +908,7 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
         {
             // The thermal update is required even when the initial field
             // residual already passes. E_L stays fixed throughout this solve.
-            status = SolveSegregated(start_time, a_step, field_reference);
+            status = SolveSegregated(start_time, a_step, verbose_step, field_reference);
             if (status < 0)
             {
                 return status;
@@ -917,7 +918,7 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
         {
             // E_L stays fixed for every Jv and line search in this solve.
             m_nlsolver->SetConvergenceReferenceNorm(field_reference);
-            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step);
+            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step, verbose_step);
             m_nlsolver->SetConvergenceReferenceNorm(0.0_rt);
             status = m_nlsolver->GetExitStatus();
             if (status < 0) { return status; }
@@ -1009,7 +1010,7 @@ int ThetaImplicitHybrid::SolveDarwinSegregated (amrex::Real start_time, int a_st
 
 int
 ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_step,
-                                      amrex::Real field_reference)
+                                      const bool verbose_step, amrex::Real field_reference)
 {
     BL_PROFILE("ThetaImplicitHybrid::SolveSegregated()");
 
@@ -1184,7 +1185,7 @@ ThetaImplicitHybrid::SolveSegregated (const amrex::Real start_time, const int a_
         if (!(initial_norm == 0.0_rt || initial_norm < field_target))
         {
             m_nlsolver->SetConvergenceReferenceNorm(field_reference);
-            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step);
+            m_nlsolver->Solve(m_E, m_Eold, start_time, m_dt, a_step, verbose_step);
             m_nlsolver->SetConvergenceReferenceNorm(0.0_rt);
             exit_status = m_nlsolver->GetExitStatus();
             if (exit_status < 0)

@@ -123,7 +123,7 @@ class HybridPICRZPC : public Preconditioner<T, Ops> {
             << "\n";
     }
     void
-    Update (T const&) override {
+    Update () override {
         using namespace amrex;
         using namespace amrex::literals;
         using ablastr::coarsen::sample::Interp;

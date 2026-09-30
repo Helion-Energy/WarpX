@@ -4121,7 +4121,7 @@ void HybridPICModel::RefreshIonFluidMoments (
                     auto const* ux = pti.GetAttribs(PIdx::ux).dataPtr();
                     auto const* uy = pti.GetAttribs(PIdx::uy).dataPtr();
                     auto const* uz = pti.GetAttribs(PIdx::uz).dataPtr();
-                    int const* ion_lev = pc.do_field_ionization
+                    int const* ion_lev = pc.DoFieldIonization()
                         ? pti.GetiAttribs("ionizationLevel").dataPtr() : nullptr;
                     auto& jx = Js[lev][0]->get(pti);
                     auto& jy = Js[lev][1]->get(pti);

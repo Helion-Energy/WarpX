@@ -150,7 +150,7 @@ class BlockBandedPC : public Preconditioner<T,Ops>
         BlockBandedPC& operator=(BlockBandedPC&&) noexcept = delete;
 
         void Define (const T&, Ops*) override;
-        void Update (const T& a_U) override;
+        void UpdateAt (const T& a_U) override;
         void Apply (T&, const T&) override;
         bool ApplyFrozenOperator (T&, const T&) override;
         void printParameters() const override;
@@ -2710,7 +2710,7 @@ void BlockBandedPC<T,Ops>::CuDSSSolve (BoxSys& S)
 #endif  // WARPX_DIM_RZ && WARPX_USE_CUDSS
 
 template <class T, class Ops>
-void BlockBandedPC<T,Ops>::Update (const T& a_U)
+void BlockBandedPC<T,Ops>::UpdateAt (const T& a_U)
 {
     BL_PROFILE("BlockBandedPC::Update()");
 

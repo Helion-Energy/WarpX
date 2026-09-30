@@ -436,12 +436,15 @@ SubcycledParticleContainer::HandleBoundariesSubcycle (amrex::Real cur_time, amre
         // Match the order of WarpX::HandleParticlesAtBoundaries: mark/reflect
         // at the embedded boundary, record the scraped particles, then remove
         // the absorbed ones.
-        if (WarpX::eb_particle_boundary == ParticleBoundaryType::Reflecting)
+        if (WarpX::eb_particle_boundary == ParticleBoundaryType::Reflecting ||
+            WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal)
         {
             for (int lev = 0; lev <= finestLevel(); ++lev)
             {
                 scrapeParticlesAtEB(*this, distance_to_eb, lev,
-                    ParticleBoundaryProcess::Reflect{dt_sub, getMass()});
+                    ParticleBoundaryProcess::ParticleBoundaryInteraction{
+                        dt_sub, getMass(), WarpX::eb_particle_boundary,
+                        getBoundaryThermalVelocity()});
             }
             boundary_buffer.gatherParticlesFromEmbeddedBoundaries(
                 *this, getSpeciesId(), distance_to_eb, cur_time, dt_sub);

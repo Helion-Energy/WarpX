@@ -23,6 +23,7 @@
 #include <AMReX_MLLinOp.H>
 #include <AMReX_MLCurlCurl.H>
 #include <AMReX_MLMG.H>
+#include <AMReX_GMRES_MLMG.H>
 
 #include <array>
 
@@ -151,6 +152,7 @@ class CurlCurlMLMGPC : public Preconditioner<T,Ops>
         std::unique_ptr<amrex::LPInfo> m_info;
         std::unique_ptr<amrex::MLCurlCurl> m_curl_curl;
         std::unique_ptr<amrex::MLMGT<MFArr>> m_solver;
+        std::unique_ptr<amrex::GMRESMLMGT<MFArr>> m_gmres_solver;
 
         /**
          * \brief Read parameters
@@ -256,6 +258,15 @@ void CurlCurlMLMGPC<T,Ops>::Define ( const T& a_U,
     m_solver->setVerbose(static_cast<int>(m_verbose));
     m_solver->setBottomVerbose(static_cast<int>(m_bottom_verbose));
 
+    // Retain the explicitly selected inner GMRES solver. The default uses
+    // upstream's fixed-count multigrid preconditioner.
+    if (m_use_gmres) {
+        m_gmres_solver = std::make_unique<GMRESMLMGT<MFArr>>(*m_solver);
+        m_gmres_solver->usePrecond(m_use_gmres_pc);
+        m_gmres_solver->setPrecondNumIters(m_max_iter);
+        m_gmres_solver->setVerbose(static_cast<int>(m_verbose));
+    }
+
     m_bcoefs = m_ops->GetMassMatricesCoeff();
     if (m_bcoefs != nullptr) { m_beta_scalar = false; }
 
@@ -271,9 +282,6 @@ void CurlCurlMLMGPC<T,Ops>::Update ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         IsDefined(),
         "CurlCurlMLMGPC::Update() called on undefined object" );
-
-    // a_U is not needed for a linear operator
-    amrex::ignore_unused(a_U);
 
     // Hybrid electron-inertia mode: the solver supplies E-staggered
     // beta = 1/d_e^2 coefficients of the divided operator

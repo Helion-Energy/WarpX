@@ -1130,7 +1130,7 @@ WarpX::ComputeEightWaysExtensions (
                             // flagged so that it is stabilized by the BCK correction instead
                             for (int n = 0; n < count; n++) {
                                 auto const vec =
-                                    FaceInfoBox::uint8_to_inds(borrowing_neigh_faces[ps + n]);
+                                    FaceInfoBox::uint8_to_inds(borrowing_neighbor_faces[ps + n]);
                                 amrex::Gpu::Atomic::AddNoRet(
                                     ::GetNeighborPtr(S_mod, i, j, k, vec(0), vec(1), idim),
                                     borrowing_area[ps + n]);

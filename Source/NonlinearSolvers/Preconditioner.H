@@ -58,7 +58,16 @@ class Preconditioner
         /**
          * \brief Update the preconditioner
          */
-        virtual void Update () = 0;
+        virtual void Update ()
+        {
+            WARPX_ABORT_WITH_MESSAGE(
+                "This preconditioner requires UpdateAt with a linearization state");
+        }
+
+        /** Update at the current nonlinear state. Stateless preconditioners
+         * use the upstream Update() interface; state-dependent diagnostics
+         * and layout setup receive the Jacobian's saved base explicitly. */
+        virtual void UpdateAt (const T&) { Update(); }
 
         /**
          * \brief Apply (solve) the preconditioner given a RHS

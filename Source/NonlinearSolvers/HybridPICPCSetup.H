@@ -378,7 +378,7 @@ void HybridPICPC<T,Ops>::printParameters () const
 }
 
 template <class T, class Ops>
-void HybridPICPC<T,Ops>::Update ( const T& a_U )
+void HybridPICPC<T,Ops>::Update ()
 {
     using namespace amrex;
     using warpx::fields::FieldType;
@@ -388,7 +388,6 @@ void HybridPICPC<T,Ops>::Update ( const T& a_U )
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         IsDefined(), "HybridPICPC::Update() called on undefined object");
-    amrex::ignore_unused(a_U);
 
     auto& warpx = WarpX::GetInstance();
     const HybridPICModel* hybrid = warpx.get_pointer_HybridPICModel();

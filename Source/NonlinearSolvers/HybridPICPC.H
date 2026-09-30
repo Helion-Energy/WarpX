@@ -203,7 +203,7 @@ class HybridPICPC : public Preconditioner<T,Ops>
 
         /** Refreeze the coefficients (bhat, c_w, eta terms) from the current
          *  Newton linearization state and inject them down the hierarchy. */
-        void Update (const T& a_U) override;
+        void Update () override;
 
         /** Approximately solve J_pc x = b on the primal pair: the inner
          *  GMRES preconditioned by multigrid V-cycles, or vcycles V-cycles

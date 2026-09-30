@@ -77,7 +77,7 @@ class JacobianFunctionMF : public LinearFunction<T,Ops>
     inline
     void updatePreCondMat () override
     {
-        if (m_usePreCond) { m_preCond->Update(); }
+        if (m_usePreCond) { m_preCond->UpdateAt(m_Y0); }
     }
 
     inline
