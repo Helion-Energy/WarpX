@@ -1,9 +1,9 @@
 Weighted particle temperature deposition
 ========================================
 
-These native RZ and 3D tests keep a small set of neutral particles at fixed
-positions and deposit their temperatures through the hybrid solver. Neutrality
-and ``do_not_push`` isolate the estimator from field evolution.
+These native RZ and 3D tests keep a small set of ions at fixed positions and
+deposit their temperatures through the hybrid solver. Disabling particle push
+and gather isolates the estimator from field evolution.
 
 For two independent samples with positive effective weights, the unbiased
 weighted variance is exactly half the squared difference of the two velocities.
