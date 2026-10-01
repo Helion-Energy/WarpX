@@ -9,6 +9,7 @@
 
 #include "EmbeddedBoundary/DistanceToEB.H"
 #include "Initialization/SampleGaussianFluxDistribution.H"
+#include "Particles/BoundaryProbability.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/Pusher/UpdatePosition.H"
 #include "Particles/WarpXParticleContainer.H"
@@ -168,6 +169,29 @@ struct ParticleBoundaryInteraction {
         // SetParticlePosition handles the conversion to the stored
         // (reduced-dimension) coordinates.
         setPosition(i, x_new, y_new, z_new);
+    }
+};
+
+/** Select one existing physical-wall handler for each detected EB encounter. */
+struct FractionalAbsorbing {
+    amrex::Real m_fraction;
+    ParticleBoundaryInteraction m_reflecting;
+
+    template <typename PData>
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void operator() (PData& ptd, int i,
+                     const SetParticlePosition<PIdx>& setPosition,
+                     amrex::ParticleReal xp, amrex::ParticleReal yp, amrex::ParticleReal zp,
+                     amrex::Array4<const amrex::Real> const& distance_to_eb,
+                     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
+                     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi,
+                     amrex::RandomEngine const& engine) const noexcept
+    {
+        if (warpx::particles::absorb_at_fractional_boundary(m_fraction, engine)) {
+            Absorb{}(ptd, i, setPosition, xp, yp, zp, distance_to_eb, plo, dxi, engine);
+        } else {
+            m_reflecting(ptd, i, setPosition, xp, yp, zp, distance_to_eb, plo, dxi, engine);
+        }
     }
 };
 

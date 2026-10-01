@@ -1088,6 +1088,11 @@ Domain Boundary Conditions
 
     * ``Absorbing``: Particles leaving the boundary will be deleted.
 
+    * ``fractional_absorbing``: Each particle crossing the boundary is absorbed with
+      probability :pp:param:`boundary.particle_absorption_fraction`; otherwise it is
+      specularly reflected. Reflected particles retain their identity, weight, and
+      tangential momentum. Requires ``boundary.reflect_all_velocities = false``.
+
     * ``Periodic``: Particles leaving the boundary will re-enter from the opposite boundary. The field boundary condition must be consistently set to periodic and both lower and upper boundaries must be periodic.
 
     * ``Reflecting``: Particles leaving the boundary are reflected from the boundary back into the domain.
@@ -1102,6 +1107,41 @@ Domain Boundary Conditions
     * ``None``: No boundary conditions are applied to the particles.
       When using RZ, RCYLINDER, and RSPHERE, this option must be used for the lower radial boundary, the first value of :pp:param:`boundary.particle_lo`.
       This should not be used in any other cases.
+
+.. pp:param:: boundary.particle_absorption_fraction
+    :type: ``float``
+
+    Required exactly when a domain face or embedded boundary selects
+    ``fractional_absorbing``. Must be finite and in ``[0, 1]``. The value is the
+    probability of **absorption** per wall encounter: ``0`` is ordinary specular
+    reflection and ``1`` is ordinary absorption. Both endpoints use the existing
+    deterministic boundary handling and consume no extra random numbers.
+    Intermediate values use one AMReX random draw per encounter and currently
+    require ``algo.evolve_scheme = explicit``. The scalar applies to all species,
+    including subcycled species and neutral products, at the selected walls only.
+
+    Whole macroparticles are sampled; the absorbed fraction equals the input in
+    expectation, not exactly at each step. Reflected weights are not reduced.
+    Repeated encounters are independent decisions. Existing seed and GPU
+    reproducibility limitations of :pp:param:`warpx.random_seed` apply.
+
+    Do not also set a species ``reflection_model_<face>(E)`` on the same fractional
+    domain face. That legacy input remains available on ordinary absorbing faces;
+    its existing parser argument and signed normal velocity convention are
+    unchanged. A constant legacy reflection probability of ``1-f`` is a
+    statistical control for absorption fraction ``f``, not an identical set of
+    particles for the same RNG sequence. Intermediate domain modes retain the
+    legacy partially reflecting absorbing-wall deposition/field treatment.
+    Simultaneous domain crossings use the existing coordinate order. Cumulative
+    domain loss tallies assign a corner loss once to the lowest eligible lossy
+    face index; per-face scraping buffers retain their geometric convention.
+
+    PICMI: ``Simulation(warpx_particle_absorption_fraction=f)``. For an embedded
+    wall, select ``EmbeddedBoundary(particle_boundary="fractional_absorbing")``.
+    Example native configuration::
+
+        boundary.particle_eb = fractional_absorbing
+        boundary.particle_absorption_fraction = 0.25
 
 .. pp:param:: boundary.reflect_all_velocities
     :type: ``bool``
@@ -1249,6 +1289,13 @@ additionally define the electric potential at the embedded boundary with an anal
       ``boundary.<species_name>.u_th`` (in units of :math:`c`, i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`),
       the same input used by the domain ``thermal`` particle boundary condition. The same standard
       deviation is used to sample all components.
+
+    * ``fractional_absorbing``: Routes each encounter to the existing absorbing
+      or specular reflection handler using :pp:param:`boundary.particle_absorption_fraction`.
+      Reflection uses the local surface normal, contact point, and remaining
+      timestep (the particle substep for subcycled species). Requires the physical
+      surface configuration ``boundary.eb_type = absorbing``; the insulating
+      pre-surface collection band is not supported for this particle mode.
 
 .. pp:param:: boundary.eb_type
     :type: ``string``

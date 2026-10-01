@@ -443,7 +443,7 @@ void init_WarpX (py::module& m)
             },
             py::arg("species_name"), py::arg("dim"), py::arg("iside"),
             "Gets the cumulative charge [C] the given species has lost to the "
-            "absorbing/open domain boundary face (dim, iside), iside 0=lo 1=hi "
+            "absorbing/open/fractional domain boundary face (dim, iside), iside 0=lo 1=hi "
             "(RZ: dim 0=r, 1=z). Collective: call on all ranks. Not preserved "
             "across restart."
         )
@@ -454,7 +454,7 @@ void init_WarpX (py::module& m)
             },
             py::arg("species_name"), py::arg("dim"), py::arg("iside"),
             "Gets the cumulative kinetic energy [J] the given species has lost "
-            "to the absorbing/open domain boundary face (dim, iside), iside "
+            "to the absorbing/open/fractional domain boundary face (dim, iside), iside "
             "0=lo 1=hi (RZ: dim 0=r, 1=z). Collective: call on all ranks. Not "
             "preserved across restart."
         )

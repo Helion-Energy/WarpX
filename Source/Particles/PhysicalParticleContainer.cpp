@@ -365,6 +365,28 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
 #endif
     }
 
+    // Check requested modes, including fractional endpoints normalized to old
+    // enums. Never combine the new absorption probability with a second draw
+    // from a species reflection model. Keep the legacy (E)/v interface intact.
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        std::string axis;
+#if defined(WARPX_DIM_1D_Z)
+        axis = "z";
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+        axis = d == 0 ? "x" : "z";
+#else
+        axis = d == 0 ? "x" : (d == 1 ? "y" : "z");
+#endif
+        for (int side = 0; side < 2; ++side) {
+            bool const fractional = side ? WarpX::fractional_particle_boundary_hi[d]
+                                         : WarpX::fractional_particle_boundary_lo[d];
+            std::string const key = "reflection_model_" + axis + (side ? "hi(E)" : "lo(E)");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !fractional || !pp_species_name.contains(key.c_str()),
+                "fractional_absorbing conflicts with " + species_name + "." + key);
+        }
+    }
+
     // Read reflection models for absorbing boundaries; defaults to a zero
     pp_species_name.query("reflection_model_xlo(E)", m_boundary_conditions.reflection_model_xlo_str);
     pp_species_name.query("reflection_model_xhi(E)", m_boundary_conditions.reflection_model_xhi_str);

@@ -1282,16 +1282,24 @@ void MultiParticleContainer::ScrapeParticlesAtEB (
     }
 
     if (WarpX::eb_particle_boundary == ParticleBoundaryType::Reflecting ||
-        WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal) {
+        WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal ||
+        WarpX::eb_particle_boundary == ParticleBoundaryType::Fractional_Absorbing) {
         auto& warpx = WarpX::GetInstance();
         for (auto& pc : allcontainers) {
             amrex::ParticleReal const mass = pc->getMass();
             amrex::ParticleReal const uth = pc->getBoundaryThermalVelocity();
             for (int lev = 0; lev <= pc->finestLevel(); ++lev) {
                 amrex::Real const dt_lev = warpx.getdt(lev);
-                scrapeParticlesAtEB(*pc, distance_to_eb, lev,
-                    ParticleBoundaryProcess::ParticleBoundaryInteraction{
-                        dt_lev, mass, WarpX::eb_particle_boundary, uth});
+                if (WarpX::eb_particle_boundary == ParticleBoundaryType::Fractional_Absorbing) {
+                    scrapeParticlesAtEB(*pc, distance_to_eb, lev,
+                        ParticleBoundaryProcess::FractionalAbsorbing{
+                            WarpX::particle_absorption_fraction,
+                            {dt_lev, mass, ParticleBoundaryType::Reflecting}});
+                } else {
+                    scrapeParticlesAtEB(*pc, distance_to_eb, lev,
+                        ParticleBoundaryProcess::ParticleBoundaryInteraction{
+                            dt_lev, mass, WarpX::eb_particle_boundary, uth});
+                }
             }
         }
     } else {

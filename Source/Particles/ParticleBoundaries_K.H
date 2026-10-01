@@ -8,12 +8,21 @@
 #define WARPX_PARTICLEBOUNDARIES_K_H_
 
 #include "ParticleBoundaries.H"
+#include "BoundaryProbability.H"
 #include "Initialization/SampleGaussianFluxDistribution.H"
 
 #include <AMReX_AmrCore.H>
 
 namespace ApplyParticleBoundaries {
     using namespace amrex::literals;
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void reflect_boundary_particle (amrex::ParticleReal& x, amrex::Real wall,
+                                    bool& change_sign) noexcept
+    {
+        x = 2*wall - x;
+        change_sign = true;
+    }
+
     /* \brief Applies the boundary condition on a specific axis
      *        This is called by apply_boundaries.
      */
@@ -23,11 +32,21 @@ namespace ApplyParticleBoundaries {
                     bool& change_sign_ux, bool& rethermalize_x, bool& particle_lost,
                     ParticleBoundaryType xmin_bc, ParticleBoundaryType xmax_bc,
                     amrex::Real refl_probability_xmin, amrex::Real refl_probability_xmax,
-                    amrex::RandomEngine const& engine )
+                    amrex::Real absorption_fraction, amrex::RandomEngine const& engine )
     {
         if (x < xmin) {
             if (xmin_bc == ParticleBoundaryType::Open) {
                 particle_lost = true;
+            }
+            else if (xmin_bc == ParticleBoundaryType::Fractional_Absorbing) {
+                if (!particle_lost) {
+                    if (warpx::particles::absorb_at_fractional_boundary(
+                            absorption_fraction, engine)) {
+                        particle_lost = true;
+                    } else {
+                        reflect_boundary_particle(x, xmin, change_sign_ux);
+                    }
+                }
             }
             else if (xmin_bc == ParticleBoundaryType::Absorbing) {
                 if (refl_probability_xmin == 0 || amrex::Random(engine) > refl_probability_xmin) {
@@ -35,13 +54,11 @@ namespace ApplyParticleBoundaries {
                 }
                 else
                 {
-                    x = 2*xmin - x;
-                    change_sign_ux = true;
+                    reflect_boundary_particle(x, xmin, change_sign_ux);
                 }
             }
             else if (xmin_bc == ParticleBoundaryType::Reflecting) {
-                x = 2*xmin - x;
-                change_sign_ux = true;
+                reflect_boundary_particle(x, xmin, change_sign_ux);
             }
             else if (xmin_bc == ParticleBoundaryType::Thermal) {
                 x = 2*xmin - x;
@@ -52,19 +69,27 @@ namespace ApplyParticleBoundaries {
             if (xmax_bc == ParticleBoundaryType::Open) {
                 particle_lost = true;
             }
+            else if (xmax_bc == ParticleBoundaryType::Fractional_Absorbing) {
+                if (!particle_lost) {
+                    if (warpx::particles::absorb_at_fractional_boundary(
+                            absorption_fraction, engine)) {
+                        particle_lost = true;
+                    } else {
+                        reflect_boundary_particle(x, xmax, change_sign_ux);
+                    }
+                }
+            }
             else if (xmax_bc == ParticleBoundaryType::Absorbing) {
                 if (refl_probability_xmax == 0 || amrex::Random(engine) > refl_probability_xmax) {
                     particle_lost = true;
                 }
                 else
                 {
-                    x = 2*xmax - x;
-                    change_sign_ux = true;
+                    reflect_boundary_particle(x, xmax, change_sign_ux);
                 }
             }
             else if (xmax_bc == ParticleBoundaryType::Reflecting) {
-                x = 2*xmax - x;
-                change_sign_ux = true;
+                reflect_boundary_particle(x, xmax, change_sign_ux);
             }
             else if (xmax_bc == ParticleBoundaryType::Thermal) {
                 x = 2*xmax - x;
@@ -129,7 +154,7 @@ namespace ApplyParticleBoundaries {
         apply_boundary(x, gridmin.x, gridmax.x, change_sign_ux, rethermalize_x, particle_lost,
                        boundaries.xmin_bc, boundaries.xmax_bc,
                        boundaries.reflection_model_xlo(-ux), boundaries.reflection_model_xhi(ux),
-                       engine);
+                       boundaries.absorption_fraction, engine);
         if (rethermalize_x) {
             thermalize_boundary_particle(ux, uy, uz, boundaries.m_uth, engine);
         }
@@ -139,7 +164,7 @@ namespace ApplyParticleBoundaries {
         apply_boundary(y, gridmin.y, gridmax.y, change_sign_uy, rethermalize_y, particle_lost,
                        boundaries.ymin_bc, boundaries.ymax_bc,
                        boundaries.reflection_model_ylo(-uy), boundaries.reflection_model_yhi(uy),
-                       engine);
+                       boundaries.absorption_fraction, engine);
         if (rethermalize_y) {
             thermalize_boundary_particle(uy, uz, ux, boundaries.m_uth, engine);
         }
@@ -149,7 +174,7 @@ namespace ApplyParticleBoundaries {
         apply_boundary(z, gridmin.z, gridmax.z, change_sign_uz, rethermalize_z, particle_lost,
                        boundaries.zmin_bc, boundaries.zmax_bc,
                        boundaries.reflection_model_zlo(-uz), boundaries.reflection_model_zhi(uz),
-                       engine);
+                       boundaries.absorption_fraction, engine);
         if (rethermalize_z) {
             thermalize_boundary_particle(uz, ux, uy, boundaries.m_uth, engine);
         }

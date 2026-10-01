@@ -300,8 +300,9 @@ void WarpX::MakeWarpX ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             eb_particle_boundary == ParticleBoundaryType::Absorbing ||
             eb_particle_boundary == ParticleBoundaryType::Reflecting ||
-            eb_particle_boundary == ParticleBoundaryType::Thermal,
-            "boundary.particle_eb must be Absorbing, Reflecting, or Thermal");
+            eb_particle_boundary == ParticleBoundaryType::Thermal ||
+            eb_particle_boundary == ParticleBoundaryType::Fractional_Absorbing,
+            "boundary.particle_eb must be Absorbing, Reflecting, Thermal, or fractional_absorbing");
 
         // Embedded-boundary wall type. Defaults to Absorbing (the historical
         // behavior); Insulating collects particles a standoff band before the
@@ -318,6 +319,59 @@ void WarpX::MakeWarpX ()
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 eb_standoff_cells >= 0.0,
                 "boundary.eb_standoff_cells must be >= 0");
+        }
+    }
+
+    {
+        amrex::ParmParse const pp_boundary("boundary");
+        bool fractional_domain = false;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            fractional_particle_boundary_lo[d] =
+                particle_boundary_lo[d] == ParticleBoundaryType::Fractional_Absorbing;
+            fractional_particle_boundary_hi[d] =
+                particle_boundary_hi[d] == ParticleBoundaryType::Fractional_Absorbing;
+            fractional_domain = fractional_domain || fractional_particle_boundary_lo[d] ||
+                fractional_particle_boundary_hi[d];
+        }
+        fractional_particle_eb = EB::enabled() &&
+            eb_particle_boundary == ParticleBoundaryType::Fractional_Absorbing;
+        bool const fractional = fractional_domain || fractional_particle_eb;
+        bool const supplied = pp_boundary.contains("particle_absorption_fraction");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            fractional == supplied,
+            "boundary.particle_absorption_fraction is required exactly when a particle "
+            "boundary selects fractional_absorbing");
+        particle_absorption_fraction = 0.0;
+        if (fractional) {
+            utils::parser::getWithParser(
+                pp_boundary, "particle_absorption_fraction", particle_absorption_fraction);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                std::isfinite(particle_absorption_fraction) &&
+                particle_absorption_fraction >= 0.0 && particle_absorption_fraction <= 1.0,
+                "boundary.particle_absorption_fraction must be finite and in [0, 1]");
+            bool reflect_all = false;
+            pp_boundary.query("reflect_all_velocities", reflect_all);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !fractional_domain || !reflect_all,
+                "fractional_absorbing domain boundaries require "
+                "boundary.reflect_all_velocities = false (specular reflection)");
+
+            // Normalize endpoints globally: deposition and field-boundary
+            // predicates must see the same BC as the deterministic controls.
+            auto normalize = [] (ParticleBoundaryType& bc) {
+                if (bc == ParticleBoundaryType::Fractional_Absorbing) {
+                    if (particle_absorption_fraction == 0.0) {
+                        bc = ParticleBoundaryType::Reflecting;
+                    } else if (particle_absorption_fraction == 1.0) {
+                        bc = ParticleBoundaryType::Absorbing;
+                    }
+                }
+            };
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                normalize(particle_boundary_lo[d]);
+                normalize(particle_boundary_hi[d]);
+            }
+            normalize(eb_particle_boundary);
         }
     }
 
@@ -641,6 +695,11 @@ WarpX::ReadParameters ()
 
 
         pp_algo.query_enum_case_insensitive("evolve_scheme", evolve_scheme);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            particle_absorption_fraction == 0.0 || particle_absorption_fraction == 1.0 ||
+            evolve_scheme == EvolveScheme::Explicit,
+            "Intermediate fractional_absorbing is currently supported only with "
+            "algo.evolve_scheme = explicit");
     }
 
     {

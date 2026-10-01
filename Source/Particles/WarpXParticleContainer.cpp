@@ -191,6 +191,8 @@ WarpXParticleContainer::WarpXParticleContainer (AmrCore* amr_core, int ispecies,
     local_Szy.resize(num_threads);
     local_Szz.resize(num_threads);
 
+    m_boundary_conditions.data.absorption_fraction = WarpX::particle_absorption_fraction;
+
     // The boundary conditions are read in in ReadBCParams but a child class
     // can allow these value to be overwritten if different boundary
     // conditions are desired for a specific species
@@ -3062,6 +3064,7 @@ WarpXParticleContainer::TallyBoundaryLostParticles ()
     auto const& bcs = m_boundary_conditions.data;
     auto is_lossy = [](ParticleBoundaryType bc) -> int {
         return (bc == ParticleBoundaryType::Absorbing ||
+                bc == ParticleBoundaryType::Fractional_Absorbing ||
                 bc == ParticleBoundaryType::Open) ? 1 : 0;
     };
 #ifndef WARPX_DIM_1D_Z

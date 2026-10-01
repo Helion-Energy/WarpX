@@ -4193,6 +4193,10 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         energy equation on, T_e is filled with zero normal gradient into
         the band and the covered region each step).
 
+    particle_boundary: string, default=None
+        Particle wall mode: absorbing, reflecting, thermal, or fractional_absorbing.
+        The fractional mode uses Simulation.warpx_particle_absorption_fraction.
+
     eb_standoff_cells: float, default=None
         Width of the insulating wall's standoff band, in cells (WarpX
         default 2). Only used with eb_type="insulating".
@@ -4212,6 +4216,7 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         cover_multiple_cuts=None,
         eb_type=None,
         eb_standoff_cells=None,
+        particle_boundary=None,
         **kw,
     ):
         assert stl_file is None or implicit_function is None, Exception(
@@ -4242,6 +4247,7 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
 
         self.eb_type = eb_type
         self.eb_standoff_cells = eb_standoff_cells
+        self.particle_boundary = particle_boundary
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -4277,6 +4283,8 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
 
         pywarpx.eb2.cover_multiple_cuts = self.cover_multiple_cuts
 
+        if self.particle_boundary is not None:
+            pywarpx.boundary.particle_eb = self.particle_boundary
         if self.eb_type is not None:
             pywarpx.boundary.eb_type = self.eb_type
         if self.eb_standoff_cells is not None:
@@ -4539,6 +4547,10 @@ class Simulation(picmistandard.PICMI_Simulation):
         Controls the random numbers used for initialization.
         This parameter should only be used for testing and continuous integration.
 
+    warpx_particle_absorption_fraction: float, optional
+        Probability of absorption at walls selected as fractional_absorbing.
+        Required for that particle BC, finite and in [0, 1], shared by all species.
+
     warpx_random_seed: string or int, optional
         (See documentation)
 
@@ -4693,6 +4705,15 @@ class Simulation(picmistandard.PICMI_Simulation):
         self.serialize_initial_conditions = kw.pop(
             "warpx_serialize_initial_conditions", None
         )
+        self.particle_absorption_fraction = kw.pop(
+            "warpx_particle_absorption_fraction", None
+        )
+        if self.particle_absorption_fraction is not None:
+            fraction = self.particle_absorption_fraction
+            if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+                raise ValueError(
+                    "warpx_particle_absorption_fraction must be finite and in [0, 1]"
+                )
         self.random_seed = kw.pop("warpx_random_seed", None)
         self.do_dynamic_scheduling = kw.pop("warpx_do_dynamic_scheduling", None)
         self.roundrobin_sfc = kw.pop("warpx_roundrobin_sfc", None)
@@ -4817,6 +4838,9 @@ class Simulation(picmistandard.PICMI_Simulation):
         pywarpx.warpx.use_filter = self.use_filter
         pywarpx.warpx.serialize_initial_conditions = self.serialize_initial_conditions
         pywarpx.warpx.random_seed = self.random_seed
+        pywarpx.boundary.particle_absorption_fraction = (
+            self.particle_absorption_fraction
+        )
         pywarpx.warpx.used_inputs_file = self.used_inputs_file
 
         pywarpx.warpx.do_dynamic_scheduling = self.do_dynamic_scheduling

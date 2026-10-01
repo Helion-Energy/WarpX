@@ -80,6 +80,7 @@ struct ParticleBoundaries
         ParticleBoundaryType zmin_bc;
         ParticleBoundaryType zmax_bc;
         amrex::Real m_uth = 0.;
+        amrex::Real absorption_fraction = 0.;
 
         amrex::ParserExecutor<1> reflection_model_xlo;
         amrex::ParserExecutor<1> reflection_model_xhi;

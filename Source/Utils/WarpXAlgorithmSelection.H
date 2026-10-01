@@ -149,6 +149,7 @@ AMREX_ENUM(ParticleBoundaryType,
            Periodic,      //!< particles are introduced from the periodic boundary
            Thermal,
            None,          //!< For r=0 boundary with RZ simulations
+           Fractional_Absorbing, //!< stochastic absorption, otherwise specular reflection
            Default = Absorbing);
 
 /** Embedded-boundary wall type

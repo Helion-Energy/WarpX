@@ -240,6 +240,13 @@ public:
      */
     static inline ParticleBoundaryType eb_particle_boundary = ParticleBoundaryType::Absorbing;
 
+    // Requested fractional faces are retained after endpoint normalization so
+    // species-level legacy reflection inputs can be checked for conflicts.
+    static inline amrex::Array<bool, AMREX_SPACEDIM> fractional_particle_boundary_lo{};
+    static inline amrex::Array<bool, AMREX_SPACEDIM> fractional_particle_boundary_hi{};
+    static inline bool fractional_particle_eb = false;
+    static inline amrex::Real particle_absorption_fraction = 0.0;
+
     /** Embedded-boundary wall type (`boundary.eb_type`).
      *
      *  Absorbing (default): particles are collected where the signed distance
