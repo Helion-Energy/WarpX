@@ -1071,3 +1071,33 @@ if(TARGET lib_rz)
     set_tests_properties(test_rz_qdsmc_source_stage PROPERTIES
         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ")
 endif()
+
+# Composed native conduction boundary counterexamples and regression gates.
+if(TARGET lib_rz)
+    add_executable(test_conduction_boundary_native_rz test_conduction_boundary_native_rz.cpp)
+    target_link_libraries(test_conduction_boundary_native_rz PRIVATE lib_rz)
+    target_include_directories(test_conduction_boundary_native_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_conduction_boundary_native_rz)
+    endif()
+    foreach(mode IN ITEMS flux robin closed)
+        set(boundary_dt 1.e-7)
+        set(boundary_integrator rkl2)
+        if(mode STREQUAL "robin")
+            set(boundary_dt 1.e-10)
+            set(boundary_integrator ssprk2)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode})
+        add_test(NAME test_rz_conduction_boundary_native_${mode}
+            COMMAND test_conduction_boundary_native_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
+                hybrid_pic_model.qdsmc_conduction_flux_limit_factor=0
+                hybrid_pic_model.qdsmc_conduction_fd_time=${boundary_integrator}
+                boundary_test.mode=${mode} boundary_test.dt=${boundary_dt})
+        set_tests_properties(test_rz_conduction_boundary_native_${mode} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;WARPX_QDSMC_COND_STATS=1")
+    endforeach()
+endif()
