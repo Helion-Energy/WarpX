@@ -13,6 +13,7 @@
 
 #include "BraginskiiViscosity.H"
 #include "ElectronViscosityPoint.H"
+#include "QdsmcConductionBoundary.H"
 #include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
 #include "QdsmcVolumeElement.H"
@@ -13889,11 +13890,34 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
 }
 
 void
-HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const dt_c,
-                                              bool const use_rho_new, amrex::MultiFab const& rho,
-                                              amrex::Real const t_now) const
-{
+HybridPICModel::QdsmcConductionOnceFDAtState (int const lev,
+                                              amrex::Real const dt_c,
+                                              bool const use_rho_new,
+                                              amrex::MultiFab const& rho,
+                                              amrex::Real const t_now) const {
+    QdsmcConductionReport report;
+    bool const success = TryQdsmcConductionOnceFDAtState(lev, dt_c, use_rho_new,
+                                                         rho, t_now, report);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        success, "FD conduction failed before commit: " + report.failure);
+    m_cond_last_report = std::move(report);
+}
+
+bool
+HybridPICModel::TryQdsmcConductionOnceFDAtState (
+    int const lev, amrex::Real const dt_c, bool const use_rho_new,
+    amrex::MultiFab const& rho, amrex::Real const t_now,
+    QdsmcConductionReport& report) const {
     ABLASTR_PROFILE("HybridPICModel::QdsmcConductionOnceFD()");
+    report = {};
+    report.requested_time = dt_c;
+    auto fail = [&] (char const* reason) {
+        report.failure = reason;
+        return false;
+    };
+    if (!std::isfinite(dt_c) || dt_c < 0.0_rt) {
+        return fail("invalid conduction interval");
+    }
 
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
@@ -13904,8 +13928,8 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
 
     // EB: covered nodes (distance_to_eb <= 0) close their faces -- the
     // flux-form staircase-adiabatic wall -- and keep their T_e frozen;
-    // the isothermal option pins the wall-adjacent fluid ring after the
-    // integrate (same ring-2 semantics and tally as the SDE path).
+    // the isothermal option constrains the same wall-adjacent fluid ring
+    // used by the SDE path, with stage-consistent heat accounting here.
     bool const has_eb = EB::enabled();
     amrex::MultiFab const * eb_dist = has_eb
         ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
@@ -13987,8 +14011,17 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     // chi tensor does. Ghosts = 3 for the isothermal ring scan (eb_ring
     // <= 3); mask comps default OPEN so unset non-periodic domain ghosts
     // never read as walls (the SDE kin convention).
-    enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ebm,
-                     b_ncomp };
+    enum BNE : int {
+        b_bx = 0,
+        b_by,
+        b_bz,
+        b_B2,
+        b_ne,
+        b_open,
+        b_ebm,
+        b_neff,
+        b_ncomp
+    };
     amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 3);
     bne.setVal(0.0_rt);
     bne.setVal(1.0_rt, BNE::b_open, 1, bne.nGrow());
@@ -14031,6 +14064,7 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
             b_arr(i,j,k,BNE::b_bz)   = unmag ? 1.0_rt : bzv*Binv;
             b_arr(i,j,k,BNE::b_B2)   = B2;
             b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
+            b_arr(i, j, k, BNE::b_neff) = ne_raw;
             b_arr(i, j, k, BNE::b_open) = (ne_raw > n_open && !covered) ? 1.0_rt : 0.0_rt;
             b_arr(i,j,k,BNE::b_ebm)  = covered ? 0.0_rt : 1.0_rt;
         });
@@ -14177,13 +14211,27 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
     };
 
     // --- stability: Gershgorin bound, neighbor-max chi, n-ratio ----------
+    // Density, B and parser time are frozen within this call. When neither
+    // parser references Te and the bulk flux limiter is disabled, the tensor
+    // and its bulk bound are invariant. Cache only that proven special case;
+    // the external leg and its gate still get re-evaluated at every RHS.
+    bool const fixed_tensor = f_lim <= 0.0_rt && m_kappa_par_parser &&
+                              m_kappa_perp_parser &&
+                              !m_kappa_par_parser->symbols().contains("Te") &&
+                              !m_kappa_perp_parser->symbols().contains("Te");
+    bool tensor_built = false, bulk_rate_built = false;
+    amrex::Real cached_bulk_rate = 0.0_rt;
+    amrex::Real boundary_s_max = 0.0_rt;
+    amrex::ReduceOps<amrex::ReduceOpMax> bulk_bound_op;
+    amrex::ReduceData<amrex::Real> bulk_bound_data(bulk_bound_op);
     auto stable_rate = [&] () -> amrex::Real
     {
         amrex::Real s_max = 0.0_rt;
-        {
-            amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
-            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
-            using ReduceTuple = typename decltype(reduce_data)::Type;
+        if (!fixed_tensor || !bulk_rate_built) {
+            auto& reduce_op = bulk_bound_op;
+            auto& reduce_data = bulk_bound_data;
+            ResetConductionReduction(reduce_op, reduce_data);
+            using ReduceTuple = typename decltype(bulk_bound_data)::Type;
             for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
                 amrex::Box const box = mfi.tilebox();
@@ -14274,9 +14322,14 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
                 });
             }
             auto tup = reduce_data.value(reduce_op);
-            s_max = amrex::get<0>(tup);
-            amrex::ParallelDescriptor::ReduceRealMax(s_max);
+            cached_bulk_rate = amrex::get<0>(tup);
+            bulk_rate_built = true;
         }
+        // Reduce the two maxima separately so the bound is independent of
+        // which rank owns the stiffest interior and boundary nodes.
+        amrex::Real rates[2] = {cached_bulk_rate, boundary_s_max};
+        amrex::ParallelDescriptor::ReduceRealMax(rates, 2);
+        s_max = rates[0] + rates[1];
         return s_max;
     };
 
@@ -14310,11 +14363,37 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
         fcache.setVal(0.0_rt);
         rbud.setVal(1.0_rt);
     }
-    auto eval_rhs = [&] (amrex::MultiFab & Tin, amrex::MultiFab & Kout)
-    {
+    auto eval_bulk_rhs = [&] (amrex::MultiFab& Tin, amrex::MultiFab& Kout) {
         ablastr::utils::communication::FillBoundary(
             Tin, WarpX::do_single_precision_comms, period, true);
-        build_xi(Tin);
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+        // Test the buffer actually consumed by the operator. Only physical
+        // exterior Te ghosts are poisoned; exchanged and valid nodes stay
+        // intact.
+        if (auto const* text = std::getenv("WARPX_TEST_COND_GHOST_POISON")) {
+            amrex::Real const poison = std::strtod(text, nullptr);
+            for (MFIter mfi(Tin); mfi.isValid(); ++mfi) {
+                auto const t = Tin.array(mfi);
+                amrex::ParallelFor(
+                    mfi.fabbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                        int const node[3] = {i, j, k};
+                        bool exterior = false;
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            exterior = exterior ||
+                                       (!is_per[d] && (node[d] < dom_lo[d] ||
+                                                       node[d] > dom_hi[d]));
+                        }
+                        if (exterior) {
+                            t(i, j, k) = poison;
+                        }
+                    });
+            }
+        }
+#endif
+        if (!fixed_tensor || !tensor_built) {
+            build_xi(Tin);
+            tensor_built = true;
+        }
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -14814,257 +14893,607 @@ HybridPICModel::QdsmcConductionOnceFDAtState (int const lev, amrex::Real const d
             << " open=" << op_loc << " xi00=" << xi0
             << " nrat=" << nrat_loc << "\n";
     };
-    auto cap = [&] () -> amrex::Real
-    {
-        amrex::Real const s_max = stable_rate();
-        if (bound_debug) { debug_bound(s_max); }
-        return (s_max > 0.0_rt) ? fd_cfl*edge_scale/s_max
-                                : std::numeric_limits<amrex::Real>::max();
-    };
-
-    auto const thermal_owner = amrex::OwnerMask(Te, geom.periodicity());
+    // Boundary rates and all correction accounts remain rank-local until
+    // a complete call is accepted. No public tally is changed by an RHS.
+    auto const thermal_owner = amrex::OwnerMask(Te, period);
     amrex::Real cartesian_volume = 1.0_rt;
-    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd)
-    {
-        cartesian_volume *= geom.CellSize(dd);
+    amrex::Real dx_max = 0.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        cartesian_volume *= geom.CellSize(d);
+        dx_max = amrex::max(dx_max, geom.CellSize(d));
     }
-    // Isothermal EB ring pin (Chebyshev distance
-    // <= eb_ring of a covered node) to the parser T_wall and tally the
-    // exchange -- identical semantics to the SDE path's ring pin (the
-    // ring-2 default covers the deposition density ramp; the FD operator
-    // has no deposit ramp, but the shared default keeps the arms
-    // comparable; positive tally = energy into the plasma).
-    auto pin_eb_ring = [&] (amrex::MultiFab& Tf, amrex::Real const dts)
-    {
-        auto const ebTe = m_cond_eb_Te;
-        auto const plo_arr = geom.ProbLoArray();
-        auto const dx_arr  = geom.CellSizeArray();
-        int const eb_ring = m_cond_eb_ring;
-        // Flux cap on the ring pin (qdsmc_conduction_eb_flux_limit, its own
-        // factor, with the same form as the domain-face pins): the ring
-        // node may lose at most
-        // q_max A dts per accepted substep, q_max = f n kB Te v_cap at the
-        // pre-pin node state (v_cap = v_te or the sonic c_s); A/V = 1/dx_max
-        // -- the ring has no normal, the largest cell size is the
-        // conservative (strongest-cap) choice. 0 = plain reset (unchanged).
-        amrex::Real dx_max = 0.0_rt;
-        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd)
-        {
-            dx_max = amrex::max(dx_max, dx_arr[dd]);
+    amrex::Real const te_floor_K = m_cond_te_floor * qe / kb;
+    amrex::GpuArray<int, 6> bc{};
+    amrex::GpuArray<amrex::Real, 7> tw{}, av{}, wall_factor{};
+    amrex::GpuArray<amrex::Real, 6> prescribed{};
+    bool any_boundary = eb_iso;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        for (int side = 0; side < 2; ++side) {
+            int const a = 2 * d + side;
+            bc[a] = m_cond_bc[d][side];
+            any_boundary = any_boundary || bc[a] != 0;
+            tw[a] = m_cond_bc_Te[d][side] * qe / kb;
+            prescribed[a] = -m_cond_bc_q[d][side]; // legacy positive inward
+            int const wall = side == 0 ? dom_lo[d] : dom_hi[d];
+            av[a] = dual_volume.wall_area_over_volume(d, side, wall);
+            wall_factor[a] = m_cond_wall_flux_limit;
+            if (bc[a] != 0 && (is_per[d] || av[a] <= 0.0_rt)) {
+                return fail(
+                    "thermal boundary requires a physical nonperiodic face");
+            }
+            if (bc[a] == 1 && wall_factor[a] == 0.0_rt && tw[a] < te_floor_K) {
+                return fail("uncapped Dirichlet temperature is below the "
+                            "conduction floor");
+            }
         }
-        amrex::Real const cap_dt_dx = m_cond_eb_flux_limit * dts / dx_max;
-        bool const sonic = (m_cond_wall_flux_cap_form == 1);
-        amrex::Real const gam = m_gamma;
-        amrex::Real const mi = sonic ? WallCapIonMass() : PhysConst::m_e;
-        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
-        using ReduceTuple = typename decltype(reduce_data)::Type;
-        for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            amrex::Box tile_box = mfi.tilebox();
-            auto const own = thermal_owner->const_array(mfi);
-            amrex::Array4<amrex::Real>       const & Te_arr  = Tf.array(mfi);
-            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
-            amrex::Array4<amrex::Real const> const & b_arr   = bne.const_array(mfi);
-            auto const ped_arr =
-                use_ped ? ped_mf->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-            reduce_op.eval(tile_box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
-            {
-                if (b_arr(i,j,k,BNE::b_ebm) == 0.0_rt) { return {0.0_rt}; }
-                amrex::Real const ne =
-                    rho_arr(i, j, k) / qe + (use_ped ? ped_arr(i, j, k) / qe : 0.0_rt);
-                if (ne <= 0.0_rt) { return {0.0_rt}; }
-                bool ring = false;
-                int const node[3] = {i, j, k};
-                int const rr = eb_ring;
+    }
+    av[6] = 1.0_rt / dx_max;
+    wall_factor[6] = m_cond_eb_flux_limit;
+    bool const sonic = m_cond_wall_flux_cap_form == 1;
+    amrex::Real const speed_coefficient =
+        sonic ? m_gamma * kb / WallCapIonMass() : kb / me;
+    QdsmcConductionLeg const leg{
+        kappa_par_ex,          m_cond_leg_length, m_cond_leg_Te_wall * qe / kb,
+        m_cond_leg_flux_limit, speed_coefficient, t_now};
+    amrex::Real const gate_temperature = amrex::max(leg.reservoir, te_floor_K);
+    // EB ring geometry and prescribed temperature are fixed during this call.
+    amrex::MultiFab eb_wall;
+    if (eb_iso) {
+        eb_wall.define(Te.boxArray(), Te.DistributionMap(), 1, 0);
+        auto const eb_te = m_cond_eb_Te;
+        auto const plo = geom.ProbLoArray();
+        auto const dx = geom.CellSizeArray();
+        int const ring_width = m_cond_eb_ring;
+        for (MFIter mfi(eb_wall, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const out = eb_wall.array(mfi);
+            auto const b = bne.const_array(mfi);
+            amrex::ParallelFor(
+                mfi.tilebox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                    out(i, j, k) = -1.0_rt;
+                    if (b(i, j, k, BNE::b_ebm) == 0.0_rt ||
+                        b(i, j, k, BNE::b_neff) <= 0.0_rt) {
+                        return;
+                    }
+                    bool ring = false;
 #if defined(WARPX_DIM_3D)
-                for (int ok = -rr; ok <= rr; ++ok) {
+                    for (int ok = -ring_width; ok <= ring_width; ++ok) {
 #else
                 int const ok = 0;
                 {
 #endif
-                for (int oj = -rr; oj <= rr; ++oj) {
-                for (int oi = -rr; oi <= rr; ++oi) {
-                    if (oi == 0 && oj == 0 && ok == 0) { continue; }
-                    ring = ring ||
-                        (b_arr(node[0]+oi, node[1]+oj, node[2]+ok,
-                               BNE::b_ebm) == 0.0_rt);
-                }}}
-                if (!ring) { return {0.0_rt}; }
-                amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
-                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
-                    cx[dd] = plo_arr[dd] + amrex::Real(node[dd])*dx_arr[dd];
-                }
+                        for (int oj = -ring_width; oj <= ring_width; ++oj) {
+                            for (int oi = -ring_width; oi <= ring_width; ++oi) {
+                                ring = ring || b(i + oi, j + oj, k + ok,
+                                                 BNE::b_ebm) == 0.0_rt;
+                            }
+                        }
+                    }
+                    if (!ring) {
+                        return;
+                    }
+                    amrex::Real const x = plo[0] + (i - dom_lo[0]) * dx[0];
 #if defined(WARPX_DIM_3D)
-                amrex::Real const Te_eV = ebTe(cx[0], cx[1], cx[2]);
+                    amrex::Real const y = plo[1] + (j - dom_lo[1]) * dx[1];
+                    amrex::Real const z = plo[2] + (k - dom_lo[2]) * dx[2];
 #else
-                amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
+                amrex::Real const y = 0.0_rt;
+                amrex::Real const z = plo[1] + (j-dom_lo[1])*dx[1];
 #endif
-                amrex::Real const TwK = Te_eV * qe / kb;
-                amrex::Real T1 = TwK;
-                if (cap_dt_dx > 0.0_rt && Te_arr(i, j, k) > TwK)
-                {
-                    // cooling toward the wall: cap the drain (member doc
-                    // of m_cond_wall_flux_limit), never below the wall
-                    amrex::Real const T0 = Te_arr(i, j, k);
-                    amrex::Real const vcap =
-                        sonic ? std::sqrt(gam * kb * T0 / mi) : std::sqrt(kb * T0 / me);
-                    T1 = amrex::max(TwK, T0 - cap_dt_dx * vcap * T0 / 1.5_rt);
-                }
-                amrex::Real const du = 1.5_rt * kb * ne * (T1 - Te_arr(i, j, k));
-                Te_arr(i, j, k) = T1;
-                return {own(i, j, k) ? dual_volume(i, j, k) * du / cartesian_volume : 0.0_rt};
-            });
+                    amrex::Real const prescribed_T = eb_te(x, y, z) * qe / kb;
+                    out(i, j, k) =
+                        prescribed_T < 0.0_rt
+                            ? std::numeric_limits<amrex::Real>::quiet_NaN()
+                            : prescribed_T;
+                });
         }
-        auto tup = reduce_data.value(reduce_op);
-        amrex::Real tly = amrex::get<0>(tup);
-        amrex::ParallelDescriptor::ReduceRealSum(tly);
-        m_cond_eb_tally += tly;
-    };
+    }
 
-    // Positivity floor (see m_cond_te_floor): the anisotropic tensor
-    // update is not monotone -- its off-diagonal cross-term fluxes can
-    // drive T_e below zero at grid-sharp field-direction rotations, and
-    // the embedded temporal error accepts the undershoot because both
-    // stages share it. Clamp after every accepted substep (last in the
-    // post-step chain, so nothing downstream can undo it) and book the
-    // injected energy in the pin_eb_ring tally convention.
-    amrex::Real const te_floor_K = m_cond_te_floor * qe / kb;
-    amrex::Real call_floor_tly = 0.0_rt;
-    amrex::Real call_floor_cnt = 0.0_rt;
-    // Error-norm exclusion set (see m_cond_te_floor_mask): the LAST
-    // accepted substep's clamp set, zeroed at call entry and rebuilt by
-    // each floor pass, consumed by the integrator's error reduction.
-    bool const mask_err = m_cond_te_floor_mask && (te_floor_K > 0.0_rt);
+    // Pin masks store active wall temperatures, including capped unilateral
+    // lower constraints. Conflicting uncapped values are rejected once.
+    amrex::MultiFab pins(Te.boxArray(), Te.DistributionMap(), 7, 0);
+    pins.setVal(-1.0_rt);
+    int invalid_pins = 0;
+    if (any_boundary) {
+        amrex::ReduceOps<amrex::ReduceOpMax> op;
+        amrex::ReduceData<int> data(op);
+        using Tuple = typename decltype(data)::Type;
+        for (MFIter mfi(pins, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const p = pins.array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const eb = eb_iso ? eb_wall.const_array(mfi)
+                                   : amrex::Array4<amrex::Real const>{};
+            op.eval(mfi.tilebox(), data,
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                        if (b(i, j, k, BNE::b_neff) <= 0.0_rt ||
+                            b(i, j, k, BNE::b_ebm) == 0.0_rt) {
+                            return {0};
+                        }
+                        int const node[3] = {i, j, k};
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            for (int side = 0; side < 2; ++side) {
+                                int const a = 2 * d + side;
+                                if (bc[a] == 1 &&
+                                    node[d] == (side ? dom_hi[d] : dom_lo[d])) {
+                                    p(i, j, k, a) = tw[a];
+                                }
+                            }
+                        }
+                        if (eb) {
+                            p(i, j, k, 6) = eb(i, j, k);
+                        }
+                        amrex::Real fixed = -1.0_rt, lower = -1.0_rt;
+                        int invalid = 0;
+                        for (int a = 0; a < 7; ++a) {
+                            amrex::Real const t = p(i, j, k, a);
+                            if (t < 0.0_rt) {
+                                continue;
+                            }
+                            if (!std::isfinite(t)) {
+                                invalid = 1;
+                            }
+                            if (wall_factor[a] > 0.0_rt) {
+                                lower = amrex::max(lower, t);
+                            } else {
+                                if (t < te_floor_K ||
+                                    (fixed >= 0.0_rt && t != fixed)) {
+                                    invalid = 1;
+                                }
+                                fixed = t;
+                            }
+                        }
+                        if (fixed >= 0.0_rt && lower > fixed) {
+                            invalid = 1;
+                        }
+                        return {invalid};
+                    });
+        }
+        invalid_pins = amrex::get<0>(data.value(op));
+        amrex::ParallelDescriptor::ReduceIntMax(invalid_pins);
+    }
+    if (invalid_pins) {
+        return fail(
+            "conflicting or below-floor domain/EB temperature constraints");
+    }
+
+    auto inventory = [&] (amrex::MultiFab const& state) {
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum,
+                         amrex::ReduceOpSum, amrex::ReduceOpSum>
+            op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real,
+                          amrex::Real, amrex::Real>
+            data(op);
+        using Tuple = typename decltype(data)::Type;
+        amrex::Real const solver_floor = m_n_floor;
+        amrex::Real const band_floor =
+            amrex::max(m_contam_n_boundary, m_n_floor);
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            auto const r = rho.const_array(mfi);
+            op.eval(mfi.tilebox(), data,
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                        if (!own(i, j, k)) {
+                            return {0., 0., 0., 0., 0., 0.};
+                        }
+                        amrex::Real const cvt =
+                            1.5_rt * kb * dual_volume(i, j, k) * t(i, j, k);
+                        amrex::Real const ec = cvt * b(i, j, k, BNE::b_ne);
+                        amrex::Real const ep =
+                            cvt * amrex::max(b(i, j, k, BNE::b_neff), 0.0_rt);
+                        amrex::Real const raw = r(i, j, k) / qe;
+                        return {
+                            ec,
+                            ep,
+                            raw > band_floor ? ep : 0.0_rt,
+                            raw > solver_floor && raw <= band_floor ? ep
+                                                                    : 0.0_rt,
+                            b(i, j, k, BNE::b_ebm) == 0.0_rt ? ec : 0.0_rt,
+                            b(i, j, k, BNE::b_open) == 0.0_rt ? ec : 0.0_rt};
+                    });
+        }
+        auto const v = data.value(op);
+        std::array<amrex::Real, 6> result{amrex::get<0>(v), amrex::get<1>(v),
+                                          amrex::get<2>(v), amrex::get<3>(v),
+                                          amrex::get<4>(v), amrex::get<5>(v)};
+        amrex::ParallelDescriptor::ReduceRealSum(result.data(), 6);
+        return result;
+    };
+    report.energy_before = inventory(T_cur);
+    QdsmcRKIntegrator::Auxiliary heat;
+    heat.value.assign(8, 0.0_rt);
+    heat.rate.assign(8, 0.0_rt);
+    std::array<amrex::Real, 7> entry_heat{};
+    amrex::Real floor_raw = 0.0_rt, floor_count = 0.0_rt;
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+    // Optional native acceptance trace. This adds collectives only in test
+    // builds with this environment variable set; production has no trace.
+    bool const trace_stage_minima =
+        std::getenv("WARPX_TEST_COND_STAGE_MINIMA") != nullptr;
+    int projection_stage = 0;
+#endif
+    bool const mask_err = m_cond_te_floor_mask && te_floor_K > 0.0_rt;
     amrex::iMultiFab floor_mask;
     if (mask_err) {
         floor_mask.define(Te.boxArray(), Te.DistributionMap(), 1, 0);
         floor_mask.setVal(0);
     }
-    auto apply_te_floor = [&] (amrex::MultiFab & Tf)
-    {
-        if (mask_err) { floor_mask.setVal(0); }
-        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
-        using ReduceTuple = typename decltype(reduce_data)::Type;
-        for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            amrex::Box tile_box = mfi.tilebox();
+
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum>
+        projection_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real>
+        projection_data(projection_op);
+    auto project = [&] (amrex::MultiFab& state, bool const entry) {
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+        amrex::Real const pre_min =
+            trace_stage_minima && !entry ? state.min(0) : 0.0_rt;
+#endif
+        if (mask_err && !entry) {
+            floor_mask.setVal(0);
+        }
+        auto& op = projection_op;
+        auto& data = projection_data;
+        ResetConductionReduction(op, data);
+        using Tuple = typename decltype(projection_data)::Type;
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.array(mfi);
+            auto const p = pins.const_array(mfi);
+            auto const b = bne.const_array(mfi);
             auto const own = thermal_owner->const_array(mfi);
-            amrex::Array4<amrex::Real>       const & Te_arr = Tf.array(mfi);
-            amrex::Array4<amrex::Real const> const & b_arr =
-                bne.const_array(mfi);
-            amrex::Array4<int> const fm_arr = mask_err
-                ? floor_mask.array(mfi) : amrex::Array4<int>{};
-            reduce_op.eval(tile_box, reduce_data,
-                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
-            {
-                amrex::Real const T0 = Te_arr(i,j,k);
-                if (T0 >= te_floor_K) { return {0.0_rt, 0.0_rt}; }
-                amrex::Real const ne = b_arr(i,j,k,BNE::b_ne);
-                amrex::Real const du = 1.5_rt*kb*ne*(te_floor_K - T0);
-                Te_arr(i,j,k) = te_floor_K;
-                if (fm_arr) { fm_arr(i,j,k) = 1; }
-                return {own(i, j, k) ? dual_volume(i, j, k) * du / cartesian_volume : 0.0_rt,
-                        own(i, j, k) ? 1.0_rt : 0.0_rt};
-            });
+            auto const fm =
+                mask_err ? floor_mask.array(mfi) : amrex::Array4<int>{};
+            op.eval(
+                mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                    amrex::Real const old = t(i, j, k);
+                    int const node[3] = {i, j, k};
+                    bool constrained = eb_iso && p(i, j, k, 6) >= 0.0_rt;
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        constrained =
+                            constrained ||
+                            (bc[2 * d] == 1 && node[d] == dom_lo[d]) ||
+                            (bc[2 * d + 1] == 1 && node[d] == dom_hi[d]);
+                    }
+                    if (!constrained &&
+                        (entry || te_floor_K <= 0.0_rt || old >= te_floor_K)) {
+                        return {0., 0., 0., 0., 0., 0., 0., 0., 0.};
+                    }
+                    amrex::Real fixed = -1.0_rt, lower = -1.0_rt;
+                    for (int a = 0; a < 7; ++a) {
+                        if (p(i, j, k, a) < 0.0_rt) {
+                            continue;
+                        }
+                        if (wall_factor[a] == 0.0_rt) {
+                            fixed = p(i, j, k, a);
+                        } else {
+                            lower = amrex::max(lower, p(i, j, k, a));
+                        }
+                    }
+                    amrex::Real const target =
+                        fixed >= 0.0_rt
+                            ? fixed
+                            : (lower >= 0.0_rt ? amrex::max(old, lower) : old);
+                    amrex::Real const capacity = 1.5_rt * kb *
+                                                 b(i, j, k, BNE::b_ne) *
+                                                 dual_volume(i, j, k);
+                    amrex::Real area_sum = 0.0_rt;
+                    for (int a = 0; a < 7; ++a) {
+                        bool const reacts =
+                            fixed >= 0.0_rt
+                                ? p(i, j, k, a) >= 0.0_rt &&
+                                      wall_factor[a] == 0.0_rt
+                                : p(i, j, k, a) == lower && lower >= 0.0_rt;
+                        if (reacts) {
+                            area_sum += av[a];
+                        }
+                    }
+                    amrex::GpuArray<amrex::Real, 7> h{};
+                    for (int a = 0; a < 7; ++a) {
+                        bool const reacts =
+                            fixed >= 0.0_rt
+                                ? p(i, j, k, a) >= 0.0_rt &&
+                                      wall_factor[a] == 0.0_rt
+                                : p(i, j, k, a) == lower && lower >= 0.0_rt;
+                        if (reacts && area_sum > 0.0_rt && own(i, j, k)) {
+                            h[a] =
+                                -capacity * (target - old) * av[a] / area_sum;
+                        }
+                    }
+                    t(i, j, k) = target;
+                    amrex::Real dfloor = 0.0_rt, count = 0.0_rt;
+                    if (!entry && te_floor_K > 0.0_rt && target < te_floor_K) {
+                        t(i, j, k) = te_floor_K;
+                        if (fm) {
+                            fm(i, j, k) = 1;
+                        }
+                        if (own(i, j, k)) {
+                            dfloor = capacity * (te_floor_K - target);
+                            count = 1.0_rt;
+                        }
+                    }
+                    return {h[0], h[1], h[2],   h[3], h[4],
+                            h[5], h[6], dfloor, count};
+                });
         }
-        auto tup = reduce_data.value(reduce_op);
-        amrex::Real tly = amrex::get<0>(tup);
-        amrex::Real cnt = amrex::get<1>(tup);
-        amrex::ParallelDescriptor::ReduceRealSum(tly);
-        amrex::ParallelDescriptor::ReduceRealSum(cnt);
-        call_floor_tly += tly;
-        call_floor_cnt += cnt;
-    };
-
-    // Bath pins must track the SUBCYCLE cadence: applied once per call
-    // they are a contact resistance whose magnitude GROWS under
-    // refinement (bath-row heat capacity ~ dx; measured anti-convergent
-    // slab wall flux 0.986 -> 0.967 from N=64 -> 128). Re-pinning after
-    // every accepted subcycle makes the deficit ~ dt_sub ~ dx^2 -- the
-    // FD analog of the SDE fold-back's continuous bath sampling. The
-    // domain helper also handles flux-injection BCs, scaled by the
-    // accepted dt so the total injection sums to dt_c exactly.
-    auto post_step = [&] (amrex::MultiFab& yy, amrex::Real const dts)
-    {
-        ApplyQdsmcConductionWallBCs(lev, dts, yy, rho, t_now);
-        if (eb_iso)
-        {
-            pin_eb_ring(yy, dts);
+        auto const v = data.value(op);
+        std::array<amrex::Real, 9> h{
+            amrex::get<0>(v), amrex::get<1>(v), amrex::get<2>(v),
+            amrex::get<3>(v), amrex::get<4>(v), amrex::get<5>(v),
+            amrex::get<6>(v), amrex::get<7>(v), amrex::get<8>(v)};
+        for (int a = 0; a < 7; ++a) {
+            if (entry) {
+                entry_heat[a] -= h[a];
+            } else {
+                heat.value[a] += h[a];
+            }
         }
-        if (te_floor_K > 0.0_rt)
-        {
-            apply_te_floor(yy);
-        }
-    };
-
-    QdsmcRKIntegrator const integ(
-        (m_cond_fd_time == 2) ? QdsmcRKIntegrator::Scheme::RKL2
-        : use_rkf45           ? QdsmcRKIntegrator::Scheme::RKF45
-                              : QdsmcRKIntegrator::Scheme::SSPRK2,
-        eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
-        m_substep_safety, m_substep_max_growth, max_sub, post_step,
-        mask_err ? &floor_mask : nullptr);
-    QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
-
-    // WARPX_QDSMC_COND_STATS: one line per integrator call from the stats
-    // the call already returns (no added reductions; zero cost unset) --
-    // runtime substep-count attribution without waiting on the profiler.
-    static bool const cond_stats =
-        (std::getenv("WARPX_QDSMC_COND_STATS") != nullptr);
-    if (cond_stats) {
-        amrex::Print() << "[qdsmc] cond rk stats: half="
-            << (use_rho_new ? 2 : 1)
-            << " accepted=" << st.n_accepted
-            << " attempts=" << st.n_attempts
-            << " dt_first=" << st.dt_first
-            << " dt_last=" << st.dt_last
-            << " rkl2_s_max=" << st.s_max
-            << " t_done_frac="
-            << ((dt_c > 0.0_rt) ? st.t_done/dt_c : 0.0_rt) << "\n";
-    }
-
-    if (st.t_done < dt_c*(1.0_rt - 1.0e-12_rt)) {
-        amrex::Warning(
-            "[qdsmc] QdsmcConductionOnceFD: attempts budget ("
-            + std::to_string(max_sub) + ") hit; dropped "
-            + std::to_string(1.0 - st.t_done/dt_c)
-            + " of the conduction substep ("
-            + std::to_string(st.n_accepted) + "/"
-            + std::to_string(st.n_attempts)
-            + " accepted; dt first/min/max/last = "
-            + [&] { char b[96]; std::snprintf(b, sizeof(b),
-                    "%.3e/%.3e/%.3e/%.3e", st.dt_first, st.dt_min,
-                    st.dt_max, st.dt_last); return std::string(b); }()
-            + ") -- raise qdsmc_conduction_fd_max_subcycles or "
-            "loosen qdsmc_conduction_fd_rtol");
-    }
-
-    if (call_floor_cnt > 0.0_rt) {
-        m_cond_floor_tally += call_floor_tly;
-        // Joules for the report line only; the tally member keeps the
-        // pin_eb_ring convention (see the member doc).
-#ifdef WARPX_DIM_RZ
-        amrex::Real const to_J = dr_rz * geom.CellSize(1);
-#else
-        amrex::Real to_J = 1.0_rt;
-        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-            to_J *= geom.CellSize(d);
+        heat.value[7] += h[7];
+        floor_raw += h[7];
+        floor_count += h[8];
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+        if (trace_stage_minima && !entry) {
+            amrex::Real const post_min = state.min(0);
+            amrex::Print() << "CONDUCTION_FLOOR_TRACE stage="
+                           << ++projection_stage << " pre_min_K=" << pre_min
+                           << " post_min_K=" << post_min << "\n";
         }
 #endif
-        amrex::Print() << "[qdsmc] conduction Te floor: clamped "
-            << static_cast<long>(call_floor_cnt)
-            << " cells, injected " << call_floor_tly*to_J
-            << " J (cumulative " << m_cond_floor_tally*to_J << " J)"
-            << (mask_err ? " err-masked" : "") << "\n";
+    };
+    project(T_cur, true);
+
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpMax>
+        boundary_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real, amrex::Real, amrex::Real>
+        boundary_data(boundary_op);
+    auto eval_rhs = [&] (amrex::MultiFab& state, amrex::MultiFab& rhs) {
+        eval_bulk_rhs(state, rhs);
+        for (auto& v : heat.rate) {
+            v = 0.0_rt;
+        }
+        boundary_s_max = 0.0_rt;
+        if (!any_boundary) {
+            return;
+        }
+        auto& op = boundary_op;
+        auto& data = boundary_data;
+        ResetConductionReduction(op, data);
+        using Tuple = typename decltype(boundary_data)::Type;
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const p = pins.const_array(mfi);
+            auto const r = rhs.array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            op.eval(
+                mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                    if (b(i, j, k, BNE::b_neff) <= 0.0_rt ||
+                        b(i, j, k, BNE::b_ebm) == 0.0_rt) {
+                        return {0., 0., 0., 0., 0., 0., 0., 0.};
+                    }
+                    int const node[3] = {i, j, k};
+                    bool touches_boundary = eb_iso && p(i, j, k, 6) >= 0.0_rt;
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        touches_boundary =
+                            touches_boundary ||
+                            (bc[2 * d] != 0 && node[d] == dom_lo[d]) ||
+                            (bc[2 * d + 1] != 0 && node[d] == dom_hi[d]);
+                    }
+                    if (!touches_boundary) {
+                        return {0., 0., 0., 0., 0., 0., 0., 0.};
+                    }
+                    amrex::Real const tb = t(i, j, k),
+                                      neff = b(i, j, k, BNE::b_neff),
+                                      nc = b(i, j, k, BNE::b_ne);
+                    amrex::Real const vol = dual_volume(i, j, k),
+                                      cv = 1.5_rt * kb * nc,
+                                      capacity = cv * vol;
+                    amrex::Real const temp = amrex::max(tb, 0.0_rt);
+                    amrex::Real const speed =
+                        std::sqrt(speed_coefficient * temp);
+                    amrex::GpuArray<amrex::Real, 7> power{};
+                    amrex::Real stiffness = 0.0_rt, fixed = -1.0_rt;
+                    for (int a = 0; a < 7; ++a) {
+                        if (p(i, j, k, a) >= 0.0_rt &&
+                            wall_factor[a] == 0.0_rt) {
+                            fixed = p(i, j, k, a);
+                        }
+                        if (p(i, j, k, a) >= 0.0_rt &&
+                            wall_factor[a] > 0.0_rt) {
+                            amrex::Real const q =
+                                wall_factor[a] * neff * kb * temp * speed;
+                            power[a] = q * av[a] * vol;
+                            stiffness += 1.5_rt * wall_factor[a] * neff * kb *
+                                         speed * av[a] / cv;
+                        }
+                    }
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        for (int side = 0; side < 2; ++side) {
+                            int const a = 2 * d + side;
+                            if (node[d] != (side ? dom_hi[d] : dom_lo[d])) {
+                                continue;
+                            }
+                            if (bc[a] == 2) {
+                                power[a] = prescribed[a] * av[a] * vol;
+                            }
+                            if (bc[a] == 3) {
+                                int inner[3] = {i, j, k};
+                                inner[d] += side ? -1 : 1;
+                                bool const open =
+                                    b(i, j, k, BNE::b_open) > 0.5_rt &&
+                                    b(inner[0], inner[1], inner[2],
+                                      BNE::b_open) > 0.5_rt;
+                                amrex::Real const source =
+                                    open ? t(inner[0], inner[1], inner[2]) : tb;
+                                if (source > gate_temperature) {
+                                    amrex::Real const q =
+                                        leg.flux(tb, neff, nc);
+                                    power[a] = q * av[a] * vol;
+                                    stiffness +=
+                                        leg.slope(tb, neff, nc, q) * av[a] / cv;
+                                }
+                            }
+                        }
+                    }
+                    amrex::Real rate = r(i, j, k);
+                    for (int a = 0; a < 7; ++a) {
+                        rate -= power[a] / capacity;
+                    }
+                    // Compatible simultaneous reactions share by physical area.
+                    amrex::Real area_sum = 0.0_rt;
+                    for (int a = 0; a < 7; ++a) {
+                        bool const reacts =
+                            p(i, j, k, a) >= 0.0_rt &&
+                            (fixed >= 0.0_rt
+                                 ? wall_factor[a] == 0.0_rt
+                                 : tb <= p(i, j, k, a) && rate < 0.0_rt);
+                        if (reacts) {
+                            area_sum += av[a];
+                        }
+                    }
+                    if (area_sum > 0.0_rt) {
+                        for (int a = 0; a < 7; ++a) {
+                            bool const reacts =
+                                p(i, j, k, a) >= 0.0_rt &&
+                                (fixed >= 0.0_rt
+                                     ? wall_factor[a] == 0.0_rt
+                                     : tb <= p(i, j, k, a) && rate < 0.0_rt);
+                            if (reacts) {
+                                power[a] += capacity * rate * av[a] / area_sum;
+                            }
+                        }
+                        rate = 0.0_rt;
+                    }
+                    r(i, j, k) = rate;
+                    if (fixed >= 0.0_rt) {
+                        stiffness = 0.0_rt;
+                    }
+                    for (int a = 0; a < 7; ++a) {
+                        if (!own(i, j, k)) {
+                            power[a] = 0.0_rt;
+                        }
+                    }
+                    return {power[0], power[1], power[2], power[3],
+                            power[4], power[5], power[6], stiffness};
+                });
+        }
+        auto const v = data.value(op);
+        heat.rate[0] = amrex::get<0>(v);
+        heat.rate[1] = amrex::get<1>(v);
+        heat.rate[2] = amrex::get<2>(v);
+        heat.rate[3] = amrex::get<3>(v);
+        heat.rate[4] = amrex::get<4>(v);
+        heat.rate[5] = amrex::get<5>(v);
+        heat.rate[6] = amrex::get<6>(v);
+        boundary_s_max = amrex::get<7>(v);
+    };
+    auto cap = [&] () -> amrex::Real {
+        amrex::Real const s_max = stable_rate();
+        if (bound_debug) {
+            debug_bound(s_max);
+        }
+        if (!std::isfinite(s_max)) {
+            return 0.0_rt;
+        }
+        return s_max > 0.0_rt ? fd_cfl * edge_scale / s_max
+                              : std::numeric_limits<amrex::Real>::max();
+    };
+    auto post_step = [&] (amrex::MultiFab& state, amrex::Real) {
+        project(state, false);
+    };
+    QdsmcRKIntegrator const integ(
+        m_cond_fd_time == 2 ? QdsmcRKIntegrator::Scheme::RKL2
+        : use_rkf45         ? QdsmcRKIntegrator::Scheme::RKF45
+                            : QdsmcRKIntegrator::Scheme::SSPRK2,
+        eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol, m_substep_safety,
+        m_substep_max_growth, max_sub, post_step,
+        mask_err ? &floor_mask : nullptr, &heat, true);
+    auto const st = integ.Advance(T_cur, dt_c);
+    report.completed_time = st.t_done;
+    report.attempts = st.n_attempts;
+    report.accepted = st.n_accepted;
+    report.s_max = st.s_max;
+    if (st.failure) {
+        return fail(st.failure);
     }
-
+    if (!T_cur.is_finite()) {
+        return fail("nonfinite final conduction state");
+    }
+    if (st.t_done < dt_c * (1.0_rt - 1.e-12_rt)) {
+        return fail("incomplete conduction interval");
+    }
+    // One accepted-call collective for heat, projections and raw floor
+    // activity.
+    std::array<amrex::Real, 17> totals{};
+    for (int a = 0; a < 8; ++a) {
+        totals[a] = heat.value[a];
+    }
+    for (int a = 0; a < 7; ++a) {
+        totals[8 + a] = entry_heat[a];
+    }
+    totals[15] = floor_raw;
+    totals[16] = floor_count;
+    amrex::ParallelDescriptor::ReduceRealSum(totals.data(), 17);
+    for (int a = 0; a < 7; ++a) {
+        report.outward_heat[a] = totals[a];
+        report.entry_heat[a] = totals[8 + a];
+    }
+    report.floor_heat = totals[7];
+    report.floor_raw_heat = totals[15];
+    report.floor_count = totals[16];
+    report.energy_after = inventory(T_cur);
+    report.residual =
+        report.energy_after[0] - report.energy_before[0] - report.floor_heat;
+    for (int a = 0; a < 7; ++a) {
+        report.residual += report.outward_heat[a] - report.entry_heat[a];
+    }
+    if (!std::isfinite(report.residual)) {
+        return fail("nonfinite conduction heat account");
+    }
+    // Commit Te and historical normalized, inward-positive tallies together.
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);
-
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        for (int side = 0; side < 2; ++side) {
+            int const a = 2 * d + side;
+            amrex::Real const change =
+                (report.entry_heat[a] - report.outward_heat[a]) /
+                cartesian_volume;
+            if (bc[a] == 3) {
+                m_cond_leg_tally[d][side] += change;
+            } else {
+                m_cond_wall_tally[d][side] += change;
+            }
+        }
+    }
+    m_cond_eb_tally +=
+        (report.entry_heat[6] - report.outward_heat[6]) / cartesian_volume;
+    m_cond_floor_tally += report.floor_heat / cartesian_volume;
+    report.completed = true;
+    static bool const cond_stats =
+        std::getenv("WARPX_QDSMC_COND_STATS") != nullptr;
+    if (cond_stats) {
+        amrex::Print() << "[qdsmc] cond rk stats: half="
+                       << (use_rho_new ? 2 : 1) << " accepted=" << st.n_accepted
+                       << " attempts=" << st.n_attempts
+                       << " rkl2_s_max=" << st.s_max
+                       << " t_done_frac=" << (dt_c > 0 ? st.t_done / dt_c : 1)
+                       << " E_cap_J=" << report.energy_after[0]
+                       << " E_eff_J=" << report.energy_after[1]
+                       << " floor_J=" << report.floor_heat
+                       << " floor_raw_J=" << report.floor_raw_heat
+                       << " residual_J=" << report.residual << "\n";
+    }
     ablastr::utils::communication::FillBoundary(
         Te, WarpX::do_single_precision_comms, period, true);
+    return true;
 }
 
 void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,

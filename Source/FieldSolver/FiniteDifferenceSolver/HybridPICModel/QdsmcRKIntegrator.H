@@ -18,10 +18,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <limits>
+#include <memory>
 #include <utility>
 
-/** Diagnostics returned by QdsmcRKIntegrator::Advance. t_done < t_end
- *  means the attempts budget ran out -- the caller decides warn/abort. */
+/** Diagnostics returned by QdsmcRKIntegrator::Advance. failure identifies an
+ * invalid stage or incomplete interval. The caller owns state commit/rollback.
+ */
 struct QdsmcRKStats
 {
     int n_attempts = 0;
@@ -42,6 +45,7 @@ struct QdsmcRKStats
     // against SSPRK2 cannot show a difference no matter how it is run.
     // Zero for the other schemes, which have no stage count.
     int s_max = 0;
+    char const* failure = nullptr;
 };
 
 /** Adaptive explicit Runge--Kutta stepper over a single-component
@@ -53,9 +57,9 @@ struct QdsmcRKStats
  *  The RHS is a host functor rhs(y, k) that owns its kernel launches
  *  and refreshes y's ghosts before evaluating; k is written on the
  *  valid region only. An optional stability-ceiling functor cap() is
- *  consulted after each fresh RHS evaluation (any state the ceiling
- *  needs -- e.g. a coefficient field -- is a side effect of rhs) and is
- *  always honored on top of the error controller: explicit RK on a
+ *  consulted at each attempt entry; validate_stages additionally checks
+ *  every stage (coefficient state is a side effect of rhs). A stage ceiling
+ *  violation rejects an adaptive attempt or fails RKL. Explicit RK on a
  *  diffusive spectrum is stability-limited, and the embedded error
  *  alone detects the instability edge only after noise has grown.
  *
@@ -92,6 +96,13 @@ public:
 
     using Rhs = std::function<void (amrex::MultiFab&, amrex::MultiFab&)>;
     using Cap = std::function<amrex::Real ()>;
+    /** Rank-local passive integrals. rhs writes rate; post_step may add a
+     * projection correction to value. They use the state tableau but do
+     * not enter its error norm. No callback may publish provisional heat. */
+    struct Auxiliary {
+        amrex::Vector<amrex::Real> value;
+        amrex::Vector<amrex::Real> rate;
+    };
     /** Optional hook run on the state after every ACCEPTED step (before
      *  the accepted state is latched for the next attempt), with the
      *  accepted dt. Used for constraint enforcement that must track the
@@ -112,17 +123,18 @@ public:
      *  owns. The pointee must outlive the integrator; the caller updates
      *  it (post-step) so each attempt's norm sees the LAST accepted
      *  step's projection set. nullptr = today's behavior exactly. */
-    QdsmcRKIntegrator (Scheme scheme, Rhs rhs, Cap cap,
-                       amrex::Real rtol, amrex::Real atol,
-                       amrex::Real safety, amrex::Real max_growth,
-                       int max_attempts, PostStep post_step = {},
-                       amrex::iMultiFab const * err_mask = nullptr)
+    QdsmcRKIntegrator (Scheme scheme, Rhs rhs, Cap cap, amrex::Real rtol,
+                       amrex::Real atol, amrex::Real safety,
+                       amrex::Real max_growth, int max_attempts,
+                       PostStep post_step = {},
+                       amrex::iMultiFab const* err_mask = nullptr,
+                       Auxiliary* auxiliary = nullptr,
+                       bool validate_stages = false)
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
-          m_post_step(std::move(post_step)),
-          m_rtol(rtol), m_atol(atol), m_safety(safety),
-          m_max_growth(max_growth), m_max_attempts(max_attempts),
-          m_err_mask(err_mask)
-    {}
+          m_post_step(std::move(post_step)), m_rtol(rtol), m_atol(atol),
+          m_safety(safety), m_max_growth(max_growth),
+          m_max_attempts(max_attempts), m_err_mask(err_mask), m_aux(auxiliary),
+          m_validate_stages(validate_stages) {}
 
     /** Advance y in place from t = 0 to t_end. y's ghost refresh is the
      *  RHS functor's job; on return y's ghosts are stale. */
@@ -132,6 +144,20 @@ public:
         QdsmcRKStats st;
         if (t_end <= 0.0_rt) { return st; }
 
+        m_failure = nullptr;
+        m_stage_cap_failed = false;
+        m_required_cap = 0.0_rt;
+        if (m_validate_stages) {
+            m_finite_data =
+                std::make_unique<amrex::ReduceData<int>>(m_finite_op);
+        }
+        if (m_aux) {
+            m_aux_entry = m_aux->value;
+            m_aux0 = m_aux->value;
+            m_auxjm2 = m_aux->value;
+            m_aux_k.assign(
+                6, amrex::Vector<amrex::Real>(m_aux->value.size(), 0.0_rt));
+        }
         if (m_scheme == Scheme::RKL2) { return AdvanceRKL2(y, t_end); }
 
         int const nk = (m_scheme == Scheme::RKF45) ? 6 : 2;
@@ -163,10 +189,20 @@ public:
             ++st.n_attempts;
 
             // k1 (side effect: whatever state the ceiling functor reads)
-            m_rhs(y, k[0]);
-            if (m_cap) { dt = amrex::min(dt, m_cap()); }
+            m_required_cap = 0.0_rt;
+            if (m_aux) {
+                m_aux0 = m_aux->value;
+            }
+            EvaluateRhs(y, k[0], 0);
+            if (m_failure) {
+                break;
+            }
+            if (m_cap) {
+                dt = amrex::min(dt, m_validate_stages ? m_last_cap : m_cap());
+            }
             dt = amrex::min(dt, t_end - st.t_done);
 
+            m_required_cap = dt;
             amrex::Real err;
             if (m_scheme == Scheme::RKF45) {
                 err = StepRKF45(y, y0, k, e_scratch, dt);
@@ -174,6 +210,23 @@ public:
                 err = StepSSPRK2(y, y0, k, e_scratch, dt);
             }
 
+            if (m_stage_cap_failed) {
+                // The existing adaptive methods already own attempt rejection.
+                // Rewind their passive accounts as well as the field, and retry
+                // below the newly observed ceiling. RKL has no retry
+                // controller.
+                amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
+                if (m_aux) {
+                    m_aux->value = m_aux0;
+                }
+                dt = amrex::min(0.5_rt * dt, m_safety * m_last_cap);
+                m_failure = nullptr;
+                m_stage_cap_failed = false;
+                continue;
+            }
+            if (m_failure) {
+                break;
+            }
             amrex::Real const fac =
                 m_safety * std::pow(err + 1.0e-10_rt, expo);
             if (err <= 1.0_rt) {
@@ -193,133 +246,152 @@ public:
                 dt *= amrex::min(m_max_growth, fac);
             } else {
                 amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
+                if (m_aux) {
+                    m_aux->value = m_aux0;
+                }
                 dt *= amrex::max(0.1_rt, fac);
             }
         }
-        return st;
+        return Finish(st, t_end);
     }
 
     // nvcc (CUDA >= 13) requires that member functions whose bodies
     // contain extended __device__ lambdas (every ParallelFor) be public.
 public:
-    /** RKL2 super-time-stepping advance. Per super-step tau, the stage
-     *  count s satisfies tau <= safety * dt_expl * (s^2+s-2)/4 with
-     *  dt_expl from the ceiling functor (evaluated once at super-step
-     *  entry; the coefficient state is that of the entry RHS call).
-     *  Recurrence (Meyer, Balsara & Aslam 2014):
-     *      Y_1 = Y_0 + mu_t1 tau M(Y_0),          mu_t1 = b_1 w_1
-     *      Y_j = mu_j Y_{j-1} + nu_j Y_{j-2} + (1 - mu_j - nu_j) Y_0
-     *            + mu_tj tau M(Y_{j-1}) + ga_tj tau M(Y_0),  j = 2..s
-     *  with b_0 = b_1 = 1/3, b_j = (j^2+j-2)/(2j(j+1)),
-     *  w_1 = 4/(s^2+s-2), mu_j = ((2j-1)/j) b_j/b_{j-1},
-     *  nu_j = -((j-1)/j) b_j/b_{j-2}, mu_tj = mu_j w_1,
-     *  ga_tj = -(1 - b_{j-1}) mu_tj.
-     *  post_step runs after EVERY stage with the stage's effective time
-     *  increment (c_j - c_{j-1}) tau, c_j = (j^2+j-2)/(s^2+s-2) and
-     *  c_1 = mu_t1; the increments sum to tau exactly, so BC flux
-     *  injections scaled by the post-step dt still integrate to the
-     *  full interval. Stage states are built in the caller's y (the
-     *  ghosted buffer the RHS functor refreshes); Y_{j-1}, Y_{j-2},
-     *  M(Y_0) are archived in ghostless temporaries. Stats: n_attempts
-     *  and n_accepted count STAGES (one RHS evaluation each, the work
-     *  unit the attempts budget bounds); the dt trajectory books the
-     *  per-stage increments. The stage count of a super-step is sized
-     *  to the remaining budget BEFORE the recurrence starts -- the
-     *  recurrence cannot stop midway (intermediate stages are not
-     *  consistent solutions), so a budget-limited super-step covers a
-     *  shorter tau and the while loop continues (or exits with
-     *  t_done < t_end, which the caller's budget warning reports). */
-    QdsmcRKStats AdvanceRKL2 (amrex::MultiFab & y, amrex::Real const t_end) const
-    {
-        using namespace amrex::literals;
-        QdsmcRKStats st;
-        int const nc = y.nComp();
-        // Y_{j-1} needs no archive of its own: the caller's y holds it at
-        // every stage entry (the fused stage kernel reads it there before
-        // overwriting), so only Y_{j-2}, Y_0, and the two RHS archives
-        // are kept.
-        amrex::MultiFab y0  (y.boxArray(), y.DistributionMap(), nc, 0);
-        amrex::MultiFab yjm2(y.boxArray(), y.DistributionMap(), nc, 0);
-        amrex::MultiFab my0 (y.boxArray(), y.DistributionMap(), nc, 0);
-        amrex::MultiFab mjm1(y.boxArray(), y.DistributionMap(), nc, 0);
+  /** RKL2 super-time-stepping advance. Per super-step tau, the stage
+   *  count s satisfies tau <= safety * dt_expl * (s^2+s-2)/4 with
+   *  dt_expl from the ceiling functor (evaluated once at super-step
+   *  entry; the coefficient state is that of the entry RHS call).
+   *  Recurrence (Meyer, Balsara & Aslam 2014):
+   *      Y_1 = Y_0 + mu_t1 tau M(Y_0),          mu_t1 = b_1 w_1
+   *      Y_j = mu_j Y_{j-1} + nu_j Y_{j-2} + (1 - mu_j - nu_j) Y_0
+   *            + mu_tj tau M(Y_{j-1}) + ga_tj tau M(Y_0),  j = 2..s
+   *  with b_0 = b_1 = 1/3, b_j = (j^2+j-2)/(2j(j+1)),
+   *  w_1 = 4/(s^2+s-2), mu_j = ((2j-1)/j) b_j/b_{j-1},
+   *  nu_j = -((j-1)/j) b_j/b_{j-2}, mu_tj = mu_j w_1,
+   *  ga_tj = -(1 - b_{j-1}) mu_tj.
+   *  post_step runs after EVERY stage for projections only. Finite-rate
+   *  sources must be in the RHS: adding them in this hook reweights the
+   *  state differently from a sum of stage-time increments. Auxiliary
+   *  corrections follow the same homogeneous recurrence as the state.
+   *  With validate_stages, each RHS rechecks the ceiling required by
+   *  the chosen tau/s; a newly insufficient ceiling fails the call.
+   *  Stage states are built in the caller's y (the
+   *  ghosted buffer the RHS functor refreshes); Y_{j-1}, Y_{j-2},
+   *  M(Y_0) are archived in ghostless temporaries. Stats: n_attempts
+   *  and n_accepted count STAGES (one RHS evaluation each, the work
+   *  unit the attempts budget bounds); the dt trajectory books the
+   *  per-stage increments. The stage count of a super-step is sized
+   *  to the remaining budget BEFORE the recurrence starts -- the
+   *  recurrence cannot stop midway (intermediate stages are not
+   *  consistent solutions), so a budget-limited super-step covers a
+   *  shorter tau and the while loop continues (or exits with
+   *  t_done < t_end, which the caller's budget warning reports). */
+  QdsmcRKStats
+  AdvanceRKL2 (amrex::MultiFab& y, amrex::Real const t_end) const {
+      using namespace amrex::literals;
+      QdsmcRKStats st;
+      int const nc = y.nComp();
+      // Y_{j-1} needs no archive of its own: the caller's y holds it at
+      // every stage entry (the fused stage kernel reads it there before
+      // overwriting), so only Y_{j-2}, Y_0, and the two RHS archives
+      // are kept.
+      amrex::MultiFab y0(y.boxArray(), y.DistributionMap(), nc, 0);
+      amrex::MultiFab yjm2(y.boxArray(), y.DistributionMap(), nc, 0);
+      amrex::MultiFab my0(y.boxArray(), y.DistributionMap(), nc, 0);
+      amrex::MultiFab mjm1(y.boxArray(), y.DistributionMap(), nc, 0);
 
-        auto book = [&] (amrex::Real const dts)
-        {
-            ++st.n_attempts;
-            ++st.n_accepted;
-            st.dt_last = dts;
-            if (st.n_accepted == 1) {
-                st.dt_first = dts; st.dt_min = dts; st.dt_max = dts;
-            } else {
-                st.dt_min = amrex::min(st.dt_min, dts);
-                st.dt_max = amrex::max(st.dt_max, dts);
-            }
-        };
+      auto book = [&] (amrex::Real const dts) {
+          ++st.n_attempts;
+          ++st.n_accepted;
+          st.dt_last = dts;
+          if (st.n_accepted == 1) {
+              st.dt_first = dts;
+              st.dt_min = dts;
+              st.dt_max = dts;
+          } else {
+              st.dt_min = amrex::min(st.dt_min, dts);
+              st.dt_max = amrex::max(st.dt_max, dts);
+          }
+      };
 
-        while (st.t_done < t_end*(1.0_rt - 1.0e-12_rt))
-        {
-            if (st.n_attempts >= m_max_attempts) { break; }
+      while (st.t_done < t_end * (1.0_rt - 1.0e-12_rt)) {
+          if (m_max_attempts - st.n_attempts < 2) {
+              break;
+          }
 
-            // Entry evaluation M(Y_0) (side effect: the ceiling functor's
-            // coefficient state) and the stability-sized stage count.
-            m_rhs(y, my0);
-            amrex::Real const dt_expl = m_cap ? m_cap()
-                : std::numeric_limits<amrex::Real>::max();
-            amrex::Real tau = t_end - st.t_done;
-            int s = 2;
-            if (tau > m_safety*dt_expl) {
-                amrex::Real const nn = tau/(m_safety*dt_expl);
-                amrex::Real const s_real = std::ceil(
-                    0.5_rt*(std::sqrt(9.0_rt + 16.0_rt*nn) - 1.0_rt));
-                // GUARD THE NARROWING CAST. s_real is unbounded above: it
-                // grows as sqrt(tau/dt_expl), and dt_expl -> 0 whenever the
-                // diffusivity is unbounded -- qdsmc_conduction_chi_max = 0
-                // removes the kappa ceiling entirely, which the knob doc
-                // advertises as a supported setting. Converting an
-                // out-of-range double to int is undefined behaviour; on x86
-                // cvttsd2si yields the "integer indefinite" value INT_MIN,
-                // which the max(s, 2) below then launders into a perfectly
-                // plausible s = 2. The step is integrated with two stages
-                // where it needed ~1e12 -- violently unstable -- AND s = 2
-                // slips under the attempts-budget test immediately after,
-                // so the guard that exists to catch exactly this condition
-                // reports nothing at all. Measured on an unclamped-chi arm:
-                // rkl2_s_max = 2, "injected -nan J", Te = 3.4e5 eV one step
-                // after restart, abort on Te_abort_threshold.
-                //
-                // Clamping in floating point first keeps the failure
-                // VISIBLE: s saturates at the attempts budget, tau is cut
-                // to what that many stages actually cover, and the
-                // uncovered remainder leaves t_done < dt_c -- which is what
-                // raises the "attempts budget hit" warning downstream.
-                if (s_real >= amrex::Real(m_max_attempts)) {
-                    s = m_max_attempts;
-                    tau = amrex::min(tau, m_safety*dt_expl
-                        * 0.25_rt*(amrex::Real(s)*(amrex::Real(s) + 1.0_rt)
-                                   - 2.0_rt));
-                } else {
-                    s = std::max(2, static_cast<int>(s_real));
-                }
-            }
-            int const s_budget = m_max_attempts - st.n_attempts;
-            if (s > s_budget) {
-                s = std::max(2, s_budget);
-                tau = amrex::min(tau, m_safety*dt_expl
-                    * 0.25_rt*(amrex::Real(s)*(amrex::Real(s) + 1.0_rt)
-                               - 2.0_rt));
-            }
-            // Recorded after the budget clamp, so it reports the stage
-            // count actually taken rather than the one requested.
-            st.s_max = std::max(st.s_max, s);
+          // Entry evaluation M(Y_0) (side effect: the ceiling functor's
+          // coefficient state) and the stability-sized stage count.
+          m_required_cap = 0.0_rt;
+          if (m_aux) {
+              m_aux0 = m_aux->value;
+              m_auxjm2 = m_aux->value;
+          }
+          EvaluateRhs(y, my0, 0);
+          if (m_failure) {
+              break;
+          }
+          amrex::Real const dt_expl =
+              m_cap ? (m_validate_stages ? m_last_cap : m_cap())
+                    : std::numeric_limits<amrex::Real>::max();
+          amrex::Real tau = t_end - st.t_done;
+          int s = 2;
+          if (tau > m_safety * dt_expl) {
+              amrex::Real const nn = tau / (m_safety * dt_expl);
+              amrex::Real const s_real = std::ceil(
+                  0.5_rt * (std::sqrt(9.0_rt + 16.0_rt * nn) - 1.0_rt));
+              // GUARD THE NARROWING CAST. s_real is unbounded above: it
+              // grows as sqrt(tau/dt_expl), and dt_expl -> 0 whenever the
+              // diffusivity is unbounded -- qdsmc_conduction_chi_max = 0
+              // removes the kappa ceiling entirely, which the knob doc
+              // advertises as a supported setting. Converting an
+              // out-of-range double to int is undefined behaviour; on x86
+              // cvttsd2si yields the "integer indefinite" value INT_MIN,
+              // which the max(s, 2) below then launders into a perfectly
+              // plausible s = 2. The step is integrated with two stages
+              // where it needed ~1e12 -- violently unstable -- AND s = 2
+              // slips under the attempts-budget test immediately after,
+              // so the guard that exists to catch exactly this condition
+              // reports nothing at all. Measured on an unclamped-chi arm:
+              // rkl2_s_max = 2, "injected -nan J", Te = 3.4e5 eV one step
+              // after restart, abort on Te_abort_threshold.
+              //
+              // Clamping in floating point first keeps the failure
+              // VISIBLE: s saturates at the attempts budget, tau is cut
+              // to what that many stages actually cover, and the
+              // uncovered remainder leaves t_done < dt_c -- which is what
+              // raises the "attempts budget hit" warning downstream.
+              if (s_real >= amrex::Real(m_max_attempts)) {
+                  s = m_max_attempts;
+                  tau = amrex::min(
+                      tau, m_safety * dt_expl * 0.25_rt *
+                               (amrex::Real(s) * (amrex::Real(s) + 1.0_rt) -
+                                2.0_rt));
+              } else {
+                  s = std::max(2, static_cast<int>(s_real));
+              }
+          }
+          int const s_budget = m_max_attempts - st.n_attempts;
+          if (s > s_budget) {
+              s = std::max(2, s_budget);
+              tau = amrex::min(
+                  tau,
+                  m_safety * dt_expl * 0.25_rt *
+                      (amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt));
+          }
+          // Recorded after the budget clamp, so it reports the stage
+          // count actually taken rather than the one requested.
+          st.s_max = std::max(st.s_max, s);
 
-            amrex::Real const ssq =
-                amrex::Real(s)*(amrex::Real(s) + 1.0_rt) - 2.0_rt;
-            amrex::Real const w1 = 4.0_rt/ssq;
+          amrex::Real const ssq =
+              amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt;
+          amrex::Real const w1 = 4.0_rt / ssq;
+          m_required_cap = tau * w1 / m_safety;
 
-            // Stage 1 (into y; archives y0 = yjm2 = Y_0 and applies the
-            // Euler update in one fused launch, in place of a copy, a
-            // LinComb, and two archive copies)
-            amrex::Real const mu_t1 = w1/3.0_rt;   // b_1 w_1
+          // Stage 1 (into y; archives y0 = yjm2 = Y_0 and applies the
+          // Euler update in one fused launch, in place of a copy, a
+          // LinComb, and two archive copies)
+          amrex::Real const mu_t1 = w1 / 3.0_rt; // b_1 w_1
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -340,6 +412,11 @@ public:
                     y_arr(i,j,kk,c) = 1.0_rt*yv + c1*my0_arr(i,j,kk,c);
                 });
             }
+            if (m_aux) {
+                for (int a = 0; a < m_aux->value.size(); ++a) {
+                    m_aux->value[a] = m_aux0[a] + mu_t1 * tau * m_aux_k[0][a];
+                }
+            }
             if (m_post_step) { m_post_step(y, mu_t1*tau); }
             book(mu_t1*tau);
             amrex::Real c_prev = mu_t1;
@@ -354,7 +431,10 @@ public:
                 // LinComb + 3 Saxpy sequence (bit-identical), reading
                 // Y_{j-1} from y before overwriting and re-archiving it
                 // as the next stage's Y_{j-2}.
-                m_rhs(y, mjm1);
+                EvaluateRhs(y, mjm1, 1);
+                if (m_failure) {
+                    return Finish(st, t_end);
+                }
                 amrex::Real const rj = amrex::Real(j);
                 amrex::Real const bj =
                     (rj*rj + rj - 2.0_rt)/(2.0_rt*rj*(rj + 1.0_rt));
@@ -388,6 +468,15 @@ public:
                         y_arr(i,jj,kk,c) = r;
                     });
                 }
+                if (m_aux) {
+                    for (int a = 0; a < m_aux->value.size(); ++a) {
+                        amrex::Real const old = m_aux->value[a];
+                        m_aux->value[a] =
+                            mu * old + nu * m_auxjm2[a] + w0 * m_aux0[a] +
+                            ct_m * m_aux_k[1][a] + ct_g * m_aux_k[0][a];
+                        m_auxjm2[a] = old;
+                    }
+                }
                 amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
                 if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
                 book((cj - c_prev)*tau);
@@ -397,7 +486,7 @@ public:
             }
             st.t_done += tau;
         }
-        return st;
+        return Finish(st, t_end);
     }
 
     /** Weighted max-norm error ratio of e against y0 (globally reduced). */
@@ -535,7 +624,10 @@ public:
                 y_arr(i,j,kk,c) = yv + dt*k1_arr(i,j,kk,c);
             });
         }
-        m_rhs(y, k[1]);
+        EvaluateRhs(y, k[1], 1);
+        if (m_failure) {
+            return std::numeric_limits<amrex::Real>::infinity();
+        }
         // corrector y = y0 + dt/2 (k1 + k2); error e = dt/2 (k2 - k1)
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -558,6 +650,12 @@ public:
                 r = r + (0.5_rt*dt)*k2v;
                 y_arr(i,j,kk,c) = r;
             });
+        }
+        if (m_aux) {
+            for (int a = 0; a < m_aux->value.size(); ++a) {
+                m_aux->value[a] = m_aux0[a] + (0.5_rt * dt) * m_aux_k[0][a] +
+                                  (0.5_rt * dt) * m_aux_k[1][a];
+            }
         }
         return ErrNorm(e, y0);
     }
@@ -597,7 +695,7 @@ public:
             for (auto const & t : terms) {
                 amrex::MultiFab::Saxpy(y, dt*t.first, k[t.second], 0, 0, nc, 0);
             }
-            m_rhs(y, k[kout]);
+            EvaluateRhs(y, k[kout], kout);
         };
         stage({{a21, 0}},                                     1);
         stage({{a31, 0}, {a32, 1}},                           2);
@@ -605,6 +703,18 @@ public:
         stage({{a51, 0}, {a52, 1}, {a53, 2}, {a54, 3}},       4);
         stage({{a61, 0}, {a62, 1}, {a63, 2}, {a64, 3}, {a65, 4}}, 5);
 
+        if (m_failure) {
+            return std::numeric_limits<amrex::Real>::infinity();
+        }
+        if (m_aux) {
+            for (int a = 0; a < m_aux->value.size(); ++a) {
+                m_aux->value[a] =
+                    m_aux0[a] +
+                    dt * (b51 * m_aux_k[0][a] + b53 * m_aux_k[2][a] +
+                          b54 * m_aux_k[3][a] + b55 * m_aux_k[4][a] +
+                          b56 * m_aux_k[5][a]);
+            }
+        }
         // 5th-order candidate and 4th/5th error in one pass each
         amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt*b51, k[0], 0, 0, nc, 0);
         amrex::MultiFab::Saxpy(y, dt*b53, k[2], 0, 0, nc, 0);
@@ -619,6 +729,85 @@ public:
         return ErrNorm(e, y0);
     }
 
+public:
+    // nvcc extended device lambdas require a public enclosing member.
+    /** Call-owned validation scratch avoids a device allocation per stage. */
+    bool
+    StageIsFinite (amrex::MultiFab const& state) const {
+        m_finite_op = amrex::ReduceOps<amrex::ReduceOpMin>{};
+#ifdef AMREX_USE_GPU
+        m_finite_data->nBlocks().fill(0);
+#else
+        for (auto& value : m_finite_data->reference()) {
+            value = amrex::GpuTuple<int>{1};
+        }
+#endif
+        int const nc = state.nComp();
+        for (amrex::MFIter mfi(state); mfi.isValid(); ++mfi) {
+            auto const data = state.const_array(mfi);
+            m_finite_op.eval(mfi.validbox(), *m_finite_data,
+                             [=] AMREX_GPU_DEVICE(
+                                 int i, int j, int k) -> amrex::GpuTuple<int> {
+                                 int finite = 1;
+                                 for (int c = 0; c < nc; ++c) {
+                                     finite = finite &&
+                                              std::isfinite(data(i, j, k, c));
+                                 }
+                                 return {finite};
+                             });
+        }
+        int finite = amrex::get<0>(m_finite_data->value(m_finite_op));
+        amrex::ParallelDescriptor::ReduceIntMin(finite);
+        return finite != 0;
+    }
+
+private:
+    void
+    EvaluateRhs (amrex::MultiFab& y, amrex::MultiFab& k,
+                 int const stage) const {
+        if (m_failure) {
+            return;
+        }
+        if (m_validate_stages && !StageIsFinite(y)) {
+            m_failure = "nonfinite stage state";
+            return;
+        }
+        m_rhs(y, k);
+        if (m_aux) {
+            m_aux_k[stage] = m_aux->rate;
+        }
+        if (m_validate_stages) {
+            m_last_cap =
+                m_cap ? m_cap() : std::numeric_limits<amrex::Real>::max();
+            if (!(m_last_cap > 0.0) || !std::isfinite(m_last_cap)) {
+                m_failure = "invalid stability ceiling";
+            } else if (m_last_cap *
+                           (1.0 +
+                            64.0 *
+                                std::numeric_limits<amrex::Real>::epsilon()) <
+                       m_required_cap) {
+                m_failure = "stage stability ceiling invalidates selected step";
+                m_stage_cap_failed = true;
+            }
+            if (!StageIsFinite(k)) {
+                m_failure = "nonfinite stage RHS";
+                m_stage_cap_failed = false;
+            }
+        }
+    }
+
+    QdsmcRKStats
+    Finish (QdsmcRKStats st, amrex::Real const t_end) const {
+        st.failure = m_failure;
+        if (!st.failure && st.t_done < t_end * (1.0 - 1.0e-12)) {
+            st.failure = "attempts budget exhausted";
+        }
+        if (st.failure && m_aux) {
+            m_aux->value = m_aux_entry;
+        }
+        return st;
+    }
+
     Scheme m_scheme;
     Rhs m_rhs;
     Cap m_cap;
@@ -628,6 +817,15 @@ public:
     /** Optional error-norm exclusion set (see the constructor doc);
      *  not owned. */
     amrex::iMultiFab const * m_err_mask = nullptr;
+    Auxiliary* m_aux = nullptr;
+    mutable amrex::ReduceOps<amrex::ReduceOpMin> m_finite_op;
+    mutable std::unique_ptr<amrex::ReduceData<int>> m_finite_data;
+    bool m_validate_stages = false;
+    mutable amrex::Vector<amrex::Real> m_aux_entry, m_aux0, m_auxjm2;
+    mutable amrex::Vector<amrex::Vector<amrex::Real>> m_aux_k;
+    mutable amrex::Real m_last_cap = 0.0, m_required_cap = 0.0;
+    mutable char const* m_failure = nullptr;
+    mutable bool m_stage_cap_failed = false;
 };
 
 #endif // WARPX_QDSMCRKINTEGRATOR_H_

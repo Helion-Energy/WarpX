@@ -412,6 +412,37 @@ void init_WarpX (py::module& m)
             "domain face (dim, side: 0=lo, 1=hi), same units and sign "
             "as get_qdsmc_wall_tally (ledger class wall_leg)."
         )
+        .def(
+            "get_qdsmc_conduction_report",
+            [] (WarpX& wx) {
+                auto const& r =
+                    wx.get_pointer_HybridPICModel()->m_cond_last_report;
+                py::dict out;
+                out["completed"] = r.completed;
+                out["requested_time_s"] = r.requested_time;
+                out["completed_time_s"] = r.completed_time;
+                out["attempts"] = r.attempts;
+                out["accepted"] = r.accepted;
+                out["rkl_s_max"] = r.s_max;
+                out["outward_heat_J"] = r.outward_heat;
+                out["entry_heat_J"] = r.entry_heat;
+                out["floor_heat_J"] = r.floor_heat;
+                out["floor_raw_heat_J"] = r.floor_raw_heat;
+                out["floor_count"] = r.floor_count;
+                out["energy_before_J"] = r.energy_before;
+                out["energy_after_J"] = r.energy_after;
+                out["residual_J"] = r.residual;
+                return out;
+            },
+            "Last successful FD conduction call; heat in joules, physical heat "
+            "outward-positive. "
+            "Heat channels: x_lo,x_hi,y_lo,y_hi,z_lo,z_hi,EB in grid "
+            "dimensions. "
+            "Energy entries: "
+            "capacity,effective_density,legacy_bulk,legacy_band,covered,closed."
+            " "
+            "Covered and closed are subsets, not additional reservoirs. Reset "
+            "on restart.")
         .def("get_qdsmc_eb_tally",
             [](WarpX& wx) {
                 return wx.get_pointer_HybridPICModel()->GetQdsmcEbTally();

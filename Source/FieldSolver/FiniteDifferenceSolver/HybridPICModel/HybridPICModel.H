@@ -13,6 +13,7 @@
 #define WARPX_HYBRIDPICMODEL_H_
 
 #include "HybridPICModel_fwd.H"
+#include "QdsmcConductionReport.H"
 
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
@@ -2234,6 +2235,14 @@ public:
     /** FD conduction with an explicit density and coefficient time. */
     void QdsmcConductionOnceFDAtState (int lev, amrex::Real dt_c, bool use_rho_new,
                                        amrex::MultiFab const& rho, amrex::Real time) const;
+    /** Transactional native FD entry point. Failure leaves caller Te and
+     * cumulative heat unchanged; the normal application entry aborts. */
+    bool TryQdsmcConductionOnceFDAtState (int lev, amrex::Real dt_c,
+                                          bool use_rho_new,
+                                          amrex::MultiFab const& rho,
+                                          amrex::Real time,
+                                          QdsmcConductionReport& report) const;
+    mutable QdsmcConductionReport m_cond_last_report;
 
     /** Grid-transport arm of the energy-equation bake-off jig
      *  (qdsmc_transport_operator = grid): advances the entropy pair
@@ -3070,7 +3079,12 @@ public:
      *  Input: qdsmc_advection_fluxform_unsplit. */
     bool m_adv_ff_unsplit = false;
 
-    /** Domain-face conduction BCs on T_e. Per grid dim and
+    /** FD boundaries: finite-rate fluxes enter the RHS, uncapped temperatures
+     * are stage constraints, and physical heat follows the RK/RKL tableau.
+     * Capped walls cool at finite rate with a unilateral lower temperature.
+     * Native nodal Te remains Kelvin. The legacy non-FD helper below retains
+     * its sequential relaxation semantics.
+     * Domain-face conduction BCs on T_e. Per grid dim and
      *  side: 0 = adiabatic (default; the fluxform wall faces already
      *  carry F = 0 = exact zero heat flux), 1 = isothermal (the
      *  boundary node row is a thermal bath pinned to the wall
@@ -3129,10 +3143,15 @@ public:
      *  qdsmc_conduction_eb_flux_limit. */
     amrex::Real m_cond_eb_flux_limit = 0.1;
 
-    /** Conduction-leg (Robin) domain-face BC, bc == 3: a 1D heat equation
+    /** FD leg: one external kappa_parallel(n_cap,Tb,t_now)*max(Tb-Twall,0)/L
+     * flux, optionally capped with physical n_eff; no repeated inward flux.
+     * Source eligibility uses Ti on open inward faces and Tb on closed faces.
+     * Parser time is frozen for the conduction half. The following describes
+     * the unchanged legacy non-FD helper, not the FD law.
+     * Conduction-leg (Robin) domain-face BC, bc == 3: a 1D heat equation
      *  along the field line to the divertor wall, in the zero-velocity
-     *  frame with no cross-field transport. Per boundary node the face is in series
-     *  with a leg of length L to a wall at T_wall: the face temperature
+     *  frame with no cross-field transport. Per boundary node the face is in
+     * series with a leg of length L to a wall at T_wall: the face temperature
      *  solving G_int (Te_1 - Te_f) = G_leg (Te_f - T_wall) is
      *  Te_f = (G_int Te_1 + G_leg T_wall) / (G_int + G_leg), with
      *  G_int = (A_inner/A_wall) kappa_face / dx, the interior-face
@@ -3165,7 +3184,7 @@ public:
      *  iterations, qdsmc_conduction_leg_flux_limit. */
     amrex::Real m_cond_leg_length = 6.0;
     amrex::Real m_cond_leg_Te_wall = 0.5;
-    int m_cond_leg_iterations = 2;
+    int m_cond_leg_iterations = 2; // Legacy non-FD helper only; unused by FD.
     amrex::Real m_cond_leg_flux_limit = 0.0;
 
     /** Ion mass used by the sonic wall cap: the first charged species. */

@@ -5046,53 +5046,57 @@ Maxwell solver: kinetic-fluid hybrid
     zero-velocity frame (no advective term at the face) and with no cross-field transport, connects the face
     to a divertor wall at :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_Te_wall` a distance :math:`L`
     away, :math:`q = -\kappa_\parallel \nabla T_e \approx \kappa_\parallel (T_e - T_\mathrm{wall})/L`.
-    Per boundary node the interior face and the leg are two conductances in series, so the boundary row is
-    set to the temperature at which the face flux equals the leg flux,
+
+    For the ``fd`` operator, the nodal boundary temperature remains an evolved plasma
+    unknown with capacity :math:`C_i=1.5 k_B n_\mathrm{cap} V_i`, where
+    :math:`n_\mathrm{eff}=\rho/q_e+n_\mathrm{ped}` and
+    :math:`n_\mathrm{cap}=\max(n_\mathrm{eff},n_\mathrm{floor,QDSMC})`.
+    The native tensor operator supplies the inward face flux exactly once. The external
+    leg supplies the outward flux
 
     .. math::
 
-        G_\mathrm{int}\,(T_1 - T_f) = G_\mathrm{leg}\,(T_f - T_\mathrm{wall}) \quad\Rightarrow\quad
-        T_f = \frac{G_\mathrm{int}\,T_1 + G_\mathrm{leg}\,T_\mathrm{wall}}{G_\mathrm{int} + G_\mathrm{leg}},
+        q_\mathrm{leg}=\kappa_\parallel(n_\mathrm{cap},T_b,t_\mathrm{now})
+            \max(T_b-T_\mathrm{wall},0)/L,
 
-    with :math:`T_1` the first node inward of the face, :math:`G_\mathrm{int} = \kappa_\mathrm{face}/\Delta x`
-    the finite-difference operator's own conductance of that face (the harmonic mean of the floored densities
-    times the arithmetic mean of :math:`\kappa_\parallel/(1.5 n_e k_B)` from the ``qdsmc_kappa_par`` parser at
-    the two nodes; zero when the face is closed by the density floor), and
-    :math:`G_\mathrm{leg} = \kappa_\parallel(n_f, T_f)/L` from the same parser at the face node's floored
-    density. :math:`T_f` is re-evaluated :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_iterations` times
-    (the conductances depend on it through :math:`\kappa_\parallel \propto T_e^{5/2}`) and clamped at
-    :math:`T_\mathrm{wall}` and at ``qdsmc_conduction_Te_floor``. The boundary row is advanced as a lumped
-    capacitor :math:`C = 1.5 n_f k_B V/A_\mathrm{wall}` between the two conductances,
-    using the physical nodal dual volume and wall-face area. At a planar nodal face
-    :math:`V/A_\mathrm{wall} = \Delta x/2`. Radial RZ conductance additionally uses
-    :math:`G_\mathrm{int} = (\kappa_\mathrm{face}/\Delta r)
-    A_\mathrm{inner}/A_\mathrm{wall}`. Density and heat capacity include any stationary
-    pedestal, consistently with the FD operator. Thus
-    :math:`T(\Delta t) = T_f + (T_0 - T_f)\,e^{-\Delta t (G_\mathrm{int} + G_\mathrm{leg})/C}`: an open
-    face (:math:`\Delta x^2/\chi \ll \Delta t`) lands on :math:`T_f`, while a face closed by the density
-    floor (:math:`G_\mathrm{int} = 0`, a frozen row) relaxes toward :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})`
-    at the leg's own rate :math:`\chi_\mathrm{leg} A_\mathrm{wall}/(L V)` instead of being pinned. The operator's last
-    face then carries :math:`q = G_\mathrm{int}(T_1 - T_f)` into the row, so the drain regulates itself: a
-    hotter interior raises :math:`T_f` and the flux, a longer or colder leg lowers both. The condition is
-    one-sided, as the MHD lane's ``outflow_limited`` wall and halo relaxation outlet are: it engages only
-    where the drain's source (:math:`T_1` on an open face, the row's own :math:`T_0` on a closed one) exceeds
-    :math:`\max(T_\mathrm{wall}, T_\mathrm{floor})` and only where the update lowers the row (a row below the
-    series value, e.g. rewritten by the transport half, is left to the operator's interior flux instead of being
-    lifted); a colder source keeps the legacy adiabatic face (no reset, no tally). The tally is therefore
-    monotone (a pure drain) and the face flux
-    :math:`G_\mathrm{int} G_\mathrm{leg}/(G_\mathrm{int} + G_\mathrm{leg})\,(T_1 - T_\mathrm{wall})` passes
-    continuously through zero. Applied where the isothermal pin is
-    applied (after every accepted conduction substep, or per RKL2 stage / super-step following
-    :pp:param:`hybrid_pic_model.qdsmc_conduction_rkl2_post_step`). The exchange is booked in a tally of its
-    own and printed as ``wall_leg`` next to ``wall_pin`` on the ``[qdsmc] step N joule_dropped_J:`` line
-    (same sign, weighted by the physical dual volume divided by the product of cell sizes), followed by
-    ``wall_leg_J`` = the same tally in Joules (times the product of cell sizes: :math:`\Delta r\,\Delta z` in RZ,
-    the product of the cell sizes in Cartesian); both tokens appear only when a ``leg`` face is armed. Python:
-    ``warpx.get_qdsmc_leg_tally(dim, side)``. Boot line ``[qdsmc] conduction z_hi BC: LEG (L = 6 m,
-    T_wall = 0.5 eV, iterations 2)``. The domain-face cap
-    :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit` does not apply to ``leg`` faces. The knobs
-    are shared by every face typed ``leg``. A flux-tube mapping of :math:`L` is a follow-up; the default is a
-    fixed 6 m.
+    subject to :pp:param:`hybrid_pic_model.qdsmc_conduction_leg_flux_limit` when nonzero.
+    The conductivity includes the configured diffusivity ceiling. The cap uses physical
+    :math:`n_\mathrm{eff}`, while the conductivity parser and capacity use
+    :math:`n_\mathrm{cap}`. Keep the existing source gate: the first inward temperature
+    on an open face, or the boundary temperature on a closed face, must exceed
+    :math:`\max(T_\mathrm{wall},T_\mathrm{floor})`. Positive-density closed rows can
+    exchange leg heat. Empty and EB-covered rows do not. There is no duplicated inward
+    conductance, series-temperature iteration, or suppression below the old series target.
+
+    Physical boundary rates enter the FD RHS. Their heat accounts use the same SSPRK2,
+    RKF45 or RKL2 weights as temperature. Uncapped prescribed-temperature walls are
+    constraints; their reaction heat balances all incident faces. At a wall/leg corner
+    the wall stays pinned, the leg retains its face area, and the wall books the balancing
+    reaction. Compatible multiple pins share reaction heat by physical face area.
+    Conflicting pins, and uncapped domain/EB temperatures below the conduction floor,
+    are rejected. Equality to the floor is allowed. Capped wall and EB cooling remain
+    finite-rate losses, with a unilateral lower wall-temperature constraint.
+
+    Parser time remains fixed at ``t_now`` during each conduction half-step. Temporal
+    convergence claims apply to this frozen-time problem. The explicit stability estimate
+    includes the local leg response and is checked at every RHS stage against the ceiling
+    needed by the chosen step. The leg slope uses two one-sided numerical differences
+    with a local margin; this is not a rigorous bound for arbitrary user parser functions
+    or a general nonlinear RKL stability proof. A newly insufficient ceiling, nonfinite
+    state, or exhausted stage budget fails without committing temperature or heat.
+    SSPRK2/RKF45 can reject and retry through their existing adaptive controller;
+    RKL has no automatic nonlinear retry. The application aborts on a failed call.
+    For temperature-independent conductivity with the bulk limiter disabled, the
+    invariant tensor and its bulk bound are cached within the call; the leg/gate
+    response and required stage ceiling are still checked at every RHS.
+
+    The legacy non-FD helper retains its series-conductance relaxation and fixed-point
+    iterations. The domain wall cap does not apply to legs. Legacy Python tallies retain
+    their normalized inward-positive convention; multiplying by the Cartesian cell volume
+    gives joules. ``warpx.get_qdsmc_conduction_report()`` instead returns the last successful
+    FD call in joules, with outward-positive physical heat, entry constraints, weighted
+    floor corrections, full capacity/effective-density energies, and unchanged class sums.
+    It is a per-call diagnostic, reset on restart, not a recovered cumulative history.
 
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_Te_wall
     :type: ``float``
@@ -5108,18 +5112,21 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``2``
     :optional:
 
-    Number of fixed-point passes of the leg face temperature :math:`T_f`, the conductances re-evaluated at the
-    new :math:`T_f` each pass (:pp:param:`hybrid_pic_model.qdsmc_conduction_leg_length`).
+    Number of fixed-point passes in the unchanged non-FD leg helper. This parameter is
+    accepted but unused by the FD operator, which evaluates one external flux locally
+    at each RHS stage (:pp:param:`hybrid_pic_model.qdsmc_conduction_leg_length`).
 
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_flux_limit
     :type: ``float``
     :default: ``0`` (off)
     :optional:
 
-    Optional cap factor :math:`f` on the energy a ``leg`` boundary node may lose per substep, with the form
-    (free-streaming or sonic, :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form`) and the
-    :math:`A/V = 1/\Delta x` convention of :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_limit`, which
-    itself never applies to ``leg`` faces (the leg throttles itself). ``0`` = no cap.
+    Optional cap factor :math:`f` on the outward leg flux,
+    :math:`q_\mathrm{cap}=f n_\mathrm{eff} k_B T_b v_\mathrm{cap}(T_b)`.
+    The speed follows :pp:param:`hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form`.
+    The FD rate uses the physical face area divided by the clipped nodal dual volume
+    (at a planar wall, :math:`A/V=2/\Delta x`). ``0`` disables the cap. The domain-wall
+    cap parameter does not apply to legs.
 
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_flux_budget
     :type: ``bool``

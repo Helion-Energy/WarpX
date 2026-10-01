@@ -1101,3 +1101,137 @@ if(TARGET lib_rz)
             TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;WARPX_QDSMC_COND_STATS=1")
     endforeach()
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_qdsmc_rk_accounting test_qdsmc_rk_accounting.cpp)
+    target_link_libraries(test_qdsmc_rk_accounting PRIVATE lib_rz)
+    target_include_directories(test_qdsmc_rk_accounting PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_qdsmc_rk_accounting)
+    endif()
+    add_test(NAME test_rz_qdsmc_rk_accounting COMMAND test_qdsmc_rk_accounting)
+    set_tests_properties(test_rz_qdsmc_rk_accounting PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    foreach(mode IN ITEMS pinned entry floor_equal floor_invalid conflict budget corner floor
+                          gate_failure growth_failure density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
+        set(extra_options)
+        set(boundary_dt 1.e-7)
+        if(mode STREQUAL "corner" OR mode MATCHES "^density_")
+            list(APPEND extra_options hybrid_pic_model.density_pedestal=0
+                hybrid_pic_model.density_pedestal_track_floor=0)
+        endif()
+        if(mode MATCHES "^density_")
+            set(boundary_dt 1.e-10)
+            list(APPEND extra_options boundary_test.density=5.e13 hybrid_pic_model.qdsmc_n_floor=1.e14)
+        elseif(mode STREQUAL "floor")
+            set(boundary_dt 1.e-5)
+        elseif(mode STREQUAL "growth_failure")
+            list(APPEND extra_options
+                "hybrid_pic_model.qdsmc_kappa_par(n,Te,t)=1.5*1.380649e-23*100*n*(Te/2)^2.5"
+                "hybrid_pic_model.qdsmc_kappa_perp(n,Te,t)=1.5*1.380649e-23*100*n*(Te/2)^2.5"
+                hybrid_pic_model.qdsmc_conduction_chi_max=0)
+        endif()
+        if(mode STREQUAL "pedestal")
+            list(APPEND extra_options hybrid_pic_model.density_pedestal=1
+                hybrid_pic_model.density_pedestal_track_floor=0
+                "hybrid_pic_model.density_pedestal_profile(x,y,z)=1.e14*(1+2*x+z)"
+                boundary_test.density=2.e13 hybrid_pic_model.qdsmc_n_floor=1.e14)
+        endif()
+        if(mode MATCHES "^eb_")
+            set(eb_temperature 0.25)
+            set(eb_cap 0)
+            if(mode STREQUAL "eb_invalid")
+                set(eb_temperature 0.125)
+            elseif(mode STREQUAL "eb_capped")
+                set(eb_cap 1.e-6)
+            endif()
+            list(APPEND extra_options "warpx.eb_implicit_function=x*x-0.2*0.2"
+                hybrid_pic_model.qdsmc_conduction_eb_bc=isothermal
+                "hybrid_pic_model.qdsmc_conduction_eb_Te(x,y,z)=${eb_temperature}"
+                hybrid_pic_model.qdsmc_conduction_eb_flux_limit=${eb_cap})
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode})
+        add_test(NAME test_rz_conduction_boundary_native_${mode}
+            COMMAND test_conduction_boundary_native_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
+                hybrid_pic_model.qdsmc_conduction_flux_limit_factor=0
+                hybrid_pic_model.qdsmc_conduction_Te_floor=0.25
+                hybrid_pic_model.qdsmc_conduction_fd_time=rkl2
+                boundary_test.mode=${mode} boundary_test.dt=${boundary_dt} ${extra_options})
+        set_tests_properties(test_rz_conduction_boundary_native_${mode} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;WARPX_QDSMC_COND_STATS=1")
+    endforeach()
+endif()
+
+# Instrument only this translation unit in test builds; production builds with
+# BUILD_TESTING=OFF contain no environment-controlled ghost mutation.
+if(TARGET lib_rz)
+    set_property(SOURCE ${WarpX_SOURCE_DIR}/Source/FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.cpp
+        TARGET_DIRECTORY lib_rz APPEND PROPERTY COMPILE_DEFINITIONS WARPX_CONDUCTION_TEST_HOOKS)
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_conduction_boundary_evolve_rz test_conduction_boundary_evolve_rz.cpp)
+    target_link_libraries(test_conduction_boundary_evolve_rz PRIVATE lib_rz)
+    target_include_directories(test_conduction_boundary_evolve_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    target_compile_definitions(test_conduction_boundary_evolve_rz PRIVATE BOUNDARY_CANDIDATE_REPORT)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_conduction_boundary_evolve_rz)
+    endif()
+endif()
+
+# Direct external-leg law and full-tensor inward-face oracles.
+if(TARGET test_conduction_boundary_native_rz)
+    foreach(case IN ITEMS eta0 eta1e6 eta1e5 eta1e4 sonic gate_off cold empty tensor)
+        set(opts boundary_test.mode=leg_law)
+        if(case STREQUAL "eta1e6" OR case STREQUAL "sonic")
+            list(APPEND opts boundary_test.eta=1.e-6)
+        elseif(case STREQUAL "eta1e5")
+            list(APPEND opts boundary_test.eta=1.e-5)
+        elseif(case STREQUAL "eta1e4")
+            list(APPEND opts boundary_test.eta=1.e-4)
+        elseif(case STREQUAL "gate_off")
+            list(APPEND opts boundary_test.ti=0.4)
+        elseif(case STREQUAL "cold")
+            list(APPEND opts boundary_test.tb=0.4)
+        elseif(case STREQUAL "empty")
+            list(APPEND opts boundary_test.density=0)
+        elseif(case STREQUAL "tensor")
+            set(opts boundary_test.mode=tensor
+                "hybrid_pic_model.qdsmc_kappa_perp(n,Te,t)=1.5*1.380649e-23*0.01*n")
+        endif()
+        if(case STREQUAL "sonic")
+            list(APPEND opts hybrid_pic_model.qdsmc_conduction_wall_flux_cap_form=sonic)
+        endif()
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_law_${case})
+        add_test(NAME test_rz_conduction_boundary_law_${case}
+            COMMAND test_conduction_boundary_native_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
+                hybrid_pic_model.density_pedestal=0 hybrid_pic_model.density_pedestal_track_floor=0
+                hybrid_pic_model.qdsmc_conduction_flux_limit_factor=0
+                hybrid_pic_model.qdsmc_conduction_Te_floor=0.25
+                hybrid_pic_model.qdsmc_conduction_fd_time=rkl2 boundary_test.dt=1.e-10 ${opts})
+        set_tests_properties(test_rz_conduction_boundary_law_${case} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_law_${case}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET test_conduction_boundary_evolve_rz)
+    foreach(suite IN ITEMS time restart)
+        add_test(NAME test_rz_conduction_boundary_${suite}
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_conduction_boundary_evolve.py
+                --executable $<TARGET_FILE:test_conduction_boundary_evolve_rz>
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                --suite ${suite}
+                --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_${suite})
+        set_tests_properties(test_rz_conduction_boundary_${suite} PROPERTIES
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
+            LABELS "conduction;native")
+    endforeach()
+endif()
