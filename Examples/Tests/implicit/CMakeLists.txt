@@ -1090,7 +1090,7 @@ if(TARGET lib_rz)
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode})
         add_test(NAME test_rz_conduction_boundary_native_${mode}
             COMMAND test_conduction_boundary_native_rz
-                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/inputs_test_rz_conduction_boundary
                 "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
                 "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
                 hybrid_pic_model.qdsmc_conduction_flux_limit_factor=0
@@ -1152,7 +1152,7 @@ if(TARGET lib_rz)
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_native_${mode})
         add_test(NAME test_rz_conduction_boundary_native_${mode}
             COMMAND test_conduction_boundary_native_rz
-                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/inputs_test_rz_conduction_boundary
                 "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
                 "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
                 hybrid_pic_model.qdsmc_conduction_flux_limit_factor=0
@@ -1208,7 +1208,7 @@ if(TARGET test_conduction_boundary_native_rz)
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_law_${case})
         add_test(NAME test_rz_conduction_boundary_law_${case}
             COMMAND test_conduction_boundary_native_rz
-                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/inputs_test_rz_conduction_boundary
                 "boundary.field_lo=none pec" "boundary.field_hi=pec pec"
                 "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting"
                 hybrid_pic_model.density_pedestal=0 hybrid_pic_model.density_pedestal_track_floor=0
@@ -1227,11 +1227,23 @@ if(TARGET test_conduction_boundary_evolve_rz)
             COMMAND ${Python_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/analysis_conduction_boundary_evolve.py
                 --executable $<TARGET_FILE:test_conduction_boundary_evolve_rz>
-                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_implicit_thermal
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/inputs_test_rz_conduction_boundary
                 --suite ${suite}
                 --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_${suite})
         set_tests_properties(test_rz_conduction_boundary_${suite} PROPERTIES
             TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
             LABELS "conduction;native")
     endforeach()
+endif()
+
+if(TARGET app_rz)
+    add_test(NAME test_rz_conduction_boundary_explicit_pc
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/analysis_conduction_boundary_explicit.py
+            --executable $<TARGET_FILE:app_rz>
+            --inputs ${CMAKE_CURRENT_SOURCE_DIR}/../ohm_solver_electron_energy_eq/inputs_test_rz_conduction_boundary
+            --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_boundary_explicit_pc)
+    set_tests_properties(test_rz_conduction_boundary_explicit_pc PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
+        LABELS "conduction;native;explicit")
 endif()

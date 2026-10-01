@@ -22,6 +22,9 @@ int main (int argc, char** argv)
     {
         auto& sim = WarpX::GetInstance();
         sim.InitData();
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            sim.evolve_scheme == EvolveScheme::Explicit,
+            "Conduction boundary fixtures require the explicit hybrid solver");
         auto& hp = *sim.get_pointer_HybridPICModel();
         using warpx::fields::FieldType;
         auto& te = *sim.m_fields.get(FieldType::hybrid_electron_temperature_fp, 0);

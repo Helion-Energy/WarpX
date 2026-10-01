@@ -89,14 +89,9 @@ if a.suite == "time":
     assert reference_delta < 0.1 * errors[-1], result
     assert min(orders[-2:]) >= 1.8, result
 else:
-    # The borrowed implicit deck enables modes that explicitly prohibit restart.
-    # This fixture advances conduction alone with frozen B/rho, so disable those
-    # unrelated field-solver options for both uninterrupted and restarted arms.
+    # The dedicated input uses the explicit hybrid solver. The native
+    # checkpoint comparison advances conduction alone with frozen B/rho.
     common += [
-        "hybrid_pic_model.darwin=0",
-        "implicit_evolve.darwin_segregated_solve=0",
-        "hybrid_pic_model.add_external_fields=0",
-        "hybrid_pic_model.include_electron_inertia=0",
         "boundary_evolve.beta=2",
         "boundary_evolve.eta=1e-5",
         "boundary_evolve.dt=2e-7",
