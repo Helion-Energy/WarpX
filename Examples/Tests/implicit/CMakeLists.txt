@@ -1112,7 +1112,7 @@ if(TARGET lib_rz)
     add_test(NAME test_rz_qdsmc_rk_accounting COMMAND test_qdsmc_rk_accounting)
     set_tests_properties(test_rz_qdsmc_rk_accounting PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
     foreach(mode IN ITEMS pinned entry floor_equal floor_invalid conflict budget corner floor
-                          gate_failure growth_failure density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
+                          gate_failure growth_failure growth_capped density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
         set(extra_options)
         set(boundary_dt 1.e-7)
         if(mode STREQUAL "corner" OR mode MATCHES "^density_")
@@ -1124,11 +1124,15 @@ if(TARGET lib_rz)
             list(APPEND extra_options boundary_test.density=5.e13 hybrid_pic_model.qdsmc_n_floor=1.e14)
         elseif(mode STREQUAL "floor")
             set(boundary_dt 1.e-5)
-        elseif(mode STREQUAL "growth_failure")
+        elseif(mode STREQUAL "growth_failure" OR mode STREQUAL "growth_capped")
             list(APPEND extra_options
                 "hybrid_pic_model.qdsmc_kappa_par(n,Te,t)=1.5*1.380649e-23*100*n*(Te/2)^2.5"
                 "hybrid_pic_model.qdsmc_kappa_perp(n,Te,t)=1.5*1.380649e-23*100*n*(Te/2)^2.5"
                 hybrid_pic_model.qdsmc_conduction_chi_max=0)
+            if(mode STREQUAL "growth_capped")
+                list(REMOVE_ITEM extra_options hybrid_pic_model.qdsmc_conduction_chi_max=0)
+                list(APPEND extra_options hybrid_pic_model.qdsmc_conduction_chi_max=400)
+            endif()
         endif()
         if(mode STREQUAL "pedestal")
             list(APPEND extra_options hybrid_pic_model.density_pedestal=1

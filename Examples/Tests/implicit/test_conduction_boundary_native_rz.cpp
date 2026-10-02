@@ -278,11 +278,11 @@ int main (int argc, char** argv)
                         t(i, j, k) = kelvin * (j == dhi[1] ? 0.499 : 2.0);
                     });
                 }
-            } else if (mode == "growth_failure") {
+            } else if (mode == "growth_failure" || mode == "growth_capped") {
                 hp.m_cond_bc[0][1] = 2;
                 hp.m_cond_bc_q[0][1] = 1.e10;
                 hp.m_cond_bc[1][1] = 0;
-                expect_failure = true;
+                expect_failure = mode == "growth_failure";
             } else if ((mode == "density_cap" || mode == "density_closed")) {
                 hp.m_cond_bc[0][1] = 0;
                 hp.m_cond_leg_flux_limit = 1.e-6;
@@ -345,6 +345,12 @@ int main (int argc, char** argv)
                         std::abs(independent_after - report.energy_after[0]) <=
                         256 * std::numeric_limits<amrex::Real>::epsilon() *
                             std::abs(independent_after));
+                }
+                if (mode == "growth_capped") {
+                    amrex::Real const imposed = 1.e10 * 2*MathConst::pi*phi[0] *
+                                                (phi[1]-plo[1]) * dt;
+                    AMREX_ALWAYS_ASSERT(report.floor_heat == 0.0 && report.floor_raw_heat == 0.0);
+                    AMREX_ALWAYS_ASSERT(std::abs((energy()-independent_before)/imposed-1) < 1.e-9);
                 }
                 if (mode == "pedestal") {
                     AMREX_ALWAYS_ASSERT(report.energy_before[0] >

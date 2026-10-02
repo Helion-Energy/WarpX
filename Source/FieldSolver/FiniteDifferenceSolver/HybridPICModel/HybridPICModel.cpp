@@ -14219,15 +14219,71 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                               m_kappa_perp_parser &&
                               !m_kappa_par_parser->symbols().contains("Te") &&
                               !m_kappa_perp_parser->symbols().contains("Te");
+    // With finite configured chi ceilings, the absolute tensor components
+    // have a stage-independent envelope. RKL stage sizing must allow the
+    // flux limiter/conductivity to change after entry. This envelope bounds
+    // the existing bulk rate estimator over every such stage; it does not
+    // assert a general nonlinear RKL stability theorem. Uncapped cases keep
+    // the measured stage bound and transactional failure behavior.
+    amrex::Real const perp_ceiling = m_cond_chi_max;
+    amrex::Real const par_ceiling = m_cond_chi_par_max > 0.0_rt
+                                       ? m_cond_chi_par_max : perp_ceiling;
+    bool const tensor_envelope = m_cond_fd_time == 2 && !fixed_tensor &&
+                                 perp_ceiling > 0.0_rt &&
+                                 std::isfinite(perp_ceiling) &&
+                                 std::isfinite(par_ceiling);
+    amrex::MultiFab xi_ceiling;
+    if (tensor_envelope) {
+        xi_ceiling.define(xi.boxArray(), xi.DistributionMap(), NXI, 2);
+        for (MFIter mfi(xi_ceiling, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const x = xi_ceiling.array(mfi);
+            auto const b = bne.const_array(mfi);
+            amrex::ParallelFor(mfi.growntilebox(2),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (b(i,j,k,BNE::b_ne) <= 0.0_rt ||
+                        b(i,j,k,BNE::b_open) <= 0.5_rt) {
+                        for (int c = 0; c < NXI; ++c) { x(i,j,k,c) = 0.0_rt; }
+                        return;
+                    }
+                    amrex::Real const B2 = b(i,j,k,BNE::b_B2);
+                    amrex::Real const q = B2 <= 0.0_rt && !iso_any
+                                             ? par_ceiling : perp_ceiling;
+                    amrex::Real p = par_ceiling;
+                    if (iso_full) {
+                        p = q;
+                    } else if (iso_B > 0.0_rt) {
+                        amrex::Real const weight = B2 / (B2 + iso_B*iso_B);
+                        p = (1.0_rt - weight)*q + weight*p;
+                    }
+                    // The longitudinal limiter only decreases p. For
+                    // xi_gh = (delta_gh-u_g*u_h)*chi_perp +
+                    //         u_g*u_h*chi_par, the triangle inequality
+                    // gives an absolute component bound, including when
+                    // the limited parallel coefficient drops below perp.
+                    amrex::Real const u[3] = {b(i,j,k,BNE::b_bx),
+                                              b(i,j,k,BNE::b_by),
+                                              b(i,j,k,BNE::b_bz)};
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        for (int h = g; h < AMREX_SPACEDIM; ++h) {
+                            int const c = g*AMREX_SPACEDIM - g*(g-1)/2 + h-g;
+                            amrex::Real const uu = u[gd2ax[g]]*u[gd2ax[h]];
+                            amrex::Real const delta = g == h ? 1.0_rt : 0.0_rt;
+                            x(i,j,k,c) = std::abs(delta-uu)*q + std::abs(uu)*p;
+                        }
+                    }
+                });
+        }
+    }
     bool tensor_built = false, bulk_rate_built = false;
     amrex::Real cached_bulk_rate = 0.0_rt;
     amrex::Real boundary_s_max = 0.0_rt;
+    amrex::Real last_bulk_rate = 0.0_rt, last_leg_rate = 0.0_rt;
     amrex::ReduceOps<amrex::ReduceOpMax> bulk_bound_op;
     amrex::ReduceData<amrex::Real> bulk_bound_data(bulk_bound_op);
     auto stable_rate = [&] () -> amrex::Real
     {
         amrex::Real s_max = 0.0_rt;
-        if (!fixed_tensor || !bulk_rate_built) {
+        if ((!fixed_tensor && !tensor_envelope) || !bulk_rate_built) {
             auto& reduce_op = bulk_bound_op;
             auto& reduce_data = bulk_bound_data;
             ResetConductionReduction(reduce_op, reduce_data);
@@ -14235,7 +14291,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
                 amrex::Box const box = mfi.tilebox();
-                amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
+                amrex::Array4<amrex::Real const> const x_arr =
+                    tensor_envelope ? xi_ceiling.const_array(mfi) : xi.const_array(mfi);
                 amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
                 reduce_op.eval(box, reduce_data,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
@@ -14329,6 +14386,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         // which rank owns the stiffest interior and boundary nodes.
         amrex::Real rates[2] = {cached_bulk_rate, boundary_s_max};
         amrex::ParallelDescriptor::ReduceRealMax(rates, 2);
+        last_bulk_rate = rates[0];
+        last_leg_rate = rates[1];
         s_max = rates[0] + rates[1];
         return s_max;
     };
@@ -14887,6 +14946,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         amrex::ParallelDescriptor::ReduceRealSum(xi0);
         amrex::ParallelDescriptor::ReduceRealSum(nrat_loc);
         amrex::AllPrint() << "[qdsmc-bound-debug] s_max=" << s_max
+            << " bulk=" << last_bulk_rate << " leg=" << last_leg_rate
+            << " tensor_envelope=" << tensor_envelope
             << " max|xi|=" << max_xi
             << " argmax=(" << l0 << "," << l1 << "," << l2
             << ") ne=" << ne_loc << " Te[K]=" << te_loc
@@ -15422,6 +15483,13 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     report.accepted = st.n_accepted;
     report.s_max = st.s_max;
     if (st.failure) {
+        amrex::Print() << "[qdsmc] conduction rejection: half="
+            << (use_rho_new ? 2 : 1) << " requested_dt=" << dt_c
+            << " completed_dt=" << st.t_done << " stage_updates=" << st.n_attempts
+            << " rkl_s=" << st.s_max << " required_cap=" << st.required_cap
+            << " observed_cap=" << st.observed_cap << " bulk=" << last_bulk_rate
+            << " leg=" << last_leg_rate << " tensor_envelope=" << tensor_envelope
+            << " reason=" << st.failure << "\n";
         return fail(st.failure);
     }
     if (!T_cur.is_finite()) {

@@ -46,6 +46,7 @@ struct QdsmcRKStats
     // Zero for the other schemes, which have no stage count.
     int s_max = 0;
     char const* failure = nullptr;
+    amrex::Real required_cap = 0.0, observed_cap = 0.0;
 };
 
 /** Adaptive explicit Runge--Kutta stepper over a single-component
@@ -799,6 +800,8 @@ private:
     QdsmcRKStats
     Finish (QdsmcRKStats st, amrex::Real const t_end) const {
         st.failure = m_failure;
+        st.required_cap = m_required_cap;
+        st.observed_cap = m_last_cap;
         if (!st.failure && st.t_done < t_end * (1.0 - 1.0e-12)) {
             st.failure = "attempts budget exhausted";
         }
