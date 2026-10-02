@@ -20,10 +20,16 @@ main (int argc, char** argv) {
         int steps = 8;
         amrex::Real n0 = 1.e20_rt, n1 = 2.e18_rt, interval = 1.e-5_rt;
         p.query("steps", steps);
+        bool stopping = false;
+        p.query("stopping", stopping);
         auto& w = WarpX::GetInstance();
         w.InitData();
         auto& h = *w.get_pointer_HybridPICModel();
         AMREX_ALWAYS_ASSERT(h.DensityPedestal(0) == nullptr);
+        if (stopping) {
+            h.m_has_energy_sink = false;
+            h.m_has_electron_stopping = true;
+        }
         auto& te =
             *w.m_fields.get(FieldType::hybrid_electron_temperature_fp, 0);
         auto& rn = *w.m_fields.get(FieldType::rho_fp, 0);
@@ -47,6 +53,7 @@ main (int argc, char** argv) {
                    dt = interval / steps;
         auto const rate = std::log(n1 / n0) / interval, gm1 = h.m_gamma - 1._rt;
         te.setVal(t0);
+        auto const owner = te.OwnerMask(w.Geom(0).periodicity());
         for (int s = 0; s < steps; ++s) {
             auto const na = n0 * std::exp(rate * s * dt),
                        nb = n0 * std::exp(rate * (s + 1) * dt);
@@ -56,10 +63,27 @@ main (int argc, char** argv) {
                 ->setVal(.6_rt * PhysConst::q_e * nb);
             w.m_fields.get("rho_fp_ions2", 0)
                 ->setVal(.4_rt * PhysConst::q_e * nb);
+            if (stopping) {
+                // A collision's integrated energy packet Q*dt. Deposit on
+                // one owner per node, including box seams/periodic images.
+                auto& stage = h.GetFastIonHeatingStaging(0);
+                for (amrex::MFIter mfi(stage); mfi.isValid(); ++mfi) {
+                    auto const e = stage.array(mfi);
+                    auto const own = owner->const_array(mfi);
+                    amrex::ParallelFor(mfi.validbox(),
+                        [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                            e(i,j,k) = own(i,j,k) ? 1.e5_rt * dt : 0.0_rt;
+                        });
+                }
+            }
             h.AdvanceElectronEnergyQDSMC_PC(dt);
+            if (stopping) {
+                AMREX_ALWAYS_ASSERT(h.GetFastIonHeatingStaging(0).norminf() == 0.0_rt);
+            }
         }
         // Exact solution of dT/dt=(gamma-1)*a*T+(gamma-1)*Q/(kB*n0*exp(a*t)).
-        // Q=-S is a constant parser source; both densities stay above all
+        // Q is a constant parser source or a staged stopping packet Q*dt;
+        // both densities stay above all
         // gates/floors. The complete PC driver dispatches
         // conduction/source/transport/source/conduction.
         auto const homogeneous = t0 * std::exp(gm1 * rate * interval);
@@ -74,7 +98,8 @@ main (int argc, char** argv) {
         auto const error = delta.norminf();
         amrex::VisMF::Write(te, "temperature");
         amrex::Print() << std::setprecision(17)
-                       << "PC_SOURCE_ORDER {\"steps\":" << steps
+                       << "PC_SOURCE_ORDER {\"stopping\":" << (stopping ? "true" : "false")
+                       << ",\"steps\":" << steps
                        << ",\"stage_matched_receiver\":"
                        << (h.m_qdsmc_source_stage_density ? "true" : "false")
                        << ",\"exact_temperature_K\":" << exact

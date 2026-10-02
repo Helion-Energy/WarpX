@@ -1251,3 +1251,28 @@ if(TARGET app_rz)
         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
         LABELS "conduction;native;explicit")
 endif()
+
+# Explicit PC stopping packets must deliver half on each side of transport.
+if(TARGET lib_rz)
+    add_executable(test_qdsmc_stopping_split_rz test_qdsmc_stopping_split.cpp)
+    target_link_libraries(test_qdsmc_stopping_split_rz PRIVATE lib_rz)
+    target_include_directories(test_qdsmc_stopping_split_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_qdsmc_stopping_split_rz)
+    endif()
+    set(stopping_ranks 1)
+    if(WarpX_MPI)
+        list(APPEND stopping_ranks 2)
+    endif()
+    foreach(ranks IN LISTS stopping_ranks)
+        add_test(NAME test_rz_qdsmc_stopping_split_mpi${ranks}
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_qdsmc_stopping_split.py
+                --split-exe $<TARGET_FILE:test_qdsmc_stopping_split_rz>
+                --order-exe $<TARGET_FILE:test_qdsmc_source_stage_order_rz>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/stopping_split_mpi${ranks}
+                --ranks ${ranks})
+        set_tests_properties(test_rz_qdsmc_stopping_split_mpi${ranks} PROPERTIES
+            TIMEOUT 180 PROCESSORS ${ranks} ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ")
+    endforeach()
+endif()

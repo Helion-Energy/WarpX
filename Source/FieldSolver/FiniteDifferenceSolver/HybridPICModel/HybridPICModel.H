@@ -2163,9 +2163,12 @@ public:
      *  heating. Factored out of the #6982 advance so Strang halves can call
      *  it twice. When fill_te_ghosts is true (the Strang paths), T_e's
      *  ghost cells are refreshed afterward (the source kernels write valid
-     *  cells only and the subsequent K_e init reads ghosts). */
+     *  cells only and the subsequent K_e init reads ghosts). The stopping
+     *  fraction selects how much of the remaining staged collision energy
+     *  to deliver; PC uses 1/2 before transport and the remainder afterward. */
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
-                                  bool fill_te_ghosts) const;
+                                  bool fill_te_ghosts,
+                                  amrex::Real stopping_fraction = 1.0) const;
 
     /** Source stage with an explicit receiving temperature state. Coefficients,
      *  physical gates and species moments retain their existing rho_fp state.
@@ -2174,11 +2177,13 @@ public:
      *  PC passes old density before transport and new density afterward. */
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
                                   bool fill_te_ghosts,
-                                  amrex::MultiFab const& rho_state) const;
+                                  amrex::MultiFab const& rho_state,
+                                  amrex::Real stopping_fraction = 1.0) const;
 
     void ApplyQdsmcEnergySourcesImpl (int lev, amrex::Real dt_src,
                                       bool fill_te_ghosts,
-                                      amrex::MultiFab const* rho_state) const;
+                                      amrex::MultiFab const* rho_state,
+                                      amrex::Real stopping_fraction) const;
 
     /** One Ito tensor-conduction substep on level lev over dt_c,
      *  operating on the energy density u = 3/2 n_e k_B T_e (NOT on the
@@ -2384,8 +2389,9 @@ public:
      * T_e (one MultiFab per level, allocated lazily on first access). The
      * hybrid_electron_stopping collision scatter-adds each particle's
      * weighted kinetic-energy loss here during the collision stage of the
-     * step; QDSMCApplyFastIonHeating consumes (and zeroes) it in the source
-     * stage of the SAME step -- one-step staging, no energy lost. Mutable:
+     * step; QDSMCApplyFastIonHeating consumes it in the source stages of
+     * the SAME step. PC delivers half before transport and half after,
+     * then leaves the buffer zero for the next collision deposit. Mutable:
      * written through the const model pointer the collision holds. */
     mutable amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_fast_ion_heating_mf;
 
@@ -2398,18 +2404,19 @@ public:
      * dropped-energy channels as stopping_floor). */
     mutable amrex::Real m_stopping_declined_J = 0.0;
 
-    /** Consume the staged fast-ion heating: SumBoundary the staging field
-     * (the deposit writes each box's own copy of shared seam nodes, so the
-     * nodal redundant copies hold partial sums that must be folded into
-     * consistent totals first), add dTe = (gamma-1) E / (n_e kB) per cell
-     * (the energy sink's conversion with the opposite sign, same
-     * solver-floor gate and Te-floor clamp discipline), then zero the
-     * staging field. Runs inside ApplyQdsmcEnergySources after the energy
-     * sink; on the twice-per-step source schemes the second call finds the
-     * staging already zeroed and no-ops. */
+    /** Deliver a fraction in [0,1] of the remaining staged stopping energy.
+     * SumBoundary the delivered packet (deposits on shared nodal copies are
+     * partial sums), then add dTe = (gamma-1) E / (n_e kB), retaining the
+     * physical density gate and Te-floor clamp. A partial delivery sums a
+     * scratch copy and retains the RAW unsummed remainder, so a later call
+     * cannot count already-summed seam/periodic contributions again.
+     * The default consumes the entire remainder and clears staging. PC
+     * passes 1/2 then 1; this splits the deposited energy, not dTe or the
+     * collision/drag calculation. No persistent split/retry state is added. */
     void QDSMCApplyFastIonHeating (
         int lev, amrex::MultiFab const* rho_state = nullptr,
-        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
+        amrex::MultiFab const* heat_capacity_rho = nullptr,
+        amrex::Real stopping_fraction = 1.0) const;
 
     /** Freeze endpoint collision coefficients and consume stopping heat once,
      * outside the implicit field/energy residual. Single-level grids only. */

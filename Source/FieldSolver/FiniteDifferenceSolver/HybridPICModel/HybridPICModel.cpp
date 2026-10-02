@@ -11699,7 +11699,8 @@ amrex::MultiFab & HybridPICModel::GetFastIonHeatingStaging (int const lev) const
 
 void
 HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* rho_state,
-                                       amrex::MultiFab const* heat_capacity_rho) const
+                                       amrex::MultiFab const* heat_capacity_rho,
+                                       amrex::Real const stopping_fraction) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCApplyFastIonHeating()");
 
@@ -11713,8 +11714,11 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
     // conversion with the opposite sign, the same solver-floor density
     // gate, and the same Te-floor clamp discipline (a negative deposit, a
     // particle dragged UP to a faster electron fluid, may cool). The
-    // staging field is zeroed afterwards, so on the twice-per-step source
-    // schemes the second call is a no-op.
+    // supplied fraction applies to the remaining deposited ENERGY, not dTe.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        stopping_fraction >= 0.0_rt && stopping_fraction <= 1.0_rt,
+        "The stopping-energy delivery fraction must be in [0,1].");
+    if (stopping_fraction == 0.0_rt) { return; }
     if (lev >= static_cast<int>(m_fast_ion_heating_mf.size()) ||
         !m_fast_ion_heating_mf[lev]) {
         return;
@@ -11729,7 +11733,17 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
     // PARTIAL sums. SumBoundary folds every copy (and periodic images)
     // into the same consistent total before the per-node update below, so
     // the seam copies of T_e stay consistent.
-    Estage.SumBoundary(period);
+    // Keep the remainder unsummed: summing a partially consumed, already
+    // synchronized field again would multiply seam and periodic deposits.
+    amrex::MultiFab partial;
+    amrex::MultiFab* delivered = &Estage;
+    if (stopping_fraction < 1.0_rt) {
+        partial.define(Estage.boxArray(), Estage.DistributionMap(), 1, 0);
+        amrex::MultiFab::Copy(partial, Estage, 0, 0, 1, 0);
+        partial.mult(stopping_fraction, 0, 1, 0);
+        delivered = &partial;
+    }
+    delivered->SumBoundary(period);
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const& rho =
@@ -11754,7 +11768,7 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
     for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
         amrex::Array4<amrex::Real>       const & Te_arr   = Te.array(mfi);
-        amrex::Array4<amrex::Real>       const & E_arr    = Estage.array(mfi);
+        auto const E_arr = delivered->const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr  = rho.const_array(mfi);
         amrex::Array4<amrex::Real>       const & decl_arr = declined_mf.array(mfi);
         auto const capacity =
@@ -11810,10 +11824,14 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
     }
 
     // Fold the declined per-cell energy density into the cumulative audit
-    // tally [J] (unique-node sum, periodic images deduplicated), then zero
-    // the staging field for the next step's deposits.
+    // tally [J] (unique-node sum, periodic images deduplicated). Both accepted
+    // and declined energy consume their share; only the raw remainder stays.
     m_stopping_declined_J += EnergyVolumeIntegral(declined_mf, 0, lev);
-    Estage.setVal(0.0_rt);
+    if (stopping_fraction == 1.0_rt) {
+        Estage.setVal(0.0_rt);
+    } else {
+        Estage.mult(1.0_rt - stopping_fraction, 0, 1, 0);
+    }
 
     Te.FillBoundary(Te.nGrowVect(), period);
 }
@@ -12789,21 +12807,24 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
 
 
 void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const dt_src,
-                                              bool const fill_te_ghosts) const
+                                              bool const fill_te_ghosts,
+                                              amrex::Real const stopping_fraction) const
 {
-    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, nullptr);
+    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, nullptr, stopping_fraction);
 }
 
 void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const dt_src,
                                               bool const fill_te_ghosts,
-                                              amrex::MultiFab const& rho_state) const
+                                              amrex::MultiFab const& rho_state,
+                                              amrex::Real const stopping_fraction) const
 {
-    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, &rho_state);
+    ApplyQdsmcEnergySourcesImpl(lev, dt_src, fill_te_ghosts, &rho_state, stopping_fraction);
 }
 
 void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real const dt_src,
                                                   bool const fill_te_ghosts,
-                                                  amrex::MultiFab const* rho_state) const
+                                                  amrex::MultiFab const* rho_state,
+                                                  amrex::Real const stopping_fraction) const
 {
     ABLASTR_PROFILE("HybridPICModel::ApplyQdsmcEnergySources()");
 
@@ -13041,16 +13062,17 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
     // collision dragged its species toward u_e in the COLLISION stage of
     // this step and staged the weighted kinetic-energy loss per cell; here
     // the SOURCE stage of the same step converts it into a T_e increment
-    // (one-step staging, no energy lost). Applied in full on the first
-    // source call and zeroed, so the twice-per-step (Strang) schemes do not
-    // double-deliver; bracketed as its own budget class, a sub-account of
-    // src like the sink. The Te_shunt_threshold machinery is not bypassed:
+    // (one-step staging, no energy lost). PC delivers half the deposit
+    // before transport and the remainder after, with each stage's receiving
+    // capacity. Other callers retain the default full delivery. Bracketed
+    // as its own budget class, a sub-account of src like the sink.
+    // The Te_shunt_threshold machinery is not bypassed:
     // the shunt runs earlier in this sequence, so any Te excess this heat
     // creates is capped at the next source application.
     if (m_has_electron_stopping) {
         std::array<amrex::Real, 2> up0{}, up1{};
         if (m_energy_budget) { up0 = QDSMCClassEnergy(lev, rho_state); }
-        QDSMCApplyFastIonHeating(lev, nullptr, heat_capacity_rho);
+        QDSMCApplyFastIonHeating(lev, nullptr, heat_capacity_rho, stopping_fraction);
         if (m_energy_budget) {
             up1 = QDSMCClassEnergy(lev, rho_state);
             m_ebud_stopping_bulk += up1[0] - up0[0];
@@ -18666,10 +18688,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         QdsmcPhaseMinTe(lev, "pc_conduction_half1");
         if (ebud) { ub1 = QDSMCClassEnergy(lev, &rho_old); }
         if (audit) { amrex::MultiFab::Copy(source_before, Te_state, 0, 0, 1, 0); }
+        // Split the collision-deposited energy symmetrically around A: half
+        // now, then the entire retained half in the second source call.
         if (m_qdsmc_source_stage_density) {
-            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true, rho_old);
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true, rho_old,
+                                    /*stopping_fraction=*/0.5_rt);
         } else {
-            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true,
+                                    /*stopping_fraction=*/0.5_rt);
         }
         if (audit) {
             AuditQdsmcSourceStage(lev, 0, source_before, rho_old,

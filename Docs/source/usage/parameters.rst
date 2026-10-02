@@ -3411,6 +3411,16 @@ Details about the collision models can be found in the :ref:`theory section <mul
       ``<species>.do_subcycled_push`` the drag is still applied once per global time step
       (the exponential update is unconditionally stable at any :math:`\nu_s \Delta t`).
 
+      In the explicit ``hybrid`` solver with ``qdsmc_time_advance = pc``, half of
+      that deposited energy is delivered in each source stage, before and after
+      electron transport. With ``qdsmc_source_stage_density = 1`` (the default),
+      the two deliveries use the old and new temperature-state heat capacities,
+      respectively; physical density gates continue to use the deposited new
+      density. Shared-node partial deposits are summed separately for each half,
+      and the buffer is cleared after the second delivery. This makes the heat
+      delivery symmetric about transport; it does not split or recompute the
+      particle drag and does not establish second-order collision coupling.
+
       With ``theta_implicit_hybrid``, stopping is applied once after the accepted
       particle advance and boundary processing. Fresh endpoint charge and ion current
       are deposited into separate scratch fields, and electron velocity is rebuilt
