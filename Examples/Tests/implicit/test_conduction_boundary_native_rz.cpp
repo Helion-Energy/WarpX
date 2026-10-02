@@ -283,6 +283,11 @@ int main (int argc, char** argv)
                 hp.m_cond_bc_q[0][1] = 1.e10;
                 hp.m_cond_bc[1][1] = 0;
                 expect_failure = mode == "growth_failure";
+            } else if (mode == "nonfinite_rhs") {
+                hp.m_cond_bc[0][1] = 2;
+                hp.m_cond_bc_q[0][1] = std::numeric_limits<amrex::Real>::infinity();
+                hp.m_cond_bc[1][1] = 0;
+                expect_failure = true;
             } else if ((mode == "density_cap" || mode == "density_closed")) {
                 hp.m_cond_bc[0][1] = 0;
                 hp.m_cond_leg_flux_limit = 1.e-6;
@@ -327,6 +332,9 @@ int main (int argc, char** argv)
                 AMREX_ALWAYS_ASSERT(wall_before == hp.GetQdsmcWallTally(0, 1));
                 AMREX_ALWAYS_ASSERT(leg_before == hp.GetQdsmcLegTally(1, 1));
                 AMREX_ALWAYS_ASSERT(floor_before == hp.m_cond_floor_tally);
+                if (mode == "nonfinite_rhs") {
+                    AMREX_ALWAYS_ASSERT(report.failure.find("nonfinite") != std::string::npos);
+                }
                 if (mode == "gate_failure" || mode == "growth_failure") {
                     AMREX_ALWAYS_ASSERT(
                         report.failure.find("stage stability") !=

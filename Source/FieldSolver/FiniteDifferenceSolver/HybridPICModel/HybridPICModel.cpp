@@ -14278,6 +14278,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     amrex::Real cached_bulk_rate = 0.0_rt;
     amrex::Real boundary_s_max = 0.0_rt;
     amrex::Real last_bulk_rate = 0.0_rt, last_leg_rate = 0.0_rt;
+    amrex::Real boundary_invalid = 0.0_rt;
+    bool stage_values_finite = true;
     amrex::ReduceOps<amrex::ReduceOpMax> bulk_bound_op;
     amrex::ReduceData<amrex::Real> bulk_bound_data(bulk_bound_op);
     auto stable_rate = [&] () -> amrex::Real
@@ -14384,8 +14386,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         }
         // Reduce the two maxima separately so the bound is independent of
         // which rank owns the stiffest interior and boundary nodes.
-        amrex::Real rates[2] = {cached_bulk_rate, boundary_s_max};
-        amrex::ParallelDescriptor::ReduceRealMax(rates, 2);
+        // Finite flags ride the stability collective, not a heat-reporting
+        // collective. Boundary reduction checks all valid nodes, including
+        // closed rows and duplicated box nodes, before any stage is accepted.
+        amrex::Real rates[3] = {cached_bulk_rate, boundary_s_max, boundary_invalid};
+        amrex::ParallelDescriptor::ReduceRealMax(rates, 3);
+        stage_values_finite = rates[2] == 0.0_rt;
         last_bulk_rate = rates[0];
         last_leg_rate = rates[1];
         s_max = rates[0] + rates[1];
@@ -15309,10 +15315,10 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
 
     amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
                      amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
-                     amrex::ReduceOpSum, amrex::ReduceOpMax>
+                     amrex::ReduceOpSum, amrex::ReduceOpMax, amrex::ReduceOpMax>
         boundary_op;
     amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real,
-                      amrex::Real, amrex::Real, amrex::Real, amrex::Real>
+                      amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real>
         boundary_data(boundary_op);
     auto eval_rhs = [&] (amrex::MultiFab& state, amrex::MultiFab& rhs) {
         eval_bulk_rhs(state, rhs);
@@ -15320,6 +15326,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             v = 0.0_rt;
         }
         boundary_s_max = 0.0_rt;
+        boundary_invalid = 0.0_rt;
         if (!any_boundary) {
             return;
         }
@@ -15336,9 +15343,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             op.eval(
                 mfi.tilebox(), data,
                 [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                    amrex::Real const invalid =
+                        !std::isfinite(t(i,j,k)) || !std::isfinite(r(i,j,k)) ? 1.0_rt : 0.0_rt;
                     if (b(i, j, k, BNE::b_neff) <= 0.0_rt ||
                         b(i, j, k, BNE::b_ebm) == 0.0_rt) {
-                        return {0., 0., 0., 0., 0., 0., 0., 0.};
+                        return {0., 0., 0., 0., 0., 0., 0., 0., invalid};
                     }
                     int const node[3] = {i, j, k};
                     bool touches_boundary = eb_iso && p(i, j, k, 6) >= 0.0_rt;
@@ -15349,7 +15358,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             (bc[2 * d + 1] != 0 && node[d] == dom_hi[d]);
                     }
                     if (!touches_boundary) {
-                        return {0., 0., 0., 0., 0., 0., 0., 0.};
+                        return {0., 0., 0., 0., 0., 0., 0., 0., invalid};
                     }
                     amrex::Real const tb = t(i, j, k),
                                       neff = b(i, j, k, BNE::b_neff),
@@ -15443,7 +15452,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         }
                     }
                     return {power[0], power[1], power[2], power[3],
-                            power[4], power[5], power[6], stiffness};
+                            power[4], power[5], power[6], stiffness,
+                            invalid != 0.0_rt || !std::isfinite(rate) ? 1.0_rt : 0.0_rt};
                 });
         }
         auto const v = data.value(op);
@@ -15455,6 +15465,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         heat.rate[5] = amrex::get<5>(v);
         heat.rate[6] = amrex::get<6>(v);
         boundary_s_max = amrex::get<7>(v);
+        boundary_invalid = amrex::get<8>(v);
     };
     auto cap = [&] () -> amrex::Real {
         amrex::Real const s_max = stable_rate();
@@ -15476,7 +15487,10 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             : QdsmcRKIntegrator::Scheme::SSPRK2,
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol, m_substep_safety,
         m_substep_max_growth, max_sub, post_step,
-        mask_err ? &floor_mask : nullptr, &heat, true);
+        mask_err ? &floor_mask : nullptr, &heat, true,
+        any_boundary ? QdsmcRKIntegrator::StageValidity([&] () {
+            return stage_values_finite;
+        }) : QdsmcRKIntegrator::StageValidity{});
     auto const st = integ.Advance(T_cur, dt_c);
     report.completed_time = st.t_done;
     report.attempts = st.n_attempts;

@@ -1112,7 +1112,7 @@ if(TARGET lib_rz)
     add_test(NAME test_rz_qdsmc_rk_accounting COMMAND test_qdsmc_rk_accounting)
     set_tests_properties(test_rz_qdsmc_rk_accounting PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
     foreach(mode IN ITEMS pinned entry floor_equal floor_invalid conflict budget corner floor
-                          gate_failure growth_failure growth_capped density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
+                          gate_failure growth_failure growth_capped nonfinite_rhs density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
         set(extra_options)
         set(boundary_dt 1.e-7)
         if(mode STREQUAL "corner" OR mode MATCHES "^density_")

@@ -97,6 +97,13 @@ public:
 
     using Rhs = std::function<void (amrex::MultiFab&, amrex::MultiFab&)>;
     using Cap = std::function<amrex::Real ()>;
+    /** Optional fused validation. After rhs and cap, return whether all valid
+     * state and RHS values in that evaluation were finite on every rank.
+     * The caller may piggyback this flag on its existing global cap reduction.
+     * Without it the integrator retains its separate finite-state reductions.
+     * The RHS must be safe to evaluate provisionally on nonfinite state; the
+     * invalid result is rejected before any stage update/commit. */
+    using StageValidity = std::function<bool ()>;
     /** Rank-local passive integrals. rhs writes rate; post_step may add a
      * projection correction to value. They use the state tableau but do
      * not enter its error norm. No callback may publish provisional heat. */
@@ -130,12 +137,14 @@ public:
                        PostStep post_step = {},
                        amrex::iMultiFab const* err_mask = nullptr,
                        Auxiliary* auxiliary = nullptr,
-                       bool validate_stages = false)
+                       bool validate_stages = false,
+                       StageValidity stage_validity = {})
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)), m_rtol(rtol), m_atol(atol),
           m_safety(safety), m_max_growth(max_growth),
           m_max_attempts(max_attempts), m_err_mask(err_mask), m_aux(auxiliary),
-          m_validate_stages(validate_stages) {}
+          m_validate_stages(validate_stages),
+          m_stage_validity(std::move(stage_validity)) {}
 
     /** Advance y in place from t = 0 to t_end. y's ghost refresh is the
      *  RHS functor's job; on return y's ghosts are stale. */
@@ -148,7 +157,7 @@ public:
         m_failure = nullptr;
         m_stage_cap_failed = false;
         m_required_cap = 0.0_rt;
-        if (m_validate_stages) {
+        if (m_validate_stages && !m_stage_validity) {
             m_finite_data =
                 std::make_unique<amrex::ReduceData<int>>(m_finite_op);
         }
@@ -769,7 +778,7 @@ private:
         if (m_failure) {
             return;
         }
-        if (m_validate_stages && !StageIsFinite(y)) {
+        if (m_validate_stages && !m_stage_validity && !StageIsFinite(y)) {
             m_failure = "nonfinite stage state";
             return;
         }
@@ -790,8 +799,9 @@ private:
                 m_failure = "stage stability ceiling invalidates selected step";
                 m_stage_cap_failed = true;
             }
-            if (!StageIsFinite(k)) {
-                m_failure = "nonfinite stage RHS";
+            if (m_stage_validity ? !m_stage_validity() : !StageIsFinite(k)) {
+                m_failure = m_stage_validity ? "nonfinite stage state or RHS"
+                                             : "nonfinite stage RHS";
                 m_stage_cap_failed = false;
             }
         }
@@ -824,6 +834,7 @@ private:
     mutable amrex::ReduceOps<amrex::ReduceOpMin> m_finite_op;
     mutable std::unique_ptr<amrex::ReduceData<int>> m_finite_data;
     bool m_validate_stages = false;
+    StageValidity m_stage_validity;
     mutable amrex::Vector<amrex::Real> m_aux_entry, m_aux0, m_auxjm2;
     mutable amrex::Vector<amrex::Vector<amrex::Real>> m_aux_k;
     mutable amrex::Real m_last_cap = 0.0, m_required_cap = 0.0;

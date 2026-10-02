@@ -87,6 +87,25 @@ main (int argc, char** argv) {
             AMREX_ALWAYS_ASSERT(st.failure && st.t_done == 0.0 &&
                                 heat.value[0] == 7.0);
         }
+        // Fused validation must still reject an invalid input even if the
+        // RHS overwrites its output with finite values, and reject invalid
+        // RHS values before updating the state or its passive accounts.
+        for (bool const bad_state : {false, true}) {
+            y.setVal(bad_state ? std::numeric_limits<amrex::Real>::quiet_NaN() : 1.0);
+            RK::Auxiliary heat{{7.0}, {0.0}};
+            bool finite = true;
+            auto rhs = [&] (amrex::MultiFab& state, amrex::MultiFab& k) {
+                k.setVal(bad_state ? 0.0 : std::numeric_limits<amrex::Real>::infinity());
+                finite = state.is_finite() && k.is_finite();
+                heat.rate[0] = 1.0;
+            };
+            RK rk(RK::Scheme::RKL2, rhs, [] () { return 1.0; },
+                  1.e-6, 1.e-10, 0.9, 2.0, 100, {}, nullptr, &heat, true,
+                  [&] () { return finite; });
+            auto const st = rk.Advance(y, 0.8);
+            AMREX_ALWAYS_ASSERT(st.failure && st.t_done == 0.0 &&
+                                heat.value[0] == 7.0 && st.n_attempts == 0);
+        }
         amrex::Print() << "RK_ACCOUNTING_PASS\n";
     }
     amrex::Finalize();
