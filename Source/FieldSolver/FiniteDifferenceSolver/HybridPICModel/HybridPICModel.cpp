@@ -15565,6 +15565,39 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         (report.entry_heat[6] - report.outward_heat[6]) / cartesian_volume;
     m_cond_floor_tally += report.floor_heat / cartesian_volume;
     report.completed = true;
+    // Optional complete per-half ledger for bounded campaign qualification.
+    // This only serializes already-reduced values; it launches no kernels or
+    // collectives and leaves the default reporting path unchanged.
+    static bool const cond_report =
+        std::getenv("WARPX_QDSMC_COND_REPORT") != nullptr;
+    if (cond_report) {
+        auto out = amrex::Print();
+        out.SetPrecision(std::numeric_limits<amrex::Real>::max_digits10);
+        out << "CONDUCTION_ACCOUNT {\"step\":" << warpx.getistep(lev)
+            << ",\"level\":" << lev << ",\"half\":" << (use_rho_new ? 2 : 1)
+            << ",\"coefficient_time_s\":" << t_now
+            << ",\"requested_time_s\":" << report.requested_time
+            << ",\"completed_time_s\":" << report.completed_time
+            << ",\"attempts\":" << report.attempts
+            << ",\"accepted\":" << report.accepted
+            << ",\"rkl_s_max\":" << report.s_max;
+        auto array = [&] (char const* name, auto const& values) {
+            out << ",\"" << name << "\":[";
+            for (std::size_t n = 0; n < values.size(); ++n) {
+                if (n != 0) { out << ","; }
+                out << values[n];
+            }
+            out << "]";
+        };
+        array("outward_heat_J", report.outward_heat);
+        array("entry_heat_J", report.entry_heat);
+        array("energy_before_J", report.energy_before);
+        array("energy_after_J", report.energy_after);
+        out << ",\"floor_heat_J\":" << report.floor_heat
+            << ",\"floor_raw_heat_J\":" << report.floor_raw_heat
+            << ",\"floor_count\":" << report.floor_count
+            << ",\"residual_J\":" << report.residual << "}\n";
+    }
     static bool const cond_stats =
         std::getenv("WARPX_QDSMC_COND_STATS") != nullptr;
     if (cond_stats) {

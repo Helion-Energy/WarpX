@@ -5089,6 +5089,10 @@ Maxwell solver: kinetic-fluid hybrid
     For temperature-independent conductivity with the bulk limiter disabled, the
     invariant tensor and its bulk bound are cached within the call; the leg/gate
     response and required stage ceiling are still checked at every RHS.
+    For temperature-dependent RKL conduction with finite configured parallel and
+    perpendicular diffusivity ceilings, stage sizing uses a fixed absolute-component
+    tensor envelope that bounds the bulk rate estimate over the call. This does not
+    alter the physical tensor or its flux limiter; the leg rate remains stage-dependent.
 
     The legacy non-FD helper retains its series-conductance relaxation and fixed-point
     iterations. The domain wall cap does not apply to legs. Legacy Python tallies retain
@@ -5097,6 +5101,10 @@ Maxwell solver: kinetic-fluid hybrid
     FD call in joules, with outward-positive physical heat, entry constraints, weighted
     floor corrections, full capacity/effective-density energies, and unchanged class sums.
     It is a per-call diagnostic, reset on restart, not a recovered cumulative history.
+    For complete per-half campaign records, set ``WARPX_QDSMC_COND_REPORT=1``.
+    Each accepted FD call then writes a ``CONDUCTION_ACCOUNT`` JSON line with both
+    energy inventories, all seven face channels, floor accounts, time, and stage count.
+    This serializes the existing report without additional reductions.
 
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_leg_Te_wall
     :type: ``float``
