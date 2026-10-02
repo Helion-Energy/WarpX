@@ -4847,6 +4847,35 @@ Maxwell solver: kinetic-fluid hybrid
     for the coil normalization in use. A tolerance appropriate to double precision
     is not automatically appropriate to a single-precision build.
 
+.. pp:param:: hybrid_pic_model.qdsmc_sync_density_floors
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Use one density floor for the hybrid field/source model, conduction and the
+    :math:`T_e \leftrightarrow K_e` representation. With this enabled,
+    :pp:param:`hybrid_pic_model.n_floor` initializes all three and every Python
+    ``set_hybrid_pic_density_floor(value)`` call updates them together. Call the setter
+    between complete outer steps so both PC source and conduction halves, and both
+    directions of entropy conversion, use the same floor. Controllers that restore
+    their floor after checkpoint loading use this same setter before resuming evolution.
+    This option does not add controller state to the native checkpoint.
+
+    The shared floor must be finite and strictly positive. Explicit
+    :pp:param:`hybrid_pic_model.qdsmc_n_floor` and
+    :pp:param:`hybrid_pic_model.qdsmc_te_n_floor` inputs must be omitted or equal to
+    ``n_floor``. The separate ``set_qdsmc_density_floor`` setter rejects a conflicting
+    value. ``get_qdsmc_te_density_floor()`` exposes the representation floor for audits.
+    With this option off, the independent input and runtime controls retain their
+    previous behavior.
+
+    Floor updates retain the temperature and the fixed density pedestal. Source gates
+    continue to use deposited density and their existing threshold controls. Pedestal
+    evolution is controlled separately by
+    :pp:param:`hybrid_pic_model.density_pedestal_track_floor`.
+    Changing a floor can change the effective heat capacity at fixed temperature;
+    this operation is not a conservative remap of the old energy state.
+
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``
     :default: ``1``
@@ -4858,7 +4887,9 @@ Maxwell solver: kinetic-fluid hybrid
     conduction open set. The density floor used in the :math:`K_e \leftrightarrow T_e` conversion itself is
     :pp:param:`hybrid_pic_model.qdsmc_te_n_floor`. Both gates drop to strict positivity under
     :pp:param:`hybrid_pic_model.qdsmc_halo_unfreeze`.
-    Defaults to :pp:param:`hybrid_pic_model.n_floor`.
+    Defaults to ``1`` when independent. With
+    :pp:param:`hybrid_pic_model.qdsmc_sync_density_floors`, it follows
+    :pp:param:`hybrid_pic_model.n_floor` at startup and runtime.
 
 .. pp:param:: hybrid_pic_model.qdsmc_halo_unfreeze
     :type: ``bool``
@@ -5027,8 +5058,8 @@ Maxwell solver: kinetic-fluid hybrid
     this floor, so that the round trip is exact for a marker that did not move. The advection-velocity guard
     is deliberately not included.
 
-    Defaults to :pp:param:`hybrid_pic_model.n_floor`, so a deck that does not set it is bit-for-bit
-    unchanged.
+    Defaults to the initial :pp:param:`hybrid_pic_model.n_floor`. Enable
+    :pp:param:`hybrid_pic_model.qdsmc_sync_density_floors` to follow runtime changes too.
 
 .. pp:param:: hybrid_pic_model.qdsmc_conduction_chi_par_max
     :type: ``float``

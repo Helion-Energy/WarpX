@@ -1276,3 +1276,28 @@ if(TARGET lib_rz)
             TIMEOUT 180 PROCESSORS ${ranks} ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ")
     endforeach()
 endif()
+
+# A controller floor change must reach every explicit thermal operator together.
+if(TARGET lib_rz)
+    add_executable(test_qdsmc_density_floor_sync_rz test_qdsmc_density_floor_sync.cpp)
+    target_link_libraries(test_qdsmc_density_floor_sync_rz PRIVATE lib_rz)
+    target_include_directories(test_qdsmc_density_floor_sync_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_qdsmc_density_floor_sync_rz)
+    endif()
+    set(floor_sync_ranks 1)
+    if(WarpX_MPI)
+        list(APPEND floor_sync_ranks 2)
+    endif()
+    foreach(ranks IN LISTS floor_sync_ranks)
+        add_test(NAME test_rz_qdsmc_density_floor_sync_mpi${ranks}
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_qdsmc_density_floor_sync.py
+                --executable $<TARGET_FILE:test_qdsmc_density_floor_sync_rz>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/density_floor_sync_mpi${ranks}
+                --ranks ${ranks})
+        set_tests_properties(test_rz_qdsmc_density_floor_sync_mpi${ranks} PROPERTIES
+            TIMEOUT 120 PROCESSORS ${ranks} ENVIRONMENT "OMP_NUM_THREADS=1"
+            LABELS "HYBRID;RZ;explicit")
+    endforeach()
+endif()

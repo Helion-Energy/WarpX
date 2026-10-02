@@ -92,6 +92,33 @@ HybridPICModel::HybridPICModel ()
 
 HybridPICModel::~HybridPICModel () = default;
 
+void HybridPICModel::SetDensityFloor (amrex::Real n_floor)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(n_floor) &&
+            (!(m_include_electron_inertia_elliptic || m_qdsmc_sync_density_floors) ||
+             n_floor > 0.0_rt),
+        "SetDensityFloor requires a finite floor, strictly positive for elliptic "
+        "electron inertia or qdsmc_sync_density_floors.");
+    m_n_floor = n_floor;
+    if (m_qdsmc_sync_density_floors) {
+        m_qdsmc_n_floor = n_floor;
+        m_qdsmc_te_n_floor = n_floor;
+    }
+    if (m_density_pedestal_track_floor) {
+        m_density_pedestal_stale = true;
+    }
+}
+
+void HybridPICModel::SetQdsmcDensityFloor (amrex::Real n_floor)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_qdsmc_sync_density_floors || n_floor == m_n_floor,
+        "qdsmc_sync_density_floors requires the QDSMC floor to equal n_floor; "
+        "update all three through set_hybrid_pic_density_floor.");
+    m_qdsmc_n_floor = n_floor;
+}
+
 void HybridPICModel::ReadParameters ()
 {
     const ParmParse pp_hybrid("hybrid_pic_model");
@@ -325,22 +352,19 @@ void HybridPICModel::ReadParameters ()
     // preserves the legacy algebraic adiabatic closure.
     pp_hybrid.query("solve_electron_energy_equation",
                     m_solve_electron_energy_equation);
-    pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
-
-    // Electron-energy REPRESENTATION floor, decoupled from the FIELD
-    // model's n_floor. n_floor exists to keep Ohm's law non-singular
-    // (J/en) and to set the resistive vacuum region; the K <-> T_e
-    // conversion, its recovery and the conduction open set need only
-    // numerical positivity. Welding the two means the electron-energy
-    // floor cannot be lowered without also moving the Ohm's-law floor,
-    // which is what burns trapped flux when it is moved wrong.
-    //
-    // Defaults to n_floor, so an unset deck is bit-for-bit inert. Note
-    // the ORDER: n_floor is parsed above, so the default below picks up
-    // a deck-supplied n_floor rather than the member's initial value.
+    bool const qdsmc_floor_given = pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
     m_qdsmc_te_n_floor = m_n_floor;
-    utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_n_floor",
-                                   m_qdsmc_te_n_floor);
+    bool const te_floor_given = utils::parser::queryWithParser(
+        pp_hybrid, "qdsmc_te_n_floor", m_qdsmc_te_n_floor);
+    pp_hybrid.query("qdsmc_sync_density_floors", m_qdsmc_sync_density_floors);
+    if (m_qdsmc_sync_density_floors) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (!qdsmc_floor_given || m_qdsmc_n_floor == m_n_floor) &&
+                (!te_floor_given || m_qdsmc_te_n_floor == m_n_floor),
+            "qdsmc_sync_density_floors requires qdsmc_n_floor and qdsmc_te_n_floor "
+            "to be omitted or equal to n_floor.");
+        SetDensityFloor(m_n_floor);
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_qdsmc_te_n_floor > 0.0_rt,
         "hybrid_pic_model.qdsmc_te_n_floor must be > 0 (it is a "

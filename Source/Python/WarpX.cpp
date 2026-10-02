@@ -338,28 +338,13 @@ void init_WarpX (py::module& m)
         )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
-                auto * const model = wx.get_pointer_HybridPICModel();
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                    !model->m_include_electron_inertia_elliptic || n_floor > 0.0,
-                    "set_hybrid_pic_density_floor: the elliptic electron-inertia "
-                    "solve requires a positive density floor (d_e^2 = "
-                    "m_e/(mu0 e max(rho, q_e n_floor)) is unbounded otherwise).");
-                model->m_n_floor = n_floor;
-                // hybrid_pic_model.density_pedestal_track_floor: keep the
-                // density pedestal on the floor the deck just set. Marking
-                // the image stale is enough -- the next
-                // EnsureDensityPedestal refills it, and the refill of an
-                // empty density_pedestal_profile uses n_uniform = m_n_floor
-                // (an empty profile is required by the input's init assert),
-                // so the new pedestal IS the new floor and the inventory is
-                // retallied with it. Off by default: the pedestal then stays
-                // static at its boot value, as before.
-                if (model->m_density_pedestal_track_floor) {
-                    model->m_density_pedestal_stale = true;
-                }
+                wx.get_pointer_HybridPICModel()->SetDensityFloor(n_floor);
             },
             py::arg("n_floor"),
-            "Sets the density floor to use in the hybrid solver. When "
+            "Sets the hybrid density floor between complete outer steps. With "
+            "hybrid_pic_model.qdsmc_sync_density_floors = 1, the conduction and "
+            "Te/entropy conversion floors are updated together, including on "
+            "controller restart restoration. When "
             "hybrid_pic_model.density_pedestal_track_floor = 1 this also "
             "rebuilds the density pedestal on the new floor, so the two "
             "stay synchronised for the rest of the run."
@@ -372,24 +357,24 @@ void init_WarpX (py::module& m)
         )
         .def("set_qdsmc_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
-                wx.get_pointer_HybridPICModel()->m_qdsmc_n_floor = n_floor;
+                wx.get_pointer_HybridPICModel()->SetQdsmcDensityFloor(n_floor);
             },
             py::arg("n_floor"),
-            "Sets the QDSMC electron-energy density floor "
-            "(hybrid_pic_model.qdsmc_n_floor): cells at or below it keep a "
-            "stale T_e instead of being updated. This is a SEPARATE floor "
-            "from set_hybrid_pic_density_floor, and the two carry a "
-            "relationship: if this floor sits below the hybrid floor, no "
-            "cell can ever fall under it and the T_e-freeze gate is "
-            "unreachable. A deck that schedules the hybrid floor at runtime "
-            "must move this one too, or the gate silently changes meaning "
-            "mid-run."
+            "Sets the independent QDSMC conduction/deposited-weight density floor. "
+            "With qdsmc_sync_density_floors = 1 this must equal the shared floor; "
+            "use set_hybrid_pic_density_floor to update all three together."
         )
         .def("get_qdsmc_density_floor",
             [](WarpX& wx) {
                 return wx.get_pointer_HybridPICModel()->m_qdsmc_n_floor;
             },
             "Gets the QDSMC electron-energy density floor."
+        )
+        .def("get_qdsmc_te_density_floor",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()->m_qdsmc_te_n_floor;
+            },
+            "Gets the density floor used by the Te/entropy conversion."
         )
         .def("get_qdsmc_wall_tally",
             [](WarpX& wx, int dim, int side) {

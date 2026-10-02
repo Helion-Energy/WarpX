@@ -116,6 +116,14 @@ public:
     HybridPICModel ( HybridPICModel && )                  = delete;
     HybridPICModel& operator= ( HybridPICModel && )       = delete;
 
+    /** Update between complete outer steps, including controller restart restoration.
+     *  With qdsmc_sync_density_floors, also update the conduction and K <-> Te floors.
+     *  The density pedestal follows only when density_pedestal_track_floor is enabled. */
+    void SetDensityFloor (amrex::Real n_floor);
+
+    /** Set the independent QDSMC floor, or require agreement with the shared floor. */
+    void SetQdsmcDensityFloor (amrex::Real n_floor);
+
     /** Read user-defined model parameters. Called in constructor. */
     void ReadParameters ();
 
@@ -3393,36 +3401,20 @@ public:
      *  qdsmc_conduction_deposit_kernel = hat | keys. */
     int m_cond_deposit_kernel = 0;
 
-    /** Deposited-weight threshold (density units, m^-3) for the QDSMC T_e
-     * update: cells whose deposited marker weight is at or below this value
-     * are skipped and keep their previous T_e, guarding the division by the
-     * deposited weight in cells no QDSMC marker reached. Defaults to the
-     * same floor as the rest of the hybrid solver. */
+    /** Keep the conduction and K <-> Te density floors equal to m_n_floor at
+     *  initialization and on every SetDensityFloor call. Default off preserves
+     *  independently configured floors. Input: qdsmc_sync_density_floors. */
+    bool m_qdsmc_sync_density_floors = false;
+
+    /** Deposited-weight threshold (m^-3) for the QDSMC Te update and density
+     *  floor for conduction. Independent default: 1 m^-3. With synchronized
+     *  floors it follows m_n_floor, including runtime changes. */
     amrex::Real m_qdsmc_n_floor = 1.0;
 
-    /** Density floor (m^-3) for the electron-energy REPRESENTATION,
-     *  decoupled from hybrid_pic_model.n_floor.
-     *
-     *  n_floor is a property of the FIELD model: it keeps Ohm's law
-     *  non-singular (J/en) and sets the resistive vacuum region. The
-     *  K <-> T_e conversion, the T_e recovery and the conduction open
-     *  set need only numerical POSITIVITY, which is a property of the
-     *  representation. Welding the two means the electron-energy floor
-     *  cannot be lowered without also moving the Ohm's-law floor -- and
-     *  moving the Ohm's-law floor wrong is what burns trapped flux.
-     *
-     *  Threaded into exactly three sites, all identified by behaviour
-     *  rather than by line number:
-     *    1. SeedTeAdiabat        -- the adiabat T_e seed
-     *    2. QDSMCUpdateTe        -- the K -> T_e recovery
-     *    3. the bne build in QdsmcConductionOnceFD -- b_ne and the
-     *       b_open conduction set
-     *  The V_e zero guard is deliberately NOT included: that is a
-     *  separate judgement call about the advection velocity, not about
-     *  representation positivity.
-     *
-     *  DEFAULTS TO n_floor, resolved after n_floor is parsed, so a deck
-     *  that does not set it is bit-for-bit inert.
+    /** Positive density floor (m^-3) for the adiabat seed and both directions
+     *  of the K <-> Te conversion. Defaults to the initial m_n_floor; with
+     *  qdsmc_sync_density_floors it also follows runtime changes. Otherwise
+     *  it can be configured independently of the field-model floor.
      *  Input: qdsmc_te_n_floor. */
     amrex::Real m_qdsmc_te_n_floor = 1.0;
 
