@@ -14290,6 +14290,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             auto& reduce_data = bulk_bound_data;
             ResetConductionReduction(reduce_op, reduce_data);
             using ReduceTuple = typename decltype(bulk_bound_data)::Type;
+#ifdef AMREX_USE_GPU
             auto const tensors = tensor_envelope ? xi_ceiling.const_arrays() : xi.const_arrays();
             auto const coefficients = bne.const_arrays();
             // Let AMReX fuse small boxes into one GPU reduction. The row
@@ -14299,6 +14300,17 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 {
                     auto const x_arr = tensors[box];
                     auto const b_arr = coefficients[box];
+#else
+            for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                amrex::Array4<amrex::Real const> const x_arr =
+                    tensor_envelope ? xi_ceiling.const_array(mfi) : xi.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+                reduce_op.eval(box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+#endif
                     if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return {0.0_rt}; }
                     amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
                     int const node[3] = {i, j, k};
@@ -14379,6 +14391,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     }
                     return {s*nrat};
                 });
+#ifndef AMREX_USE_GPU
+            }
+#endif
             auto tup = reduce_data.value(reduce_op);
             cached_bulk_rate = amrex::get<0>(tup);
             bulk_rate_built = true;
@@ -15063,6 +15078,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         amrex::ReduceOps<amrex::ReduceOpMax> op;
         amrex::ReduceData<int> data(op);
         using Tuple = typename decltype(data)::Type;
+#ifdef AMREX_USE_GPU
         auto const pin_arrays = pins.arrays();
         auto const coefficients = bne.const_arrays();
         auto const eb_arrays = eb_iso ? eb_wall.const_arrays()
@@ -15073,6 +15089,15 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         auto const b = coefficients[box];
                         auto const eb = eb_iso ? eb_arrays[box]
                                               : amrex::Array4<amrex::Real const>{};
+#else
+        for (MFIter mfi(pins, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const p = pins.array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const eb = eb_iso ? eb_wall.const_array(mfi)
+                                   : amrex::Array4<amrex::Real const>{};
+            op.eval(mfi.tilebox(), data,
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+#endif
                         if (b(i, j, k, BNE::b_neff) <= 0.0_rt ||
                             b(i, j, k, BNE::b_ebm) == 0.0_rt) {
                             return {0};
@@ -15115,6 +15140,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         }
                         return {invalid};
                     });
+#ifndef AMREX_USE_GPU
+        }
+#endif
         invalid_pins = amrex::get<0>(data.value(op));
         amrex::ParallelDescriptor::ReduceIntMax(invalid_pins);
     }
@@ -15135,6 +15163,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         amrex::Real const solver_floor = m_n_floor;
         amrex::Real const band_floor =
             amrex::max(m_contam_n_boundary, m_n_floor);
+#ifdef AMREX_USE_GPU
         auto const temperatures = state.const_arrays();
         auto const coefficients = bne.const_arrays();
         auto const ownership = thermal_owner->const_arrays();
@@ -15145,6 +15174,15 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         auto const b = coefficients[box];
                         auto const own = ownership[box];
                         auto const r = densities[box];
+#else
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            auto const r = rho.const_array(mfi);
+            op.eval(mfi.tilebox(), data,
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+#endif
                         if (!own(i, j, k)) {
                             return {0., 0., 0., 0., 0., 0.};
                         }
@@ -15163,6 +15201,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             b(i, j, k, BNE::b_ebm) == 0.0_rt ? ec : 0.0_rt,
                             b(i, j, k, BNE::b_open) == 0.0_rt ? ec : 0.0_rt};
                     });
+#ifndef AMREX_USE_GPU
+        }
+#endif
         auto const v = data.value(op);
         std::array<amrex::Real, 6> result{amrex::get<0>(v), amrex::get<1>(v),
                                           amrex::get<2>(v), amrex::get<3>(v),
@@ -15210,6 +15251,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         auto& data = projection_data;
         ResetConductionReduction(op, data);
         using Tuple = typename decltype(projection_data)::Type;
+#ifdef AMREX_USE_GPU
         auto const temperatures = state.arrays();
         auto const pin_arrays = pins.const_arrays();
         auto const coefficients = bne.const_arrays();
@@ -15222,6 +15264,18 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     auto const b = coefficients[box];
                     auto const own = ownership[box];
                     auto const fm = mask_err ? floors[box] : amrex::Array4<int>{};
+#else
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.array(mfi);
+            auto const p = pins.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            auto const fm =
+                mask_err ? floor_mask.array(mfi) : amrex::Array4<int>{};
+            op.eval(
+                mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+#endif
                     amrex::Real const old = t(i, j, k);
                     int const node[3] = {i, j, k};
                     bool constrained = eb_iso && p(i, j, k, 6) >= 0.0_rt;
@@ -15291,6 +15345,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     return {h[0], h[1], h[2],   h[3], h[4],
                             h[5], h[6], dfloor, count};
                 });
+#ifndef AMREX_USE_GPU
+        }
+#endif
         auto const v = data.value(op);
         std::array<amrex::Real, 9> h{
             amrex::get<0>(v), amrex::get<1>(v), amrex::get<2>(v),
@@ -15338,6 +15395,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         auto& data = boundary_data;
         ResetConductionReduction(op, data);
         using Tuple = typename decltype(boundary_data)::Type;
+#ifdef AMREX_USE_GPU
         auto const temperatures = state.const_arrays();
         auto const coefficients = bne.const_arrays();
         auto const pin_arrays = pins.const_arrays();
@@ -15350,6 +15408,17 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     auto const p = pin_arrays[box];
                     auto const r = rates[box];
                     auto const own = ownership[box];
+#else
+        for (MFIter mfi(state, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = state.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const p = pins.const_array(mfi);
+            auto const r = rhs.array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            op.eval(
+                mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+#endif
                     amrex::Real const invalid =
                         !std::isfinite(t(i,j,k)) || !std::isfinite(r(i,j,k)) ? 1.0_rt : 0.0_rt;
                     if (b(i, j, k, BNE::b_neff) <= 0.0_rt ||
@@ -15462,6 +15531,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             power[4], power[5], power[6], stiffness,
                             invalid != 0.0_rt || !std::isfinite(rate) ? 1.0_rt : 0.0_rt};
                 });
+#ifndef AMREX_USE_GPU
+        }
+#endif
         auto const v = data.value(op);
         heat.rate[0] = amrex::get<0>(v);
         heat.rate[1] = amrex::get<1>(v);
