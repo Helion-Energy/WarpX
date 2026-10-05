@@ -578,6 +578,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("include_electron_inertia_elliptic",
                     m_include_electron_inertia_elliptic);
     pp_hybrid.query("electron_inertia_convection", m_electron_inertia_convection);
+    pp_hybrid.query("electron_inertia_moment_terms", m_electron_inertia_moment_terms);
     if (m_include_electron_inertia_elliptic) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_esolve_tensor && !m_esolve_curlcurl,
@@ -606,7 +607,13 @@ void HybridPICModel::ReadParameters ()
             m_electron_inertia_rtol > 0.0 && m_electron_inertia_max_iters > 0,
             "hybrid_pic_model.electron_inertia_relative_tolerance must be "
             "positive and electron_inertia_max_iterations must be >= 1.");
-        if (m_electron_inertia_convection) {
+        if (m_electron_inertia_moment_terms) {
+            std::string scheme = "explicit";
+            amrex::ParmParse("algo").query("evolve_scheme", scheme);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scheme == "explicit",
+                "Elliptic electron inertia moment terms require the explicit leapfrog scheme");
+        }
+        if (m_electron_inertia_convection || m_electron_inertia_moment_terms) {
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
             WARPX_ABORT_WITH_MESSAGE("Electron inertia convection is not supported in 1D radial geometry");
 #endif
@@ -617,7 +624,9 @@ void HybridPICModel::ReadParameters ()
         }
         amrex::Print() << "Electron inertia (elliptic): convection "
                        << (m_electron_inertia_convection ? "ON" : "OFF")
-                       << "; physical electron mass; ion-current/density time terms omitted\n";
+                       << "; ion-current slope and continuity compression "
+                       << (m_electron_inertia_moment_terms ? "ON" : "OFF")
+                       << "; physical electron mass\n";
         // The operator coefficient d_e^2 = m_e / (mu0 e max(rho, q_e n_floor))
         // is bounded only by the floor: with n_floor = 0 it is unbounded
         // wherever the density vanishes and the solve cannot stay finite.
@@ -3615,12 +3624,31 @@ void HybridPICModel::HybridPICSolveE (
             warpx.Geom(lev), convection_mask);
     }
 
+    // partial_t rho_i = -div(J_i), by quasineutral charge continuity.
+    // rho_i is the positive ion density, not the vanishing net charge.
+    // Keep partial_t J_plasma in the curl-curl operator only.
+    if (m_include_electron_inertia_elliptic && m_electron_inertia_moment_terms) {
+        if (static_cast<int>(m_inertia_moments.size()) <= lev) {
+            m_inertia_moments.resize(lev+1);
+        }
+        if (!m_inertia_moments[lev]) {
+            m_inertia_moments[lev] = std::make_unique<ElectronInertiaMoments>();
+        }
+        std::array<amrex::iMultiFab const*, 3> moment_mask{nullptr, nullptr, nullptr};
+        if (EB::enabled()) {
+            for (int c = 0; c < 3; ++c) { moment_mask[c] = eb_update_E[c].get(); }
+        }
+        m_inertia_moments[lev]->AddToRHS(Efield, current_fp_plasma, Jfield,
+            rhofield, DensityPedestal(lev), PhysConst::q_e * m_n_floor,
+            warpx.Geom(lev), *warpx.get_pointer_fdtd_solver_fp(lev), moment_mask);
+    }
+
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
 
     // Electron inertia, elliptic form. The field assembled above is the
-    // non-temporal Ohm RHS, including convection when enabled:
-    //     E + d_e^2 curl(curl E) = E_inertialess + E_convection
+    // Ohm RHS, including convection and the ion-moment terms when enabled:
+    //     E + d_e^2 curl(curl E) = E_inertialess + E_convection + E_moments
     // and the corrected E replaces it in place, so every downstream consumer
     // (Faraday, the particle gather, diagnostics) sees the inertial field
     // without knowing this step happened. The boundary pass above runs
@@ -19572,6 +19600,18 @@ namespace
             );
         }
     }
+}
+
+void HybridPICModel::PrepareElectronInertiaCurrentSlope (
+    int const lev, ablastr::fields::VectorField const& old_current,
+    ablastr::fields::VectorField const& new_current, amrex::Real const dt)
+{
+    if (!m_include_electron_inertia_elliptic || !m_electron_inertia_moment_terms) { return; }
+    if (static_cast<int>(m_inertia_moments.size()) <= lev) { m_inertia_moments.resize(lev+1); }
+    if (!m_inertia_moments[lev]) {
+        m_inertia_moments[lev] = std::make_unique<ElectronInertiaMoments>();
+    }
+    m_inertia_moments[lev]->SetCurrentSlope(old_current, new_current, dt);
 }
 
 void HybridPICModel::BfieldEvolve (

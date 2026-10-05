@@ -2488,12 +2488,17 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
     include_electron_inertia_elliptic: bool, default=False
         Enable the explicit elliptic electron-current inertia response. The
-        convective acceleration is included by default. Separate ion-current
-        and density time derivatives remain omitted; see the input reference.
+        convective acceleration, deposited ion-current slope and continuity
+        compression are included by default; see the input reference.
 
     electron_inertia_convection: bool, default=True
         Include stage-based electron convective acceleration in elliptic Ohm
-        recovery. False selects the legacy closure for controlled comparisons.
+        recovery. Disable this and electron_inertia_moment_terms to select
+        the legacy total-current-only closure for controlled comparisons.
+
+    electron_inertia_moment_terms: bool, default=True
+        Include the leapfrog ion-current slope and compression from quasineutral
+        continuity in explicit elliptic Ohm recovery, without density history.
 
     include_electron_inertia: bool, default=False
         Add the electron-inertia term to the generalized Ohm's law (the
@@ -2793,6 +2798,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         do_external_diva_cleaning=None,
         include_electron_inertia_elliptic=None,
         electron_inertia_convection=None,
+        electron_inertia_moment_terms=None,
         **kw,
     ):
         self.grid = grid
@@ -2819,6 +2825,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.darwin = darwin
         self.include_electron_inertia_elliptic = include_electron_inertia_elliptic
         self.electron_inertia_convection = electron_inertia_convection
+        self.electron_inertia_moment_terms = electron_inertia_moment_terms
         self.include_electron_inertia = include_electron_inertia
         self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
         self.electron_inertia_bdf2 = electron_inertia_bdf2
@@ -2952,6 +2959,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.electron_inertia_convection is not None:
             pywarpx.hybridpicmodel.electron_inertia_convection = self.electron_inertia_convection
+        if self.electron_inertia_moment_terms is not None:
+            pywarpx.hybridpicmodel.electron_inertia_moment_terms = self.electron_inertia_moment_terms
         if self.include_electron_inertia is not None:
             pywarpx.hybridpicmodel.include_electron_inertia = (
                 self.include_electron_inertia

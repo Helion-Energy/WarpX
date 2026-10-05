@@ -62,12 +62,20 @@
  * history. electron_inertia_convection = 0 selects the legacy omission for
  * controlled comparisons; there is no validated universal smallness bound.
  *
- * REMAINING APPROXIMATIONS. Replacing the electron-velocity time derivative
- * by the total-current response omits -(m_e/e^2 n) partial_t J_i and
- * +(m_e/e) u_e partial_t ln(n), and any explicit external-current rate.
- * This is not the full material derivative for evolving ion moments. The
- * density floor/pedestal further regularize the closure. Inertia stores
- * electron bulk kinetic energy and supplies no thermal heating term.
+ * ION MOMENTS. HybridPICModel also adds -(m_e/(e rho_eff)) times
+ * [partial_t J_i + chi u_e div(J_i)] before recovery. Here rho_i=en_e is
+ * positive ion charge density, not net charge. Quasineutral continuity
+ * gives partial_t rho_i=-div(J_i); the total-current derivative is already
+ * represented by this curl-curl operator and is not added again. The ion
+ * slope comes from consecutive leapfrog deposits and is held across both
+ * magnetic halves and the final gather. chi is zero when a fixed density
+ * floor clips rho_i+pedestal, and one above it. See ElectronInertiaMoments.H.
+ *
+ * REMAINING APPROXIMATIONS. The closure assumes source-free charge continuity
+ * and does not include explicit prescribed-current time derivatives or
+ * numerical changes of the floor/pedestal themselves. Electron inertia stores
+ * bulk kinetic energy and supplies no thermal heating term. No claim of exact
+ * general discrete moving-plasma energy conservation is made.
  *
  * DISCRETISATION. curl(curl E) is not assembled from a standalone stencil.
  * It is formed as the exact composition of the two discrete curls the hybrid

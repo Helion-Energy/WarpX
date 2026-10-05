@@ -31,6 +31,8 @@ hybrid_pic_model.substeps = 2
 hybrid_pic_model.solve_electron_energy_equation = 1
 hybrid_pic_model.include_joule_heating = 0
 hybrid_pic_model.qdsmc_time_advance = pc
+# Isolate the convection certificate from the separately tested moment terms.
+hybrid_pic_model.electron_inertia_moment_terms = 0
 hybrid_pic_model.include_electron_inertia_elliptic = 1
 hybrid_pic_model.electron_inertia_relative_tolerance = 1.e-11
 hybrid_pic_model.electron_inertia_max_iterations = 1000

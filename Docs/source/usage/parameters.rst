@@ -5987,30 +5987,55 @@ Maxwell solver: kinetic-fluid hybrid
 .. pp:param:: hybrid_pic_model.include_electron_inertia_elliptic
 
     ``bool`` (default ``false``)
-    Enables the explicit elliptic electron-current response, using the physical
-    electron mass. Each E evaluation solves
-    :math:`(I+d_e^2\nabla\times\nabla\times)\mathbf E
-    = \mathbf R_0-(m_e/e)(\mathbf u_e\cdot\nabla)\mathbf u_e`, where
-    :math:`\mathbf u_e=(\mathbf J_i-\mathbf J_{\rm plasma})/(en_{\rm eff})`
-    and :math:`en_{\rm eff}=\max(\rho+\rho_{\rm pedestal},e n_{\rm floor})`.
-    The nonlinear convective RHS is rebuilt at every magnetic RK stage and at
-    the particle-gather E solve. It includes all cylindrical terms in axisymmetric
-    RZ. A positive ``n_floor`` is required. This path cannot be combined with
+    Enables the explicit elliptic electron-inertia response, using the physical
+    electron mass. With the convection and moment terms enabled, each E evaluation solves
+
+    .. math::
+
+       (I+d_e^2\nabla\times\nabla\times)\mathbf E
+       = \mathbf R_0 - \frac{m_e}{e}(\mathbf u_e\cdot\nabla)\mathbf u_e
+       - \frac{m_e}{e\rho_{\rm eff}}
+         \left(\partial_t\mathbf J_i + \chi\mathbf u_e\nabla\cdot\mathbf J_i\right).
+
+    Here :math:`\rho_i=en_e` is the positive ion charge density, not the net
+    plasma charge; :math:`\mathbf u_e=(\mathbf J_i-\mathbf J_{\rm plasma})/\rho_{\rm eff}`
+    and :math:`\rho_{\rm eff}=\max(\rho_i+\rho_{\rm pedestal},e n_{\rm floor})`.
+    Quasineutrality and charge continuity eliminate the density time derivative
+    through :math:`\partial_t\rho_i=-\nabla\cdot\mathbf J_i`.
+    They do not require constant ion or electron number density.
+    For the fixed floor and pedestal within a particle step, :math:`\chi=1`
+    above the floor and zero where it clips the density (including equality).
+    No numerical time derivative of the density is stored.
+
+    Before in-place averaging overwrites the old deposit, the explicit leapfrog
+    loop captures :math:`\partial_t\mathbf J_i\simeq
+    (\mathbf J_i^{n+1/2}-\mathbf J_i^{n-1/2})/\Delta t`.
+    This linear slope is held across both magnetic halves, all RK substeps and
+    retries, and the final particle-gather E solve. The first half uses
+    :math:`(\mathbf J_i^n,\rho_i^n)`, the second
+    :math:`(\mathbf J_i^{n+1/2},\rho_i^{n+1/2})`, and the final E solve uses the
+    extrapolated :math:`\mathbf J_i^{n+1}` with :math:`\rho_i^{n+1}`.
+    The divergence uses the same current supplied to that E evaluation and the
+    native Yee edge-to-node stencil, including the RZ axis regularization.
+    The plasma-current part of electron velocity is refreshed at every RK stage.
+    The first particle advance reconstructs both ion-current endpoints on fresh
+    starts and restarts. Standalone E evaluations before an interval has been
+    deposited use a zero current slope.
+
+    This closure assumes source-free charge continuity and neglects explicit
+    prescribed-current time derivatives and time changes of the numerical
+    floor/pedestal themselves. It adds no thermal-heating source. A positive
+    ``n_floor`` is required. This path cannot be combined with
     ``include_electron_inertia`` or the implicit tensor/curlcurl E forms.
 
-    This closure still omits the separate ion-current and density time derivatives
-    and any prescribed-current time contribution; it is not a complete
-    moving-plasma electron-inertia model. Inertia adds no thermal-heating source.
     Convection is a centered second-order spatial discretization, with second-order
     one-sided derivatives at physical boundaries and regularity at the RZ axis.
-    The convection stencil uses the rotational identity
-    :math:`(\mathbf{u}_e\cdot\nabla)\mathbf{u}_e = \nabla(|\mathbf{u}_e|^2/2) - \mathbf{u}_e\times(\nabla\times\mathbf{u}_e)`
-    with a native Yee gradient, whose discrete curl vanishes. The nonlinear
-    operator is second-order consistent; it is not an exact discrete energy
-    conservation scheme for general moving, variable-density plasmas.
-    Boundary electron flow can transport kinetic energy through a wall even
-    when its electromagnetic Poynting flux is zero.
-
+    It uses :math:`(\mathbf u_e\cdot\nabla)\mathbf u_e
+    =\nabla(|\mathbf u_e|^2/2)-\mathbf u_e\times(\nabla\times\mathbf u_e)`
+    with a native Yee gradient, whose discrete curl vanishes. These operators
+    are not an exact discrete energy conservation scheme for general moving,
+    variable-density plasmas. Boundary electron flow can transport kinetic
+    energy even when electromagnetic Poynting flux is zero.
     The magnetic substep must resolve electron advection as well as the inertial
     whistler. Use adaptive RK error control or establish time-step convergence.
 
@@ -6018,9 +6043,20 @@ Maxwell solver: kinetic-fluid hybrid
 
     ``bool`` (default ``true``)
     Includes :math:`-(m_e/e)(\mathbf u_e\cdot\nabla)\mathbf u_e` in the elliptic
-    inertia RHS. Set ``false`` to reproduce the legacy total-current-only response
-    in controlled comparisons. It has no effect when elliptic inertia is off.
+    inertia RHS. It has no effect when elliptic inertia is off.
     Supported in Cartesian geometry and axisymmetric RZ; not in 1D radial geometry.
+    Disable both this and ``electron_inertia_moment_terms`` to reproduce the
+    legacy total-current-only response in controlled comparisons.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_moment_terms
+
+    ``bool`` (default ``true``)
+    Includes the deposited ion-current slope and the compression contribution
+    obtained from quasineutral continuity in the elliptic inertia RHS.
+    Requires the explicit leapfrog evolve scheme. Supported in Cartesian
+    geometry and axisymmetric RZ; not in 1D radial geometry.
+    It has no effect when elliptic inertia is off. Set ``false`` for controlled
+    comparisons with the previous omission of these two contributions.
 
 .. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
 

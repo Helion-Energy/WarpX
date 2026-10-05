@@ -24,6 +24,7 @@
 #include "ExternalVectorPotential.H"
 #include "ElectronInertiaConvection.H"
 #include "ElectronInertiaElliptic.H"
+#include "ElectronInertiaMoments.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -1591,20 +1592,27 @@ public:
      *  Je-form above, and mutually exclusive with it. Substituting Ampere's
      *  and Faraday's laws into the inertia term before discretising in time
      *  turns it into a spatial operator on E,
-     *      E + d_e^2 curl(curl E) = E_inertialess - (m_e/e)(u_e.grad)u_e,
+     *      E + d_e^2 curl(curl E) = E_inertialess + E_convection + E_moments,
      *  which is solved for E each time Ohm's law is imposed. Unlike the
      *  Je-form this carries no electron-current history at all -- nothing to
      *  lag, nothing to rotate, nothing to reconstruct on restart -- and it
      *  bounds the whistler branch at Omega_ce for every wavenumber the grid
      *  can represent, instead of letting omega ~ k^2 run past Omega_ce at
      *  the grid scale and set the magnetic substep CFL. See
-     *  ElectronInertiaElliptic.H for the remaining temporal approximations
+     *  ElectronInertiaElliptic.H for the ion-moment contributions
      *  and the boundary condition mapping. */
     bool m_include_electron_inertia_elliptic = false;
     /** Spatial material acceleration, refreshed at each E stage. Set false
      *  only for a controlled comparison with the legacy reduced closure. */
     bool m_electron_inertia_convection = true;
     mutable std::unique_ptr<ElectronInertiaConvection> m_inertia_convection;
+    /** Ion-current slope and continuity compression, held on the leapfrog
+     *  moment staging. Independent of the convective comparison switch. */
+    bool m_electron_inertia_moment_terms = true;
+    mutable amrex::Vector<std::unique_ptr<ElectronInertiaMoments>> m_inertia_moments;
+    void PrepareElectronInertiaCurrentSlope (
+        int lev, ablastr::fields::VectorField const& old_current,
+        ablastr::fields::VectorField const& new_current, amrex::Real dt);
     amrex::Real m_electron_inertia_rtol = 1.e-8;
     int m_electron_inertia_max_iters = 200;
     int m_electron_inertia_verbose = 0;

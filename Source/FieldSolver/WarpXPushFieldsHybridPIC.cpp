@@ -67,6 +67,17 @@ void WarpX::HybridPICEvolveFields ()
     // Perform charge deposition at t_{n+1} and current deposition at t_{n+1/2}.
     HybridPICDepositRhoAndJ();
 
+    // Capture [J_i^(n+1/2)-J_i^(n-1/2)]/dt before the old deposit is
+    // overwritten by J_i^n averaging. The same linear slope underlies the
+    // later extrapolation to J_i^(n+1); hold it across both magnetic halves,
+    // all RK retries, and the final particle-gather E solve. Initialization
+    // reconstructs the old deposit from particles on fresh starts and restarts.
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        m_hybrid_pic_model->PrepareElectronInertiaCurrentSlope(lev,
+            m_fields.get_alldirs(FieldType::hybrid_current_fp_temp, lev),
+            m_fields.get_alldirs(FieldType::current_fp, lev), dt[lev]);
+    }
+
     // Electron-pressure update. When solve_electron_energy_equation is on,
     // run the QDSMC entropy-transport step (which also emits Pe = n_e k_B T_e
     // at the end). Otherwise the legacy algebraic adiabatic closure is run
@@ -192,7 +203,7 @@ void WarpX::HybridPICEvolveFields ()
     );
 
     // Extrapolate the ion current density to t=n+1 using
-    // J_i^{n+1} = 1/2 * J_i^{n-1/2} + 3/2 * J_i^{n+1/2}, and recalling that
+    // J_i^{n+1} = -1/2 * J_i^{n-1/2} + 3/2 * J_i^{n+1/2}, and recalling that
     // now current_fp_temp = J_i^{n} = 1/2 * (J_i^{n-1/2} + J_i^{n+1/2})
     for (int lev = 0; lev <= finest_level; ++lev)
     {

@@ -1348,3 +1348,28 @@ if(TARGET test_electron_inertia_convection_rz)
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     endforeach()
 endif()
+
+# Continuity-form electron inertia: ion-current slope, compression and both
+# production magnetic halves, with multiple box layouts and substep counts.
+if(TARGET lib_rz)
+    add_executable(test_electron_inertia_moments_rz test_electron_inertia_moments.cpp)
+    target_link_libraries(test_electron_inertia_moments_rz PRIVATE lib_rz)
+    target_include_directories(test_electron_inertia_moments_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_moments_rz)
+    endif()
+    foreach(box_size IN ITEMS 8 16)
+        foreach(substeps IN ITEMS 2 8)
+            set(test_name test_rz_electron_inertia_moments_grid${box_size}_sub${substeps})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            add_test(NAME ${test_name}
+                COMMAND test_electron_inertia_moments_rz
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
+                    hybrid_pic_model.electron_inertia_moment_terms=1
+                    amr.max_grid_size=${box_size} hybrid_pic_model.substeps=${substeps})
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()

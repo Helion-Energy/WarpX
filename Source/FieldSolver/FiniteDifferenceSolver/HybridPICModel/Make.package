@@ -10,3 +10,6 @@ CEXE_headers += ElectronInertiaElliptic.H
 
 CEXE_sources += ElectronInertiaConvection.cpp
 CEXE_headers += ElectronInertiaConvection.H
+
+CEXE_sources += ElectronInertiaMoments.cpp
+CEXE_headers += ElectronInertiaMoments.H

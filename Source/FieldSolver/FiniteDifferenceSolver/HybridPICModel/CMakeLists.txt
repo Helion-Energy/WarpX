@@ -4,6 +4,7 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
       ElectronInertiaConvection.cpp
       ElectronInertiaElliptic.cpp
+      ElectronInertiaMoments.cpp
       HybridPICModel.cpp
       EBJBoundary.cpp
       EBJBoundaryFold.cpp
