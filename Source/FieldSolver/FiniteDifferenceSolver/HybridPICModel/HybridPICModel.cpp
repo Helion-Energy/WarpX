@@ -577,6 +577,7 @@ void HybridPICModel::ReadParameters ()
     // the derivation in ElectronInertiaElliptic.H).
     pp_hybrid.query("include_electron_inertia_elliptic",
                     m_include_electron_inertia_elliptic);
+    pp_hybrid.query("electron_inertia_convection", m_electron_inertia_convection);
     if (m_include_electron_inertia_elliptic) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_esolve_tensor && !m_esolve_curlcurl,
@@ -605,6 +606,18 @@ void HybridPICModel::ReadParameters ()
             m_electron_inertia_rtol > 0.0 && m_electron_inertia_max_iters > 0,
             "hybrid_pic_model.electron_inertia_relative_tolerance must be "
             "positive and electron_inertia_max_iterations must be >= 1.");
+        if (m_electron_inertia_convection) {
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            WARPX_ABORT_WITH_MESSAGE("Electron inertia convection is not supported in 1D radial geometry");
+#endif
+#if defined(WARPX_DIM_RZ)
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
+                "Electron inertia convection requires axisymmetric RZ (m=0)");
+#endif
+        }
+        amrex::Print() << "Electron inertia (elliptic): convection "
+                       << (m_electron_inertia_convection ? "ON" : "OFF")
+                       << "; physical electron mass; ion-current/density time terms omitted\n";
         // The operator coefficient d_e^2 = m_e / (mu0 e max(rho, q_e n_floor))
         // is bounded only by the floor: with n_floor = 0 it is unbounded
         // wherever the density vanishes and the solve cannot stay finite.
@@ -3586,12 +3599,28 @@ void HybridPICModel::HybridPICSolveE (
     }
     } // end !m_esolve_tensor
 
+    // Spatial electron inertia belongs to the same stage RHS for Faraday
+    // and particle gathering. It is reversible, independent of incl_eta,
+    // and must not enter the viscous/Joule heating mirrors.
+    if (m_include_electron_inertia_elliptic && m_electron_inertia_convection) {
+        if (!m_inertia_convection) {
+            m_inertia_convection = std::make_unique<ElectronInertiaConvection>();
+        }
+        std::array<amrex::iMultiFab const*, 3> convection_mask{nullptr, nullptr, nullptr};
+        if (EB::enabled()) {
+            for (int c = 0; c < 3; ++c) { convection_mask[c] = eb_update_E[c].get(); }
+        }
+        m_inertia_convection->AddToRHS(Efield, current_fp_plasma, Jfield,
+            rhofield, DensityPedestal(lev), PhysConst::q_e * m_n_floor,
+            warpx.Geom(lev), convection_mask);
+    }
+
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
 
     // Electron inertia, elliptic form. The field assembled above is the
-    // inertialess Ohm's law; it becomes the right-hand side of
-    //     E + d_e^2 curl(curl E) = E_inertialess
+    // non-temporal Ohm RHS, including convection when enabled:
+    //     E + d_e^2 curl(curl E) = E_inertialess + E_convection
     // and the corrected E replaces it in place, so every downstream consumer
     // (Faraday, the particle gather, diagnostics) sees the inertial field
     // without knowing this step happened. The boundary pass above runs

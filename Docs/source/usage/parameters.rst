@@ -5984,6 +5984,64 @@ Maxwell solver: kinetic-fluid hybrid
     (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
     default 200, and ``darwin_poisson_verbosity``, default 0).
 
+.. pp:param:: hybrid_pic_model.include_electron_inertia_elliptic
+
+    ``bool`` (default ``false``)
+    Enables the explicit elliptic electron-current response, using the physical
+    electron mass. Each E evaluation solves
+    :math:`(I+d_e^2\nabla\times\nabla\times)\mathbf E
+    = \mathbf R_0-(m_e/e)(\mathbf u_e\cdot\nabla)\mathbf u_e`, where
+    :math:`\mathbf u_e=(\mathbf J_i-\mathbf J_{\rm plasma})/(en_{\rm eff})`
+    and :math:`en_{\rm eff}=\max(\rho+\rho_{\rm pedestal},e n_{\rm floor})`.
+    The nonlinear convective RHS is rebuilt at every magnetic RK stage and at
+    the particle-gather E solve. It includes all cylindrical terms in axisymmetric
+    RZ. A positive ``n_floor`` is required. This path cannot be combined with
+    ``include_electron_inertia`` or the implicit tensor/curlcurl E forms.
+
+    This closure still omits the separate ion-current and density time derivatives
+    and any prescribed-current time contribution; it is not a complete
+    moving-plasma electron-inertia model. Inertia adds no thermal-heating source.
+    Convection is a centered second-order spatial discretization, with second-order
+    one-sided derivatives at physical boundaries and regularity at the RZ axis.
+    The convection stencil uses the rotational identity
+    :math:`(\mathbf{u}_e\cdot\nabla)\mathbf{u}_e = \nabla(|\mathbf{u}_e|^2/2) - \mathbf{u}_e\times(\nabla\times\mathbf{u}_e)`
+    with a native Yee gradient, whose discrete curl vanishes. The nonlinear
+    operator is second-order consistent; it is not an exact discrete energy
+    conservation scheme for general moving, variable-density plasmas.
+    Boundary electron flow can transport kinetic energy through a wall even
+    when its electromagnetic Poynting flux is zero.
+
+    The magnetic substep must resolve electron advection as well as the inertial
+    whistler. Use adaptive RK error control or establish time-step convergence.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_convection
+
+    ``bool`` (default ``true``)
+    Includes :math:`-(m_e/e)(\mathbf u_e\cdot\nabla)\mathbf u_e` in the elliptic
+    inertia RHS. Set ``false`` to reproduce the legacy total-current-only response
+    in controlled comparisons. It has no effect when elliptic inertia is off.
+    Supported in Cartesian geometry and axisymmetric RZ; not in 1D radial geometry.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
+
+    ``float`` (default ``1.e-8``)
+    Relative convergence tolerance of the elliptic inertia solve (must be positive).
+
+.. pp:param:: hybrid_pic_model.electron_inertia_max_iterations
+
+    ``int`` (default ``200``)
+    Maximum elliptic inertia iterations. Failure to converge aborts the solve.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_warm_start
+
+    ``bool`` (default ``true``)
+    Reuses the preceding solution as a Krylov initial guess, without changing the RHS.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_verbosity
+
+    ``int`` (default ``0``)
+    Controls elliptic inertia solver diagnostics.
+
 .. pp:param:: hybrid_pic_model.include_electron_inertia
     :type: ``bool``
     :default: ``false``

@@ -2486,6 +2486,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         field advances the magnetic vector potential, removing the radiative
         branch (Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)).
 
+    include_electron_inertia_elliptic: bool, default=False
+        Enable the explicit elliptic electron-current inertia response. The
+        convective acceleration is included by default. Separate ion-current
+        and density time derivatives remain omitted; see the input reference.
+
+    electron_inertia_convection: bool, default=True
+        Include stage-based electron convective acceleration in elliptic Ohm
+        recovery. False selects the legacy closure for controlled comparisons.
+
     include_electron_inertia: bool, default=False
         Add the electron-inertia term to the generalized Ohm's law (the
         Je-form material derivative of the electron fluid velocity, per the
@@ -2782,6 +2791,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        include_electron_inertia_elliptic=None,
+        electron_inertia_convection=None,
         **kw,
     ):
         self.grid = grid
@@ -2806,6 +2817,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             implicit_push_excludes_resistive_field
         )
         self.darwin = darwin
+        self.include_electron_inertia_elliptic = include_electron_inertia_elliptic
+        self.electron_inertia_convection = electron_inertia_convection
         self.include_electron_inertia = include_electron_inertia
         self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
         self.electron_inertia_bdf2 = electron_inertia_bdf2
@@ -2933,6 +2946,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.darwin is not None:
             pywarpx.hybridpicmodel.darwin = self.darwin
+        if self.include_electron_inertia_elliptic is not None:
+            pywarpx.hybridpicmodel.include_electron_inertia_elliptic = (
+                self.include_electron_inertia_elliptic
+            )
+        if self.electron_inertia_convection is not None:
+            pywarpx.hybridpicmodel.electron_inertia_convection = self.electron_inertia_convection
         if self.include_electron_inertia is not None:
             pywarpx.hybridpicmodel.include_electron_inertia = (
                 self.include_electron_inertia

@@ -7,3 +7,6 @@ VPATH_LOCATIONS += $(WARPX_HOME)/Source/FieldSolver/FiniteDifferenceSolver/Hybri
 
 CEXE_sources += ElectronInertiaElliptic.cpp
 CEXE_headers += ElectronInertiaElliptic.H
+
+CEXE_sources += ElectronInertiaConvection.cpp
+CEXE_headers += ElectronInertiaConvection.H

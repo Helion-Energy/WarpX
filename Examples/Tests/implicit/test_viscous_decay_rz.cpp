@@ -83,6 +83,8 @@ int main (int argc, char** argv)
         options.query("relative_tolerance", tolerance);
         bool inertia_energy=false;
         options.query("include_inertia_energy",inertia_energy);
+        bool closed_electron_flow=false;
+        options.query("closed_electron_flow",closed_electron_flow);
         auto& w = WarpX::GetInstance();
         w.InitData();
         // The explicit hybrid deposits rho on its first step. Populate that
@@ -110,10 +112,16 @@ int main (int argc, char** argv)
                     auto const rr=r/rwall;
                     if (c==0) { b(i,j,k)=0.0_rt; }
                     else if (c==1) {
-                        b(i,j,k)=0.005_rt*rr*(3.0_rt-rr*rr)*
-                            std::sin(2.0_rt*MathConst::pi*(z-lo[1])/zlength);
+                        amrex::Real const profile = closed_electron_flow
+                            ? rr*std::pow(1.0_rt-rr*rr,3) : rr*(3.0_rt-rr*rr);
+                        auto const wave=std::sin(2.0_rt*MathConst::pi*(z-lo[1])/zlength);
+                        // The convection certificate isolates closed flow:
+                        // both poloidal velocity components vanish at the
+                        // endcaps as well as at the radial conductor.
+                        b(i,j,k)=0.005_rt*profile*(closed_electron_flow ? wave*wave*wave : wave);
                     } else {
-                        b(i,j,k)=0.1_rt+0.005_rt*std::cos(MathConst::pi*rr);
+                        b(i,j,k)=0.1_rt+0.005_rt*(closed_electron_flow
+                            ? std::pow(1.0_rt-rr*rr,4) : std::cos(MathConst::pi*rr));
                     }
                 });
             }

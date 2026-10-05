@@ -55,18 +55,19 @@
  * The decisive property of this form is that it is ALGEBRAIC IN TIME. No
  * electron-current state is stored, nothing is lagged across a substep, and
  * nothing can go stale across a restart: each call solves a self-contained
- * elliptic problem for E given the inertialess right-hand side.
+ * elliptic problem for E given the stage right-hand side.
  *
- * DELIBERATE OMISSION -- the advective inertia term. The full convective
- * derivative would add -(m_e/e)(u_e . grad) u_e to Ohm's law. It is dropped
- * here on a direct measurement rather than for convenience: evaluated on
- * dumps of the magnetised, strongly sheared regime this solver is aimed at,
- * it came out three to five orders of magnitude below both the Hall term and
- * the total solved |E|, consistent with its structural suppression by the
- * ratio of the electron gyroradius to the gradient scale length. Anyone
- * porting this to a regime where that ratio is not small should re-measure
- * before relying on the omission. It is also the term whose omission
- * preserves the algebraic-in-time property above.
+ * CONVECTION. HybridPICModel adds -(m_e/e)(u_e . grad)u_e to the RHS
+ * from the current stage before calling this recovery. It needs no current
+ * history. electron_inertia_convection = 0 selects the legacy omission for
+ * controlled comparisons; there is no validated universal smallness bound.
+ *
+ * REMAINING APPROXIMATIONS. Replacing the electron-velocity time derivative
+ * by the total-current response omits -(m_e/e^2 n) partial_t J_i and
+ * +(m_e/e) u_e partial_t ln(n), and any explicit external-current rate.
+ * This is not the full material derivative for evolving ion moments. The
+ * density floor/pedestal further regularize the closure. Inertia stores
+ * electron bulk kinetic energy and supplies no thermal heating term.
  *
  * DISCRETISATION. curl(curl E) is not assembled from a standalone stencil.
  * It is formed as the exact composition of the two discrete curls the hybrid
@@ -143,7 +144,7 @@ public:
     /**
      * \brief Apply the inertia correction in place: E <- (I + d_e^2 C)^{-1} E.
      *
-     * On entry Efield holds the inertialess Ohm's-law solution; on exit it
+     * On entry Efield holds the Ohm RHS including spatial inertia; on exit it
      * holds the field including electron inertia. Aborts if the iteration
      * fails to reach m_rtol within m_max_iter -- a partially converged E is
      * never accepted, because a loose solve silently restores the unbounded

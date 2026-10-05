@@ -898,7 +898,8 @@ if(TARGET test_viscous_decay_rz)
     endforeach()
 endif()
 
-# Matched inertia-plus-drag energy balance with frozen ions and density.
+# Preserve the legacy temporal-inertia/drag certificate explicitly. With
+# convection on, use a profile with no electron kinetic-energy wall flux.
 if(TARGET test_viscous_decay_rz)
     foreach(boundary IN ITEMS periodic pmc)
         if(boundary STREQUAL "periodic")
@@ -906,32 +907,40 @@ if(TARGET test_viscous_decay_rz)
         else()
             set(particle_boundary absorbing)
         endif()
-        foreach(refinement IN ITEMS 1 2)
-            if(refinement EQUAL 1)
-                set(decay_steps 20)
-                set(decay_dt 1.e-10)
-            else()
-                set(decay_steps 40)
-                set(decay_dt 5.e-11)
-            endif()
-            set(test_name test_rz_viscous_decay_inertia_${boundary}_${refinement})
-            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
-            add_test(NAME ${test_name}
-                COMMAND test_viscous_decay_rz
-                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_viscous_decay
-                    viscous_decay.steps=${decay_steps} warpx.const_dt=${decay_dt}
-                    "boundary.field_lo=none ${boundary}"
-                    "boundary.field_hi=pec ${boundary}"
-                    "boundary.particle_lo=none ${particle_boundary}"
-                    "boundary.particle_hi=reflecting ${particle_boundary}"
-                    viscous_decay.include_inertia_energy=1
-                    hybrid_pic_model.include_electron_inertia_elliptic=1
-                    hybrid_pic_model.electron_inertia_relative_tolerance=1.e-10
-                    ions.profile=parse_density_function
-                    "ions.density_function(x,y,z)=1.e19*(0.01+0.99*0.5*(1+cos(20.943951023931955*x)))")
-            set_tests_properties(${test_name} PROPERTIES
-                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
-                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+        foreach(convection IN ITEMS 0 1)
+            foreach(refinement IN ITEMS 1 2)
+                if(refinement EQUAL 1)
+                    set(decay_steps 20)
+                    set(decay_dt 1.e-10)
+                else()
+                    set(decay_steps 40)
+                    set(decay_dt 5.e-11)
+                endif()
+                if(convection)
+                    set(test_name test_rz_electron_inertia_convection_energy_${boundary}_${refinement})
+                else()
+                    set(test_name test_rz_viscous_decay_inertia_${boundary}_${refinement})
+                endif()
+                file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+                add_test(NAME ${test_name}
+                    COMMAND test_viscous_decay_rz
+                        ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_viscous_decay
+                        viscous_decay.steps=${decay_steps} warpx.const_dt=${decay_dt}
+                        "boundary.field_lo=none ${boundary}"
+                        "boundary.field_hi=pec ${boundary}"
+                        "boundary.particle_lo=none ${particle_boundary}"
+                        "boundary.particle_hi=reflecting ${particle_boundary}"
+                        viscous_decay.include_inertia_energy=1
+                        viscous_decay.closed_electron_flow=${convection}
+                        hybrid_pic_model.electron_inertia_convection=${convection}
+                        hybrid_pic_model.include_electron_inertia_elliptic=1
+                        hybrid_pic_model.electron_inertia_relative_tolerance=1.e-10
+                        ions.profile=parse_density_function
+                        "ions.density_function(x,y,z)=1.e19*(0.01+0.99*0.5*(1+cos(20.943951023931955*x)))")
+                set_tests_properties(${test_name} PROPERTIES
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                    TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+            endforeach()
         endforeach()
     endforeach()
 endif()
@@ -1299,5 +1308,43 @@ if(TARGET lib_rz)
         set_tests_properties(test_rz_qdsmc_density_floor_sync_mpi${ranks} PROPERTIES
             TIMEOUT 120 PROCESSORS ${ranks} ENVIRONMENT "OMP_NUM_THREADS=1"
             LABELS "HYBRID;RZ;explicit")
+    endforeach()
+endif()
+
+
+# Nonlinear convective electron inertia: exact RZ acceleration, moving ions,
+# density floor/pedestal, axis, fresh stages and full elliptic Ohm ordering.
+if(TARGET lib_rz)
+    add_executable(test_electron_inertia_convection_rz test_electron_inertia_convection.cpp)
+    target_link_libraries(test_electron_inertia_convection_rz PRIVATE lib_rz)
+    target_include_directories(test_electron_inertia_convection_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_convection_rz)
+    endif()
+    foreach(box_size IN ITEMS 8 16)
+        set(test_name test_rz_electron_inertia_convection_grid${box_size})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name}
+            COMMAND test_electron_inertia_convection_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
+                amr.max_grid_size=${box_size})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+# Refine a nonlinear analytic electron flow independently of box decomposition.
+if(TARGET test_electron_inertia_convection_rz)
+    foreach(nz IN ITEMS 32 64)
+        set(test_name test_rz_electron_inertia_convection_smooth_z${nz})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name}
+            COMMAND test_electron_inertia_convection_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
+                "amr.n_cell=32 ${nz}")
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
     endforeach()
 endif()
