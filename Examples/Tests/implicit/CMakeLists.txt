@@ -1342,7 +1342,7 @@ if(TARGET test_electron_inertia_convection_rz)
         add_test(NAME ${test_name}
             COMMAND test_electron_inertia_convection_rz
                 ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
-                "amr.n_cell=32 ${nz}")
+                "amr.n_cell=32 ${nz}" amr.max_grid_size=16)
         set_tests_properties(${test_name} PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
             TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
