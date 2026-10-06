@@ -21,7 +21,8 @@ main (int argc, char** argv) {
         amrex::ParmParse p("audit");
         amrex::Real nold = 1.e19_rt, nnew = 1.e19_rt, nped = 1.e18_rt,
                     dt = 1.e-5_rt;
-        bool heat = true, old_receiver = false;
+        bool heat = true, old_receiver = false, full_pedestal = false;
+        amrex::ParmParse("hybrid_pic_model").query("qdsmc_full_pedestal_transport", full_pedestal);
         amrex::Real eta_factor = 1._rt;
         p.query("nold", nold);
         p.query("nnew", nnew);
@@ -99,7 +100,11 @@ main (int argc, char** argv) {
                            : 0._rt;
         auto const receiver_capacity = old_receiver ? cold : cnew;
         auto const expected_dT = q / receiver_capacity;
-        auto const recover_factor =
+        // Adiabatic electron entropy gives T proportional to n_eff^(gamma-1).
+        // The legacy option instead mixes this with stationary pedestal heat.
+        bool const full_population = full_pedestal && pedestal != nullptr;
+        auto const expected_marker_density = full_population ? eff_old : nold;
+        auto const recover_factor = full_population ? std::pow(eff_new / eff_old, gm1) :
             nold > 0 ? (nped + nold * std::pow(eff_new / eff_old, gm1)) /
                            (nped + nold)
                      : 1._rt;
@@ -122,7 +127,7 @@ main (int argc, char** argv) {
                     a(i, j, k, 2) = volume * cnew * (t(i, j, k) - c(i, j, k));
                     a(i, j, k, 3) = std::abs(s(i, j, k) - (t0 + expected_dT));
                     a(i, j, k, 4) = std::abs(t(i, j, k) - te_expected);
-                    a(i, j, k, 5) = std::abs(weights(i, j, k) - nold) /
+                    a(i, j, k, 5) = std::abs(weights(i, j, k) - expected_marker_density) /
                                     (nold + nped + 1._rt);
                     a(i, j, k, 6) = std::abs(c(i, j, k) - t0 * recover_factor);
                 });
@@ -148,6 +153,7 @@ main (int argc, char** argv) {
         amrex::Print() << std::setprecision(17)
                        << "ENERGY_RECOVERY {\"n_old\":" << nold
                        << ",\"n_new\":" << nnew << ",\"n_ped\":" << nped
+                       << ",\"full_pedestal_transport\":" << (full_pedestal ? "true" : "false")
                        << ",\"stage_matched_receiver\":"
                        << (old_receiver ? "true" : "false")
                        << ",\"physical_source_J\":" << input

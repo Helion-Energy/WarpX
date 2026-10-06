@@ -1546,3 +1546,17 @@ if(TARGET test_electron_inertia_transport_rz)
             TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
     endforeach()
 endif()
+
+# The same independently integrated heat packets must survive full-population
+# pedestal entropy transport, including empty ion cells and density jumps.
+if(TARGET test_qdsmc_source_stage_capacity_rz)
+    add_test(NAME test_rz_qdsmc_source_stage_full_pedestal
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_qdsmc_source_stage.py
+            --order-exe $<TARGET_FILE:test_qdsmc_source_stage_order_rz>
+            --capacity-exe $<TARGET_FILE:test_qdsmc_source_stage_capacity_rz>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/qdsmc_source_stage_full_pedestal
+            --full-pedestal)
+    set_tests_properties(test_rz_qdsmc_source_stage_full_pedestal PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics;HYBRID;RZ")
+endif()

@@ -14,6 +14,7 @@ p.add_argument("--order-exe", type=Path, required=True)
 p.add_argument("--capacity-exe", type=Path, required=True)
 p.add_argument("--output", type=Path, required=True)
 p.add_argument("--ranks", type=int, default=1)
+p.add_argument("--full-pedestal", action="store_true")
 p.add_argument("--mpiexec", default="mpiexec")
 a = p.parse_args()
 a.output.mkdir(parents=True, exist_ok=True)
@@ -25,6 +26,8 @@ def run(tag, exe, inputs, extra, expected_code=0):
     d = out / tag
     d.mkdir()
     cmd = [str(exe.resolve()), str(inputs), *extra]
+    if a.full_pedestal:
+        cmd.append("hybrid_pic_model.qdsmc_full_pedestal_transport=1")
     if a.ranks > 1:
         cmd = [a.mpiexec, "-n", str(a.ranks), *cmd, "amr.max_grid_size=8"]
     (d / "COMMAND.json").write_text(json.dumps(cmd, indent=2) + "\n")
