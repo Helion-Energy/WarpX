@@ -1637,3 +1637,16 @@ if(TARGET test_rz_mc_boundary)
             TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
     endforeach()
 endif()
+
+if(TARGET test_rz_mc_boundary)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_rz_mc_boundary_restart)
+    add_test(NAME test_rz_mc_boundary_restart
+        COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/analysis_rz_boundary_restart.py
+        $<TARGET_FILE:test_rz_mc_boundary>
+        ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_mc_boundary)
+    set_tests_properties(test_rz_mc_boundary_restart PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_rz_mc_boundary_restart
+        TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+endif()

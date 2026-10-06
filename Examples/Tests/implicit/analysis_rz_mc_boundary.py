@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Explicit continuity gate for the native MC boundary probe's measured output.
 
-The inventory CTests intentionally do not certify continuity or coupled energy.
-This gate exits nonzero when a requested continuity tolerance is not met.
+The native CTests assert continuity and inventory; coupled energy is separate.
+This standalone gate checks every reported continuity and surface-flux measure.
 """
 import argparse
 import json
@@ -22,7 +22,12 @@ for line in args.log.read_text().splitlines():
     elif line.startswith('MC_BOUNDARY_COMPLETE '):
         complete.append(json.loads(line.split(' ', 1)[1]))
 passed = (len(complete) == 1 and len(rows) == complete[0]['steps']
-          and all(row['finite'] for row in rows)
+          and all(row['finite'] and all(
+              row[key] < args.continuity_tolerance for key in [
+                  'continuity_relative', 'species_continuity_relative',
+                  'grid_particle_charge_relative', 'integrated_continuity_relative',
+                  'zlo_escape_current_relative', 'zhi_escape_current_relative'])
+                  for row in rows)
           and complete[0]['max_charge_inventory_relative'] < 2e-12
           and complete[0]['max_continuity_relative'] < args.continuity_tolerance)
 print(json.dumps({'continuity_gate': 'PASS' if passed else 'FAIL',
