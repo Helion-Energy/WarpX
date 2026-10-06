@@ -1650,3 +1650,22 @@ if(TARGET test_rz_mc_boundary)
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_rz_mc_boundary_restart
         TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
 endif()
+
+if(TARGET test_rz_mc_boundary)
+    foreach(layout IN ITEMS filter4 multibox)
+        set(test_name test_rz_mc_boundary_${layout})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        if(layout STREQUAL "multibox")
+            set(boundary_grid 16)
+        else()
+            set(boundary_grid 32)
+        endif()
+        add_test(NAME ${test_name} COMMAND test_rz_mc_boundary
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_mc_boundary
+            "warpx.filter_npass_each_dir=4 4" amr.max_grid_size=${boundary_grid}
+            boundary.particle_absorption_fraction=1)
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
+endif()

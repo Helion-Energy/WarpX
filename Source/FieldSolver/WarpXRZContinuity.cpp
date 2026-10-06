@@ -131,6 +131,45 @@ namespace
         auto const c = 0.125_rt*(left+right);
         return i == 0 ? amrex::min(c,left) : c;
     }
+
+    // FillBoundary exchanges valid cells; physical ghosts at an MPI seam are
+    // outside every valid box and are not exchanged. After each filter pass,
+    // reconstruct them from the exchanged interior and a nodal surface-flux
+    // field whose endcap nodes ARE valid (and therefore exchanged).
+    void fill_physical_moment_ghosts (
+        MultiFab& field, MultiFab const* axial_flux, int component,
+        amrex::Geometry const& geom)
+    {
+        int const nr=geom.Domain().bigEnd(0)+1, nz=geom.Domain().bigEnd(1)+1;
+        auto const type=field.ixType().toIntVect();
+        int const hi_r=nr-(1-type[0]), hi_z=nz-(1-type[1]);
+        for (amrex::MFIter mfi(field,false);mfi.isValid();++mfi) {
+            auto const a=field.array(mfi);
+            auto const flux=axial_flux ? axial_flux->const_array(mfi)
+                : amrex::Array4<amrex::Real const>{};
+            amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                if (i>=0 && i<=hi_r && j>=0 && j<=hi_z) { return; }
+                int ir=i, iz=j;
+                amrex::Real parity=1._rt;
+                if (i<0) {
+                    ir=-i-(1-type[0]);
+                    if (component==0 || component==1) { parity=-1._rt; }
+                } else if (i>hi_r) {
+                    ir=2*nr-(1-type[0])-i;
+                    // The supported radial wall reflects particles: r*Jr_face=0.
+                    parity=component==0 ? -(2._rt*ir+1._rt)/(2._rt*i+1._rt)
+                        : amrex::Real(ir)/i;
+                }
+                if (j<0) { iz=-j-(1-type[1]); }
+                else if (j>hi_z) { iz=2*nz-(1-type[1])-j; }
+                if (component==2 && (j<0 || j>hi_z)) {
+                    a(i,j,k)=parity*(2._rt*flux(ir,j<0 ? 0 : nz,k)-a(ir,iz,k));
+                } else {
+                    a(i,j,k)=parity*a(ir,iz,k);
+                }
+            });
+        }
+    }
 }
 
 bool WarpX::UseRZBoundaryCurrent () const
@@ -251,8 +290,26 @@ void WarpX::FilterRZBoundaryMoments (
                         }
                     });
                 }
+                std::unique_ptr<MultiFab> axial_flux;
+                if (component==2) {
+                    axial_flux=std::make_unique<MultiFab>(rho.boxArray(),
+                        rho.DistributionMap(),1,ng);
+                    axial_flux->setVal(0._rt);
+                    for (amrex::MFIter mfi(*axial_flux,false);mfi.isValid();++mfi) {
+                        auto const src=out.const_array(mfi);
+                        auto const flux=axial_flux->array(mfi);
+                        amrex::ParallelFor(mfi.validbox(),
+                            [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                                if (j==0 || j==nz) {
+                                    flux(i,j,k)=.5_rt*(src(i,j-1,k)+src(i,j,k));
+                                }
+                            });
+                    }
+                    axial_flux->FillBoundary(period);
+                }
                 MultiFab::Copy(field,out,0,0,1,ng);
                 field.FillBoundary(period);
+                fill_physical_moment_ghosts(field,axial_flux.get(),component,Geom(0));
             }
         }
     }
@@ -366,7 +423,7 @@ void WarpX::PrepareRZBoundaryLossDensity ()
         amrex::ignore_unused(name);
         auto& lost=*entry.lost_charge;
         ApplyInverseVolumeScalingToChargeDensity(&lost,0);
-        WarpXSumGuardCells(lost,Geom(0).periodicity(),lost.nGrowVect());
+        WarpXSumGuardCells(lost,Geom(0).periodicity(),lost.nGrowVect(),0,lost.nComp());
         FoldRZBoundaryCharge(lost);
         lost.FillBoundary(Geom(0).periodicity());
         MultiFab::Add(*m_rz_boundary_total_loss,lost,0,0,2,ng);

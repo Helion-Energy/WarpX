@@ -24,7 +24,11 @@ and normal current uses B=I-HD, so D B = A D. H vanishes at a physical surface;
 the face current is preserved and filtered tangentially. In particular,
 Jz_face=(Jz[-1]+Jz[0])/2 at the lower cap, and an exterior ghost is reconstructed
 as 2*Jz_face minus its interior mirror. The radial rule preserves r*Jr flux.
-Charge quadrature uses the native deposition axis volume and half volumes on
+After every pass, physical ghosts at internal box seams are rebuilt from the
+exchanged interior and exchanged nodal endcap flux. Both loss components are
+summed across overlaps. Repeated-pass and radial-plus-axial box-split tests
+exercise these intersections. Charge quadrature uses the native deposition axis
+volume and half volumes on
 physical boundary nodes. These weights differ from the clipped geometric
 volumes used by the field-energy diagnostic; the test keeps them separate.
 
