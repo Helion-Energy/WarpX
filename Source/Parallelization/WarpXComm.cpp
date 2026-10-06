@@ -2068,13 +2068,15 @@ void WarpX::ApplyRZAdjointGather (amrex::MultiFab& dst, const amrex::MultiFab& s
     auto const& geom=Geom(lev);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         n_rz_azimuthal_modes==1 && grid_type==GridType::Staggered && finest_level==0 &&
+        dst.ixType()==src.ixType() &&
         geom.ProbLo(0)==0.0_rt && geom.isPeriodic(1) && !EB::enabled() &&
         !do_current_centering && electromagnetic_solver_id==ElectromagneticSolverAlgo::HybridPIC &&
         evolve_scheme==EvolveScheme::Explicit && m_rz_continuity_filter &&
         field_boundary_hi[0]==FieldBoundaryType::PEC &&
         particle_boundary_hi[0]==ParticleBoundaryType::Reflecting,
         "rz_adjoint_gather requires single-level staggered m=0 explicit hybrid RZ, "
-        "periodic z, r=0 axis, reflecting particles at the PEC outer wall, and no EB/current centering");
+        "energy-conserving field gathering, periodic z, r=0 axis, reflecting particles "
+        "at the PEC outer wall, and no EB/current centering");
     AMREX_ALWAYS_ASSERT(&dst!=&src);
     int const nr=geom.Domain().bigEnd(0)+1;
     int const axis=geom.Domain().smallEnd(0);

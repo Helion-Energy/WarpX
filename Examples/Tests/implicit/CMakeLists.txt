@@ -1490,3 +1490,59 @@ if(TARGET lib_rz)
         endforeach()
     endforeach()
 endif()
+
+# Complete energy exchange: actual charge-conserving ions, kinetic electron
+# inertia, magnetic energy, and full represented thermal energy. A sharp edge
+# must move at least two cells; numerical Hall work is never an energy source.
+if(TARGET test_electron_inertia_transport_rz)
+    set(energy_pair_options
+        hybrid_pic_model.energy_conserving_motional=1
+        hybrid_pic_model.center_field_moments=1
+        warpx.rz_adjoint_gather=1)
+    set(warm_energy_options
+        hybrid_pic_model.elec_temp=5
+        hybrid_pic_model.include_electron_pressure_term=1
+        hybrid_pic_model.solve_electron_energy_equation=1
+        hybrid_pic_model.qdsmc_time_advance=pc
+        hybrid_pic_model.qdsmc_full_pedestal_transport=1)
+    foreach(phase IN ITEMS 0 0.25 0.75)
+        set(test_name test_rz_electron_energy_closed_phase${phase})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_transport_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_closed_compression
+            "amr.n_cell=64 16" warpx.const_dt=1.e-9 edge_transport.steps=300
+            "ions.density_function(x,y,z)=if(x*x+y*y<(0.015+${phase}*0.03/64)^2,1.e21,0)"
+            ${energy_pair_options})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
+    foreach(kind IN ITEMS closed_warm driven)
+        set(test_name test_rz_electron_energy_${kind})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        if(kind STREQUAL "closed_warm")
+            set(energy_input inputs_test_rz_electron_inertia_closed_compression)
+            set(energy_options warpx.const_dt=1.e-9 edge_transport.steps=300 ${warm_energy_options})
+        else()
+            set(energy_input inputs_test_rz_electron_inertia_compression)
+            set(energy_options hybrid_pic_model.substeps=128 edge_transport.steps=300)
+        endif()
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_transport_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/${energy_input} "amr.n_cell=64 16"
+            ${energy_options} ${energy_pair_options})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
+    foreach(transport IN ITEMS markers grid)
+        set(test_name test_rz_electron_energy_warm_edge_${transport})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_transport_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_transport
+            ${warm_energy_options} ${energy_pair_options}
+            hybrid_pic_model.qdsmc_transport_operator=${transport})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
+endif()

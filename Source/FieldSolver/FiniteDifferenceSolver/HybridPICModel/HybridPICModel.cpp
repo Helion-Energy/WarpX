@@ -9490,6 +9490,11 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
     // bounds the update at tiny weights), so the deposited-weight gate is off.
     amrex::MultiFab const* const ped_mf = DensityPedestal(lev);
     bool const use_ped = (ped_mf != nullptr);
+    bool full_pedestal_transport=false;
+    amrex::ParmParse("hybrid_pic_model").query("qdsmc_full_pedestal_transport",full_pedestal_transport);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!full_pedestal_transport ||
+        (warpx.evolve_scheme==EvolveScheme::Explicit && m_qdsmc_time_advance==QdsmcTimeAdvance::PC),
+        "qdsmc_full_pedestal_transport currently requires explicit PC electron transport");
     auto const w_floor = (m_qdsmc_halo_unfreeze || use_ped) ? 0.0_rt : m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
     // Optional source taper of the transport update (member doc): the
@@ -9541,8 +9546,11 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
                 use_ped ? amrex::max(rho_arr(i, j, k) / PhysConst::q_e + n_ped, n_floor)
                         : amrex::max(rho_arr(i, j, k) / PhysConst::q_e, n_floor);
             amrex::Real Te_rec = Ke_arr(i, j, k) / std::pow(ne, 1.0_rt - gamma) / w / kb_over_qe;
-            if (use_ped)
+            if (use_ped && !full_pedestal_transport)
             {
+                // Legacy fixed thermal background. With full electron transport,
+                // all n_eff electrons advect/compress with u_e; the STATIC ion
+                // charge pedestal does not define a static electron heat reservoir.
                 // Pedestal as a state (the MHD offset-density rule "the
                 // background is not transported"): the markers carry the
                 // deposited part's energy 1.5 kB w Te_rec, the pedestal part
@@ -12493,6 +12501,12 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
     amrex::MultiFab       & wts = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp, lev);
     amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
 
+    bool full_pedestal_transport=false;
+    amrex::ParmParse("hybrid_pic_model").query("qdsmc_full_pedestal_transport",full_pedestal_transport);
+    auto const* pedestal=DensityPedestal(lev);
+    bool const full_density=full_pedestal_transport && pedestal!=nullptr;
+    auto const rho_floor_transport=PhysConst::q_e*m_qdsmc_te_n_floor;
+
     auto const dual_volume = MakeQdsmcVolumeElement(geom, Ke.ixType());
     amrex::Real const qe = PhysConst::q_e;
     int const fd_limiter = m_cond_fd_limiter;
@@ -12569,7 +12583,7 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
         {
             bool const covered = has_eb && (phi_arr(i,j,k) <= 0.0_rt);
             o_arr(i,j,k) = (!covered &&
-                            rho_arr(i,j,k)/PhysConst::q_e > n_floor_t)
+                            (full_density || rho_arr(i,j,k)/PhysConst::q_e > n_floor_t))
                            ? 1.0_rt : 0.0_rt;
         });
     }
@@ -12588,9 +12602,12 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
         amrex::Array4<amrex::Real>       const & y_arr = y.array(mfi);
         amrex::Array4<amrex::Real const> const & K_arr = Ke.const_array(mfi);
         amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        auto const ped_arr=full_density ? pedestal->const_array(mfi) : amrex::Array4<amrex::Real const>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            amrex::Real const ne = amrex::max(rho_arr(i,j,k)/qe, 0.0_rt);
+            amrex::Real const ne = full_density ?
+                amrex::max(rho_floor_transport,rho_arr(i,j,k)+ped_arr(i,j,k))/qe :
+                amrex::max(rho_arr(i,j,k)/qe,0.0_rt);
             y_arr(i,j,k,0) = ne;
             y_arr(i,j,k,1) = K_arr(i,j,k)*ne;
         });
@@ -12830,7 +12847,26 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // Load each QDSMC particle with V_e and (K_e * N_e, N_e) from its home
     // node.
     m_qdsmc_pc->SetV(lev, Vex, Vey, Vez);
-    m_qdsmc_pc->SetK(lev, Ke, rho);
+    bool full_pedestal_transport=false;
+    amrex::ParmParse("hybrid_pic_model").query("qdsmc_full_pedestal_transport",full_pedestal_transport);
+    auto const* pedestal=DensityPedestal(lev);
+    amrex::MultiFab rho_transport;
+    if (full_pedestal_transport && pedestal) {
+        // Carry the electrons represented in pressure and thermal capacity.
+        // The positive background charge stays fixed; electron entropy does not.
+        rho_transport.define(rho.boxArray(),rho.DistributionMap(),1,rho.nGrowVect());
+        auto const floor=PhysConst::q_e*m_qdsmc_te_n_floor;
+        for (amrex::MFIter mfi(rho_transport);mfi.isValid();++mfi) {
+            auto const den=rho.const_array(mfi), ped=pedestal->const_array(mfi);
+            auto const out=rho_transport.array(mfi);
+            amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                out(i,j,k)=amrex::max(floor,den(i,j,k)+ped(i,j,k));
+            });
+        }
+        m_qdsmc_pc->SetK(lev,Ke,rho_transport);
+    } else {
+        m_qdsmc_pc->SetK(lev,Ke,rho);
+    }
     QdsmcPhaseMinTe(lev, "transport_set_vk");
 
     // EB marker handling (adiabatic E7-replacement, matching the

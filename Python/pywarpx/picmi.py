@@ -2808,6 +2808,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         electron_inertia_momentum_flux=None,
         energy_conserving_motional=None,
         center_field_moments=None,
+        qdsmc_full_pedestal_transport=None,
         **kw,
     ):
         self.grid = grid
@@ -2838,6 +2839,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.electron_inertia_momentum_flux = electron_inertia_momentum_flux
         self.energy_conserving_motional = energy_conserving_motional
         self.center_field_moments = center_field_moments
+        self.qdsmc_full_pedestal_transport = qdsmc_full_pedestal_transport
         self.include_electron_inertia = include_electron_inertia
         self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
         self.electron_inertia_bdf2 = electron_inertia_bdf2
@@ -2975,6 +2977,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             pywarpx.hybridpicmodel.electron_inertia_momentum_flux = self.electron_inertia_momentum_flux
         if self.energy_conserving_motional is not None:
             pywarpx.hybridpicmodel.energy_conserving_motional = self.energy_conserving_motional
+        if self.qdsmc_full_pedestal_transport is not None:
+            pywarpx.hybridpicmodel.qdsmc_full_pedestal_transport = self.qdsmc_full_pedestal_transport
         if self.center_field_moments is not None:
             pywarpx.hybridpicmodel.center_field_moments = self.center_field_moments
         if self.electron_inertia_moment_terms is not None:

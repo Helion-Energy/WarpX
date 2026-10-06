@@ -4063,7 +4063,8 @@ Filtering
     electric field: inverse-volume scaling and axis folding, continuity-compatible
     filtering, periodic summation, and the reflecting outer-wall fold. The field
     solve retains its own electric field and boundary conditions. Requires
-    ``rz_continuity_filter = 1``, single-level staggered explicit hybrid PIC with
+    ``rz_continuity_filter = 1``, ``algo.field_gathering = energy-conserving``,
+    single-level staggered explicit hybrid PIC with
     one azimuthal mode, periodic z, the axis at r=0, a PEC outer wall with reflecting
     particles, and no embedded boundaries or current centering. With filtering off,
     the deposition-volume and boundary transpose still applies.
@@ -6103,6 +6104,17 @@ Maxwell solver: kinetic-fluid hybrid
     Holmstrom gates occur on both sides of the pair. Requires single-level m=0 RZ,
     the axis at r=0, no embedded boundary, the e-form Ohm solver, and a hard density
     floor. It adds no thermal source.
+
+.. pp:param:: hybrid_pic_model.qdsmc_full_pedestal_transport
+
+    ``bool`` (default ``false``)
+    For explicit PC electron transport with a density pedestal, carry entropy with
+    the full effective electron density used by pressure and heat capacity. The
+    positive background charge remains fixed; its compensating electrons advect
+    and compress with the electron fluid. Applies to marker and grid transport.
+    Removes the legacy temperature blend with a stationary pedestal heat reservoir,
+    which suppresses adiabatic compression work. Requires
+    ``qdsmc_time_advance = pc``; it does not add irreversible heating.
 
 .. pp:param:: hybrid_pic_model.center_field_moments
 
