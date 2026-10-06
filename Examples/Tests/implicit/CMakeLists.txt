@@ -1586,3 +1586,54 @@ if(TARGET test_qdsmc_source_stage_capacity_rz)
     set_tests_properties(test_rz_qdsmc_source_stage_full_pedestal PROPERTIES
         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics;HYBRID;RZ")
 endif()
+
+# Reject incompatible gather settings before a large particle load.
+if(TARGET lib_rz)
+    add_executable(test_rz_gather_configuration test_rz_gather_configuration.cpp)
+    target_link_libraries(test_rz_gather_configuration PRIVATE lib_rz)
+    target_include_directories(test_rz_gather_configuration PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_rz_gather_configuration)
+    endif()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_rz_mc_boundary test_rz_mc_boundary.cpp)
+    target_link_libraries(test_rz_mc_boundary PRIVATE lib_rz)
+    target_include_directories(test_rz_mc_boundary PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_rz_mc_boundary)
+    endif()
+endif()
+
+if(TARGET test_rz_gather_configuration)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_rz_gather_configuration_early)
+    add_test(NAME test_rz_gather_configuration_early
+        COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/analysis_rz_gather_configuration.py
+        $<TARGET_FILE:test_rz_gather_configuration>
+        ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_transport)
+    set_tests_properties(test_rz_gather_configuration_early PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_rz_gather_configuration_early
+        TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()
+
+if(TARGET test_rz_mc_boundary)
+    foreach(absorption IN ITEMS 0 0.05 1)
+        set(test_name test_rz_mc_boundary_inventory_${absorption})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        if(absorption STREQUAL "0")
+            set(require_escape 0)
+        else()
+            set(require_escape 1)
+        endif()
+        add_test(NAME ${test_name} COMMAND test_rz_mc_boundary
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_mc_boundary
+            boundary.particle_absorption_fraction=${absorption}
+            mc_boundary.require_escape=${require_escape})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
+endif()

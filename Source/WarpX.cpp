@@ -1507,6 +1507,34 @@ WarpX::ReadParameters ()
             }
         }
 
+#ifdef WARPX_DIM_RZ
+        // Validate this optional path before constructing particle containers.
+        // The work transpose is derived for the periodic-z, reflecting-r wall
+        // topology and an edge (energy-conserving) particle gather only.
+        if (m_rz_adjoint_gather) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                field_gathering_algo == GatheringAlgo::EnergyConserving,
+                "warpx.rz_adjoint_gather=1 requires algo.field_gathering=energy-conserving. "
+                "For momentum-conserving gathering set warpx.rz_adjoint_gather=0; "
+                "the MC particle-field work residual must be measured separately.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                Geom(0).isPeriodic(1),
+                "warpx.rz_adjoint_gather=1 requires periodic z; its axial endcap transpose "
+                "is not implemented. For the explicit MC/nonperiodic configuration use "
+                "algo.field_gathering=momentum-conserving and warpx.rz_adjoint_gather=0 "
+                "with separate boundary-flux and particle-field work accounting.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                n_rz_azimuthal_modes == 1 && grid_type == GridType::Staggered &&
+                maxLevel() == 0 && Geom(0).ProbLo(0) == 0.0_rt &&
+                !EB::enabled() && !do_current_centering &&
+                field_boundary_hi[0] == FieldBoundaryType::PEC &&
+                particle_boundary_hi[0] == ParticleBoundaryType::Reflecting,
+                "warpx.rz_adjoint_gather=1 requires single-level staggered m=0 RZ, "
+                "an r=0 axis, a PEC radial wall with reflecting particles, "
+                "and no embedded boundary or current centering.");
+        }
+#endif
+
         // Use same shape factors in all directions
         // - with momentum-conserving field gathering
         if (field_gathering_algo == GatheringAlgo::MomentumConserving) {galerkin_interpolation = false;}
