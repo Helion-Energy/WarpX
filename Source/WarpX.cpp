@@ -992,6 +992,11 @@ WarpX::ReadParameters ()
         pp_warpx.query("use_filter", use_filter);
         pp_warpx.query("use_filter_compensation", use_filter_compensation);
         pp_warpx.query("rz_continuity_filter", m_rz_continuity_filter);
+        pp_warpx.query("rz_adjoint_gather", m_rz_adjoint_gather);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_rz_adjoint_gather ||
+            (m_rz_continuity_filter && electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+             && evolve_scheme == EvolveScheme::Explicit),
+            "rz_adjoint_gather requires explicit hybrid PIC and rz_continuity_filter");
         pp_warpx.query("rz_continuity_audit_interval", m_rz_continuity_audit_interval);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_rz_continuity_audit_interval >= 0,
             "warpx.rz_continuity_audit_interval must be nonnegative");
@@ -1002,7 +1007,7 @@ WarpX::ReadParameters ()
             "RZ continuity options require explicit hybrid PIC");
 #if !defined(WARPX_DIM_RZ)
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_rz_continuity_filter && m_rz_continuity_audit_interval == 0,
+            !m_rz_continuity_filter && !m_rz_adjoint_gather && m_rz_continuity_audit_interval == 0,
             "RZ continuity options require geometry.dims = RZ");
 #endif
         Vector<int> parse_filter_npass_each_dir(AMREX_SPACEDIM,1);
@@ -3072,7 +3077,7 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
                 m_fields.alias_init(FieldType::Bfield_aux, FieldType::Bfield_fp, Direction{1}, lev, 0.0_rt);
                 m_fields.alias_init(FieldType::Bfield_aux, FieldType::Bfield_fp, Direction{2}, lev, 0.0_rt);
             }
-            if (mypc->m_E_ext_particle_s == "read_from_file") {
+            if (mypc->m_E_ext_particle_s == "read_from_file" || m_rz_adjoint_gather) {
                 m_fields.alloc_init(FieldType::Efield_aux, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag), dm, ncomps, ngEB, 0.0_rt);
                 m_fields.alloc_init(FieldType::Efield_aux, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag), dm, ncomps, ngEB, 0.0_rt);
                 m_fields.alloc_init(FieldType::Efield_aux, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag), dm, ncomps, ngEB, 0.0_rt);

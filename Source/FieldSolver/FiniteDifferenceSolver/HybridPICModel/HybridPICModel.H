@@ -1390,6 +1390,8 @@ public:
      * turning them off makes e.g. a species-free resistive-vacuum deck
      * exactly linear (used by the open-boundary Green's-function tests). */
     bool m_include_hall_term = true;
+    /** RZ physical-volume adjoint pair for the nondissipative motional force. */
+    bool m_energy_conserving_motional = false;
     bool m_include_electron_pressure_term = true;
 
     /** Treat the r-max PEC wall node row as a conductor row in the Ohm

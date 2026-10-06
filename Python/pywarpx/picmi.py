@@ -2806,6 +2806,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         electron_inertia_convection=None,
         electron_inertia_moment_terms=None,
         electron_inertia_momentum_flux=None,
+        energy_conserving_motional=None,
+        center_field_moments=None,
         **kw,
     ):
         self.grid = grid
@@ -2834,6 +2836,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.electron_inertia_convection = electron_inertia_convection
         self.electron_inertia_moment_terms = electron_inertia_moment_terms
         self.electron_inertia_momentum_flux = electron_inertia_momentum_flux
+        self.energy_conserving_motional = energy_conserving_motional
+        self.center_field_moments = center_field_moments
         self.include_electron_inertia = include_electron_inertia
         self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
         self.electron_inertia_bdf2 = electron_inertia_bdf2
@@ -2969,6 +2973,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             pywarpx.hybridpicmodel.electron_inertia_convection = self.electron_inertia_convection
         if self.electron_inertia_momentum_flux is not None:
             pywarpx.hybridpicmodel.electron_inertia_momentum_flux = self.electron_inertia_momentum_flux
+        if self.energy_conserving_motional is not None:
+            pywarpx.hybridpicmodel.energy_conserving_motional = self.energy_conserving_motional
+        if self.center_field_moments is not None:
+            pywarpx.hybridpicmodel.center_field_moments = self.center_field_moments
         if self.electron_inertia_moment_terms is not None:
             pywarpx.hybridpicmodel.electron_inertia_moment_terms = self.electron_inertia_moment_terms
         if self.include_electron_inertia is not None:
@@ -4736,6 +4744,7 @@ class Simulation(picmistandard.PICMI_Simulation):
         self.field_gathering_algo = kw.pop("warpx_field_gathering_algo", None)
         self.particle_pusher_algo = kw.pop("warpx_particle_pusher_algo", None)
         self.use_filter = kw.pop("warpx_use_filter", None)
+        self.rz_adjoint_gather = kw.pop("warpx_rz_adjoint_gather", None)
         self.grid_type = kw.pop("warpx_grid_type", None)
         self.do_current_centering = kw.pop("warpx_do_current_centering", None)
         self.field_centering_order = kw.pop("warpx_field_centering_order", None)
@@ -4874,6 +4883,7 @@ class Simulation(picmistandard.PICMI_Simulation):
         pywarpx.warpx.grid_type = self.grid_type
         pywarpx.warpx.do_current_centering = self.do_current_centering
         pywarpx.warpx.use_filter = self.use_filter
+        pywarpx.warpx.rz_adjoint_gather = self.rz_adjoint_gather
         pywarpx.warpx.serialize_initial_conditions = self.serialize_initial_conditions
         pywarpx.warpx.random_seed = self.random_seed
         pywarpx.boundary.particle_absorption_fraction = (

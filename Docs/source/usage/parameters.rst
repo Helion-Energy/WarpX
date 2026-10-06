@@ -4055,6 +4055,19 @@ Filtering
     density floor/pedestal nor entropy-marker transport. Charge sources and physical
     boundary operations require separate accounting.
 
+.. pp:param:: warpx.rz_adjoint_gather
+    :type: ``bool``
+    :default: ``0``
+
+    Use the work transpose of RZ current deposition postprocessing for the particle
+    electric field: inverse-volume scaling and axis folding, continuity-compatible
+    filtering, periodic summation, and the reflecting outer-wall fold. The field
+    solve retains its own electric field and boundary conditions. Requires
+    ``rz_continuity_filter = 1``, single-level staggered explicit hybrid PIC with
+    one azimuthal mode, periodic z, the axis at r=0, a PEC outer wall with reflecting
+    particles, and no embedded boundaries or current centering. With filtering off,
+    the deposition-volume and boundary transpose still applies.
+
 .. pp:param:: warpx.rz_continuity_audit_interval
     :type: ``int``
     :default: ``0``
@@ -6079,6 +6092,28 @@ Maxwell solver: kinetic-fluid hybrid
     using native edge densities and compatible kinetic-energy geometry.
     Active only when elliptic inertia, convection and moment terms are all on.
     Set ``false`` for comparison with the preceding split nodal formulation.
+
+.. pp:param:: hybrid_pic_model.energy_conserving_motional
+
+    ``bool`` (default ``false``)
+    Gather electron velocity from the physical RZ Yee edges, evaluate its cross
+    product with B on nodes, and return the force with the physical-volume adjoint
+    of that gather. This enforces zero electron work by the motional/Hall term,
+    including across density jumps. PEC projections and square roots of any
+    Holmstrom gates occur on both sides of the pair. Requires single-level m=0 RZ,
+    the axis at r=0, no embedded boundary, the e-form Ohm solver, and a hard density
+    floor. It adds no thermal source.
+
+.. pp:param:: hybrid_pic_model.center_field_moments
+
+    ``bool`` (default ``false``)
+    In explicit hybrid PIC, freeze density and ion current at the midpoint of each
+    magnetic half advance: n+1/4 and n+3/4. Reconstruct these from the two deposited
+    density endpoints and the same linear slope between leapfrog currents used by
+    the final n+1 electric solve. Moments remain uniform throughout each half's
+    magnetic subcycles. This removes the first-order lag from freezing the moments
+    at n and n+1/2. The ion-current derivative enters inertia once through its
+    existing slope term; the total-current derivative stays in curl-curl recovery.
 
 .. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
 

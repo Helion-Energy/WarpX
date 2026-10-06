@@ -245,6 +245,11 @@ void HybridPICModel::ReadParameters ()
         m_holmstrom_axis_radius <= 0._rt || m_holmstrom_vacuum_region,
         "hybrid_pic_model.holmstrom_axis_radius requires holmstrom_vacuum_region = 1");
     pp_hybrid.query("include_hall_term", m_include_hall_term);
+    pp_hybrid.query("energy_conserving_motional", m_energy_conserving_motional);
+#ifndef WARPX_DIM_RZ
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_energy_conserving_motional,
+        "hybrid_pic_model.energy_conserving_motional requires RZ geometry");
+#endif
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
     pp_hybrid.query("pec_conductor_wall_rows", m_pec_conductor_wall_rows);
 

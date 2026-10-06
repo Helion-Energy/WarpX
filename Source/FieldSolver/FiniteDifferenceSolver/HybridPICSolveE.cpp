@@ -21,6 +21,7 @@
 #   include "FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H"
 #endif
 #include "HybridPICModel/HybridPICModel.H"
+#include "HybridPICModel/MotionalFieldRZ.H"
 #include "HybridPICModel/QdsmcVolumeElement.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
@@ -751,9 +752,10 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
     amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
 
     // The E-field calculation is done in 2 steps:
-    // 1) The J x B term is calculated on a nodal mesh in order to ensure
-    //    energy conservation.
-    // 2) The nodal E-field values are averaged onto the Yee grid and the
+    // 1) The Lorentz force is evaluated on a nodal mesh. In the compatible
+    //    RZ path, gather edge velocity and scatter with its volume adjoint;
+    //    nodal current averaging alone does not conserve work at varying rho.
+    // 2) The nodal force is returned to the Yee grid and the
     //    electron pressure & resistivity terms are added (these terms are
     //    naturally located on the Yee grid).
 
@@ -905,6 +907,26 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
         eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
     }
 
+#if defined(WARPX_DIM_RZ)
+    bool const compatible_motional = hybrid_model->m_energy_conserving_motional;
+    auto const& motional_geom = warpx.Geom(lev);
+    if (compatible_motional) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !EB::enabled() && warpx.finestLevel() == 0 && Efield[0]->nComp() == 1 &&
+            motional_geom.ProbLo(0) == 0.0_rt && floor_w == 0.0_rt && !hybrid_model->m_esolve_curlcurl,
+            "energy_conserving_motional requires single-level m=0 RZ e_form, no EB, "
+            "axis at r=0, and a hard density floor");
+    }
+    MotionalFieldRZ const motional{
+        hybrid_model->ViscosityRZEdges(lev),
+        MakeQdsmcVolumeElement(motional_geom, amrex::IndexType(IntVect::TheNodeVector())),
+        MakeQdsmcVolumeElement(motional_geom, Efield[0]->ixType()),
+        MakeQdsmcVolumeElement(motional_geom, Efield[2]->ixType()), rho_floor,
+        holmstrom_vacuum_region, holmstrom_smooth, holmstrom_axis_confined,
+        conductor_wall_row, holmstrom_inv_width, holmstrom_axis_r,
+        holmstrom_axis_inv_w, motional_geom.CellSize(0)};
+#endif
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -935,6 +957,12 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
             Bz_ext = Bfield_external[2]->array(mfi);
         }
 
+#if defined(WARPX_DIM_RZ)
+        auto const rho_motional = rhofield.const_array(mfi);
+        auto const ped_motional = use_pedestal ? rho_ped_mf->const_array(mfi)
+                                             : Array4<Real const>{};
+#endif
+
         // Loop over the cells and update the nodal E field
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
@@ -962,9 +990,21 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
             // calculate enE = (J - Ji) x B (without the Hall term the total
             // current drops out and this is the ideal -u_i x B motional
             // field)
-            const Real jer = (include_hall_term ? jr_interp : 0.0_rt) - jir_interp;
-            const Real jet = (include_hall_term ? jtheta_interp : 0.0_rt) - jit_interp;
-            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
+            Real jer = (include_hall_term ? jr_interp : 0.0_rt) - jir_interp;
+            Real jet = (include_hall_term ? jtheta_interp : 0.0_rt) - jit_interp;
+            Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
+#if defined(WARPX_DIM_RZ)
+            if (compatible_motional) {
+                Real const rn = motional.density(
+                    rho_motional,ped_motional,use_pedestal,i,j,1);
+                jer = -rn * motional.gather(Jir,Jr,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,0);
+                jet = -rn * motional.gather(Jit,Jtheta,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,1);
+                jez = -rn * motional.gather(Jiz,Jz,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,2);
+            }
+#endif
             enE_nodal(i, j, 0, 0) = (
                 jet * Bz_interp
                 - jez * Btheta_interp
@@ -1216,7 +1256,16 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         : 0._rt;
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
+#if defined(WARPX_DIM_RZ)
+                    if (compatible_motional) {
+                        auto const sqrt_gate=motional.gate_sqrt(rho,i,j,0);
+                        // The existing branch below multiplies by g (also
+                        // for pressure); leave sqrt(g) on the motional field.
+                        enE_r = sqrt_gate>0.0_rt ?
+                            motional.scatter(enE,i,j,0)/sqrt_gate : 0.0_rt;
+                    }
+#endif
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited =
@@ -1402,7 +1451,16 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto grad_Pe = 0.0_rt;
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+                    auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+#if defined(WARPX_DIM_RZ)
+                    if (compatible_motional) {
+                        auto const sqrt_gate=motional.gate_sqrt(rho,i,j,1);
+                        // The existing branch below multiplies by g (also
+                        // for pressure); leave sqrt(g) on the motional field.
+                        enE_t = sqrt_gate>0.0_rt ?
+                            motional.scatter(enE,i,j,1)/sqrt_gate : 0.0_rt;
+                    }
+#endif
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited = HybridSmoothFloor(
@@ -1577,7 +1635,16 @@ FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         : 0._rt;
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
+#if defined(WARPX_DIM_RZ)
+                    if (compatible_motional) {
+                        auto const sqrt_gate=motional.gate_sqrt(rho,i,j,2);
+                        // The existing branch below multiplies by g (also
+                        // for pressure); leave sqrt(g) on the motional field.
+                        enE_z = sqrt_gate>0.0_rt ?
+                            motional.scatter(enE,i,j,2)/sqrt_gate : 0.0_rt;
+                    }
+#endif
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited =

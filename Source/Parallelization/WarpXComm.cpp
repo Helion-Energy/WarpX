@@ -15,6 +15,8 @@
 #include "Fields.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "Filter/BilinearFilter.H"
+#include "Filter/RZCurrentFilter.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 #include "WarpXComm_K.H"
@@ -508,6 +510,14 @@ WarpX::UpdateAuxiliaryData ()
     } else {
         UpdateAuxiliaryDataStagToNodal();
     }
+
+#ifdef WARPX_DIM_RZ
+    if (m_rz_adjoint_gather) {
+        auto const e = m_fields.get_alldirs(FieldType::Efield_fp,0);
+        auto const gather = m_fields.get_alldirs(FieldType::Efield_aux,0);
+        for (int c=0;c<3;++c) { ApplyRZAdjointGather(*gather[c],*e[c],0,c); }
+    }
+#endif
 
     // When loading particle fields from file, add the external fields.
     for (int lev = 0; lev <= finest_level; ++lev) {
@@ -1607,7 +1617,14 @@ amrex::IntVect WarpX::ApplyVolumeWeightedFilter (amrex::MultiFab& dst, const amr
             // so D B = A D with the *deposition* divergence D. Transverse
             // components retain A. Radial and axial tensor sweeps then commute
             // with the full divergence. H vanishes on exterior domain edges.
-            if (current_dir == 0 && dir == 0) {
+            if (m_rz_continuity_filter && dir == 0) {
+                RZCurrentFilter const stencil{domain.smallEnd(0),domain.bigEnd(0),axis_volume_factor};
+                amrex::ParallelFor(tb,ncomp,
+                [=] AMREX_GPU_DEVICE(int i,int j,int k,int n) {
+                    auto const a=stencil.row(i,current_dir);
+                    v(i,j,k,n)=a[0]*u(i-1,j,k,n)+a[1]*u(i,j,k,n)+a[2]*u(i+1,j,k,n);
+                });
+            } else if (current_dir == 0 && dir == 0) {
                 const int axis = domain.smallEnd(0);
                 const int last_face = domain.bigEnd(0);
                 amrex::ParallelFor(tb, ncomp,
@@ -2042,3 +2059,99 @@ void WarpX::AddRhoFromFineLevelandSumBoundary (
         MultiFab::Add(*charge_fp[lev], mf, 0, icomp, ncomp, 0);
     }
 }
+
+#ifdef WARPX_DIM_RZ
+void WarpX::ApplyRZAdjointGather (amrex::MultiFab& dst, const amrex::MultiFab& src,
+                                 int const lev, int const component)
+{
+    using namespace amrex::literals;
+    auto const& geom=Geom(lev);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        n_rz_azimuthal_modes==1 && grid_type==GridType::Staggered && finest_level==0 &&
+        geom.ProbLo(0)==0.0_rt && geom.isPeriodic(1) && !EB::enabled() &&
+        !do_current_centering && electromagnetic_solver_id==ElectromagneticSolverAlgo::HybridPIC &&
+        evolve_scheme==EvolveScheme::Explicit && m_rz_continuity_filter &&
+        field_boundary_hi[0]==FieldBoundaryType::PEC &&
+        particle_boundary_hi[0]==ParticleBoundaryType::Reflecting,
+        "rz_adjoint_gather requires single-level staggered m=0 explicit hybrid RZ, "
+        "periodic z, r=0 axis, reflecting particles at the PEC outer wall, and no EB/current centering");
+    AMREX_ALWAYS_ASSERT(&dst!=&src);
+    int const nr=geom.Domain().bigEnd(0)+1;
+    int const axis=geom.Domain().smallEnd(0);
+    bool const nodal_r=src.ixType().nodeCentered(0);
+    auto const dx=geom.CellSizeArray();
+    auto const volume=MakeQdsmcVolumeElement(geom,src.ixType());
+    amrex::Real const axis_volume=m_verboncoeur_axis_correction ? 1.0_rt/3.0_rt : 0.25_rt;
+    int const pr=use_filter ? static_cast<int>(bilinear_filter.npass_each_dir[0]) : 0;
+    int const pz=use_filter ? static_cast<int>(bilinear_filter.npass_each_dir[1]) : 0;
+    amrex::IntVect const passes(pr,pz);
+    amrex::IntVect const ng=dst.nGrowVect()+passes+amrex::IntVect(1);
+    amrex::MultiFab extended(src.boxArray(),src.DistributionMap(),1,ng);
+    amrex::MultiFab a(src.boxArray(),src.DistributionMap(),1,ng);
+    amrex::MultiFab b(src.boxArray(),src.DistributionMap(),1,ng);
+    extended.setVal(0.0_rt); a.setVal(0.0_rt); b.setVal(0.0_rt);
+    amrex::MultiFab::Copy(extended,src,0,0,1,0);
+    extended.FillBoundary(geom.periodicity());
+    // Transpose the physical current-wall fold before transposing smoothing.
+    // In RZ the wall fold includes r_ghost/r_interior. Its self mirror doubles
+    // tangential current on the wall node; use the actual clipped field volume.
+    for (amrex::MFIter mfi(a);mfi.isValid();++mfi) {
+        auto const e=extended.const_array(mfi);
+        auto const out=a.array(mfi);
+        auto const bounds=amrex::lbound(mfi.fabbox());
+        amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+            if (i<axis) { out(i,j,k)=0.0_rt; return; }
+            int const last=nr-(nodal_r ? 0 : 1);
+            int const im=i<=last ? i : 2*nr-(nodal_r ? 0 : 1)-i;
+            if (im<bounds.x || im<axis) { out(i,j,k)=0.0_rt; return; }
+            auto const shift=nodal_r ? 0.0_rt : 0.5_rt;
+            auto const mirror_weight=i>last ? (component==0 ? -1.0_rt : 1.0_rt)*
+                (i+shift)/(im+shift) : (nodal_r && i==nr ? 2.0_rt : 1.0_rt);
+            out(i,j,k)=mirror_weight*volume(im,j,k)*e(im,j,k);
+        });
+    }
+    RZCurrentFilter const stencil{axis,nr-1,axis_volume};
+    amrex::MultiFab* in=&a;
+    amrex::MultiFab* out=&b;
+    auto available=ng;
+    // Forward is radial then axial, so the transpose reverses that order.
+    for (int d=1;d>=0;--d) {
+        int const count=d==0 ? pr : pz;
+        for (int pass=0;pass<count;++pass) {
+            --available[d];
+            for (amrex::MFIter mfi(*in);mfi.isValid();++mfi) {
+                auto const u=in->const_array(mfi);
+                auto const v=out->array(mfi);
+                auto const box=amrex::grow(mfi.validbox(),available);
+                amrex::ParallelFor(box,[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    if (d==1) {
+                        v(i,j,k)=0.25_rt*u(i,j-1,k)+0.5_rt*u(i,j,k)+0.25_rt*u(i,j+1,k);
+                    } else {
+                        auto const center=stencil.row(i,component);
+                        auto const left=stencil.row(i-1,component),right=stencil.row(i+1,component);
+                        v(i,j,k)=left[2]*u(i-1,j,k)+center[1]*u(i,j,k)+right[0]*u(i+1,j,k);
+                    }
+                });
+            }
+            std::swap(in,out);
+        }
+    }
+    // Transpose the deposition inverse-volume scaling and axis fold last.
+    // The Verboncoeur axis volume differs from the field-energy dual volume;
+    // even with zero filter passes this ratio belongs in the gather.
+    for (amrex::MFIter mfi(dst);mfi.isValid();++mfi) {
+        auto const u=in->const_array(mfi);
+        auto const e=dst.array(mfi);
+        amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+            int const im=i<axis ? 2*axis-(nodal_r ? 0 : 1)-i : i;
+            if (component==1 && im==axis) { e(i,j,k)=0.0_rt; return; }
+            auto const r=(im-axis+(nodal_r ? 0.0_rt : 0.5_rt))*dx[0];
+            auto const deposition_volume=dx[0]*dx[1]*(r==0.0_rt ?
+                MathConst::pi*dx[0]*axis_volume : 2.0_rt*MathConst::pi*r);
+            auto const parity=i<axis && component!=2 ? -1.0_rt : 1.0_rt;
+            e(i,j,k)=parity*u(im,j,k)/deposition_volume;
+        });
+    }
+    dst.FillBoundary(geom.periodicity());
+}
+#endif

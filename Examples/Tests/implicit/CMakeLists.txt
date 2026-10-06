@@ -1436,3 +1436,57 @@ if(TARGET test_electron_inertia_transport_rz)
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
         TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1")
 endif()
+
+if(TARGET lib_rz)
+    add_executable(test_motional_work_rz test_motional_work_rz.cpp)
+    target_link_libraries(test_motional_work_rz PRIVATE lib_rz)
+    target_include_directories(test_motional_work_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_motional_work_rz)
+    endif()
+    foreach(box IN ITEMS 16 64)
+        foreach(bc IN ITEMS periodic pec pmc)
+            set(test_name test_rz_motional_work_${bc}_${box})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            if(bc STREQUAL "periodic")
+                set(particle_bc periodic)
+            else()
+                set(particle_bc reflecting)
+            endif()
+            add_test(NAME ${test_name} COMMAND test_motional_work_rz
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
+                "amr.n_cell=64 32" amr.max_grid_size=${box}
+                "boundary.field_lo=none ${bc}" "boundary.field_hi=pec ${bc}"
+                "boundary.particle_lo=none ${particle_bc}"
+                "boundary.particle_hi=reflecting ${particle_bc}")
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_rz_filter_work test_rz_filter_work.cpp)
+    target_link_libraries(test_rz_filter_work PRIVATE lib_rz)
+    target_include_directories(test_rz_filter_work PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_rz_filter_work)
+    endif()
+    foreach(box IN ITEMS 16 64)
+        foreach(passes IN ITEMS 0 1 4)
+            foreach(axis IN ITEMS 0 1)
+                set(test_name test_rz_filter_work_${box}_${passes}_${axis})
+                file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+                add_test(NAME ${test_name} COMMAND test_rz_filter_work
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_transport
+                    "amr.n_cell=64 32" amr.max_grid_size=${box}
+                    "warpx.filter_npass_each_dir=${passes} ${passes}"
+                    warpx.rz_adjoint_gather=1 boundary.verboncoeur_axis_correction=${axis})
+                set_tests_properties(${test_name} PROPERTIES
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                    TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+            endforeach()
+        endforeach()
+    endforeach()
+endif()

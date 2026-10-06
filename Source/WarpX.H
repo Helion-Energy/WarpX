@@ -993,6 +993,10 @@ public:
 #endif
 
 #ifdef WARPX_DIM_RZ
+    /** Transpose of current scaling, filtering, periodic sum and wall fold.
+     * src is the physical electric field; dst is a separate particle field. */
+    void ApplyRZAdjointGather (amrex::MultiFab& dst, const amrex::MultiFab& src,
+                               int lev, int component);
     /** Residual of the m=0 deposited-charge continuity equation, in C/m^3/s.
      * rho is nodal; J has Yee staggering and already summed guards. The axis
      * coefficient follows deposition's volume normalization, not curl(E)'s.
@@ -1475,6 +1479,8 @@ private:
 
     // Experimental compatible RZ m=0 moment filter. Historical filter is default.
     bool m_rz_continuity_filter = false;
+    /** Work-adjoint electric gather for explicit RZ deposition/filtering. */
+    bool m_rz_adjoint_gather = false;
     int m_rz_continuity_audit_interval = 0;
 #ifdef WARPX_DIM_RZ
     std::array<std::unique_ptr<amrex::MultiFab>, 2> m_rz_continuity_old_rho;

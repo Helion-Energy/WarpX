@@ -16,6 +16,7 @@
 #include "Fluids/MultiFluidContainer.H"
 #include "Fluids/WarpXFluidContainer.H"
 #include "WarpX.H"
+#include <AMReX_ParmParse.H>
 
 #include <ablastr/fields/MultiFabRegister.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
@@ -132,13 +133,47 @@ void WarpX::HybridPICEvolveFields ()
         }
     }
 
+    // The legacy half advances freeze the slow moments at each half's
+    // LEFT endpoint (n and n+1/2). That lags their integrated work by dt/4
+    // even when the magnetic RK solve is converged. Midpoint quadrature
+    // keeps rho and Ji uniform across every subcycle, at n+1/4 and n+3/4.
+    // Both come from the same two charge endpoints and leapfrog-current slope.
+    bool center_field_moments=false;
+    amrex::ParmParse("hybrid_pic_model").query("center_field_moments",center_field_moments);
+    auto first_current=current_fp_temp;
+    auto second_current=m_fields.get_mr_levels_alldirs(FieldType::current_fp,finest_level);
+    auto first_density=rho_fp_temp;
+    auto second_density=rho_fp_temp;
+    std::array<MultiFab,3> j_quarter, j_three_quarter;
+    MultiFab rho_quarter, rho_three_quarter;
+    if (center_field_moments) {
+        auto const& old_rho=*rho_fp_temp[0];
+        auto const& new_rho=*m_fields.get(FieldType::rho_fp,0);
+        rho_quarter.define(old_rho.boxArray(),old_rho.DistributionMap(),1,old_rho.nGrowVect());
+        rho_three_quarter.define(old_rho.boxArray(),old_rho.DistributionMap(),1,old_rho.nGrowVect());
+        MultiFab::LinComb(rho_quarter,0.75_rt,old_rho,0,0.25_rt,new_rho,0,0,1,old_rho.nGrowVect());
+        MultiFab::LinComb(rho_three_quarter,0.25_rt,old_rho,0,0.75_rt,new_rho,0,0,1,old_rho.nGrowVect());
+        first_density[0]=&rho_quarter;
+        second_density[0]=&rho_three_quarter;
+        for (int c=0;c<3;++c) {
+            auto const& jn=*current_fp_temp[0][c];
+            auto const& jhalf=*second_current[0][c];
+            j_quarter[c].define(jn.boxArray(),jn.DistributionMap(),1,jn.nGrowVect());
+            j_three_quarter[c].define(jn.boxArray(),jn.DistributionMap(),1,jn.nGrowVect());
+            MultiFab::LinComb(j_quarter[c],0.5_rt,jn,0,0.5_rt,jhalf,0,0,1,jn.nGrowVect());
+            MultiFab::LinComb(j_three_quarter[c],-0.5_rt,jn,0,1.5_rt,jhalf,0,0,1,jn.nGrowVect());
+            first_current[0][c]=&j_quarter[c];
+            second_current[0][c]=&j_three_quarter[c];
+        }
+    }
+
     // Push the B field from t=n to t=n+1/2 using the current and density
     // at t=n, while updating the E field along with B using the electron
     // momentum equation
     m_hybrid_pic_model->BfieldEvolve(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level),
-        current_fp_temp, rho_fp_temp,
+        first_current, first_density,
         m_eb_update_E,
         getistep(0),
         0.5_rt*dt[0],
@@ -193,8 +228,7 @@ void WarpX::HybridPICEvolveFields ()
     m_hybrid_pic_model->BfieldEvolve(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level),
-        m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level),
-        rho_fp_temp,
+        second_current, second_density,
         m_eb_update_E,
         getistep(0),
         0.5_rt*dt[0],

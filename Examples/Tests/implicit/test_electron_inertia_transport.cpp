@@ -1,6 +1,7 @@
 /* Copyright 2026 The WarpX Community
  * This file is part of WarpX. License: BSD-3-Clause-LBNL
  */
+#include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "Initialization/WarpXInit.H"
@@ -93,6 +94,31 @@ namespace
         return result;
     }
 
+    // Full represented thermal state, including the pedestal and floor.
+    // QDSMCClassEnergy deliberately omits sub-floor nodes for its bulk/band
+    // report, so it is not the total electron energy of a moving pedestal edge.
+    amrex::Real thermal_energy (WarpX& w, HybridPICModel const& hp, MultiFab const& rho)
+    {
+        if (!hp.m_solve_electron_energy_equation) { return 0.0_rt; }
+        auto const& te=*w.m_fields.get(FieldType::hybrid_electron_temperature_fp,0);
+        auto const* pedestal=hp.DensityPedestal(0);
+        bool const has_ped=pedestal!=nullptr;
+        auto const floor=hp.m_n_floor*PhysConst::q_e;
+        auto const volume=MakeQdsmcVolumeElement(w.Geom(0),rho.ixType());
+        auto const capacity=PhysConst::kb/(PhysConst::q_e*(hp.m_gamma-1.0_rt));
+        MultiFab measured(rho.boxArray(),rho.DistributionMap(),1,0);
+        for (amrex::MFIter mfi(measured);mfi.isValid();++mfi) {
+            auto const den=rho.const_array(mfi), temp=te.const_array(mfi);
+            auto const ped=has_ped ? pedestal->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+            auto const out=measured.array(mfi);
+            amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                out(i,j,k)=volume(i,j,k)*capacity*temp(i,j,k)*
+                    amrex::max(floor,den(i,j,k)+(has_ped ? ped(i,j,k) : 0.0_rt));
+            });
+        }
+        return measured.sum_unique(0,false,w.Geom(0).periodicity());
+    }
+
     std::array<amrex::Real,2> charge_radius (MultiFab const& rho, amrex::Geometry const& geom,
                                            bool const corrected_axis)
     {
@@ -145,62 +171,27 @@ namespace
         return result;
     }
 
-    // Measure the existing nodal-current / edge-density Lorentz discretization's
-    // electron work. The continuum value is zero. This diagnostic is NOT booked
-    // as external input and cannot make a failed physical-energy gate pass.
-    amrex::Real hall_work (WarpX& w, HybridPICModel const& hp, MultiFab const& rho,
+    // Measure the actual applied native motional field. Its numerical work
+    // is diagnostic only; it is never booked as physical heat or external input.
+    amrex::Real hall_work (WarpX& w, HybridPICModel& hp, MultiFab const& rho,
                           Field const& Ji, Field const& B)
     {
-        auto const J=w.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma,0);
-        auto const& geom=w.Geom(0);
-        auto const* pedestal=hp.DensityPedestal(0);
-        auto const floor=hp.m_n_floor*PhysConst::q_e;
-        amrex::GpuArray<int,3> const node{1,1,1},ratio{1,1,1};
-        amrex::GpuArray<amrex::GpuArray<int,3>,3> js{},bs{};
-        for (int c=0;c<3;++c) {
-            auto const j=Ji[c]->ixType().toIntVect(),b=B[c]->ixType().toIntVect();
-            js[c]={j[0],j[1],1}; bs[c]={b[0],b[1],1};
-        }
-        MultiFab force(rho.boxArray(),rho.DistributionMap(),3,0);
-        for (amrex::MFIter mfi(force);mfi.isValid();++mfi) {
-            auto const out=force.array(mfi);
-            amrex::GpuArray<amrex::Array4<amrex::Real const>,3> ji{},j{},b{};
-            for (int c=0;c<3;++c) {
-                ji[c]=Ji[c]->const_array(mfi);j[c]=J[c]->const_array(mfi);b[c]=B[c]->const_array(mfi);
-            }
-            amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j0,int k) {
-                amrex::Real qn[3],bn[3];
-                for (int c=0;c<3;++c) {
-                    qn[c]=ablastr::coarsen::sample::Interp(ji[c],js[c],node,ratio,i,j0,k,0)
-                         -ablastr::coarsen::sample::Interp(j[c],js[c],node,ratio,i,j0,k,0);
-                    bn[c]=ablastr::coarsen::sample::Interp(b[c],bs[c],node,ratio,i,j0,k,0);
-                }
-                for (int c=0;c<3;++c) {
-                    auto const d=(c+1)%3,e=(c+2)%3;
-                    out(i,j0,k,c)=qn[e]*bn[d]-qn[d]*bn[e];
-                }
-            });
-        }
-        amrex::Real result=0.0_rt;
-        for (int c=0;c<3;++c) {
-            MultiFab measured(Ji[c]->boxArray(),Ji[c]->DistributionMap(),1,0);
-            auto const volume=MakeQdsmcVolumeElement(geom,Ji[c]->ixType());
-            for (amrex::MFIter mfi(measured);mfi.isValid();++mfi) {
-                auto const f=force.const_array(mfi),den=rho.const_array(mfi);
-                auto const ped=pedestal?pedestal->const_array(mfi):amrex::Array4<amrex::Real const>{};
-                bool const has_ped=pedestal!=nullptr;
-                auto const ji=Ji[c]->const_array(mfi),j=J[c]->const_array(mfi);
-                auto const out=measured.array(mfi);
-                amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j0,int k) {
-                    auto const raw=ablastr::coarsen::sample::Interp(den,node,js[c],ratio,i,j0,k,0)+
-                        (has_ped?ablastr::coarsen::sample::Interp(ped,node,js[c],ratio,i,j0,k,0):0.0_rt);
-                    out(i,j0,k)=volume(i,j0,k)*(ji(i,j0,k)-j(i,j0,k))*
-                        ablastr::coarsen::sample::Interp(f,node,js[c],ratio,i,j0,k,c)/amrex::max(floor,raw);
-                });
-            }
-            result+=measured.sum_unique(0,false,geom.periodicity());
-        }
-        return result;
+        auto J=w.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma,0);
+        Scratch force(Ji), q(Ji);
+        MultiFab pressure(rho.boxArray(),rho.DistributionMap(),1,rho.nGrowVect());
+        pressure.setVal(0.0_rt);
+        bool const old_pressure=hp.m_include_electron_pressure_term;
+        bool const old_external=hp.m_add_external_fields;
+        hp.m_include_electron_pressure_term=false;
+        hp.m_add_external_fields=false;
+        for (int c=0;c<3;++c) { force.values[c].setVal(0.0_rt); }
+        w.get_pointer_fdtd_solver_fp(0)->HybridPICSolveE(
+            force.field,J,Ji,B,rho,pressure,w.GetEBUpdateEFlag()[0],0,&hp,false,false);
+        hp.m_include_electron_pressure_term=old_pressure;
+        hp.m_add_external_fields=old_external;
+        q.copy(Ji);
+        for (int c=0;c<3;++c) { MultiFab::Subtract(q.values[c],*J[c],0,0,1,0); }
+        return product(q.field,force.field,w.Geom(0));
     }
 
     amrex::Real wall_power (Field const& E, Field const& B, amrex::Geometry const& geom)
@@ -253,7 +244,7 @@ int main (int argc, char** argv)
         test.query("minimum_crossed_cells",minimum_crossing);
         AMREX_ALWAYS_ASSERT(geom.isPeriodic(1) && hp.m_include_electron_inertia_elliptic);
         if (prescribed) {
-            AMREX_ALWAYS_ASSERT(!hp.m_add_external_fields && !hp.m_solve_electron_energy_equation);
+            AMREX_ALWAYS_ASSERT(!hp.m_add_external_fields);
         }
         if (magnetic_piston) {
             AMREX_ALWAYS_ASSERT(!hp.m_add_external_fields && !prescribed);
@@ -280,6 +271,9 @@ int main (int argc, char** argv)
         }
         MultiFab previous_rho(rho.boxArray(),rho.DistributionMap(),1,rho.nGrowVect());
         MultiFab continuity(rho.boxArray(),rho.DistributionMap(),1,0);
+        auto& pressure=*w.m_fields.get(FieldType::hybrid_electron_pressure_fp,0);
+        MultiFab previous_pressure(pressure.boxArray(),pressure.DistributionMap(),1,pressure.nGrowVect());
+        MultiFab evolved_pressure(pressure.boxArray(),pressure.DistributionMap(),1,pressure.nGrowVect());
         amrex::Real const dt = w.getdt(0);
         amrex::Real initial_energy = 0.0_rt, initial_radius = 0.0_rt, initial_charge = 0.0_rt;
         amrex::Real initial_electron=0.0_rt,initial_ion=0.0_rt,initial_thermal=0.0_rt,initial_magnetic=0.0_rt;
@@ -290,13 +284,14 @@ int main (int argc, char** argv)
         for (int step = 0; step <= steps; ++step) {
             MultiFab::Copy(previous_rho,rho,0,0,1,rho.nGrowVect());
             previous_current.copy(Ji); previous_b.copy(B); previous_e.copy(E);
+            if (prescribed && hp.m_solve_electron_energy_equation) {
+                MultiFab::Copy(previous_pressure,pressure,0,0,1,pressure.nGrowVect());
+            }
             if (hp.m_add_external_fields) {
                 previous_ext.copy(w.m_fields.get_alldirs(FieldType::hybrid_E_fp_external,0));
             }
             auto const ion = particles.GetParticleContainerFromName("ions").sumParticleEnergy();
-            auto const thermal_class = hp.m_solve_electron_energy_equation
-                ? hp.QDSMCClassEnergy(0,&rho) : std::array<amrex::Real,2>{0.0_rt,0.0_rt};
-            auto const thermal = thermal_class[0]+thermal_class[1];
+            auto const thermal = thermal_energy(w,hp,rho);
             auto const magnetic = product(B,B,geom)/(2.0_rt*PhysConst::mu0);
             auto const moment = charge_radius(rho,geom,corrected_axis);
             if (prescribed) {
@@ -318,9 +313,16 @@ int main (int argc, char** argv)
                 // Reevaluate the same production first-half Ohm RHS for the
                 // measured t^n current. Ions follow prescribed ballistic paths;
                 // -Ji.E is the external constraint work entering electron energy.
+                if (hp.m_solve_electron_energy_equation) {
+                    MultiFab::Copy(evolved_pressure,pressure,0,0,1,pressure.nGrowVect());
+                    MultiFab::Copy(pressure,previous_pressure,0,0,1,pressure.nGrowVect());
+                }
                 hp.HybridPICSolveE(E,centered.field,previous_b.field,previous_rho,
-                                  w.GetEBUpdateEFlag()[0],0,true);
+                                  w.GetEBUpdateEFlag()[0],0,false);
                 power = -product(centered.field,E,geom);
+                if (hp.m_solve_electron_energy_equation) {
+                    MultiFab::Copy(pressure,evolved_pressure,0,0,1,pressure.nGrowVect());
+                }
             } else {
                 poynting = -wall_power(previous_e.field,previous_b.field,geom);
                 if (hp.m_add_external_fields) {
@@ -329,7 +331,7 @@ int main (int argc, char** argv)
                 power = poynting+penetration;
             }
             auto const numerical_hall=prescribed?0.0_rt:hall_work(w,hp,previous_rho,centered.field,previous_b.field);
-            auto const total = prescribed ? electron : electron+ion+thermal+magnetic;
+            auto const total = prescribed ? electron+thermal+magnetic : electron+ion+thermal+magnetic;
             if (step == 0) {
                 initial_energy = total; initial_radius = moment[1]; initial_charge = moment[0];
                 initial_electron=electron; initial_ion=ion; initial_thermal=thermal; initial_magnetic=magnetic;
