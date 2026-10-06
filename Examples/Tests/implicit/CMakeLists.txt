@@ -1396,9 +1396,10 @@ if(TARGET lib_rz)
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
         add_test(NAME ${test_name} COMMAND test_electron_inertia_flux_profile_rz
             ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
-            "amr.n_cell=${nr} 16" "boundary.field_lo=none periodic"
-            "boundary.field_hi=pec periodic" "boundary.particle_lo=none periodic"
-            "boundary.particle_hi=reflecting periodic" boundary.verboncoeur_axis_correction=0)
+            "amr.n_cell=${nr} 16" amr.max_grid_size=16
+            "boundary.field_lo=none periodic" "boundary.field_hi=pec periodic"
+            "boundary.particle_lo=none periodic" "boundary.particle_hi=reflecting periodic"
+            boundary.verboncoeur_axis_correction=0)
         set_tests_properties(${test_name} PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
             TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
