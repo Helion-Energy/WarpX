@@ -3,6 +3,8 @@
  */
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Initialization/WarpXInit.H"
+#include "Particles/MultiParticleContainer.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "WarpX.H"
 
 #include <AMReX_ParmParse.H>
@@ -24,7 +26,9 @@ main (int argc, char** argv) {
         amrex::ParmParse test("joule_test");
         amrex::Real ne = 1.e19_rt, pedfrac = .2_rt, dt = 1.e-7_rt;
         amrex::Real accepted = 1._rt, redirected = 0._rt, declined = 0._rt;
-        bool variable = false, redirect = false, check_relaxation = false;
+        bool variable = false, redirect = false, check_relaxation = false, check_pair = false, pair_via_stage = false;
+        test.query("pair_via_stage", pair_via_stage);
+        test.query("check_pair_energy", check_pair);
         amrex::Real raw_species_scale = 1._rt;
         test.query("raw_species_scale", raw_species_scale);
         test.query("check_relaxation", check_relaxation);
@@ -180,8 +184,8 @@ main (int argc, char** argv) {
             ti_a.setVal(0._rt); ti_b.setVal(0._rt); te.setVal(t0);
             std::map<std::string, MultiFab*> const ti{{"ions", &ti_a}, {"ions2", &ti_b}};
             constexpr amrex::Real relax_dt = 1.e-4_rt, nu = 1.e3_rt;
-            hp.QDSMCAddTemperatureRelaxation(0, relax_dt, rho, ti);
-            auto const expected = t0 * std::exp(-1.6_rt * nu * relax_dt);
+            hp.QDSMCAddTemperatureRelaxation(0, relax_dt, rho, ti, &receiving);
+            auto const expected = t0 * std::exp(-1.6_rt * nu * relax_dt / (receiving_ratio + pedfrac));
             te.plus(-expected, 0, 1, 0);
             auto const error = te.norminf();
             bool const relax_pass = error < 128._rt * std::numeric_limits<amrex::Real>::epsilon() * t0;
@@ -189,6 +193,62 @@ main (int argc, char** argv) {
                            << ",\"error_K\":" << error << ",\"pass\":"
                            << (relax_pass ? "true" : "false") << "}\n";
             pass = pass && relax_pass;
+        }
+        if (check_pair) {
+            // Real cold-ion OU kicks, with independent electron+particle energy.
+            // Dense quiet loading makes the statistical error small compared
+            // with a missing pedestal heat-capacity factor.
+            auto const cc = amrex::convert(te.boxArray(), amrex::IntVect::TheCellVector());
+            MultiFab ti_a(cc, te.DistributionMap(), 1, 1);
+            MultiFab ti_b(cc, te.DistributionMap(), 1, 1);
+            ti_a.setVal(0._rt); ti_b.setVal(0._rt); te.setVal(t0);
+            std::map<std::string, MultiFab*> const ti{{"ions", &ti_a}, {"ions2", &ti_b}};
+            auto& particles = w.GetPartContainer();
+            auto const before_ion = particles.GetParticleContainerFromName("ions").sumParticleEnergy()
+                                  + particles.GetParticleContainerFromName("ions2").sumParticleEnergy();
+            if (pair_via_stage) {
+                for (auto const& name : {std::string("ions"), std::string("ions2")}) {
+                    for (auto* component : w.m_fields.get_alldirs("T_"+name, 0)) {
+                        component->setVal(0._rt);
+                    }
+                }
+                // The fixture enables only Q_ei for this production source call.
+                hp.ApplyQdsmcEnergySources(0, dt, true, receiving);
+            } else {
+                hp.QDSMCAddTemperatureRelaxation(0, dt, rho, ti, &receiving);
+                hp.QDSMCApplyIonHeating(0, dt, nullptr, &ti);
+            }
+            auto const after_ion = particles.GetParticleContainerFromName("ions").sumParticleEnergy()
+                                 + particles.GetParticleContainerFromName("ions2").sumParticleEnergy();
+            auto const vol = MakeQdsmcVolumeElement(g, te.ixType());
+            MultiFab change(te.boxArray(), te.DistributionMap(), 1, 0);
+            for (amrex::MFIter mfi(change); mfi.isValid(); ++mfi) {
+                auto const tt = te.const_array(mfi), rr = receiving.const_array(mfi);
+                auto const pp = ped ? ped->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                auto const out = change.array(mfi); bool const has_ped = ped != nullptr;
+                amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    out(i,j,k) = vol(i,j,k) * 1.5_rt * PhysConst::kb / PhysConst::q_e
+                        * (rr(i,j,k)+(has_ped ? pp(i,j,k) : 0._rt)) * (tt(i,j,k)-t0);
+                });
+            }
+            auto const de = change.sum_unique(0,false,g.periodicity());
+            auto const di = after_ion-before_ion;
+            auto const defect = std::abs(de+di)/std::max(std::abs(de),std::abs(di));
+            // Independent OU ensemble mean. Keep its finite-time splitting
+            // error separate from the realized stochastic energy difference.
+            AMREX_ALWAYS_ASSERT(!variable && ne == 1.e19_rt);
+            auto const mean_ion = 1.5_rt * (.6_rt+.4_rt/2._rt) * ne
+                * MathConst::pi * radius*radius*length * PhysConst::kb
+                * te.min(0) * (-std::expm1(-2._rt*1.e3_rt*dt));
+            auto const mean_defect = std::abs(de+mean_ion)/std::max(std::abs(de),mean_ion);
+            bool const pair_pass = de<0._rt && di>0._rt && defect<.01_rt
+                                  && mean_defect<.001_rt;
+            amrex::Print() << "RELAXATION_PAIR {\"electron_delta_J\":" << de
+                           << ",\"ion_delta_J\":" << di << ",\"relative_defect\":" << defect
+                           << ",\"expected_ion_delta_J\":" << mean_ion
+                           << ",\"ensemble_mean_relative_defect\":" << mean_defect
+                           << ",\"pass\":" << (pair_pass ? "true" : "false") << "}\n";
+            pass = pass && pair_pass;
         }
         result = pass ? 0 : 2;
     }

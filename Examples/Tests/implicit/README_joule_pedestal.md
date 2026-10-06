@@ -66,3 +66,20 @@ redirected energy, and the analytic electron relaxation rate must be invariant.
 The latter verifies the electron primitive, not a particle-pair energy theorem.
 The moving-edge resistive tests additionally close the full particle, magnetic,
 bulk-electron, and thermal budget at two timesteps.
+
+## Electron-ion exchange with the represented capacity
+
+The physical relaxation source is `Qei = sum_s 3 ns kB nu (Te - Ti_s)`. Its
+electron temperature rate divides by the represented capacity, including the
+pedestal and the source-stage density. The parser and source gates retain the
+physical deposited density. Using ion density alone in that denominator loses
+energy even as the timestep tends to zero when a pedestal is present.
+
+Eight native cases now call both the electron primitive and actual two-species
+particle OU heating. They cover pedestal fractions0,0.2,5 and receiving-density
+ratios0.2,1,10, including the production source-stage wrapper. The gate is1% of
+the actual exchanged energy, and0.1% for the independently calculated OU
+ensemble mean. The short step has nu*dt=1e-4; sequential source integration has
+finite-time splitting error, and realized ion heating has sampling error. These
+are reported separately. The earlier electron-primitive-only scope statements
+apply to the raw-fraction scale tests, not these new paired exchange cases.

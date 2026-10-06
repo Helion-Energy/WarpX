@@ -72,6 +72,31 @@ cases = {
     ],
 }
 
+# Actual two-species particle heating, not just staged redirected energy.
+_pair = [
+    "joule_test.check_pair_energy=1",
+    "ions.num_particles_per_cell_each_dim=4 16 4",
+    "ions2.num_particles_per_cell_each_dim=4 16 4",
+    "ions.do_not_push=0", "ions2.do_not_push=0",
+    "hybrid_pic_model.include_joule_heating=0",
+    "hybrid_pic_model.qdsmc_viscosity_model=parser",
+    "hybrid_pic_model.qdsmc_nu_par(n,Te,B)=0",
+    "hybrid_pic_model.qdsmc_nu_perp(n,Te,B)=0",
+    "hybrid_pic_model.qdsmc_viscosity_heating=strain",
+    "hybrid_pic_model.qdsmc_viscosity_in_ohms_law=0",
+]
+for _name, _args in {
+    "pedestal-zero": ["joule_test.pedestal_fraction=0"],
+    "pedestal-p2": [],
+    "pedestal-five": ["joule_test.pedestal_fraction=5"],
+    "receiving-thin": ["joule_test.receiving_density_ratio=.2"],
+    "receiving-dense": ["joule_test.receiving_density_ratio=10"],
+    "stage-p2": ["joule_test.pair_via_stage=1"],
+    "stage-thin": ["joule_test.pair_via_stage=1", "joule_test.receiving_density_ratio=.2"],
+    "stage-dense": ["joule_test.pair_via_stage=1", "joule_test.receiving_density_ratio=10"],
+}.items():
+    cases["relaxation-pair-"+_name] = _pair + _args
+
 p = argparse.ArgumentParser()
 p.add_argument("--executable", type=Path, required=True)
 p.add_argument("--output", type=Path, required=True)
@@ -106,7 +131,10 @@ for tag, extra in cases.items():
         )
     match = re.search(r"JOULE_PEDESTAL (\{.*\})", (d / "run.log").read_text())
     data = json.loads(match[1]) if match else None
-    rows.append({"tag": tag, "returncode": proc.returncode, "diagnostic": data})
+    pair_match = re.search(r"RELAXATION_PAIR (\{.*\})", (d / "run.log").read_text())
+    pair = json.loads(pair_match[1]) if pair_match else None
+    rows.append({"tag": tag, "returncode": proc.returncode, "diagnostic": data,
+                 "relaxation_pair": pair})
     (out / "RESULTS.json").write_text(json.dumps(rows, indent=2) + "\n")
     print(tag, proc.returncode, data, flush=True)
 passed = all(

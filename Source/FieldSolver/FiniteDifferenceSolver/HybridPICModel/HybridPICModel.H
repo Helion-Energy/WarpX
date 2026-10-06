@@ -946,11 +946,14 @@ public:
 
     /** \brief Parameterized variant of QDSMCAddTemperatureRelaxation using the
      *         given charge density for the coefficient state (rho^{n+1/2} on
-     *         the theta-implicit path).
+     *         the theta-implicit path). The optional receiving density sets
+     *         the represented electron heat capacity; the pedestal is added
+     *         separately. Rates and physical gates use rho.
      */
     void QDSMCAddTemperatureRelaxation (int lev, amrex::Real dt,
         amrex::MultiFab const & rho,
-        std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const;
+        std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species,
+        amrex::MultiFab const* heat_capacity_rho = nullptr) const;
 
     /** \brief Build the per-charged-species cell-centered ion temperature [eV]
      *         from the shape-aware T_<species> deposits (collapse the

@@ -11965,7 +11965,8 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
 
 void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real const dt,
     amrex::MultiFab const & rho_in,
-    std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const
+    std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species,
+    amrex::MultiFab const* heat_capacity_rho) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCAddTemperatureRelaxation()");
 
@@ -11973,18 +11974,20 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
 
     // Electron-ion thermal-equilibration sink, summed over ion species s:
     //   Q_ei = Sigma_s 3 n_s k_B nu_ei (T_e - T_i_s),    dU_e/dt += -Q_ei.
-    // With U_e = n_e k_B T_e/(gamma-1), the per-cell T_e obeys
-    //   dT_e/dt = -(gamma-1) 3 Sigma_s (n_s/n_e) nu_ei (T_e - T_i_s),
+    // With U_e = n_capacity k_B T_e/(gamma-1), the per-cell T_e obeys
+    //   dT_e/dt = -(gamma-1) 3 Sigma_s (n_s/n_capacity) nu_ei (T_e - T_i_s),
     // where n_s/n_e = f_s/Z_s, f_s = rho_fp_s/Sigma_t rho_fp_t. T_e is stored in
     // Kelvin; T_i (deposited per species, cell-centered, in eV) is interpolated
     // to the nodal T_e grid and converted to K. This is the electron-side sink;
-    // QDSMCApplyIonHeating deposits the matching ion heating so the pair
-    // conserves energy.
+    // QDSMCApplyIonHeating deposits the matching ion heating in expectation;
+    // the pair retains finite-time splitting and particle sampling errors.
     auto & warpx = WarpX::GetInstance();
     amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = rho_in;
+    auto const* pedestal = DensityPedestal(lev);
+    bool const use_pedestal = pedestal != nullptr;
 
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
@@ -12051,6 +12054,9 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
         {
             amrex::Array4<amrex::Real>       const & Te_arr     = Te.array(mfi);
             amrex::Array4<amrex::Real const> const & rho_arr    = rho.const_array(mfi);
+            auto const receiving = (heat_capacity_rho ? *heat_capacity_rho : rho).const_array(mfi);
+            auto const ped = use_pedestal ? pedestal->const_array(mfi)
+                                          : amrex::Array4<amrex::Real const>{};
             amrex::Array4<amrex::Real const> const & rhos_arr   = rho_s.const_array(mfi);
             amrex::Array4<amrex::Real const> const & rhosum_arr = rhos_sum.const_array(mfi);
             amrex::Array4<amrex::Real const> const & Ti_arr     = Ti_cc.const_array(mfi);
@@ -12073,8 +12079,14 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
 
                 amrex::Real const nu = nu_ei(rho_val, amrex::max(Te_eV, Te_floor_eV), Ti_eV, t_new);
                 // Exact exponential integration of dT_e/dt = -alpha nu (T_e - T_i),
-                // with alpha = (gamma-1) 3 n_s/n_e and n_s/n_e = f_s/Z_s.
-                amrex::Real const alpha = gamma_minus_1 * 3.0_rt * (f_s / Z_s);
+                // with alpha = (gamma-1) 3 n_s/n_capacity; n_s/n_e = f_s/Z_s.
+                // Q_ei uses the physical ion populations. Its electron-side
+                // temperature rate must divide by the represented capacity,
+                // including the pedestal and the current source-stage density.
+                amrex::Real const receiving_rho = receiving(i,j,k) +
+                    (use_pedestal ? ped(i,j,k) : 0.0_rt);
+                amrex::Real const alpha = gamma_minus_1 * 3.0_rt * (f_s / Z_s)
+                                       * rho_val / receiving_rho;
                 Te_arr(i,j,k) = Ti_K + (Te_K - Ti_K) * std::exp(-alpha * nu * dt);
             });
         }
@@ -13177,7 +13189,8 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
     // Step 6b: electron-ion thermal-equilibration (Q_ei) sink on T_e
     // (cools T_e toward each ion species' T_i).
     if (m_include_temperature_relaxation) {
-        QDSMCAddTemperatureRelaxation(lev, dt_src, Ti_dep_by_species);
+        QDSMCAddTemperatureRelaxation(lev, dt_src, rho_eval, Ti_dep_by_species,
+                                      heat_capacity_rho);
         QdsmcPhaseMinTe(lev, "sources_relaxation");
     }
 
