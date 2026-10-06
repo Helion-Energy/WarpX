@@ -154,7 +154,7 @@ public:
      *
      * On entry Efield holds the Ohm RHS including spatial inertia; on exit it
      * holds the field including electron inertia. Aborts if the iteration
-     * fails to reach m_rtol within m_max_iter -- a partially converged E is
+     * fails to reach m_rtol relative to the original Ohm RHS within m_max_iter -- a partially converged E is
      * never accepted, because a loose solve silently restores the unbounded
      * branch this term exists to remove.
      */

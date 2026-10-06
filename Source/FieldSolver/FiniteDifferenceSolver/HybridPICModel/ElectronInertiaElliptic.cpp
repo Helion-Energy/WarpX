@@ -928,18 +928,30 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
     SetVal3(m_v, 0._rt);
 
     Real rho_old = 1._rt, alpha = 1._rt, omega = 1._rt;
-    const Real tol = m_rtol * bnorm;
+    // The requested relative residual belongs to A E = E0. The correction
+    // RHS E0-A E0 can be arbitrarily small for a longitudinal field; using
+    // its norm would demand residuals far below roundoff in the original
+    // equation and can break BiCGStab on perfectly finite moving-edge data.
+    // Conversely, a large curl-curl correction must not loosen that tolerance.
+    const Real tol = m_rtol * e0norm;
     int iter = 0;
     bool converged = (NormInf3(m_r) <= tol);
 
     for (; iter < m_max_iter && !converged; ++iter)
     {
         const Real rho_new = Dot3(m_rhat, m_r);
+        if (!std::isfinite(rho_new) || rho_new == 0._rt) {
+            amrex::Print() << "INERTIA_BREAKDOWN iteration=" << iter
+                << " shadow_dot=" << rho_new << " rhs_norm=" << bnorm
+                << " E0_norm=" << e0norm << " residual_norm=" << NormInf3(m_r)
+                << " shadow_norm=" << NormInf3(m_rhat) << " solution_norm=" << NormInf3(m_x)
+                << " tolerance=" << tol << " alpha=" << alpha << " omega=" << omega << '\n';
+        }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             std::isfinite(rho_new) && rho_new != 0._rt,
             "The elliptic electron-inertia solve broke down (the BiCGStab "
-            "shadow residual became orthogonal or non-finite). This "
-            "indicates a corrupted E field or density entering the solve.");
+            "shadow residual became orthogonal or non-finite). See "
+            "INERTIA_BREAKDOWN for the finite-field and residual diagnostics.");
 
         const Real beta = (rho_new / rho_old) * (alpha / omega);
         // p = r + beta * (p - omega * v)
@@ -978,8 +990,8 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
 
         const Real rnorm = NormInf3(m_r);
         if (m_verbose > 2) {
-            amrex::Print() << "    it " << iter << "  |r|/|b| "
-                           << rnorm / bnorm << "  rho " << rho_new
+            amrex::Print() << "    it " << iter << "  |r|/|E0| "
+                           << rnorm / e0norm << "  rho " << rho_new
                            << "  alpha " << alpha << "  omega " << omega
                            << "\n";
         }
@@ -996,7 +1008,7 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
         converged,
         "The elliptic electron-inertia solve did not converge within "
         + std::to_string(m_max_iter) + " iterations (relative residual "
-        + std::to_string(static_cast<double>(final_res / bnorm)) + " against "
+        + std::to_string(static_cast<double>(final_res / e0norm)) + " against "
         "a tolerance of "
         + std::to_string(static_cast<double>(m_rtol)) + "). A partially "
         "converged E is not accepted: it would silently restore the "
@@ -1018,7 +1030,7 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
 
     if (m_verbose > 1) {
         amrex::Print() << "  electron inertia: " << iter << " iterations, "
-                       << "relative residual " << final_res / bnorm
+                       << "relative residual " << final_res / e0norm
                        << ", |dE|/|E| " << NormInf3(m_x) / std::max(e0norm, 1.e-30_rt)
                        << "\n";
     }

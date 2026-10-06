@@ -5,6 +5,7 @@ foreach(D IN LISTS WarpX_DIMS)
       ElectronInertiaConvection.cpp
       ElectronInertiaElliptic.cpp
       ElectronInertiaMoments.cpp
+    ElectronInertiaFlux.cpp
       HybridPICModel.cpp
       EBJBoundary.cpp
       EBJBoundaryFold.cpp

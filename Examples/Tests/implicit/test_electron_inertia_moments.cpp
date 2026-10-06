@@ -197,6 +197,33 @@ int main (int argc, char** argv)
         amrex::Print()<<"MOMENTS translating_density_cancellation relative="<<cancellation<<'\n';
         AMREX_ALWAYS_ASSERT(cancellation<2.e-10_rt);
 
+        for (int c=0;c<3;++c) { E[c]->setVal(0); }
+        moments.AddMomentumFluxToRHS(E,J,Ji,rho,ped,floor,geom,solver);
+        auto const flux_cancellation=norm(E)/(PhysConst::m_e/PhysConst::q_e*beta*U*U);
+        amrex::Print()<<"MOMENTS flux_translating_density_cancellation relative="
+                      <<flux_cancellation<<'\n';
+        AMREX_ALWAYS_ASSERT(flux_cancellation<2.e-10_rt);
+
+        // Independent clipped-floor limit: rho_eff is constant, so an affine
+        // axial flow has material acceleration uz*d(uz)/dz, with no density
+        // compression term. This detects dropping or halving the floor source.
+        rho.setVal(0.1_rt*floor); ped->setVal(0.2_rt*floor);
+        for (int c=0;c<3;++c) {
+            E[c]->setVal(0); J[c]->setVal(0); expected.values[c].setVal(0);
+            auto const it=Ji[c]->ixType().toIntVect();
+            for (amrex::MFIter mfi(*Ji[c]);mfi.isValid();++mfi) {
+                auto const ji=Ji[c]->array(mfi), exact=expected.values[c].array(mfi);
+                amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    auto const z=lower[1]+(j+(it[1]?0.0_rt:0.5_rt))*dx[1];
+                    ji(i,j,k)=c==2 ? floor*(C*z+U) : 0.0_rt;
+                    exact(i,j,k)=c==2 ? -PhysConst::m_e/PhysConst::q_e*C*(C*z+U) : 0.0_rt;
+                });
+            }
+        }
+        moments.SetCurrentSlope(Ji,Ji,interval);
+        moments.AddMomentumFluxToRHS(E,J,Ji,rho,ped,floor,geom,solver);
+        compare(E,expected.field,"flux_clipped_floor_material_acceleration");
+
         prepare(1.2_rt*density);
         manufacture(density,0.2_rt*density,0.0_rt,2.0_rt,true);
         std::array<amrex::iMultiFab,3> masks;
@@ -301,6 +328,38 @@ int main (int argc, char** argv)
         w.HybridPICEvolveFields();
         compare(E,recovered.field,"production_deposit_slope_and_final_gather",2.e-8_rt);
         compare(B,predicted_B.field,"production_both_halves_and_all_rk_substeps",2.e-8_rt);
+
+        // Nearly longitudinal fields must satisfy the ORIGINAL elliptic
+        // equation at the requested relative tolerance, without chasing the
+        // tiny transverse correction below floating-point resolution.
+        effective.setVal(floor);
+        elliptic.PrepareCoefficients(effective,floor,0);
+        auto const rwall=geom.ProbHi(0);
+        for (int phase=0;phase<8;++phase) {
+            for (int c=0;c<3;++c) {
+                auto const it=expected.values[c].ixType().toIntVect();
+                for (amrex::MFIter mfi(expected.values[c]);mfi.isValid();++mfi) {
+                    auto const out=expected.values[c].array(mfi);
+                    amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                        auto const r=lower[0]+(i+(it[0]?0.0_rt:0.5_rt))*dx[0];
+                        out(i,j,k)=c==0 ? 0.01_rt*r/rwall : c==1
+                            ? (phase+1)*1.e-12_rt*(i%2 ? 1.0_rt : -1.0_rt)*r/rwall : 0.0_rt;
+                    });
+                }
+            }
+            elliptic.ApplyOperator(expected.values,first.values,0);
+            copy(E,first.field);
+            elliptic.Solve(E,0);
+            copy(recovered.field,E);
+            elliptic.ApplyOperator(recovered.values,newer.values,0);
+            for (int c=0;c<3;++c) {
+                MultiFab::Subtract(newer.values[c],first.values[c],0,0,1,0);
+            }
+            auto const residual=norm(newer.field)/norm(first.field);
+            amrex::Print()<<"MOMENTS original_equation_residual phase="<<phase
+                          <<" relative="<<residual<<'\n';
+            AMREX_ALWAYS_ASSERT(residual<5.0_rt*elliptic.m_rtol);
+        }
         amrex::Print()<<"MOMENTS production_continuity_completion PASS\n";
         WarpX::Finalize();
     }

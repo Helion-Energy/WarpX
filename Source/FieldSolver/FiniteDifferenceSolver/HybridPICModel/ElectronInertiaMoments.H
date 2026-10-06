@@ -44,7 +44,23 @@ public:
         FiniteDifferenceSolver& solver,
         std::array<amrex::iMultiFab const*, 3> const& eb_mask = {nullptr, nullptr, nullptr});
 
+    /** Combined conservative momentum flux on the native current/E grid.
+     * Uses the same edge density as the elliptic operator. The effective
+     * continuity residual is retained at a clipped floor and for the RZ
+     * staggered-volume geometry; no mass or heat source is deposited.
+     */
+    void AddMomentumFluxToRHS (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& J_plasma,
+        ablastr::fields::VectorField const& J_ion,
+        amrex::MultiFab const& rho_i, amrex::MultiFab const* pedestal,
+        amrex::Real rho_floor, amrex::Geometry const& geom,
+        FiniteDifferenceSolver& solver,
+        std::array<amrex::iMultiFab const*, 3> const& eb_mask = {nullptr, nullptr, nullptr});
+
 private:
+    std::array<amrex::MultiFab, 3> m_flux_current;
+    std::array<amrex::MultiFab, 3> m_flux_velocity;
     std::array<amrex::MultiFab, 3> m_current_slope;
     amrex::MultiFab m_div_ion_current;
     amrex::MultiFab m_rhs;

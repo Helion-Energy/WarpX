@@ -579,6 +579,7 @@ void HybridPICModel::ReadParameters ()
                     m_include_electron_inertia_elliptic);
     pp_hybrid.query("electron_inertia_convection", m_electron_inertia_convection);
     pp_hybrid.query("electron_inertia_moment_terms", m_electron_inertia_moment_terms);
+    pp_hybrid.query("electron_inertia_momentum_flux", m_electron_inertia_momentum_flux);
     if (m_include_electron_inertia_elliptic) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_esolve_tensor && !m_esolve_curlcurl,
@@ -626,6 +627,9 @@ void HybridPICModel::ReadParameters ()
                        << (m_electron_inertia_convection ? "ON" : "OFF")
                        << "; ion-current slope and continuity compression "
                        << (m_electron_inertia_moment_terms ? "ON" : "OFF")
+                       << "; momentum flux "
+                       << (m_electron_inertia_momentum_flux && m_electron_inertia_convection &&
+                           m_electron_inertia_moment_terms ? "ON" : "OFF")
                        << "; physical electron mass\n";
         // The operator coefficient d_e^2 = m_e / (mu0 e max(rho, q_e n_floor))
         // is bounded only by the floor: with n_floor = 0 it is unbounded
@@ -3611,7 +3615,9 @@ void HybridPICModel::HybridPICSolveE (
     // Spatial electron inertia belongs to the same stage RHS for Faraday
     // and particle gathering. It is reversible, independent of incl_eta,
     // and must not enter the viscous/Joule heating mirrors.
-    if (m_include_electron_inertia_elliptic && m_electron_inertia_convection) {
+    bool const momentum_flux = m_electron_inertia_momentum_flux &&
+        m_electron_inertia_convection && m_electron_inertia_moment_terms;
+    if (m_include_electron_inertia_elliptic && m_electron_inertia_convection && !momentum_flux) {
         if (!m_inertia_convection) {
             m_inertia_convection = std::make_unique<ElectronInertiaConvection>();
         }
@@ -3638,9 +3644,15 @@ void HybridPICModel::HybridPICSolveE (
         if (EB::enabled()) {
             for (int c = 0; c < 3; ++c) { moment_mask[c] = eb_update_E[c].get(); }
         }
-        m_inertia_moments[lev]->AddToRHS(Efield, current_fp_plasma, Jfield,
-            rhofield, DensityPedestal(lev), PhysConst::q_e * m_n_floor,
-            warpx.Geom(lev), *warpx.get_pointer_fdtd_solver_fp(lev), moment_mask);
+        if (momentum_flux) {
+            m_inertia_moments[lev]->AddMomentumFluxToRHS(Efield, current_fp_plasma, Jfield,
+                rhofield, DensityPedestal(lev), PhysConst::q_e * m_n_floor,
+                warpx.Geom(lev), *warpx.get_pointer_fdtd_solver_fp(lev), moment_mask);
+        } else {
+            m_inertia_moments[lev]->AddToRHS(Efield, current_fp_plasma, Jfield,
+                rhofield, DensityPedestal(lev), PhysConst::q_e * m_n_floor,
+                warpx.Geom(lev), *warpx.get_pointer_fdtd_solver_fp(lev), moment_mask);
+        }
     }
 
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);

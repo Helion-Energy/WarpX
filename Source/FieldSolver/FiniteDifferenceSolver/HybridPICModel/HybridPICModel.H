@@ -1609,6 +1609,8 @@ public:
     /** Ion-current slope and continuity compression, held on the leapfrog
      *  moment staging. Independent of the convective comparison switch. */
     bool m_electron_inertia_moment_terms = true;
+    /** Combine convection and moments using native staggered momentum fluxes. */
+    bool m_electron_inertia_momentum_flux = true;
     mutable amrex::Vector<std::unique_ptr<ElectronInertiaMoments>> m_inertia_moments;
     void PrepareElectronInertiaCurrentSlope (
         int lev, ablastr::fields::VectorField const& old_current,

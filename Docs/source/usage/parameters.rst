@@ -6016,7 +6016,8 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`(\mathbf J_i^{n+1/2},\rho_i^{n+1/2})`, and the final E solve uses the
     extrapolated :math:`\mathbf J_i^{n+1}` with :math:`\rho_i^{n+1}`.
     The divergence uses the same current supplied to that E evaluation and the
-    native Yee edge-to-node stencil, including the RZ axis regularization.
+    deposited-current edge-to-node stencil, including the Verboncoeur axis
+    volume when enabled in RZ. The Yee field curl and divergence are unchanged.
     The plasma-current part of electron velocity is refreshed at every RK stage.
     The first particle advance reconstructs both ion-current endpoints on fresh
     starts and restarts. Standalone E evaluations before an interval has been
@@ -6028,14 +6029,27 @@ Maxwell solver: kinetic-fluid hybrid
     ``n_floor`` is required. This path cannot be combined with
     ``include_electron_inertia`` or the implicit tensor/curlcurl E forms.
 
-    Convection is a centered second-order spatial discretization, with second-order
-    one-sided derivatives at physical boundaries and regularity at the RZ axis.
-    It uses :math:`(\mathbf u_e\cdot\nabla)\mathbf u_e
-    =\nabla(|\mathbf u_e|^2/2)-\mathbf u_e\times(\nabla\times\mathbf u_e)`
-    with a native Yee gradient, whose discrete curl vanishes. These operators
-    are not an exact discrete energy conservation scheme for general moving,
-    variable-density plasmas. Boundary electron flow can transport kinetic
-    energy even when electromagnetic Poynting flux is zero.
+    By default the ion-current slope, convection and density compression use a
+    combined centered momentum flux on the native current/E grid. Each component
+    uses the same interpolated-and-floored edge density as elliptic recovery.
+    The discrete divergence uses physical dual volumes, including boundary
+    half-cells. RZ radial/azimuthal connection forces form a work-adjoint pair.
+    Half the difference between the component-grid mass-flux divergence and
+    the interpolated deposited-current divergence supplies the compatible
+    kinetic-energy split; the clipped-floor continuity source retains its
+    full coefficient. These are discretizations of the material derivative,
+    not viscosity or thermal heating.
+
+    The older split nodal/rotational discretization is available by setting
+    ``electron_inertia_momentum_flux = false``. Neither method guarantees exact
+    total energy conservation for a moving PIC plasma: moment time centering,
+    particle gather/deposition and any hard-floor mass source also enter that
+    balance. Include electron bulk energy
+    :math:`\int m_e|\mathbf J_i-\mathbf J|^2/(2e\rho_{\rm eff})\,dV` in audits.
+    Boundary electron flow transports kinetic energy even when Poynting flux
+    vanishes. A sharp loaded particle edge must be tested with the actual
+    deposition and filtering; an unresolved point-sampled current slope is
+    not repaired by curl-curl recovery or extra magnetic subcycles.
     The magnetic substep must resolve electron advection as well as the inertial
     whistler. Use adaptive RK error control or establish time-step convergence.
 
@@ -6058,10 +6072,21 @@ Maxwell solver: kinetic-fluid hybrid
     It has no effect when elliptic inertia is off. Set ``false`` for controlled
     comparisons with the previous omission of these two contributions.
 
+.. pp:param:: hybrid_pic_model.electron_inertia_momentum_flux
+
+    ``bool`` (default ``true``)
+    Combines convection and ion-moment inertia as a centered momentum flux
+    using native edge densities and compatible kinetic-energy geometry.
+    Active only when elliptic inertia, convection and moment terms are all on.
+    Set ``false`` for comparison with the preceding split nodal formulation.
+
 .. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
 
     ``float`` (default ``1.e-8``)
-    Relative convergence tolerance of the elliptic inertia solve (must be positive).
+    Relative convergence tolerance of the original elliptic equation
+    :math:`(I+d_e^2\nabla\times\nabla\times)E=R` (must be positive).
+    The residual is normalized by :math:`\|R\|_\infty`, not by the potentially
+    vanishing RHS of the internal correction solve.
 
 .. pp:param:: hybrid_pic_model.electron_inertia_max_iterations
 

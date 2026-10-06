@@ -1373,3 +1373,65 @@ if(TARGET lib_rz)
         endforeach()
     endforeach()
 endif()
+
+# Actual charge-conserving moving edge and driven compression energy diagnostics.
+if(TARGET lib_rz)
+    add_executable(test_electron_inertia_transport_rz test_electron_inertia_transport.cpp)
+    target_link_libraries(test_electron_inertia_transport_rz PRIVATE lib_rz)
+    target_include_directories(test_electron_inertia_transport_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_transport_rz)
+    endif()
+endif()
+
+if(TARGET lib_rz)
+    add_executable(test_electron_inertia_flux_profile_rz test_electron_inertia_flux_profile.cpp)
+    target_link_libraries(test_electron_inertia_flux_profile_rz PRIVATE lib_rz)
+    target_include_directories(test_electron_inertia_flux_profile_rz PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_flux_profile_rz)
+    endif()
+    foreach(nr IN ITEMS 32 64 128)
+        set(test_name test_rz_electron_inertia_flux_profile_${nr})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_flux_profile_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_convection
+            "amr.n_cell=${nr} 16" "boundary.field_lo=none periodic"
+            "boundary.field_hi=pec periodic" "boundary.particle_lo=none periodic"
+            "boundary.particle_hi=reflecting periodic" boundary.verboncoeur_axis_correction=0)
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
+if(TARGET test_electron_inertia_transport_rz)
+    foreach(nr IN ITEMS 32 64 128)
+        math(EXPR edge_steps "100 * ${nr} / 32")
+        if(nr EQUAL 32)
+            set(edge_dt 2.5e-8)
+        elseif(nr EQUAL 64)
+            set(edge_dt 1.25e-8)
+        else()
+            set(edge_dt 6.25e-9)
+        endif()
+        set(test_name test_rz_electron_inertia_moving_edge_${nr})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_transport_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_transport
+            "amr.n_cell=${nr} 16" warpx.const_dt=${edge_dt} edge_transport.steps=${edge_steps})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+    find_package(Python COMPONENTS Interpreter REQUIRED)
+    set(test_name test_rz_electron_inertia_moving_edge_order)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+    add_test(NAME ${test_name} COMMAND ${Python_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/analysis_electron_inertia_transport.py
+        $<TARGET_FILE:test_electron_inertia_transport_rz>
+        ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_transport)
+    set_tests_properties(${test_name} PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+        TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1")
+endif()
