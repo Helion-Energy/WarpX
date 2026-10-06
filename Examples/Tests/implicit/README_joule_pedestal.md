@@ -46,8 +46,10 @@ including the explicit production call. The theta-implicit final source stage
 passes a midpoint coefficient density after restoring an endpoint temperature.
 That pre-existing receiving-density mismatch is not changed or qualified by
 this patch; no theta integration energy-closure claim follows from these tests.
-This change does not alter Qei, hyper/viscous heat, marker transport, pedestal
-tracking, floors, the field/heating Spitzer normalization, or any campaign input.
+The pedestal-capacity correction does not alter Qei, hyper/viscous heat, marker
+transport, pedestal tracking, floors, or the field/heating Spitzer normalization.
+The separate raw-species normalization repair below also corrects the electron
+relaxation rate; its tests do not certify the complete stochastic Qei exchange.
 
 ## Raw RZ species fractions
 
