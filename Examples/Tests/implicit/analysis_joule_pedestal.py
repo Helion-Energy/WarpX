@@ -14,6 +14,14 @@ import tempfile
 from pathlib import Path
 
 cases = {
+    "species-small-raw-scale": ["joule_test.raw_species_scale=1.e-6", "joule_test.check_relaxation=1"],
+    "species-large-raw-scale": ["joule_test.raw_species_scale=1.e6", "joule_test.check_relaxation=1"],
+    "species-unit-raw-scale": ["joule_test.check_relaxation=1"],
+    "species-small-raw-redirect": [
+        "joule_test.raw_species_scale=1.e-6", "joule_test.redirect=1",
+        "hybrid_pic_model.joule_redirect_Te_threshold=50",
+        "joule_test.accepted_fraction=0", "joule_test.redirected_fraction=1",
+    ],
     "receiving-thin": ["joule_test.receiving_density_ratio=0.2"],
     "receiving-dense": ["joule_test.receiving_density_ratio=10"],
     "receiving-redirect": [

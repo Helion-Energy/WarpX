@@ -19,7 +19,9 @@ below/at the physical density gate, density and source tapers, full redirection,
 redirected taper and redirect density rejection. The test performs no particle
 advance. Redirected energy is staged; realized stochastic ion heating is not
 claimed. The enabled relaxation parser satisfies the native redirection guard;
-this fixture never calls relaxation. No clamp is relaxed.
+the original capacity cases do not call relaxation. The raw-species scaling
+cases also call the production electron relaxation primitive against its
+analytic cold-ion exponential. No clamp is relaxed.
 
 Build and run inside the source worktree:
 
@@ -46,3 +48,19 @@ That pre-existing receiving-density mismatch is not changed or qualified by
 this patch; no theta integration energy-closure claim follows from these tests.
 This change does not alter Qei, hyper/viscous heat, marker transport, pedestal
 tracking, floors, the field/heating Spitzer normalization, or any campaign input.
+
+## Raw RZ species fractions
+
+The per-species deposits have not received the total-density RZ volume scaling.
+A physical density floor cannot be applied to their sum. Normalization now uses
+the positive raw sum, so the species fractions sum to one at any radial volume;
+empty raw deposits have no species source. Physical density gates still use the
+scaled total density. This corrects Joule heating and the electron relaxation
+rate, without changing the receiving heat capacity or the configured gates.
+
+Native tests rescale both species deposits by 1e-6, 1, and 1e6 while holding the
+physical density, current, fractions, and temperature fixed. Joule energy,
+redirected energy, and the analytic electron relaxation rate must be invariant.
+The latter verifies the electron primitive, not a particle-pair energy theorem.
+The moving-edge resistive tests additionally close the full particle, magnetic,
+bulk-electron, and thermal budget at two timesteps.

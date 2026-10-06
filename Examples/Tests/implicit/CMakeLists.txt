@@ -1534,6 +1534,32 @@ if(TARGET test_electron_inertia_transport_rz)
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
             TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
     endforeach()
+    # Dissipation must return magnetic work as thermal energy while the same
+    # sharp pedestal edge moves. Keep the existing 1% energy and two-cell gates.
+    foreach(kind IN ITEMS resistive resistive_halfdt hyper)
+        set(test_name test_rz_electron_energy_${kind})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        set(dissipation_options
+            "hybrid_pic_model.plasma_resistivity(rho,J,t)=if(rho>8.01088317,1.e-5,0)"
+            warpx.const_dt=1.e-9 edge_transport.steps=300)
+        if(kind STREQUAL "resistive_halfdt")
+            list(APPEND dissipation_options warpx.const_dt=5.e-10 edge_transport.steps=600)
+        elseif(kind STREQUAL "hyper")
+            set(dissipation_options
+                "hybrid_pic_model.plasma_hyper_resistivity(rho,B)=if(rho>8.01088317,1.e-12,0)"
+                hybrid_pic_model.hyper_resistivity_curl_curl=1
+                hybrid_pic_model.hyper_resistivity_heating=1
+                warpx.const_dt=1.e-9 edge_transport.steps=300)
+        endif()
+        add_test(NAME ${test_name} COMMAND test_electron_inertia_transport_rz
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_rz_electron_inertia_closed_compression
+            "amr.n_cell=64 16" ${energy_pair_options} ${warm_energy_options}
+            hybrid_pic_model.qdsmc_source_stage_density=1
+            hybrid_pic_model.include_joule_heating=1 ${dissipation_options})
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "physics")
+    endforeach()
     foreach(transport IN ITEMS markers grid)
         set(test_name test_rz_electron_energy_warm_edge_${transport})
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})

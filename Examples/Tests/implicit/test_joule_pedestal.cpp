@@ -24,7 +24,11 @@ main (int argc, char** argv) {
         amrex::ParmParse test("joule_test");
         amrex::Real ne = 1.e19_rt, pedfrac = .2_rt, dt = 1.e-7_rt;
         amrex::Real accepted = 1._rt, redirected = 0._rt, declined = 0._rt;
-        bool variable = false, redirect = false;
+        bool variable = false, redirect = false, check_relaxation = false;
+        amrex::Real raw_species_scale = 1._rt;
+        test.query("raw_species_scale", raw_species_scale);
+        test.query("check_relaxation", check_relaxation);
+        AMREX_ALWAYS_ASSERT(raw_species_scale > 0._rt);
         amrex::Real receiving_ratio = 1._rt;
         test.query("receiving_density_ratio", receiving_ratio);
         test.query("ne", ne);
@@ -69,8 +73,8 @@ main (int argc, char** argv) {
                                                     (z - lo[1]) / length)
                              : 1._rt;
                 rr(i, j, k) = PhysConst::q_e * ne * mod;
-                aa(i, j, k) = .6_rt * rr(i, j, k);
-                bb(i, j, k) = .4_rt * rr(i, j, k);
+                aa(i, j, k) = raw_species_scale * .6_rt * rr(i, j, k);
+                bb(i, j, k) = raw_species_scale * .4_rt * rr(i, j, k);
                 if (use_ped) {
                     pp(i, j, k) =
                         PhysConst::q_e * ne * pedfrac *
@@ -107,8 +111,7 @@ main (int argc, char** argv) {
         for (amrex::MFIter mfi(diagnostic); mfi.isValid(); ++mfi) {
             auto const out = diagnostic.array(mfi);
             auto const tt = te.const_array(mfi);
-            auto const rr = rho.const_array(mfi), aa = a.const_array(mfi),
-                       bb = b.const_array(mfi);
+            auto const rr = rho.const_array(mfi);
             auto const red = redirect_energy.const_array(mfi);
             auto const pp = ped ? ped->const_array(mfi)
                                 : amrex::Array4<amrex::Real const>{};
@@ -130,8 +133,8 @@ main (int argc, char** argv) {
                 // its independent staged energy, not realized particle heat.
                 out(i, j, k, 1) =
                     volume * 1.5_rt *
-                    (aa(i, j, k) / PhysConst::q_e * red(i, j, k, 0) +
-                     bb(i, j, k) / (2._rt * PhysConst::q_e) * red(i, j, k, 1));
+                    ((.6_rt * rr(i, j, k)) / PhysConst::q_e * red(i, j, k, 0) +
+                     (.4_rt * rr(i, j, k)) / (2._rt * PhysConst::q_e) * red(i, j, k, 1));
                 out(i, j, k, 2) = volume * capacity * t0;
                 auto const expected_t =
                     t0 + accepted * dt * eta * current * current / capacity;
@@ -150,7 +153,7 @@ main (int argc, char** argv) {
         auto const bound =
             128._rt * std::numeric_limits<amrex::Real>::epsilon() * initial +
             2.e-11_rt * source;
-        bool const pass = std::abs(deposited - accepted * source) <= bound &&
+        bool pass = std::abs(deposited - accepted * source) <= bound &&
                           std::abs(ion_staged - redirected * source) <= bound &&
                           std::abs(dropped - declined * source) <= bound &&
                           std::abs(native - deposited) <= bound;
@@ -167,6 +170,26 @@ main (int argc, char** argv) {
                        << ",\"temperature_max_error_K\":"
                        << diagnostic.norminf(3) << ",\"bound_J\":" << bound
                        << ",\"pass\":" << (pass ? "true" : "false") << "}\n";
+        if (check_relaxation) {
+            // The same raw species fractions set the physical relaxation rate.
+            // Cold ions make the independently known solution a single
+            // exponential: alpha = (gamma-1)*3*(0.6/1 + 0.4/2) = 1.6.
+            auto const cc = amrex::convert(te.boxArray(), amrex::IntVect::TheCellVector());
+            MultiFab ti_a(cc, te.DistributionMap(), 1, 1);
+            MultiFab ti_b(cc, te.DistributionMap(), 1, 1);
+            ti_a.setVal(0._rt); ti_b.setVal(0._rt); te.setVal(t0);
+            std::map<std::string, MultiFab*> const ti{{"ions", &ti_a}, {"ions2", &ti_b}};
+            constexpr amrex::Real relax_dt = 1.e-4_rt, nu = 1.e3_rt;
+            hp.QDSMCAddTemperatureRelaxation(0, relax_dt, rho, ti);
+            auto const expected = t0 * std::exp(-1.6_rt * nu * relax_dt);
+            te.plus(-expected, 0, 1, 0);
+            auto const error = te.norminf();
+            bool const relax_pass = error < 128._rt * std::numeric_limits<amrex::Real>::epsilon() * t0;
+            amrex::Print() << "SPECIES_RELAXATION {\"raw_species_scale\":" << raw_species_scale
+                           << ",\"error_K\":" << error << ",\"pass\":"
+                           << (relax_pass ? "true" : "false") << "}\n";
+            pass = pass && relax_pass;
+        }
         result = pass ? 0 : 2;
     }
     WarpX::ResetInstance();

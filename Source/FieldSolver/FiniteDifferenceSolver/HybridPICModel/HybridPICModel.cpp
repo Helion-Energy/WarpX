@@ -10082,7 +10082,11 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // the true per-species number density:
                 //   n_s = f_s * n_e / Z_s
                 amrex::Real const rhos_val_raw  = rhos_arr(i,j,k);
-                amrex::Real const rhos_sum_val  = std::max(rhosum_arr(i,j,k), rho_floor);
+                // Species deposits have not received RZ volume scaling. Their
+                // charge fractions must sum to one independently of that scale;
+                // the physical density floor applies to rho_val above only.
+                amrex::Real const rhos_sum_val  = rhosum_arr(i,j,k);
+                if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s           = rhos_val_raw / rhos_sum_val;
                 amrex::Real const ns            = f_s * ne / Z_s;
 
@@ -12056,7 +12060,9 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
             {
                 amrex::Real const rho_val = rho_arr(i,j,k);
                 if (rho_val <= rho_floor) { return; }
-                amrex::Real const rhos_sum_val = std::max(rhosum_arr(i,j,k), rho_floor);
+                // Normalize in the raw deposited units (not physical rho units).
+                amrex::Real const rhos_sum_val = rhosum_arr(i,j,k);
+                if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s = rhos_arr(i,j,k) / rhos_sum_val;   // = Z_s n_s/n_e
 
                 amrex::Real const Ti_eV = ablastr::coarsen::sample::Interp(
