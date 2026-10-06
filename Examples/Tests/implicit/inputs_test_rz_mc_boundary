@@ -56,6 +56,7 @@ particles.species_names = ions_plus ions_minus
 my_constants.clight = 299792458
 mc_boundary.steps = 24
 mc_boundary.require_escape = 1
+mc_boundary.continuity_tolerance = 1.e-12
 diagnostics.enable = 0
 
 ions_plus.charge = q_e

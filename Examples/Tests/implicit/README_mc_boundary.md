@@ -1,49 +1,67 @@
-# Nonperiodic momentum-conserving boundary probe
+# RZ nonperiodic ion continuity
 
-`test_rz_mc_boundary` advances real particles with explicit RZ hybrid PIC,
-shape-3 Esirkepov deposition, MC gathering, the conservative filter, and all
-three electron-inertia contributions. The cold counterstreaming fixture has
-Neumann axial field boundaries, fractional particle absorption, a reflecting
-radial PEC wall, and two full-radius Z slabs. It is deliberately smaller and
-simpler than a production compression experiment.
+`test_rz_mc_boundary` advances actual particles through reflecting and absorbing
+walls with MC gathering, the conservative RZ filter, and full electron inertia.
+The fixture populates the axis, radial wall, both endcaps and an MPI Z seam.
+The absorption fractions 0, 0.05 and 1 are strict native CTest cases. All local
+and integrated charge checks use a tolerance of 1e-12, without fitting a current
+correction to the measured residual.
 
-The inventory CTests cover absorption probabilities 0, 0.05 and 1. They require
-actual axial wall incidents, reflection where applicable, escape at both ends
-where applicable, finite fields, conserved particle charge plus absorbed
-charge, and agreement between the kinetic-energy decrement during boundary
-handling and the native absorbed-energy tally. The relative inventory and
-boundary-energy tolerance is 2e-12.
+## Boundary-current contract
 
-**A passing inventory test is not a continuity or energy-closure certificate.**
-The probe also records the native deposition continuity residual, localized
-norms, electron bulk/magnetic/thermal inventories, and the discrepancy between
-particle kinetic gain plus escape and the postprocessed current's grid work.
-The latter includes MC spatial mismatch, explicit time quadrature and boundary
-trajectory reconstruction; it is not a pure gather error or a heat source.
-The inventories occupy native staggered time levels and are not asserted to
-form a closed total-energy budget.
+The explicit hybrid advance retains each charged species' Esirkepov current
+before reflection, absorption and redistribution change the particle trajectory.
+The native boundary decision also records which particles were actually absorbed
+and deposits their unreflected endpoint charge clouds. Surviving particle clouds
+are mirrored into the plasma independently of the electromagnetic field parity.
+Each removed endpoint cloud is transported normally to its absorbing endcap:
+its cumulative nodal charge determines the added normal face current. This
+preserves the final trajectory of a lost particle and makes the integrated
+surface current equal the native particle-loss tally. It adds no heating term.
 
-Run a separate continuity gate with an explicit required tolerance:
+The filter acts on assembled, physically folded moments. Density uses A=I-DH
+and normal current uses B=I-HD, so D B = A D. H vanishes at a physical surface;
+the face current is preserved and filtered tangentially. In particular,
+Jz_face=(Jz[-1]+Jz[0])/2 at the lower cap, and an exterior ghost is reconstructed
+as 2*Jz_face minus its interior mirror. The radial rule preserves r*Jr flux.
+Charge quadrature uses the native deposition axis volume and half volumes on
+physical boundary nodes. These weights differ from the clipped geometric
+volumes used by the field-energy diagnostic; the test keeps them separate.
 
-```bash
-OMP_NUM_THREADS=1 build-cpu/bin/test_rz_mc_boundary \
-    Examples/Tests/implicit/inputs_test_rz_mc_boundary > boundary.log 2>&1
-python3 Examples/Tests/implicit/analysis_rz_mc_boundary.py \
-    boundary.log --continuity-tolerance 1e-12
-```
+The supported path is single-level staggered m=0 RZ, r_lo=0, explicit hybrid PIC,
+Esirkepov deposition, PEC/reflecting radial wall, and reflecting, absorbing or
+fractional_absorbing axial particles with PEC or PMC/Neumann fields. It is
+selected by `warpx.rz_continuity_filter=1` with nonperiodic Z, even if
+`warpx.use_filter=0`. Unsupported topology is rejected before particle loading.
+The particle gathering algorithm is unchanged. Adjoint gathering still requires
+its separately supported periodic-Z topology.
 
-The ef19-based nonperiodic implementation fails this continuity gate at actual
-wall events. Do not turn that known failure into an expected-pass conservation
-test or use inventory success to authorize a production energy-closure claim.
-`warpx.use_filter=0`, probabilities 0 and 1, and a two-rank launch provide
-controls separating filtering, absorption and MPI effects. Probability 0.05
-uses stochastic wall decisions; rank-count changes need not reproduce the
-same individual absorption history.
+## Carried moments and restart
 
-The recorded `continuity_seam_relative` strip includes its intersections with
-the radial walls. Use `continuity_interior_relative` and deterministic
-rank-count comparisons to distinguish physical-wall errors from MPI seams.
+Absorbed-particle current cannot be reconstructed from surviving particles.
+The completed-step total rho/Ji and any per-species moments are checkpointed
+and retained across segmented `Evolve()` calls. A nonzero-step checkpoint
+without these moments is rejected with an explanation. Fresh starts continue
+to deposit the initial moments from the loaded particles.
 
-`analysis_rz_gather_configuration.py` is independent: its constructor-only
-executable never calls `InitData`. It tests accepted periodic/MC settings and
-rejection of incompatible adjoint settings before particle loading.
+## What the probe measures
+
+The native checks cover local continuity, represented grid charge versus
+particle charge, integrated continuity including the physical surface currents,
+and each endcap's current versus its actual particle-loss tally. When the
+thermal model needs per-species moments, each species gets its own local
+continuity check. Particle charge plus absorbed charge and specular/absorbing
+boundary kinetic-energy bookkeeping are also checked. Diagnostics read carried
+solver state without recomputing or overwriting the plasma current.
+
+The reported particle-field work discrepancy includes MC spatial discretization
+and finite-step particle quadrature. It is not booked as heat. These tests do
+not establish full hot-plasma, fusion, Robin-conduction or driven energy closure,
+or qualify a production-size run. The nonperiodic repair does not change the
+periodic-Z boundary/filter path.
+
+For additional checks, set `mc_boundary.segment_steps`, enable checkpoint
+output and continue with `amr.restart`, vary the timestep/grid/shape order, or
+enable the electron energy equation. The artifact qualification report records
+native inputs, exact source and executable hashes, CPU/CUDA decomposition,
+refinement results and any remaining limits.

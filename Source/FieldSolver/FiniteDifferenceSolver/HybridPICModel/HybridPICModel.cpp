@@ -1798,11 +1798,19 @@ void HybridPICModel::AllocateLevelMFs (
             lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho, 0.0_rt);
     }
 
+    // Endcap losses carry current history that cannot be reconstructed from
+    // the surviving particles. Persist the completed-step moments, including
+    // the per-species moments consumed by collision/fluid-velocity operators.
+    bool boundary_moment_history = false;
+#ifdef WARPX_DIM_RZ
+    boundary_moment_history = WarpX::GetInstance().UseRZBoundaryCurrent();
+#endif
+
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
     // interpolated or extrapolated to appropriate timesteps.
     fields.alloc_init(FieldType::hybrid_rho_fp_temp,
         lev, amrex::convert(ba, rho_nodal_flag),
-        dm, ncomps, ngRho, 0.0_rt);
+        dm, ncomps, ngRho, 0.0_rt, true, true, boundary_moment_history);
 
     // Density pedestal q_e n_ped(x,y,z) (change of variables, member doc):
     // nodal like rho, static, (re)filled on demand -- this allocation runs
@@ -1818,13 +1826,13 @@ void HybridPICModel::AllocateLevelMFs (
     // interpolated or extrapolated to appropriate timesteps.
     fields.alloc_init(FieldType::hybrid_current_fp_temp, Direction{0},
         lev, amrex::convert(ba, jx_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt, true, true, boundary_moment_history);
     fields.alloc_init(FieldType::hybrid_current_fp_temp, Direction{1},
         lev, amrex::convert(ba, jy_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt, true, true, boundary_moment_history);
     fields.alloc_init(FieldType::hybrid_current_fp_temp, Direction{2},
         lev, amrex::convert(ba, jz_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt, true, true, boundary_moment_history);
 
     // The "hybrid_current_fp_plasma" multifab stores the total plasma current calculated
     // as the curl of B minus any external current. Under the QDSMC energy
@@ -1877,13 +1885,17 @@ void HybridPICModel::AllocateLevelMFs (
         for (auto const & spec : mypc.GetSpeciesNames()) {
             if (mypc.GetParticleContainerFromName(spec).getCharge() == 0._prt) { continue; }
             fields.alloc_init("current_fp_" + spec, Direction{0},
-                lev, amrex::convert(ba, jx_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt);
+                lev, amrex::convert(ba, jx_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt,
+                true, true, boundary_moment_history);
             fields.alloc_init("current_fp_" + spec, Direction{1},
-                lev, amrex::convert(ba, jy_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt);
+                lev, amrex::convert(ba, jy_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt,
+                true, true, boundary_moment_history);
             fields.alloc_init("current_fp_" + spec, Direction{2},
-                lev, amrex::convert(ba, jz_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt);
+                lev, amrex::convert(ba, jz_nodal_flag), dm, ncomps, ngJ_plasma, 0.0_rt,
+                true, true, boundary_moment_history);
             fields.alloc_init("rho_fp_" + spec,
-                lev, amrex::convert(ba, rho_nodal_flag), dm, ncomps, ngRho, 0.0_rt);
+                lev, amrex::convert(ba, rho_nodal_flag), dm, ncomps, ngRho, 0.0_rt,
+                true, true, boundary_moment_history);
             if (m_need_fluid_velocities) {
                 fields.alloc_init("Vs_fp_" + spec, Direction{0},
                     lev, amrex::convert(ba, jx_nodal_flag), dm, ncomps, ngJ_gather, 0.0_rt);

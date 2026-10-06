@@ -353,6 +353,9 @@ void WarpX::HybridPICDepositRhoAndJ ()
 
     auto current_fp = m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level);
     auto rho_fp = m_fields.get_mr_levels(FieldType::rho_fp, finest_level);
+#ifdef WARPX_DIM_RZ
+    if (UseRZBoundaryCurrent()) { PrepareRZBoundaryLossDensity(); }
+#endif
     if (m_hybrid_pic_model->m_need_per_species_fields) {
         // Per-species deposition at t_{n+1} (rho) and t_{n-1/2} (J): each
         // charged species deposits once into its own MultiFabs and the raw
@@ -374,7 +377,16 @@ void WarpX::HybridPICDepositRhoAndJ ()
             for (auto const & J_lev : J_spec) {
                 for (int idim = 0; idim < 3; ++idim) { J_lev[idim]->setVal(0._rt); }
             }
-            pc.DepositCurrent(J_spec, dt[0], -0.5_rt * dt[0]);
+#ifdef WARPX_DIM_RZ
+            if (UseRZBoundaryCurrent() && m_rz_boundary_current_pending) {
+                auto const& saved=m_rz_boundary_moments.at(spec).current;
+                for (int c=0;c<3;++c) {
+                    MultiFab::Copy(*J_spec[0][c],*saved[c],0,0,1,
+                        amrex::min(J_spec[0][c]->nGrowVect(),saved[c]->nGrowVect()));
+                }
+            } else
+#endif
+            { pc.DepositCurrent(J_spec, dt[0], -0.5_rt * dt[0]); }
             pc.DepositCharge(rho_spec, /*local*/true, /*reset*/true,
                              /*apply_boundary_and_scale_volume*/false,
                              /*interpolate_across_levels*/false);
@@ -420,6 +432,16 @@ void WarpX::HybridPICDepositRhoAndJ ()
                         WarpX::do_single_precision_comms, Geom(lev).periodicity());
                 }
             }
+#ifdef WARPX_DIM_RZ
+            if (UseRZBoundaryCurrent()) {
+                FoldRZBoundaryMoments(*rho_spec[0],J_spec[0]);
+                if (m_rz_boundary_current_pending && m_rz_boundary_loss_ready) {
+                    AddRZAbsorbedCurrent(*m_rz_boundary_moments.at(spec).lost_charge,J_spec[0]);
+                }
+                rho_spec[0]->FillBoundary(Geom(0).periodicity());
+                for (auto* j : J_spec[0]) { j->FillBoundary(Geom(0).periodicity()); }
+            }
+#endif
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
             // Below-axis guard cells still hold raw deposit remnants after
             // the fold; fill them by parity reflection (as for E and B) for
@@ -453,7 +475,19 @@ void WarpX::HybridPICDepositRhoAndJ ()
         // deposits and guard-cell sums entirely. Zeroing and the RZ inverse
         // volume scaling are handled inside.
         mypc->DepositCharge(rho_fp, 0._rt);
-        mypc->DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]);
+#ifdef WARPX_DIM_RZ
+        if (UseRZBoundaryCurrent() && m_rz_boundary_current_pending) {
+            for (auto* j : current_fp[0]) { j->setVal(0._rt); }
+            for (auto const& [name,entry] : m_rz_boundary_moments) {
+                amrex::ignore_unused(name);
+                for (int c=0;c<3;++c) {
+                    MultiFab::Add(*current_fp[0][c],*entry.current[c],0,0,1,current_fp[0][c]->nGrowVect());
+                }
+            }
+            ApplyInverseVolumeScalingToCurrentDensity(current_fp[0][0],current_fp[0][1],current_fp[0][2],0);
+        } else
+#endif
+        { mypc->DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]); }
     }
 
     // TODO: Perhaps add flag here for when using temperature accumulation in Hybrid
@@ -545,6 +579,8 @@ void WarpX::HybridPICDepositRhoAndJ ()
     }
 #ifdef WARPX_DIM_RZ
     if (m_rz_continuity_audit_interval > 0) { AuditRZContinuity(true); }
+    m_rz_boundary_current_pending=false;
+    m_rz_boundary_loss_ready=false;
 #endif
 }
 
@@ -558,16 +594,28 @@ void WarpX::HybridPICInitializeRhoJandB ()
     using warpx::fields::FieldType;
     using ablastr::fields::Direction;
 
-    // Deposit rho^n and J_i^{n-1/2} from the particles. This must also run on
-    // restart: the checkpoint does not contain rho_fp (and contains current_fp
-    // only when written synchronized), while the particles are restored at
-    // exactly (x^n, v^{n-1/2}) on both paths, so the deposit deterministically
-    // reconstructs both fields. Without it the first restarted step runs the
-    // adaptive B integration with rho = 0 everywhere: every node falls into
-    // the below-n_floor branch of the Ohm's-law E-solve on top of the full
-    // mid-run curl(B), which is catastrophically stiff (or, with the vacuum
-    // treatment, silently wrong physics for one step).
-    HybridPICDepositRhoAndJ();
+    // A fresh start deposits its initial moments from the loaded particles.
+    // After a nonperiodic advance, J includes trajectories of absorbed particles
+    // and the associated surface flux. Reconstructing it from survivors on a
+    // segmented Evolve() entry or restart would corrupt the inertial dJi/dt.
+#ifdef WARPX_DIM_RZ
+    if (UseRZBoundaryCurrent() && istep[0] > 0) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            auto& rho = *m_fields.get(FieldType::rho_fp, lev);
+            MultiFab::Copy(rho, *m_fields.get(FieldType::hybrid_rho_fp_temp, lev),
+                0, 0, 1, rho.nGrowVect());
+            for (int c = 0; c < 3; ++c) {
+                auto& current = *m_fields.get(FieldType::current_fp, Direction{c}, lev);
+                MultiFab::Copy(current,
+                    *m_fields.get(FieldType::hybrid_current_fp_temp, Direction{c}, lev),
+                    0, 0, 1, current.nGrowVect());
+            }
+        }
+    } else
+#endif
+    {
+        HybridPICDepositRhoAndJ();
+    }
 
     // Fill the electron pressure using the freshly deposited rho. On a fresh
     // start this seeds Pe^0 for the first step's B-substep E-solves (the

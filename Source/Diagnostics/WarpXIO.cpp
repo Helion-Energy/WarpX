@@ -450,6 +450,31 @@ WarpX::InitFromCheckpoint ()
         // fields absent from older checkpoints are skipped, not errors.
         auto const restored_names = m_fields.read_restarts(
             lev, amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, ""));
+#ifdef WARPX_DIM_RZ
+        if (UseRZBoundaryCurrent() && istep[0] > 0) {
+            auto require_moment = [&](std::string const& field, int components) {
+                int found = 0;
+                for (auto const& name : restored_names) {
+                    if (name.rfind(field + "[", 0) == 0) { ++found; }
+                }
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(found == components,
+                    "Nonperiodic RZ restart is missing carried boundary moment " + field +
+                    ". Absorbed-particle current history cannot be reconstructed from survivors; "
+                    "use a checkpoint written with boundary-current history support.");
+            };
+            require_moment(amrex::getEnumNameString(FieldType::hybrid_rho_fp_temp), 1);
+            require_moment(amrex::getEnumNameString(FieldType::hybrid_current_fp_temp), 3);
+            if (m_hybrid_pic_model->m_need_per_species_fields) {
+                for (auto const& spec : mypc->GetSpeciesNames()) {
+                    if (mypc->GetParticleContainerFromName(spec).getCharge() == 0._rt) {
+                        continue;
+                    }
+                    require_moment("rho_fp_" + spec, 1);
+                    require_moment("current_fp_" + spec, 3);
+                }
+            }
+        }
+#endif
         std::string const te_name =
             amrex::getEnumNameString(FieldType::hybrid_electron_temperature_fp);
         // "[" excludes fields whose name merely extends this one (e.g.

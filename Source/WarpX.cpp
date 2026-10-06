@@ -1533,6 +1533,30 @@ WarpX::ReadParameters ()
                 "an r=0 axis, a PEC radial wall with reflecting particles, "
                 "and no embedded boundary or current centering.");
         }
+        if (UseRZBoundaryCurrent()) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(maxLevel() == 0 && n_rz_azimuthal_modes == 1
+                && grid_type == GridType::Staggered && !do_current_centering
+                && Geom(0).ProbLo(0) == 0._rt && !EB::enabled()
+                && !do_moving_window && !do_fluid_species
+                && current_deposition_algo == CurrentDepositionAlgo::Esirkepov
+                && field_boundary_hi[0] == FieldBoundaryType::PEC
+                && particle_boundary_hi[0] == ParticleBoundaryType::Reflecting,
+                "Nonperiodic rz_continuity_filter requires single-level staggered m=0 "
+                "explicit hybrid PIC with Esirkepov, an r=0 axis, a PEC/reflecting radial "
+                "wall, and no moving window, fluid species, EB or current centering.");
+            for (int side = 0; side < 2; ++side) {
+                auto const particle_bc = side == 0 ? particle_boundary_lo[1]
+                                                   : particle_boundary_hi[1];
+                auto const field_bc = side == 0 ? field_boundary_lo[1] : field_boundary_hi[1];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    (particle_bc == ParticleBoundaryType::Reflecting
+                     || particle_bc == ParticleBoundaryType::Absorbing
+                     || particle_bc == ParticleBoundaryType::Fractional_Absorbing)
+                    && (field_bc == FieldBoundaryType::PEC || field_bc == FieldBoundaryType::PMC),
+                    "Nonperiodic rz_continuity_filter supports reflecting, absorbing or "
+                    "fractional_absorbing axial particles with PEC or PMC/Neumann fields.");
+            }
+        }
 #endif
 
         // Use same shape factors in all directions

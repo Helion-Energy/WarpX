@@ -1621,7 +1621,7 @@ endif()
 
 if(TARGET test_rz_mc_boundary)
     foreach(absorption IN ITEMS 0 0.05 1)
-        set(test_name test_rz_mc_boundary_inventory_${absorption})
+        set(test_name test_rz_mc_boundary_continuity_${absorption})
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
         if(absorption STREQUAL "0")
             set(require_escape 0)

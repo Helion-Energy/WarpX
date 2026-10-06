@@ -11,6 +11,9 @@
 
 #include "ablastr/particles/DepositCharge.H"
 #include "Deposition/ChargeDeposition.H"
+#ifdef WARPX_DIM_RZ
+#   include "Deposition/RZBoundaryLossDeposition.H"
+#endif
 #include "Deposition/CurrentDeposition.H"
 #include "Deposition/VarianceAccumulationBuffer.H"
 #include "Deposition/TemperatureDeposition.H"
@@ -2956,6 +2959,9 @@ WarpXParticleContainer::ApplyBoundaryConditions ()
     if (m_boundary_conditions.CheckAll(ParticleBoundaryType::Periodic)) { return; }
 
     auto boundary_conditions = m_boundary_conditions.data;
+#ifdef WARPX_DIM_RZ
+    auto* loss_charge=WarpX::GetInstance().RZBoundaryLossCharge(getName());
+#endif
 
     for (int lev = 0; lev <= finestLevel(); ++lev)
     {
@@ -2989,10 +2995,21 @@ WarpXParticleContainer::ApplyBoundaryConditions ()
             amrex::ParticleReal * const AMREX_RESTRICT uy = soa.GetRealData(PIdx::uy).data();
             amrex::ParticleReal * const AMREX_RESTRICT uz = soa.GetRealData(PIdx::uz).data();
 
+#ifdef WARPX_DIM_RZ
+            // One byte per particle, only while its boundary events are being
+            // handled. Record only decisions made by this call, so invalid
+            // particles from other processes cannot be booked a second time.
+            amrex::Gpu::DeviceVector<unsigned char> absorbed;
+            if (loss_charge) { absorbed.resize(pti.numParticles()); }
+            auto* const absorbed_ptr=loss_charge ? absorbed.data() : nullptr;
+#endif
             // Loop over particles and apply BC to each particle
             amrex::ParallelForRNG(
                 pti.numParticles(),
                 [=] AMREX_GPU_DEVICE (long i, amrex::RandomEngine const& engine) {
+#ifdef WARPX_DIM_RZ
+                    if (absorbed_ptr) { absorbed_ptr[i]=0; }
+#endif
                     // skip particles that are already flagged for removal
                     auto pidw = amrex::ParticleIDWrapper{idcpu[i]};
                     if (!pidw.is_valid()) { return; }
@@ -3003,6 +3020,9 @@ WarpXParticleContainer::ApplyBoundaryConditions ()
                     // and for RSPHERE (r, theta, phi).
 
                     bool particle_lost = false;
+#ifdef WARPX_DIM_RZ
+                    auto const original_z=z;
+#endif
 
                     bool outside_domain = false;
 #ifndef WARPX_DIM_1D_Z
@@ -3029,11 +3049,40 @@ WarpXParticleContainer::ApplyBoundaryConditions ()
 
                     if (particle_lost) {
                         pidw.make_invalid();
+#ifdef WARPX_DIM_RZ
+                        if (absorbed_ptr) { absorbed_ptr[i]=original_z<gridmin.z ? 1 : 2; }
+#endif
                     } else {
                         SetPosition.AsStored(i, x, y, z);
                     }
                 }
             );
+#ifdef WARPX_DIM_RZ
+            if (loss_charge) {
+                auto tile=pti.tilebox();
+                // Native shape factors truncate nonnegative grid coordinates.
+                // Include guards in the origin, as charge deposition does, so
+                // an absorbed endpoint below z_lo is still nonnegative here.
+                tile.grow(loss_charge->nGrowVect());
+                auto const lower=WarpX::LowerCorner(tile,lev,0._rt);
+                auto const dinv=WarpX::InvCellSize(lev);
+                auto const lo=amrex::lbound(tile);
+                auto const loss=loss_charge->array(pti);
+                auto const* weight=soa.GetRealData(PIdx::w).data();
+                int const* ion_level=do_field_ionization ? pti.GetiAttribs("ionizationLevel").data() : nullptr;
+                auto deposit=[&]<int order>() {
+                    DepositRZBoundaryLoss<order>(GetPosition,absorbed_ptr,weight,ion_level,
+                        pti.numParticles(),loss,getCharge(),dinv,lower,lo);
+                };
+                if (WarpX::nox==1) { deposit.template operator()<1>(); }
+                else if (WarpX::nox==2) { deposit.template operator()<2>(); }
+                else if (WarpX::nox==3) { deposit.template operator()<3>(); }
+                else if (WarpX::nox==4) { deposit.template operator()<4>(); }
+                // The byte mask is scoped to this tile; do not release/reuse it
+                // until the asynchronous deposition has consumed it.
+                amrex::Gpu::streamSynchronize();
+            }
+#endif
         }
     }
 

@@ -769,6 +769,11 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
 
     ExecutePythonCallback("particlescraper");
 
+#ifdef WARPX_DIM_RZ
+    // Retain the actual pre-reflection trajectories, including particles
+    // that the next operation will absorb and Redistribute will delete.
+    if (UseRZBoundaryCurrent()) { PrepareRZBoundaryCurrent(); }
+#endif
     mypc->ApplyBoundaryConditions();
     m_particle_boundary_buffer->gatherParticlesFromDomainBoundaries(*mypc, cur_time);
 
@@ -865,6 +870,13 @@ void WarpX::SyncCurrentAndRho ()
 {
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
+
+#ifdef WARPX_DIM_RZ
+    if (UseRZBoundaryCurrent()) {
+        SyncRZBoundaryMoments();
+        return;
+    }
+#endif
 
     if (electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD)
     {

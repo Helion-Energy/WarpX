@@ -62,9 +62,10 @@ namespace
     }
 
     amrex::Real electron_energy (WarpX& w, HybridPICModel& hp, MultiFab const& rho,
-                                 Field const& Ji, Field const& B)
+                                 Field const& Ji)
     {
-        hp.CalculatePlasmaCurrent(B,w.GetEBUpdateEFlag()[0],0);
+        // Read the solver's carried state; an observer must not recompute and
+        // overwrite the plasma current used by the electron-energy advance.
         auto const J = w.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma,0);
         auto const& geom = w.Geom(0);
         auto const* pedestal = hp.DensityPedestal(0);
@@ -120,6 +121,34 @@ namespace
             });
         }
         return measured.sum_unique(0,false,w.Geom(0).periodicity());
+    }
+
+    std::array<amrex::Real,4> charge_and_flux (
+        MultiFab const& rho, Field const& current, amrex::Geometry const& geom,
+        bool corrected_axis)
+    {
+        auto const dx=geom.CellSizeArray();
+        int const nr=geom.Domain().bigEnd(0)+1, nz=geom.Domain().bigEnd(1)+1;
+        auto const axis_volume=corrected_axis ? 1._rt/3._rt : .25_rt;
+        MultiFab measured(rho.boxArray(),rho.DistributionMap(),4,0);
+        for (amrex::MFIter mfi(measured);mfi.isValid();++mfi) {
+            auto const den=rho.const_array(mfi);
+            auto const jr=current[0]->const_array(mfi), jz=current[2]->const_array(mfi);
+            auto const out=measured.array(mfi);
+            amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                auto const wr=i==0 ? axis_volume : (i==nr ? amrex::Real(nr) : 2._rt*i);
+                auto const wz=j==0 || j==nz ? .5_rt : 1._rt;
+                auto const area=MathConst::pi*dx[0]*dx[0]*wr;
+                out(i,j,k,0)=area*dx[1]*wz*den(i,j,k);
+                out(i,j,k,1)=j==0 ? -.5_rt*area*(jz(i,-1,k)+jz(i,0,k)) : 0._rt;
+                out(i,j,k,2)=j==nz ? .5_rt*area*(jz(i,nz-1,k)+jz(i,nz,k)) : 0._rt;
+                out(i,j,k,3)=i==nr ? .5_rt*MathConst::pi*dx[0]*dx[1]*wz*
+                    ((2._rt*nr-1._rt)*jr(nr-1,j,k)+(2._rt*nr+1._rt)*jr(nr,j,k)) : 0._rt;
+            });
+        }
+        std::array<amrex::Real,4> result;
+        for (int c=0;c<4;++c) { result[c]=measured.sum_unique(c,false,geom.periodicity()); }
+        return result;
     }
 
     struct Inventory
@@ -192,11 +221,29 @@ int main (int argc, char** argv)
         MultiFab previous_rho(rho.boxArray(),rho.DistributionMap(),1,rho.nGrowVect());
         MultiFab residual(rho.boxArray(),rho.DistributionMap(),1,0);
         MultiFab regions(rho.boxArray(),rho.DistributionMap(),6,0);
+        bool corrected_axis=true;
+        amrex::ParmParse("boundary").query("verboncoeur_axis_correction",corrected_axis);
+        amrex::Real continuity_tolerance=1.e-12_rt;
+        amrex::Real old_grid_charge=0._rt;
         int steps = 24;
+        int segment_steps = 0;
+        int const start_step = w.getistep(0);
         bool require_escape = true;
         amrex::ParmParse test("mc_boundary");
         test.query("steps",steps);
+        test.query("segment_steps",segment_steps);
         test.query("require_escape",require_escape);
+        test.query("continuity_tolerance",continuity_tolerance);
+        std::map<std::string, std::unique_ptr<MultiFab>> previous_species_rho;
+        if (hp.m_need_per_species_fields) {
+            for (auto const& species : w.GetPartContainer().GetSpeciesNames()) {
+                auto const& pc = w.GetPartContainer().GetParticleContainerFromName(species);
+                if (pc.getCharge() == 0._prt || pc.do_not_deposit) { continue; }
+                auto const& source = *w.m_fields.get("rho_fp_" + species, 0);
+                previous_species_rho[species] = std::make_unique<MultiFab>(
+                    source.boxArray(), source.DistributionMap(), 1, source.nGrowVect());
+            }
+        }
         Inventory before, before_boundary, after_boundary;
         auto const initial = inventory(w);
         amrex::Real max_charge_error = 0.0_rt, max_continuity = 0.0_rt;
@@ -208,8 +255,13 @@ int main (int argc, char** argv)
         // are enabled in this controlled fixture.
         InstallPythonCallback("aftercollisions",[&]() {
             before = inventory(w);
+            old_grid_charge=charge_and_flux(rho,Ji,geom,corrected_axis)[0];
             push_e.copy(E);
             MultiFab::Copy(previous_rho,rho,0,0,1,rho.nGrowVect());
+            for (auto& [species, previous] : previous_species_rho) {
+                MultiFab::Copy(*previous, *w.m_fields.get("rho_fp_" + species, 0),
+                    0, 0, 1, previous->nGrowVect());
+            }
         });
         InstallPythonCallback("particlescraper",[&]() {
             // Native Evolve calls this immediately before ApplyBoundaryConditions.
@@ -247,6 +299,24 @@ int main (int argc, char** argv)
             auto const continuity = residual.norminf()*dt/
                 std::max(previous_rho.norminf(),rho.norminf());
             max_continuity = std::max(max_continuity,continuity);
+            amrex::Real species_continuity = 0._rt;
+            for (auto const& [species, previous] : previous_species_rho) {
+                auto const& next = *w.m_fields.get("rho_fp_" + species, 0);
+                MultiFab species_residual(next.boxArray(),next.DistributionMap(),1,0);
+                w.ComputeRZContinuityResidual(species_residual,*previous,next,
+                    w.m_fields.get_alldirs("current_fp_" + species,0),dt);
+                species_continuity = std::max(species_continuity,
+                    species_residual.norminf()*dt/std::max(
+                        std::max(previous->norminf(),next.norminf()),1.e-30_rt));
+            }
+            auto const qflux=charge_and_flux(rho,Ji,geom,corrected_axis);
+            auto const grid_charge_error=std::abs(qflux[0]-after.charge)/std::abs(initial.charge);
+            auto const flux_error=std::abs(qflux[0]-old_grid_charge+
+                dt*(qflux[1]+qflux[2]+qflux[3]))/std::abs(initial.charge);
+            auto const escape_lo_error=std::abs(dt*qflux[1]-(after.escaped_lo-before.escaped_lo))
+                /std::abs(initial.charge);
+            auto const escape_hi_error=std::abs(dt*qflux[2]-(after.escaped_hi-before.escaped_hi))
+                /std::abs(initial.charge);
             auto const domain = geom.Domain();
             int const irlo = domain.smallEnd(0), irhi = domain.bigEnd(0)+1;
             int const izlo = domain.smallEnd(1), izhi = domain.bigEnd(1)+1;
@@ -272,7 +342,7 @@ int main (int argc, char** argv)
             for (int c = 0; c < 3; ++c) {
                 finite = finite && E[c]->is_finite() && B[c]->is_finite() && Ji[c]->is_finite();
             }
-            auto const bulk = electron_energy(w,hp,rho,Ji,B);
+            auto const bulk = electron_energy(w,hp,rho,Ji);
             auto const thermal = thermal_energy(w,hp,rho);
             auto const magnetic = product(B,B,geom)/(2.0_rt*PhysConst::mu0);
             // The work discrepancy contains MC spatial and finite-step particle
@@ -288,6 +358,15 @@ int main (int argc, char** argv)
                 << ",\"escaped_zhi_C\":" << after.escaped_hi
                 << ",\"charge_inventory_relative\":" << charge_error
                 << ",\"continuity_relative\":" << continuity
+                << ",\"species_continuity_relative\":" << species_continuity
+                << ",\"deposition_grid_charge_C\":" << qflux[0]
+                << ",\"zlo_outward_current_A\":" << qflux[1]
+                << ",\"zhi_outward_current_A\":" << qflux[2]
+                << ",\"rwall_outward_current_A\":" << qflux[3]
+                << ",\"grid_particle_charge_relative\":" << grid_charge_error
+                << ",\"integrated_continuity_relative\":" << flux_error
+                << ",\"zlo_escape_current_relative\":" << escape_lo_error
+                << ",\"zhi_escape_current_relative\":" << escape_hi_error
                 << ",\"continuity_axis_relative\":" << reg[0]
                 << ",\"continuity_rwall_relative\":" << reg[1]
                 << ",\"continuity_zlo_relative\":" << reg[2]
@@ -311,16 +390,28 @@ int main (int argc, char** argv)
                 << ",\"Te_max_K\":" << te.norminf()
                 << ",\"finite\":" << (finite ? "true" : "false") << "}\n";
             AMREX_ALWAYS_ASSERT(finite && std::isfinite(work_mismatch));
+            if (continuity_tolerance>0._rt) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(continuity<continuity_tolerance &&
+                    species_continuity<continuity_tolerance &&
+                    grid_charge_error<continuity_tolerance && flux_error<continuity_tolerance &&
+                    escape_lo_error<continuity_tolerance && escape_hi_error<continuity_tolerance,
+                    "Nonperiodic density/current must satisfy local continuity and actual particle wall flux");
+            }
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE(charge_error < 2.e-12_rt,
                 "Particle charge plus tallied absorbed charge must remain constant");
         });
-        w.Evolve(steps);
+        for (int advanced = 0; advanced < steps;) {
+            int const count = segment_steps > 0 ? std::min(segment_steps, steps-advanced)
+                                                 : steps-advanced;
+            w.Evolve(count);
+            advanced += count;
+        }
         ClearPythonCallback("aftercollisions");
         ClearPythonCallback("particlescraper");
         ClearPythonCallback("beforeEsolve");
         ClearPythonCallback("afterEsolve");
         auto const final = inventory(w);
-        AMREX_ALWAYS_ASSERT(w.getistep(0) == steps);
+        AMREX_ALWAYS_ASSERT(w.getistep(0) == start_step+steps);
         AMREX_ALWAYS_ASSERT(incident_charge > 0.0_rt);
         if (WarpX::particle_absorption_fraction < 1.0_rt) {
             AMREX_ALWAYS_ASSERT(reflected_charge > 0.0_rt);
@@ -333,7 +424,7 @@ int main (int argc, char** argv)
             << ",\"max_charge_inventory_relative\":" << max_charge_error
             << ",\"max_continuity_relative\":" << max_continuity
             << ",\"work_mismatch_J\":" << work_mismatch
-            << ",\"scope\":\"particle inventory and finite native evolution; energy closure not asserted\"}\n";
+            << ",\"scope\":\"native boundary continuity and particle inventory; energy closure not asserted\"}\n";
         WarpX::Finalize();
     }
     warpx::initialization::finalize_external_libraries();

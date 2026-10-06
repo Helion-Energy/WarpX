@@ -551,6 +551,23 @@ public:
      */
     void HybridPICDepositRhoAndJ ();
 
+#ifdef WARPX_DIM_RZ
+    /** Boundary-aware explicit RZ moment synchronization, with physical half
+     *  volumes at end nodes and a separately retained normal surface current. */
+    [[nodiscard]] bool UseRZBoundaryCurrent () const;
+    void SyncRZBoundaryMoments ();
+    void PrepareRZBoundaryCurrent ();
+    void PrepareRZBoundaryLossDensity ();
+    amrex::MultiFab* RZBoundaryLossCharge (std::string const& species);
+    void FoldRZBoundaryCharge (amrex::MultiFab& rho);
+    void FoldRZBoundaryMoments (amrex::MultiFab& rho,
+        const std::array<amrex::MultiFab*,3>& current);
+    void AddRZAbsorbedCurrent (amrex::MultiFab const& loss,
+        const std::array<amrex::MultiFab*,3>& current) const;
+    void FilterRZBoundaryMoments (amrex::MultiFab& rho,
+        const std::array<amrex::MultiFab*, 3>& current);
+#endif
+
     /** apply QED correction on electric field
      *
      * \param dt vector of time steps (for all levels)
@@ -1484,6 +1501,14 @@ private:
     int m_rz_continuity_audit_interval = 0;
 #ifdef WARPX_DIM_RZ
     std::array<std::unique_ptr<amrex::MultiFab>, 2> m_rz_continuity_old_rho;
+    struct RZBoundaryMoments {
+        std::array<std::unique_ptr<amrex::MultiFab>,3> current;
+        std::unique_ptr<amrex::MultiFab> lost_charge;
+    };
+    std::map<std::string,RZBoundaryMoments> m_rz_boundary_moments;
+    std::unique_ptr<amrex::MultiFab> m_rz_boundary_total_loss;
+    bool m_rz_boundary_current_pending = false;
+    bool m_rz_boundary_loss_ready = false;
 #endif
 
     // Macroscopic properties
