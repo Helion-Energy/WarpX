@@ -9,13 +9,18 @@ import tempfile
 
 exe, inputs = map(str, map(Path, sys.argv[1:3]))
 root = Path(tempfile.mkdtemp(prefix="inertia-transport-", dir="."))
+# Keep an expected MPI_Abort inside its own launch step. GPU/Slurm harnesses
+# run this controller outside srun and pass an argv prefix as JSON; serial
+# CTest needs no launcher. No shell expansion is performed.
+launcher = json.loads(os.environ.get("WARPX_TEST_LAUNCHER_JSON", "[]"))
+assert isinstance(launcher, list) and all(isinstance(a, str) for a in launcher)
 
 
 def run(name, *overrides, fails=False):
     work = root / name
     work.mkdir()
     result = subprocess.run(
-        [exe, inputs, *overrides], cwd=work, text=True,
+        [*launcher, exe, inputs, *overrides], cwd=work, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         env={**os.environ, "OMP_NUM_THREADS": "1"}, check=False,
     )
@@ -30,7 +35,7 @@ def run(name, *overrides, fails=False):
     else:
         assert result.returncode == 0, result.stdout[-4000:]
         assert "EDGE_TRANSPORT_COMPLETE" in result.stdout
-    print(json.dumps({"case": name, "exit": result.returncode, "last": rows[-1]}))
+    print(json.dumps({"case": name, "exit": result.returncode, "last": rows[-1]}), flush=True)
     return rows
 
 
