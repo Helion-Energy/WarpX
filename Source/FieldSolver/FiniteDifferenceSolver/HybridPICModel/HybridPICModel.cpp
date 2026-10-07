@@ -37,6 +37,7 @@
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Particles/Deposition/CurrentDeposition.H"
+#include "Particles/Algorithms/KineticEnergy.H"
 #include <type_traits>
 #include "ExternalVectorPotential.H"
 #include "WarpX.H"
@@ -122,6 +123,7 @@ void HybridPICModel::SetQdsmcDensityFloor (amrex::Real n_floor)
 void HybridPICModel::ReadParameters ()
 {
     const ParmParse pp_hybrid("hybrid_pic_model");
+    m_source_guard.ReadParameters();
 
     // The B-field update is subcycled to improve stability - the number
     // of sub steps can be specified by the user.
@@ -1974,6 +1976,7 @@ void HybridPICModel::AllocateLevelMFs (
 
 void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 {
+    m_source_guard.Validate(*this);
     if (m_resistivity_has_Te_dependence)
     {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -9399,6 +9402,7 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 
 void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
 {
+    m_source_guard.Phase(lev, phase, *this);
     // WARPX_QDSMC_PHASE_MINTE=N: per-phase minimum-T_e tracer (see header
     // doc). MultiFab::min/minIndex are collective and device-safe; both
     // reduce over the valid region, so ghost-only writes do not register.
@@ -9908,6 +9912,14 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = rho_in;
+    m_source_guard.Prepare(lev, rho, *this);
+    m_source_guard.BeginChannel(HybridSourceEligibility::Ohmic, Te);
+    bool const source_guard = m_source_guard.guards(HybridSourceEligibility::Ohmic);
+    amrex::MultiFab guard_tally;
+    if (source_guard) {
+        guard_tally.define(Te.boxArray(), Te.DistributionMap(), 2, 0);
+        guard_tally.setVal(0);
+    }
     auto const* const pedestal = DensityPedestal(lev);
     bool const use_pedestal = pedestal != nullptr;
     ablastr::fields::VectorField J_plasma =
@@ -10082,10 +10094,26 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
             amrex::Array4<amrex::Real> dropped_arr;
             if (any_drop_tally) { dropped_arr = dropped_mf.array(mfi); }
 
+            auto const guard = source_guard ? m_source_guard.nodes().const_array(mfi)
+                : amrex::Array4<amrex::Real const>{};
+            auto const declined = source_guard ? guard_tally.array(mfi)
+                : amrex::Array4<amrex::Real>{};
             amrex::Box const & tbox = mfi.tilebox();
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 amrex::Real const rho_val = rho_arr(i,j,k);
+                bool const rejected = source_guard &&
+                    guard(i,j,k,HybridSourceEligibility::Ohmic) != 0;
+                // Vacuum and invalid thermodynamic inputs never reach a rate parser,
+                // even to estimate counterfactual heat. Tally those as unresolved.
+                if (source_guard && (!(rho_val > rho_heat_gate) ||
+                    !std::isfinite(rho_val) || !(Te_arr(i,j,k) > 0) ||
+                    !std::isfinite(Te_arr(i,j,k)))) {
+                    if (rejected) declined(i,j,k,1) += 1;
+                    else AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
+                        "source_guard: invalid eligible Ohmic state");
+                    return;
+                }
                 if (rho_val <= rho_heat_gate) { return; }
                 // n_e (m^-3) from the volume-scaled total rho_fp.
                 amrex::Real const ne = rho_val / PhysConst::q_e;
@@ -10098,6 +10126,12 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // charge fractions must sum to one independently of that scale;
                 // the physical density floor applies to rho_val above only.
                 amrex::Real const rhos_sum_val  = rhosum_arr(i,j,k);
+                if (source_guard && (!(rhos_sum_val > 0) || !std::isfinite(rhos_sum_val) ||
+                                     !std::isfinite(rhos_val_raw) || rhos_val_raw < 0)) {
+                    if (rejected) { declined(i,j,k,1) += 1; return; }
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
+                        "source_guard: invalid eligible species density");
+                }
                 if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s           = rhos_val_raw / rhos_sum_val;
                 amrex::Real const ns            = f_s * ne / Z_s;
@@ -10107,6 +10141,11 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 auto const jx = ablastr::coarsen::sample::Interp(Jpx, Jx_stag, nodal, coarsen, i, j, k, 0);
                 auto const jy = ablastr::coarsen::sample::Interp(Jpy, Jy_stag, nodal, coarsen, i, j, k, 0);
                 auto const jz = ablastr::coarsen::sample::Interp(Jpz, Jz_stag, nodal, coarsen, i, j, k, 0);
+                if (source_guard && !(std::isfinite(jx) && std::isfinite(jy) && std::isfinite(jz))) {
+                    if (rejected) { declined(i,j,k,1) += 1; return; }
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
+                        "source_guard: invalid eligible Ohmic current");
+                }
                 amrex::Real const Jmag = std::sqrt(jx*jx + jy*jy + jz*jz);
 
                 // eta: the Ohm's-law E-solve parser by default (per-cell
@@ -10163,6 +10202,15 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 amrex::Real const du_s = dt * Z_s
                                * PhysConst::q_e * PhysConst::q_e
                                * eta_s_eff * ns * ne * dv2;
+                if (source_guard) {
+                    if (rejected) {
+                        if (std::isfinite(du_s)) declined(i,j,k,0) += du_s;
+                        else declined(i,j,k,1) += 1;
+                        return; // BEFORE either electron heat or ion redirect
+                    }
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(du_s) && du_s >= 0,
+                        "source_guard: invalid eligible Ohmic source");
+                }
                 // Decoupled heating gate: between the solver floor and
                 // joule_heating_n_min no heat is created at all; the declined
                 // source goes to the audit tally (only reachable when armed).
@@ -10246,6 +10294,9 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
         }
     }
 
+    if (source_guard) { m_source_guard.RecordOhmic(lev, guard_tally, dt); }
+    m_source_guard.EndChannel(lev, HybridSourceEligibility::Ohmic, dt, Te,
+        heat_capacity_rho ? *heat_capacity_rho : rho, pedestal, m_gamma);
     Te.FillBoundary(Te.nGrowVect(), period);
 }
 
@@ -11870,6 +11921,8 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const& rho =
         rho_state ? *rho_state : *warpx.m_fields.get(FieldType::rho_fp, lev);
+    m_source_guard.BeginChannel(HybridSourceEligibility::Stopping, Te);
+    bool const guarded_stopping = m_source_guard.guards(HybridSourceEligibility::Stopping);
     EnsureDensityPedestal();
     bool const pedestal = m_density_pedestal;
 
@@ -11906,7 +11959,7 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
             if (E_val == 0.0_rt) { return; }
 
             amrex::Real const rho_val = rho_arr(i,j,k);
-            if (rho_val <= rho_floor) {
+            if (!guarded_stopping && rho_val <= rho_floor) {
                 // Below the solver floor there is no fluid to heat: decline
                 // (the drag kernel skips sub-floor gathers, so this only
                 // catches partial shape overlap at density edges).
@@ -11915,9 +11968,12 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
             }
             // Use the same capacity as the electron energy, including the
             // stationary pedestal; the availability gate above remains raw.
-            amrex::Real const ne =
-                capacity(i,j,k) / PhysConst::q_e +
-                (pedestal ? ped(i, j, k) / PhysConst::q_e : 0.0_rt);
+            amrex::Real const receiving_rho = capacity(i,j,k) +
+                (pedestal ? ped(i,j,k) : 0.0_rt);
+            // Guarded packets were accepted before drag. Do not discard their
+            // conjugate heat because physical density or the mask later changed.
+            amrex::Real const ne = (guarded_stopping ? amrex::max(receiving_rho,rho_floor)
+                                                    : receiving_rho) / PhysConst::q_e;
 
             amrex::Real const Te_K = Te_arr(i,j,k);
             // dTe = (gamma-1) E / (n_e k_B), added.
@@ -11955,6 +12011,26 @@ HybridPICModel::QDSMCApplyFastIonHeating (int const lev, amrex::MultiFab const* 
         Estage.mult(1.0_rt - stopping_fraction, 0, 1, 0);
     }
 
+    // Guarded packet accounting uses the same receiving capacity floor as delivery.
+    amrex::MultiFab audit_capacity;
+    auto const* audit_rho = heat_capacity_rho ? heat_capacity_rho : &rho;
+    if (guarded_stopping) {
+        audit_capacity.define(rho.boxArray(), rho.DistributionMap(), 1, 0);
+        auto const* ped_mf = DensityPedestal(lev);
+        for (amrex::MFIter mfi(audit_capacity); mfi.isValid(); ++mfi) {
+            auto const a = audit_capacity.array(mfi);
+            auto const r = audit_rho->const_array(mfi);
+            auto const p = ped_mf ? ped_mf->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+            bool const has_ped = ped_mf != nullptr;
+            amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                amrex::Real const ped = has_ped ? p(i,j,k) : 0;
+                a(i,j,k) = amrex::max(r(i,j,k),rho_floor-ped);
+            });
+        }
+        audit_rho = &audit_capacity;
+    }
+    m_source_guard.EndChannel(lev, HybridSourceEligibility::Stopping,
+        warpx.getdt(lev), Te, *audit_rho, DensityPedestal(lev), m_gamma);
     Te.FillBoundary(Te.nGrowVect(), period);
 }
 
@@ -11998,6 +12074,10 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
 
     amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::MultiFab const & rho = rho_in;
+    m_source_guard.Prepare(lev, rho, *this);
+    m_source_guard.BeginChannel(HybridSourceEligibility::Thermal, Te);
+    bool const guarded_relaxation = m_source_guard.guards(HybridSourceEligibility::Thermal);
+    if (guarded_relaxation) { m_source_guard.ClearRelaxation(); }
     auto const* pedestal = DensityPedestal(lev);
     bool const use_pedestal = pedestal != nullptr;
 
@@ -12038,6 +12118,8 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
         // relax).
         if (IsRelaxationExcluded(spec_name)) { continue; }
         amrex::Real const Z_s = pc.getCharge() / PhysConst::q_e;
+        amrex::MultiFab* common = guarded_relaxation
+            ? &m_source_guard.NewRelaxation(spec_name, Te) : nullptr;
 
         amrex::MultiFab const & rho_s = *warpx.m_fields.get("rho_fp_" + spec_name, lev);
 
@@ -12073,13 +12155,27 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
             amrex::Array4<amrex::Real const> const & rhosum_arr = rhos_sum.const_array(mfi);
             amrex::Array4<amrex::Real const> const & Ti_arr     = Ti_cc.const_array(mfi);
 
+            auto const guard = guarded_relaxation ? m_source_guard.nodes().const_array(mfi)
+                : amrex::Array4<amrex::Real const>{};
+            auto const rates = common ? common->array(mfi) : amrex::Array4<amrex::Real>{};
             amrex::Box const & tbox = mfi.tilebox();
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
+                if (guarded_relaxation) {
+                    // The Ti diagnostic is retained even for excluded nodes. It is
+                    // never fed into a rate in a rejected interaction.
+                    rates(i,j,k,2) = ablastr::coarsen::sample::Interp(
+                        Ti_arr, cc_stag, nodal, coarsen, i, j, k, 0);
+                    if (guard(i,j,k,HybridSourceEligibility::Thermal) != 0) return;
+                }
                 amrex::Real const rho_val = rho_arr(i,j,k);
                 if (rho_val <= rho_floor) { return; }
                 // Normalize in the raw deposited units (not physical rho units).
                 amrex::Real const rhos_sum_val = rhosum_arr(i,j,k);
+                if (guarded_relaxation) {
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(rhos_sum_val) && rhos_sum_val>0,
+                        "source_guard: invalid eligible species normalization");
+                }
                 if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s = rhos_arr(i,j,k) / rhos_sum_val;   // = Z_s n_s/n_e
 
@@ -12089,7 +12185,18 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
                 amrex::Real const Te_eV = Te_K / K_per_eV;
                 amrex::Real const Ti_K  = Ti_eV * K_per_eV;
 
+                if (guarded_relaxation) {
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(Ti_eV) && Ti_eV >= 0 &&
+                        std::isfinite(Te_K) && Te_K > 0 && std::isfinite(f_s) && f_s >= 0,
+                        "source_guard: invalid eligible relaxation moments");
+                }
                 amrex::Real const nu = nu_ei(rho_val, amrex::max(Te_eV, Te_floor_eV), Ti_eV, t_new);
+                if (guarded_relaxation) {
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(nu) && nu >= 0,
+                        "source_guard: invalid eligible relaxation rate");
+                    rates(i,j,k,0) = nu;
+                    rates(i,j,k,1) = nu * Te_K;
+                }
                 // Exact exponential integration of dT_e/dt = -alpha nu (T_e - T_i),
                 // with alpha = (gamma-1) 3 n_s/n_capacity; n_s/n_e = f_s/Z_s.
                 // Q_ei uses the physical ion populations. Its electron-side
@@ -12102,8 +12209,14 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
                 Te_arr(i,j,k) = Ti_K + (Te_K - Ti_K) * std::exp(-alpha * nu * dt);
             });
         }
+        if (common) {
+            common->OverrideSync(period);
+            common->FillBoundary(period);
+        }
     }
 
+    m_source_guard.EndChannel(lev, HybridSourceEligibility::Thermal, dt, Te,
+        heat_capacity_rho ? *heat_capacity_rho : rho, pedestal, m_gamma);
     Te.FillBoundary(Te.nGrowVect(), period);
 }
 
@@ -12128,6 +12241,10 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
     auto & warpx = WarpX::GetInstance();
 
     bool const do_relax = m_include_temperature_relaxation;
+    bool const guarded_relaxation = do_relax &&
+        m_source_guard.guards(HybridSourceEligibility::Thermal);
+    bool const audit_exchange = m_source_guard.enabled();
+    amrex::Real actual_ion_J = 0, thermal_ion_J = 0, redirect_ion_J = 0;
     bool const do_redir = (redirect_E != nullptr);
     if (!do_relax && !do_redir) { return; }
 
@@ -12246,6 +12363,7 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                                amrex::IntVect::TheZeroVector());
         }
 
+        auto const* common = guarded_relaxation ? &m_source_guard.Relaxation(spec_name) : nullptr;
         // Per-cell drag-diffusion coefficients on the cc field grid:
         //   0 = nu_ei [1/s], 1-3 = u_i [m/s], 4 = T_e [K], 5 = redirected dTe [K].
         // Defaults (0) leave inactive / below-floor cells as no-ops.
@@ -12296,6 +12414,8 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                 rhosum_arr  = rhos_sum_mf->const_array(mfi);
             }
 
+            auto const rates = common ? common->const_array(mfi)
+                : amrex::Array4<amrex::Real const>{};
             amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 amrex::Real const rho_val = ablastr::coarsen::sample::Interp(
@@ -12308,7 +12428,16 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
 
                 if (do_relax) {
                     amrex::Real const Ti_eV = Ti_arr(i,j,k);
+                    if (guarded_relaxation) {
+                        amrex::Real const nu = ablastr::coarsen::sample::Interp(
+                            rates, nodal_src, cc_dst, coarsen, i,j,k,0);
+                        amrex::Real const nuT = ablastr::coarsen::sample::Interp(
+                            rates, nodal_src, cc_dst, coarsen, i,j,k,1);
+                        coef_arr(i,j,k,0) = nu;
+                        coef_arr(i,j,k,4) = nu > 0 ? nuT/nu : 0;
+                    } else {
                     coef_arr(i,j,k,0) = nu_ei(rho_val, amrex::max(Te_K / K_per_eV, Te_floor_eV), Ti_eV, t_new);
+                    }
                     coef_arr(i,j,k,1) = ablastr::coarsen::sample::Interp(
                         Vsx_arr, Jx_stag, cc_x, coarsen, i, j, k, 0);
                     coef_arr(i,j,k,2) = ablastr::coarsen::sample::Interp(
@@ -12366,6 +12495,12 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         amrex::MultiFab coef_p(pba, pdm, 6, 0);
         coef_p.setVal(0.0_rt);
         coef_p.ParallelCopy(coef, 0, 0, 6);
+        amrex::MultiFab realized;
+        if (audit_exchange) {
+            // J per cell, already macro-weighted. No per-particle scratch array.
+            realized.define(pba, pdm, 3, 0);
+            realized.setVal(0);
+        }
 
         // Apply the drag-diffusion update to each ion (NGP cell lookup).
         auto const plo = warpx.Geom(lev).ProbLoArray();
@@ -12388,6 +12523,8 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
 #endif
 
             amrex::Array4<amrex::Real const> const & coef_arr = coef_p.const_array(pti);
+            auto const tally = audit_exchange ? realized.array(pti) : amrex::Array4<amrex::Real>{};
+            auto const* weight = pti.GetAttribs(PIdx::w).dataPtr();
 
             amrex::ParallelForRNG(np,
                 [=] AMREX_GPU_DEVICE (long ip, amrex::RandomEngine const& engine)
@@ -12420,10 +12557,40 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
 #endif
                 amrex::ParticleReal const uiz = coef_arr(ii,jj,kk,3);
                 amrex::ParticleReal const sig = std::sqrt(amrex::max(0._prt, sig2));
+                if (audit_exchange) {
+                    // Same three draws as the combined operator. The incremental
+                    // redirect attribution includes its cross term with thermal
+                    // noise; it is not an independently realized random kick.
+                    auto const rx=amrex::RandomNormal(0._prt,1._prt,engine);
+                    auto const ry=amrex::RandomNormal(0._prt,1._prt,engine);
+                    auto const rz=amrex::RandomNormal(0._prt,1._prt,engine);
+                    auto const before=Algorithms::KineticEnergy(uxp[ip],uyp[ip],uzp[ip],m_i);
+                    auto const thermal_sigma=std::sqrt(amrex::max(0._prt,
+                        -kb*Te_K*std::expm1(-2._prt*nu_dt)/m_i));
+                    auto const tx=uxp[ip]-drag*(uxp[ip]-uix)+thermal_sigma*rx;
+                    auto const ty=uyp[ip]-drag*(uyp[ip]-uiy)+thermal_sigma*ry;
+                    auto const tz=uzp[ip]-drag*(uzp[ip]-uiz)+thermal_sigma*rz;
+                    auto const thermal=Algorithms::KineticEnergy(tx,ty,tz,m_i)-before;
+                    uxp[ip] += -drag*(uxp[ip]-uix)+sig*rx;
+                    uyp[ip] += -drag*(uyp[ip]-uiy)+sig*ry;
+                    uzp[ip] += -drag*(uzp[ip]-uiz)+sig*rz;
+                    auto const total=Algorithms::KineticEnergy(uxp[ip],uyp[ip],uzp[ip],m_i)-before;
+                    // AMReX ParallelForRNG is a scalar for-loop on CPU (not
+                    // SIMD ParallelFor). HostDevice atomics also protect OMP tiles.
+                    amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,0),weight[ip]*total);
+                    amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,1),weight[ip]*thermal);
+                    amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,2),weight[ip]*(total-thermal));
+                } else {
                 uxp[ip] += -drag*(uxp[ip]-uix) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
                 uyp[ip] += -drag*(uyp[ip]-uiy) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
                 uzp[ip] += -drag*(uzp[ip]-uiz) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
+                }
             });
+        }
+        if (audit_exchange) {
+            actual_ion_J += realized.sum(0);
+            thermal_ion_J += realized.sum(1);
+            redirect_ion_J += realized.sum(2);
         }
     }
 
@@ -12438,6 +12605,10 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
             m_contam_kicks_J += EnergyVolumeIntegral(contam_cc, 0, lev);
         }
     }
+    if (audit_exchange) {
+        m_source_guard.RecordIon(actual_ion_J, thermal_ion_J, redirect_ion_J, dt, do_redir);
+    }
+
 }
 
 
@@ -12994,6 +13165,7 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
 
     auto & warpx = WarpX::GetInstance();
     auto const& rho_eval = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    m_source_guard.BeginBatch(lev, rho_eval, *this);
     // Only the receiving capacity changes time level. Keep the physical
     // coefficients, source gates, current and species moments at rho_eval.
     // Regularize the represented state exactly as pressure does. Store the
@@ -13115,6 +13287,9 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
     // QDSMCApplyIonHeating calls that read it through Ti_dep_by_species.
     std::map<std::string, std::unique_ptr<amrex::MultiFab>> Ti_scalar_owned;
     if (m_include_temperature_relaxation) {
+        if (m_source_guard.guards(HybridSourceEligibility::Thermal)) {
+            warpx.GetPartContainer().DepositTemperatures(warpx.m_fields, 0.0_rt);
+        }
         using ablastr::fields::Direction;
         amrex::GpuArray<int, 3> const Tr_stag = Jx_IndexType;
         amrex::GpuArray<int, 3> const Tt_stag = Jy_IndexType;
@@ -13401,6 +13576,7 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
         amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
         amrex::Real const te_max_eV = te_max_K / K_per_eV;
         if (te_max_eV > m_te_abort_threshold_eV) {
+            m_source_guard.Phase(lev, "temperature_abort", *this, true);
             WARPX_ABORT_WITH_MESSAGE(
                 "QDSMC electron energy equation: open-set (n > n_floor) "
                 "max(Te) = " + std::to_string(te_max_eV)
@@ -13411,6 +13587,7 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
                 + " s): electron-temperature runaway.");
         }
     }
+    m_source_guard.EndBatch();
 }
 
 

@@ -14,6 +14,7 @@
 
 #include "HybridPICModel_fwd.H"
 #include "QdsmcConductionReport.H"
+#include "HybridSourceEligibility.H"
 
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
@@ -109,6 +110,8 @@ class HybridPICModel
 {
 public:
     HybridPICModel ();
+
+    mutable HybridSourceEligibility m_source_guard;
     // Defined out-of-line in the .cpp so the unique_ptr<QdsmcParticleContainer>
     // member can destroy a forward-declared particle container.
     ~HybridPICModel ();

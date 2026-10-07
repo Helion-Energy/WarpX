@@ -21,6 +21,7 @@
 
 #include <AMReX_GpuAtomic.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_VisMF.H>
 
 #include <cmath>
 #include <string>
@@ -103,12 +104,23 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
     int const n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
     bool const galerkin_interpolation = WarpX::galerkin_interpolation;
 
+    bool const audit = hybrid_model->m_source_guard.enabled();
+    amrex::Real const initial_energy = audit ? species.sumParticleEnergy() : 0;
     for (int lev = 0; lev <= species.finestLevel(); ++lev) {
         ablastr::fields::VectorField Ve_fp = warpx.m_fields.get_alldirs("Ve_fp", lev);
         ablastr::fields::VectorField B_fp  = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
         amrex::MultiFab const& rho_fp = hybrid_model->GetStoppingChargeDensity(lev);
         amrex::MultiFab const & Te_fp      = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         amrex::MultiFab & stage            = hybrid_model->GetFastIonHeatingStaging(lev);
+        bool const guarded_stopping = hybrid_model->m_source_guard.guards(
+            HybridSourceEligibility::Stopping);
+        if (guarded_stopping) hybrid_model->m_source_guard.Prepare(lev, rho_fp, *hybrid_model);
+        amrex::MultiFab interaction_counts;
+        if (guarded_stopping) {
+            interaction_counts.define(species.ParticleBoxArray(lev),
+                species.ParticleDistributionMap(lev), 2, 0);
+            interaction_counts.setVal(0);
+        }
 
         amrex::XDim3 const dinv = WarpX::InvCellSize(lev);
         auto const dxi = warpx.Geom(lev).InvCellSizeArray();
@@ -140,6 +152,8 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
             auto const rho_arr = rho_fp.const_array(pti);
             auto const Te_arr  = Te_fp.const_array(pti);
             auto const st_arr  = stage.array(pti);
+            auto const guard = guarded_stopping ? hybrid_model->m_source_guard.nodes().const_array(pti)
+                : amrex::Array4<amrex::Real const>{};
 
             amrex::IndexType const Vex_type = Ve_fp[0]->ixType();
             amrex::IndexType const Vey_type = Ve_fp[1]->ixType();
@@ -155,6 +169,9 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
             amrex::ParticleReal const* const AMREX_RESTRICT wp = attribs[PIdx::w].dataPtr();
 
             auto const getPosition = GetParticlePosition<PIdx>(pti);
+            auto const ptd = pti.GetParticleTile().getParticleTileData();
+            auto const counts = guarded_stopping ? interaction_counts.array(pti)
+                : amrex::Array4<amrex::Real>{};
             long const np = pti.numParticles();
 
             // amrex::For (not ParallelFor): iterations scatter-add into
@@ -163,6 +180,14 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
             {
                 amrex::ParticleReal xp, yp, zp;
                 getPosition(ip, xp, yp, zp);
+                if (guarded_stopping) {
+                    bool const eligible = HybridSourceEligibility::StoppingEligible(
+                        xp, yp, zp, guard, plo, dxi);
+                    auto const particle = WarpXParticleContainer::ParticleType(ptd,ip);
+                    auto const [ci,cj,ck] = amrex::getParticleCell(particle,plo,dxi).dim3();
+                    amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,eligible?0:1),1.0_rt);
+                    if (!eligible) return;
+                }
 
                 // Self-consistent n_e at the particle (the same source and
                 // solver-floor skip as hybrid_resistive_drag).
@@ -354,5 +379,29 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
 #endif
             });
         }
+        if (guarded_stopping) {
+            auto const accepted=interaction_counts.sum(0), rejected=interaction_counts.sum(1);
+            amrex::Print() << "[source_guard_stopping_mask] step=" << warpx.getistep(0)
+                << " epoch=" << hybrid_model->m_source_guard.epoch()
+                << " species=" << m_species_names[0] << " accepted=" << accepted
+                << " rejected=" << rejected << '\n';
+            amrex::ParmParse pp("hybrid_pic_model.source_guard");
+            int cadence=0; std::string prefix="source_guard";
+            pp.query("export_interval",cadence); pp.query("output_prefix",prefix);
+            if (cadence>0 && warpx.getistep(0)%cadence==0) {
+                auto const dir=prefix+"_step"+std::to_string(warpx.getistep(0))+"_epoch"+
+                    std::to_string(hybrid_model->m_source_guard.epoch())+"_"+m_species_names[0];
+                amrex::UtilCreateDirectory(dir,0755);
+                amrex::ParallelDescriptor::Barrier();
+                // Exact particle-interaction decisions aggregated by resident
+                // cell, including particles on zero-weight stencil boundaries.
+                amrex::VisMF::Write(interaction_counts,dir+"/accepted_rejected_interactions");
+            }
+        }
     }
+    if (audit) {
+        hybrid_model->m_source_guard.RecordStoppingParticle(
+            species.sumParticleEnergy()-initial_energy, dt);
+    }
+
 }

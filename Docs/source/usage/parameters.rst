@@ -8864,3 +8864,5 @@ When developing, testing and :ref:`debugging WarpX <debugging_warpx>`, the follo
 
 .. bibliography::
     :keyprefix: param-
+
+.. include:: source_guard.rst
