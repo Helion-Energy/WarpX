@@ -107,8 +107,30 @@ Declined modeled Ohmic heating is tallied before redirection. This is not total
 field dissipation: heating and field resistivity parsers may differ. Vacuum or
 nonfinite counterfactuals are counted as unevaluable species-node evaluations;
 a zero reported declined energy does not bound their omitted power. Arbitrary
-parser singularities remain a model/input responsibility. Rejected thermal and
-stopping rates are not evaluated merely to invent a skipped-energy estimate.
+parser singularities remain a model/input responsibility.
+
+Skipped thermal exchange reports a signed, frozen per-species electron update
+only when the original physical density exceeds the solver floor and the native
+temperatures, species normalization and receiving capacity are finite and valid.
+Zero/invalid sampled Ti is explicitly unevaluable. The rate must also be finite
+and nonnegative. These estimates do not mutate temperature or shared coefficients,
+do not consume RNG draws, and do not predict the realized skipped OU exchange.
+Species estimates use the bath at their actual source phase; summing them is not
+a full unguarded trajectory with sequential hypothetical bath updates.
+
+Skipped stopping reports the signed hypothetical lab-frame particle energy change
+and conjugate electron packet, using the unchanged rejected particle and its
+current background. Density, temperature, rate, velocity and candidate result are
+validated before unsafe operations. Invalid counterfactuals are counted separately.
+The export's first two components remain accepted/rejected counts, followed by
+hypothetical signed electron energy[J], unevaluable count and evaluated count.
+No rejected particle momentum, staged heat or RNG state changes. These frozen
+estimates do not include subsequent electron capacity/floor clipping or establish
+a bound on missing power from unevaluable interactions.
+
+Eligible invalid states use a device error flag and host abort, including release
+GPU builds where AMReX device assertions are disabled. Excluded invalid states
+remain skipped. The guard does not replace invalid physical data with a zero bath.
 
 Phase maximum records include coordinates, owning rank, physical and pedestal
 densities, resident counts, linear effective counts, native sampled Ti, and the

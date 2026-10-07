@@ -12082,7 +12082,14 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
     bool const guarded_relaxation = m_source_guard.guards(HybridSourceEligibility::Thermal);
     HybridSourceCheck source_check(guarded_relaxation);
     auto* const source_error=source_check.data();
-    if (guarded_relaxation) { m_source_guard.ClearRelaxation(); }
+    amrex::MultiFab skipped_exchange;
+    if (guarded_relaxation) {
+        m_source_guard.ClearRelaxation();
+        // Frozen, per-species counterfactual electron energy density, unevaluable
+        // count, and total rejected count. It is not a hypothetical OU draw.
+        skipped_exchange.define(Te.boxArray(),Te.DistributionMap(),3,0);
+        skipped_exchange.setVal(0);
+    }
     auto const* pedestal = DensityPedestal(lev);
     bool const use_pedestal = pedestal != nullptr;
 
@@ -12163,6 +12170,8 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
             auto const guard = guarded_relaxation ? m_source_guard.nodes().const_array(mfi)
                 : amrex::Array4<amrex::Real const>{};
             auto const rates = common ? common->array(mfi) : amrex::Array4<amrex::Real>{};
+            auto const skipped = guarded_relaxation ? skipped_exchange.array(mfi)
+                : amrex::Array4<amrex::Real>{};
             amrex::Box const & tbox = mfi.tilebox();
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -12171,7 +12180,30 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
                     // never fed into a rate in a rejected interaction.
                     rates(i,j,k,2) = ablastr::coarsen::sample::Interp(
                         Ti_arr, cc_stag, nodal, coarsen, i, j, k, 0);
-                    if (guard(i,j,k,HybridSourceEligibility::Thermal) != 0) return;
+                    if (guard(i,j,k,HybridSourceEligibility::Thermal) != 0) {
+                        skipped(i,j,k,2) += 1;
+                        auto const r=rho_arr(i,j,k), sum=rhosum_arr(i,j,k), rs=rhos_arr(i,j,k);
+                        auto const te=Te_arr(i,j,k), ti=rates(i,j,k,2);
+                        auto const cap=receiving(i,j,k)+(use_pedestal?ped(i,j,k):0);
+                        // Check the unmodified physical state before any division
+                        // or parser call. Zero/invalid Ti is not a fabricated bath.
+                        if (!(std::isfinite(r) && r>rho_floor && std::isfinite(sum) && sum>0 &&
+                              std::isfinite(rs) && rs>=0 && std::isfinite(te) && te>0 &&
+                              std::isfinite(ti) && ti>0 && std::isfinite(cap) && cap>0)) {
+                            skipped(i,j,k,1) += 1; return;
+                        }
+                        auto const nu=nu_ei(r,amrex::max(te/K_per_eV,Te_floor_eV),ti,t_new);
+                        if (!(std::isfinite(nu) && nu>=0)) {
+                            skipped(i,j,k,1) += 1; return;
+                        }
+                        auto const alpha=gamma_minus_1*3*(rs/sum)/Z_s*r/cap;
+                        auto const trial=ti*K_per_eV+(te-ti*K_per_eV)*std::exp(-alpha*nu*dt);
+                        auto const energy=(trial-te)*cap*PhysConst::kb/
+                            (PhysConst::q_e*gamma_minus_1);
+                        if (std::isfinite(energy)) skipped(i,j,k,0) += energy;
+                        else skipped(i,j,k,1) += 1;
+                        return; // no temperature, shared rate, particle or RNG change
+                    }
                 }
                 amrex::Real const rho_val = rho_arr(i,j,k);
                 if (rho_val <= rho_floor) { return; }
@@ -12221,6 +12253,17 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
     }
 
     source_check.Finish();
+    if (guarded_relaxation) {
+        auto const energy=EnergyVolumeIntegral(skipped_exchange,0,lev);
+        auto const unknown=skipped_exchange.sum_unique(1,false,period);
+        auto const rejected=skipped_exchange.sum_unique(2,false,period);
+        amrex::Print() << std::setprecision(17) << "[source_guard_skipped] channel=thermal epoch="
+            << m_source_guard.epoch() << " frozen_electron_J=" << energy
+            << " dt=" << dt << " frozen_electron_W=" << (dt>0?energy/dt:0)
+            << " evaluated_species_nodes=" << rejected-unknown
+            << " unevaluable_species_nodes=" << unknown
+            << " scope=frozen_per_species_no_ou_realization\n";
+    }
     m_source_guard.EndChannel(lev, HybridSourceEligibility::Thermal, dt, Te,
         heat_capacity_rho ? *heat_capacity_rho : rho, pedestal, m_gamma);
     Te.FillBoundary(Te.nGrowVect(), period);

@@ -25,6 +25,7 @@
 #include <AMReX_VisMF.H>
 
 #include <cmath>
+#include <iomanip>
 #include <string>
 
 HybridElectronStopping::HybridElectronStopping (std::string const& collision_name)
@@ -121,7 +122,7 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
         amrex::MultiFab interaction_counts;
         if (guarded_stopping) {
             interaction_counts.define(species.ParticleBoxArray(lev),
-                species.ParticleDistributionMap(lev), 2, 0);
+                species.ParticleDistributionMap(lev), 5, 0);
             interaction_counts.setVal(0);
         }
 
@@ -183,19 +184,25 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
             {
                 amrex::ParticleReal xp, yp, zp;
                 getPosition(ip, xp, yp, zp);
+                bool eligible=true;
+                int ci=0,cj=0,ck=0;
                 if (guarded_stopping) {
-                    bool const eligible = HybridSourceEligibility::StoppingEligible(
+                    eligible = HybridSourceEligibility::StoppingEligible(
                         xp, yp, zp, guard, plo, dxi);
                     auto const particle = WarpXParticleContainer::ParticleType(ptd,ip);
-                    auto const [ci,cj,ck] = amrex::getParticleCell(particle,plo,dxi).dim3();
+                    auto const cell = amrex::getParticleCell(particle,plo,dxi).dim3();
+                    ci=cell.x; cj=cell.y; ck=cell.z;
                     amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,eligible?0:1),1.0_rt);
-                    if (!eligible) return;
                 }
 
                 // Self-consistent n_e at the particle (the same source and
                 // solver-floor skip as hybrid_resistive_drag).
                 amrex::Real const rho_val = ablastr::particles::doGatherScalarFieldNodal(
                     xp, yp, zp, rho_arr, dxi, plo);
+                if (guarded_stopping && !eligible &&
+                    !(std::isfinite(rho_val) && rho_val>rho_floor)) {
+                    amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt); return;
+                }
                 if (rho_val <= rho_floor) { return; }
                 amrex::Real const n_e = rho_val * inv_qe;
 
@@ -203,8 +210,12 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 amrex::Real const gathered_Te = ablastr::particles::doGatherScalarFieldNodal(
                     xp, yp, zp, Te_arr, dxi, plo);
                 if (guarded_stopping) {
-                    if (!HybridSourceCheck::Require(std::isfinite(rho_val) &&
-                        std::isfinite(gathered_Te) && gathered_Te > 0,
+                    bool const valid=std::isfinite(rho_val) &&
+                        std::isfinite(gathered_Te) && gathered_Te > 0;
+                    if (!valid && !eligible) {
+                        amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt); return;
+                    }
+                    if (!HybridSourceCheck::Require(valid,
                         HybridSourceCheck::StoppingThermodynamics, source_error)) return;
                 }
                 amrex::Real const Te_K = amrex::max(gathered_Te, Te_floor_K);
@@ -226,8 +237,12 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                     / (12._rt * pi32 * ep02 * species_mass * T32);
 
                 if (guarded_stopping) {
-                    if (!HybridSourceCheck::Require(std::isfinite(nu_s) && nu_s >= 0 &&
-                        std::isfinite(dt) && dt >= 0,
+                    bool const valid=std::isfinite(nu_s) && nu_s >= 0 &&
+                        std::isfinite(dt) && dt >= 0;
+                    if (!valid && !eligible) {
+                        amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt); return;
+                    }
+                    if (!HybridSourceCheck::Require(valid,
                         HybridSourceCheck::StoppingRate, source_error)) return;
                 }
 
@@ -270,8 +285,12 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 amrex::ParticleReal const u2b = ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
                 if (guarded_stopping) {
                     amrex::ParticleReal const ve2 = Vex*Vex + Vey*Vey + Vez*Vez;
-                    if (!HybridSourceCheck::Require(std::isfinite(ve2) && ve2*inv_c2 < 1 &&
-                        std::isfinite(u2b) && std::isfinite(wp[ip]) && wp[ip] >= 0,
+                    bool const valid=std::isfinite(ve2) && ve2*inv_c2 < 1 &&
+                        std::isfinite(u2b) && std::isfinite(wp[ip]) && wp[ip] >= 0;
+                    if (!valid && !eligible) {
+                        amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt); return;
+                    }
+                    if (!HybridSourceCheck::Require(valid,
                         HybridSourceCheck::StoppingParticle, source_error)) return;
                 }
                 amrex::ParticleReal const gb  = std::sqrt(1._prt + u2b*inv_c2);
@@ -281,14 +300,14 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 amrex::ParticleReal const vzn = Vez + (uz[ip]/gb - Vez)*fac;
                 amrex::ParticleReal const v2n = vxn*vxn + vyn*vyn + vzn*vzn;
                 if (guarded_stopping) {
-                    if (!HybridSourceCheck::Require(std::isfinite(v2n) && v2n*inv_c2 < 1,
+                    bool const valid=std::isfinite(v2n) && v2n*inv_c2 < 1;
+                    if (!valid && !eligible) {
+                        amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt); return;
+                    }
+                    if (!HybridSourceCheck::Require(valid,
                         HybridSourceCheck::StoppingResult, source_error)) return;
                 }
                 amrex::ParticleReal const ga  = 1._prt/std::sqrt(1._prt - v2n*inv_c2);
-                ux[ip] = ga*vxn;
-                uy[ip] = ga*vyn;
-                uz[ip] = ga*vzn;
-
                 // Weighted kinetic-energy loss [J], with
                 //   KE = (gamma - 1) m c^2 = m |u|^2 / (gamma + 1)
                 // (the second form avoids the (gamma - 1) cancellation for
@@ -296,6 +315,21 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 amrex::ParticleReal const u2a = ga*ga*v2n;
                 amrex::Real const dE = wp[ip] * species_mass
                     * (u2b/(gb + 1._prt) - u2a/(ga + 1._prt));
+
+                if (guarded_stopping) {
+                    if (!eligible) {
+                        if (std::isfinite(dE)) {
+                            amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,2),dE);
+                            amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,4),1.0_rt);
+                        } else amrex::Gpu::Atomic::AddNoRet(&counts(ci,cj,ck,3),1.0_rt);
+                        return; // hypothetical only: neither momentum nor staged heat changes
+                    }
+                    if (!HybridSourceCheck::Require(std::isfinite(dE),
+                        HybridSourceCheck::StoppingResult, source_error)) return;
+                }
+                ux[ip] = ga*vxn;
+                uy[ip] = ga*vyn;
+                uz[ip] = ga*vzn;
 
                 // Scatter-add w dKE as an energy DENSITY [J/m^3] with the
                 // gather-conjugate linear nodal weights: each corner node
@@ -409,6 +443,16 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 << " epoch=" << hybrid_model->m_source_guard.epoch()
                 << " species=" << m_species_names[0] << " accepted=" << accepted
                 << " rejected=" << rejected << '\n';
+            auto const hypothetical=interaction_counts.sum(2);
+            amrex::Print() << std::setprecision(17)
+                << "[source_guard_skipped] channel=stopping epoch="
+                << hybrid_model->m_source_guard.epoch()
+                << " frozen_electron_J=" << hypothetical
+                << " frozen_particle_J=" << -hypothetical
+                << " dt=" << dt << " frozen_electron_W=" << (dt>0?hypothetical/dt:0)
+                << " evaluated_interactions=" << interaction_counts.sum(4)
+                << " unevaluable_interactions=" << interaction_counts.sum(3)
+                << " scope=frozen_signed_lab_energy_no_state_change\n";
             amrex::ParmParse pp("hybrid_pic_model.source_guard");
             int cadence=0; std::string prefix="source_guard";
             pp.query("export_interval",cadence); pp.query("output_prefix",prefix);
@@ -419,6 +463,8 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
                 amrex::ParallelDescriptor::Barrier();
                 // Exact particle-interaction decisions aggregated by resident
                 // cell, including particles on zero-weight stencil boundaries.
+                // Components: accepted, rejected, hypothetical signed heat[J],
+                // unevaluable counterfactuals, evaluated counterfactuals.
                 amrex::VisMF::Write(interaction_counts,dir+"/accepted_rejected_interactions");
             }
         }

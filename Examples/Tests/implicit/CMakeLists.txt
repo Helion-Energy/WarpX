@@ -1678,7 +1678,8 @@ if(TARGET lib_rz)
     if(WarpX_COMPUTE STREQUAL "CUDA")
         setup_target_for_cuda_compilation(test_source_guard_rz)
     endif()
-    foreach(mode IN ITEMS dense dust vacuum redirect drift mask_change)
+    foreach(mode IN ITEMS dense dust vacuum redirect drift mask_change
+            configured_floor ohmic_floor nonperiodic_low nonperiodic_high periodic_wrap moving_epoch)
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/source_guard_${mode})
         set(extra_args "")
         if(mode STREQUAL "dust")
@@ -1691,11 +1692,37 @@ if(TARGET lib_rz)
             set(extra_args source_test.electron_drift=6.e6)
         elseif(mode STREQUAL "mask_change")
             set(extra_args source_test.changed_mask=1)
+        elseif(mode STREQUAL "configured_floor")
+            set(extra_args hybrid_pic_model.source_guard.n_min=2.e17 source_test.n=2.e17 source_test.defect=0)
+        elseif(mode STREQUAL "ohmic_floor")
+            set(extra_args hybrid_pic_model.joule_heating_n_min=2.e17 source_test.n=2.e17 source_test.defect=0)
+        elseif(mode MATCHES "^nonperiodic_")
+            set(extra_args "boundary.field_lo=none pec" "boundary.field_hi=none pec"
+                "boundary.particle_lo=none reflecting" "boundary.particle_hi=reflecting reflecting")
+            if(mode STREQUAL "nonperiodic_low")
+                list(APPEND extra_args source_test.defect_j=0)
+            else()
+                list(APPEND extra_args source_test.defect_j=16)
+            endif()
+        elseif(mode STREQUAL "periodic_wrap")
+            set(extra_args source_test.defect_j=0)
+        elseif(mode STREQUAL "moving_epoch")
+            set(extra_args source_test.move_epoch=1 source_test.defect=0)
         endif()
         add_test(NAME test_rz_source_guard_${mode} COMMAND test_source_guard_rz
             ${CMAKE_CURRENT_SOURCE_DIR}/inputs_source_guard_rz ${extra_args})
         set_tests_properties(test_rz_source_guard_${mode} PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/source_guard_${mode}
+            TIMEOUT 30 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ;source_guard")
+    endforeach()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    foreach(fault IN ITEMS thermal_nan thermal_negative_rate ohmic_nan stopping_nan_te stopping_nan_velocity)
+        add_test(NAME test_rz_source_guard_reject_${fault}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_source_guard.py
+                --executable $<TARGET_FILE:test_source_guard_rz>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/source_guard_reject_${fault}
+                --case eligible_${fault} --new-attempt)
+        set_tests_properties(test_rz_source_guard_reject_${fault} PROPERTIES
             TIMEOUT 30 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;RZ;source_guard")
     endforeach()
 endif()

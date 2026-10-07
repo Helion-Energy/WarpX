@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import time
+import tempfile
 
 
 def fields(line):
@@ -20,9 +21,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--launcher", default="")
     parser.add_argument("--seeds", type=int, default=0)
+    parser.add_argument("--case", help="Run one named case (including expected rejections)")
+    parser.add_argument("--new-attempt", action="store_true", help="Preserve a fresh attempt under --output")
     args = parser.parse_args()
     out = args.output.resolve()
-    out.mkdir(parents=True, exist_ok=False)
+    out.mkdir(parents=True, exist_ok=args.new_attempt)
+    if args.new_attempt:
+        out = Path(tempfile.mkdtemp(prefix="attempt-", dir=out))
     executable = str(args.executable.resolve())
     inputs = str(Path(__file__).with_name("inputs_source_guard_rz").resolve())
     prefix = shlex.split(args.launcher)
@@ -97,6 +102,12 @@ def main():
     ]
     bad = [(name, [option], expected) for name, option, expected in bad]
     bad += [(f"eligible_{name}", options, expected) for name, options, expected in invalid_data]
+    if args.case:
+        names = {x[0] for x in cases+bad}
+        if args.case not in names or args.seeds:
+            parser.error("--case requires a known case and --seeds=0")
+        cases = [x for x in cases if x[0] == args.case]
+        bad = [x for x in bad if x[0] == args.case]
     rows = []
     for name, opts in cases:
         case = out / name
@@ -111,7 +122,7 @@ def main():
                      "seconds": time.monotonic()-start,
                      "pass": result.returncode == 0 and "SOURCE_GUARD_PASS" in text,
                      "records": [fields(x) for x in text.splitlines()
-                                 if x.startswith(("[source_guard_exchange]", "[source_guard_expectation]", "SOURCE_GUARD_PASS", "SOURCE_GUARD_STOPPING"))]})
+                                 if x.startswith(("[source_guard_exchange]", "[source_guard_expectation]", "[source_guard_skipped]", "SOURCE_GUARD_PASS", "SOURCE_GUARD_STOPPING"))]})
         (out / "RESULTS.json").write_text(json.dumps(rows, indent=2)+"\n")
     for name, options, expected in bad:
         case = out / name
