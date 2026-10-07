@@ -203,6 +203,8 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     );
 
     utils::parser::queryWithParser(pp_species_name, "do_temperature_deposition", m_do_temperature_deposition);
+    utils::parser::queryWithParser(pp_species_name, "temperature_deposition_bias_correction",
+                                   m_temperature_deposition_bias_correction);
 
     // The hybrid-PIC electron-ion temperature relaxation (Q_ei) needs the
     // shape-aware ion temperature of every charged species, so turn the
@@ -2163,6 +2165,7 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
         // IntVect as extra ghost growth, not an index-type conversion, and can
         // miss valid staggered points at grid boundaries.
         const bool single_pass = (depos_type == TemperatureDepositionType::SINGLE_PASS);
+        const bool bias_correction = m_temperature_deposition_bias_correction;
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -2197,17 +2200,17 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
                         wx_arr(i,j,k), wsqx_arr(i,j,k), w2x_arr(i,j,k),
-                        vxbar_arr(i,j,k), varx_arr(i,j,k), single_pass);
+                        vxbar_arr(i,j,k), varx_arr(i,j,k), single_pass, bias_correction);
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
                         wy_arr(i,j,k), wsqy_arr(i,j,k), w2y_arr(i,j,k),
-                        vybar_arr(i,j,k), vary_arr(i,j,k), single_pass);
+                        vybar_arr(i,j,k), vary_arr(i,j,k), single_pass, bias_correction);
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
                         wz_arr(i,j,k), wsqz_arr(i,j,k), w2z_arr(i,j,k),
-                        vzbar_arr(i,j,k), varz_arr(i,j,k), single_pass);
+                        vzbar_arr(i,j,k), varz_arr(i,j,k), single_pass, bias_correction);
                 });
         }
 

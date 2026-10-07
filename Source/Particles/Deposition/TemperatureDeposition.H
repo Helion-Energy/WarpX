@@ -39,13 +39,14 @@ namespace warpx::particles::deposition {
  * With a_p = particle weight times the deposition shape, the unbiased variance
  * is [sum a_p (v_p-vbar)^2 / W] / [1 - sum (a_p/W)^2]. The denominator reduces
  * to (n-1)/n only for equal effective weights. A common grid-volume factor
- * cancels, including in RZ. Empty and numerically single-sample nodes have no
- * variance information and are explicitly reset to zero.
+ * cancels, including in RZ. With bias_correction=false, return the weighted
+ * population variance without this denominator. Empty nodes return zero; with
+ * correction enabled, numerically single-effective-sample nodes also return zero.
  */
 AMREX_GPU_HOST_DEVICE AMREX_INLINE
 void normalizeTemperatureMoments (
     amrex::Real sumw, amrex::Real normalized_wsq, amrex::Real sumwv2,
-    amrex::Real& mean, amrex::Real& variance, bool single_pass)
+    amrex::Real& mean, amrex::Real& variance, bool single_pass, bool bias_correction)
 {
     using namespace amrex::literals;
     // Invalid moments must remain visible to diagnostics/guards rather than
@@ -63,7 +64,7 @@ void normalizeTemperatureMoments (
             variance = std::numeric_limits<amrex::Real>::quiet_NaN();
             return;
         }
-        const amrex::Real reliability = 1._rt - normalized_wsq;
+        const amrex::Real reliability = bias_correction ? 1._rt - normalized_wsq : 1._rt;
         constexpr amrex::Real tolerance = 32 * std::numeric_limits<amrex::Real>::epsilon();
         if (reliability > tolerance) {
             amrex::Real central_moment = sumwv2 / sumw;

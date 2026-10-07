@@ -15,6 +15,13 @@ interior. A particle pair straddles box boundaries so that two-rank runs exercis
 the communication between the two deposition passes. Empty, single-sample and
 numerically single-effective-sample regions must have finite zero temperature.
 
+The same run includes species with ``temperature_deposition_bias_correction = 0``
+next to default-on and explicitly enabled species. Co-located equal and 1:9
+weight pairs check the population variance without the correction, and a
+1:1e-20 pair with power-of-two velocities checks that this mode retains a small
+nonzero variance with an exactly representable dominant mean. Empty nodes remain
+zero; a single particle permits only a squared-roundoff residual.
+
 The temperature fields in these tests are the shape-matched vector temperatures
 used by the hybrid solver, in kelvin. They are distinct from the scalar NGP
 ``T_<species>`` diagnostic. Filtering is disabled so the checks apply directly to

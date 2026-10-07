@@ -215,6 +215,10 @@ class Species(picmistandard.PICMI_Species):
     warpx_do_temperature_deposition: bool, default=False
         This flag is set per species to do another pass to deposit temperature
         on each timestep if required. Currently only works with Ohm's Law Hybrid Solver.
+
+    warpx_temperature_deposition_bias_correction: bool, default=True
+        Apply the finite-sample bias correction to the deposited temperature of this species.
+        If False, use the weighted population variance without the correction.
     """
 
     def init(self, kw):
@@ -340,6 +344,9 @@ class Species(picmistandard.PICMI_Species):
         self.extra_real_attributes = kw.pop("warpx_add_real_attributes", None)
 
         self.do_temperature_deposition = kw.pop("warpx_do_temperature_deposition", None)
+        self.temperature_deposition_bias_correction = kw.pop(
+            "warpx_temperature_deposition_bias_correction", None
+        )
 
     def species_initialize_inputs(
         self,
@@ -396,6 +403,7 @@ class Species(picmistandard.PICMI_Species):
             resampling_algorithm_n_phi=self.resampling_algorithm_n_phi,
             resampling_algorithm_delta_u=self.resampling_algorithm_delta_u,
             do_temperature_deposition=self.do_temperature_deposition,
+            temperature_deposition_bias_correction=self.temperature_deposition_bias_correction,
         )
 
         # add reflection models
