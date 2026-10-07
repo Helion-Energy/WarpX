@@ -307,6 +307,9 @@ void HybridSourceEligibility::RecordStoppingParticle (amrex::Real actual, amrex:
 {
     m_stopping_particle_J+=actual;
     m_stopping_dt=dt;
+    amrex::Print() << std::setprecision(17) << "[source_guard_particle_power] channel=stopping epoch="
+        << m_epoch << " actual_particle_J=" << actual << " collision_dt=" << dt
+        << " actual_particle_W=" << (dt>0?actual/dt:0) << '\n';
 }
 void HybridSourceEligibility::RecordIon (amrex::Real actual, amrex::Real thermal,
     amrex::Real redirected, amrex::Real dt, bool redirect)
@@ -316,6 +319,9 @@ void HybridSourceEligibility::RecordIon (amrex::Real actual, amrex::Real thermal
         << " actual_ion_J=" << actual << " electron_thermal_J=" << m_last_electron_J[Thermal]
         << " thermal_shared_draw_J=" << thermal << " redirect_increment_J=" << redirected
         << " thermal_residual_J=" << thermal+m_last_electron_J[Thermal] << " dt=" << dt
+        << " actual_ion_W=" << (dt>0?actual/dt:0)
+        << " thermal_shared_draw_W=" << (dt>0?thermal/dt:0)
+        << " redirect_increment_W=" << (dt>0?redirected/dt:0)
         << " includes_redirect=" << redirect
         << " closure=stochastic_with_splitting_error\n";
 }

@@ -94,7 +94,11 @@ step and source epoch. Use a fresh output prefix/run directory for each restart
 segment; diagnostic counters/epochs restart with the process and are not a
 cumulative checkpointed science budget.
 
-Source-energy lines report actual electron changes and interval powers. The ion
+Source-energy lines report actual electron changes and interval powers.
+Stopping electron power divides each half-packet by the outer-step duration;
+sum both half contributions for that step. Stopping particle power uses the
+collision interval explicitly recorded on its line. Thermal and redirected ion
+powers use their actual source interval. The ion
 ledger reports realized total energy change and a thermal-only counterfactual
 using the same three random draws; the incremental redirect share includes its
 noise cross term. These attributions sum to the realized ion change. Thermal
