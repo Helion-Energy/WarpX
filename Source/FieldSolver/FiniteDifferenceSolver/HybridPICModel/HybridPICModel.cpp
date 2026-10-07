@@ -10,6 +10,7 @@
  */
 
 #include "HybridPICModel.H"
+#include "HybridSourceCheck.H"
 
 #include "BraginskiiViscosity.H"
 #include "ElectronViscosityPoint.H"
@@ -9915,6 +9916,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     m_source_guard.Prepare(lev, rho, *this);
     m_source_guard.BeginChannel(HybridSourceEligibility::Ohmic, Te);
     bool const source_guard = m_source_guard.guards(HybridSourceEligibility::Ohmic);
+    HybridSourceCheck source_check(source_guard);
+    auto* const source_error=source_check.data();
     amrex::MultiFab guard_tally;
     if (source_guard) {
         guard_tally.define(Te.boxArray(), Te.DistributionMap(), 2, 0);
@@ -10110,8 +10113,7 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                     !std::isfinite(rho_val) || !(Te_arr(i,j,k) > 0) ||
                     !std::isfinite(Te_arr(i,j,k)))) {
                     if (rejected) declined(i,j,k,1) += 1;
-                    else AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
-                        "source_guard: invalid eligible Ohmic state");
+                    else HybridSourceCheck::Require(false, HybridSourceCheck::OhmicState, source_error);
                     return;
                 }
                 if (rho_val <= rho_heat_gate) { return; }
@@ -10129,8 +10131,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 if (source_guard && (!(rhos_sum_val > 0) || !std::isfinite(rhos_sum_val) ||
                                      !std::isfinite(rhos_val_raw) || rhos_val_raw < 0)) {
                     if (rejected) { declined(i,j,k,1) += 1; return; }
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
-                        "source_guard: invalid eligible species density");
+                    HybridSourceCheck::Require(false, HybridSourceCheck::OhmicSpecies, source_error);
+                    return;
                 }
                 if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s           = rhos_val_raw / rhos_sum_val;
@@ -10143,8 +10145,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 auto const jz = ablastr::coarsen::sample::Interp(Jpz, Jz_stag, nodal, coarsen, i, j, k, 0);
                 if (source_guard && !(std::isfinite(jx) && std::isfinite(jy) && std::isfinite(jz))) {
                     if (rejected) { declined(i,j,k,1) += 1; return; }
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(false,
-                        "source_guard: invalid eligible Ohmic current");
+                    HybridSourceCheck::Require(false, HybridSourceCheck::OhmicCurrent, source_error);
+                    return;
                 }
                 amrex::Real const Jmag = std::sqrt(jx*jx + jy*jy + jz*jz);
 
@@ -10208,8 +10210,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                         else declined(i,j,k,1) += 1;
                         return; // BEFORE either electron heat or ion redirect
                     }
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(du_s) && du_s >= 0,
-                        "source_guard: invalid eligible Ohmic source");
+                    if (!HybridSourceCheck::Require(std::isfinite(du_s) && du_s >= 0,
+                        HybridSourceCheck::OhmicSource, source_error)) return;
                 }
                 // Decoupled heating gate: between the solver floor and
                 // joule_heating_n_min no heat is created at all; the declined
@@ -10294,6 +10296,7 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
         }
     }
 
+    source_check.Finish();
     if (source_guard) { m_source_guard.RecordOhmic(lev, guard_tally, dt); }
     m_source_guard.EndChannel(lev, HybridSourceEligibility::Ohmic, dt, Te,
         heat_capacity_rho ? *heat_capacity_rho : rho, pedestal, m_gamma);
@@ -12077,6 +12080,8 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
     m_source_guard.Prepare(lev, rho, *this);
     m_source_guard.BeginChannel(HybridSourceEligibility::Thermal, Te);
     bool const guarded_relaxation = m_source_guard.guards(HybridSourceEligibility::Thermal);
+    HybridSourceCheck source_check(guarded_relaxation);
+    auto* const source_error=source_check.data();
     if (guarded_relaxation) { m_source_guard.ClearRelaxation(); }
     auto const* pedestal = DensityPedestal(lev);
     bool const use_pedestal = pedestal != nullptr;
@@ -12173,8 +12178,8 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
                 // Normalize in the raw deposited units (not physical rho units).
                 amrex::Real const rhos_sum_val = rhosum_arr(i,j,k);
                 if (guarded_relaxation) {
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(rhos_sum_val) && rhos_sum_val>0,
-                        "source_guard: invalid eligible species normalization");
+                    if (!HybridSourceCheck::Require(std::isfinite(rhos_sum_val) && rhos_sum_val>0,
+                        HybridSourceCheck::ThermalSpecies, source_error)) return;
                 }
                 if (rhos_sum_val <= 0.0_rt) { return; }
                 amrex::Real const f_s = rhos_arr(i,j,k) / rhos_sum_val;   // = Z_s n_s/n_e
@@ -12186,14 +12191,14 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
                 amrex::Real const Ti_K  = Ti_eV * K_per_eV;
 
                 if (guarded_relaxation) {
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(Ti_eV) && Ti_eV >= 0 &&
+                    if (!HybridSourceCheck::Require(std::isfinite(Ti_eV) && Ti_eV >= 0 &&
                         std::isfinite(Te_K) && Te_K > 0 && std::isfinite(f_s) && f_s >= 0,
-                        "source_guard: invalid eligible relaxation moments");
+                        HybridSourceCheck::ThermalMoments, source_error)) return;
                 }
                 amrex::Real const nu = nu_ei(rho_val, amrex::max(Te_eV, Te_floor_eV), Ti_eV, t_new);
                 if (guarded_relaxation) {
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(nu) && nu >= 0,
-                        "source_guard: invalid eligible relaxation rate");
+                    if (!HybridSourceCheck::Require(std::isfinite(nu) && nu >= 0,
+                        HybridSourceCheck::ThermalRate, source_error)) return;
                     rates(i,j,k,0) = nu;
                     rates(i,j,k,1) = nu * Te_K;
                 }
@@ -12215,6 +12220,7 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
         }
     }
 
+    source_check.Finish();
     m_source_guard.EndChannel(lev, HybridSourceEligibility::Thermal, dt, Te,
         heat_capacity_rho ? *heat_capacity_rho : rho, pedestal, m_gamma);
     Te.FillBoundary(Te.nGrowVect(), period);

@@ -26,7 +26,7 @@ def main():
     executable = str(args.executable.resolve())
     inputs = str(Path(__file__).with_name("inputs_source_guard_rz").resolve())
     prefix = shlex.split(args.launcher)
-    base = ["hybrid_pic_model.source_guard.export_interval=0"]
+    base = ["hybrid_pic_model.source_guard.export_interval=0", "amrex.the_arena_init_size=67108864"]
     cases = [
         ("dense", []),
         ("at_count", ["source_test.thermal=0", "source_test.stopping=0"]),
@@ -50,6 +50,42 @@ def main():
         ("thermal_only", ["hybrid_pic_model.source_guard.ohmic=0", "hybrid_pic_model.source_guard.alpha_stopping=0"]),
         ("stopping_only", ["hybrid_pic_model.source_guard.ohmic=0", "hybrid_pic_model.source_guard.thermal_relaxation=0"]),
     ]
+    # Check independently configured physical cutoffs, both physical Z ends,
+    # periodic wrapping, and current particle ownership across an MPI seam.
+    for label, option in [("configured", "hybrid_pic_model.source_guard.n_min"),
+                          ("ohmic", "hybrid_pic_model.joule_heating_n_min")]:
+        for side, density in [("below", "1.999999e17"), ("at", "2.e17"),
+                              ("above", "2.000001e17")]:
+            cases.append((f"{label}_floor_{side}", [f"{option}=2.e17",
+                         f"source_test.n={density}", "source_test.defect=0"]))
+    nonperiodic = ["boundary.field_lo=none pec", "boundary.field_hi=none pec",
+                  "boundary.particle_lo=none reflecting", "boundary.particle_hi=reflecting reflecting"]
+    for j in [0, 9, 16]:
+        cases.append((f"nonperiodic_defect{j}", nonperiodic+[f"source_test.defect_j={j}"]))
+    cases += [
+        ("periodic_wrap_defect", ["source_test.defect_j=0"]),
+        ("axis_disabled", ["hybrid_pic_model.source_guard.axis_cells=0"]),
+        ("axis_two_cells", ["hybrid_pic_model.source_guard.axis_cells=2"]),
+        ("empty_background", ["ions.injection_style=none", "ions2.injection_style=none",
+                              "source_test.ppc=0", "source_test.n=0", "source_test.defect=0"]),
+        ("moving_count_epoch", ["source_test.move_epoch=1", "source_test.defect=0",
+                                "hybrid_pic_model.source_guard.diagnostic_interval=1000"]),
+        ("nonperiodic_moving_epoch", nonperiodic+["source_test.move_epoch=1", "source_test.defect=0"]),
+    ]
+    invalid_data = [
+        ("thermal_nan", ["source_test.bad_ti=1", "source_test.stopping=0"],
+         "invalid eligible relaxation moments"),
+        ("thermal_negative_rate", ["hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)=-1",
+                                   "source_test.stopping=0"], "invalid eligible relaxation rate"),
+        ("ohmic_nan", ["source_test.bad_current=1", "source_test.thermal=0", "source_test.stopping=0"],
+         "invalid eligible Ohmic current"),
+        ("stopping_nan_te", ["source_test.bad_stopping_te=1", "source_test.thermal=0"],
+         "invalid eligible stopping thermodynamics"),
+        ("stopping_nan_velocity", ["source_test.bad_stopping_ve=1", "source_test.thermal=0"],
+         "invalid eligible stopping velocity or particle"),
+    ]
+    for name, options, _ in invalid_data:
+        cases.append((f"masked_{name}", options+["hybrid_pic_model.source_guard.minimum_resident_markers=17"]))
     bad = [
         ("zero_count", "hybrid_pic_model.source_guard.minimum_resident_markers=0", "invalid threshold"),
         ("negative_density", "hybrid_pic_model.source_guard.n_min=-1", "invalid threshold"),
@@ -59,6 +95,8 @@ def main():
         ("duplicate_species", "hybrid_pic_model.source_guard.background_species=ions ions", "explicit and unique"),
         ("nonthermal_background", "hybrid_pic_model.source_guard.background_species=alpha", "thermal ion"),
     ]
+    bad = [(name, [option], expected) for name, option, expected in bad]
+    bad += [(f"eligible_{name}", options, expected) for name, options, expected in invalid_data]
     rows = []
     for name, opts in cases:
         case = out / name
@@ -75,10 +113,10 @@ def main():
                      "records": [fields(x) for x in text.splitlines()
                                  if x.startswith(("[source_guard_exchange]", "[source_guard_expectation]", "SOURCE_GUARD_PASS", "SOURCE_GUARD_STOPPING"))]})
         (out / "RESULTS.json").write_text(json.dumps(rows, indent=2)+"\n")
-    for name, option, expected in bad:
+    for name, options, expected in bad:
         case = out / name
         case.mkdir()
-        command = prefix + [executable, inputs] + base + [option]
+        command = prefix + [executable, inputs] + base + options
         with (case / "stdout.log").open("w") as log:
             result = subprocess.run(command, cwd=case, stdout=log, stderr=subprocess.STDOUT,
                                     env={**os.environ, "OMP_NUM_THREADS": "1"}, timeout=120)
