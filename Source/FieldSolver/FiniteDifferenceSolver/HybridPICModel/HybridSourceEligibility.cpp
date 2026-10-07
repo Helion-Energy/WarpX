@@ -409,7 +409,7 @@ void HybridSourceEligibility::Phase (int lev,char const* phase,HybridPICModel co
     auto const& te=*w.m_fields.get(FieldType::hybrid_electron_temperature_fp,lev);
     auto const& rho=*w.m_fields.get(FieldType::rho_fp,lev);
     if (m_nodes->boxArray() != te.boxArray() || m_nodes->DistributionMap() != te.DistributionMap())
-        return; // A regrid/load balance is followed by a fresh source Prepare. 
+        return; // A regrid/load balance is followed by a fresh source Prepare.
     auto const* pedestal=model.DensityPedestal(lev);
     amrex::MultiFab maximum(te.boxArray(),te.DistributionMap(),1,0);
     amrex::MultiFab::Copy(maximum,te,0,0,1,0);

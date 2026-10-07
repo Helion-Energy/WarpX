@@ -72,7 +72,7 @@ def main():
                      "seconds": time.monotonic()-start,
                      "pass": result.returncode == 0 and "SOURCE_GUARD_PASS" in text,
                      "records": [fields(x) for x in text.splitlines()
-                                 if x.startswith(("[source_guard_exchange]", "SOURCE_GUARD_PASS", "SOURCE_GUARD_STOPPING"))]})
+                                 if x.startswith(("[source_guard_exchange]", "[source_guard_expectation]", "SOURCE_GUARD_PASS", "SOURCE_GUARD_STOPPING"))]})
         (out / "RESULTS.json").write_text(json.dumps(rows, indent=2)+"\n")
     for name, option, expected in bad:
         case = out / name
@@ -103,7 +103,7 @@ def main():
             rows.append({"case": case.name, "command": command, "returncode": result.returncode,
                          "pass": result.returncode == 0 and "SOURCE_GUARD_PASS" in text,
                          "ppc": ppc, "seed": seed,
-                         "records": [fields(x) for x in text.splitlines() if x.startswith("[source_guard_exchange]")]})
+                         "records": [fields(x) for x in text.splitlines() if x.startswith(("[source_guard_exchange]", "[source_guard_expectation]"))]})
             (out / "RESULTS.json").write_text(json.dumps(rows, indent=2)+"\n")
     failed = [r["case"] for r in rows if not r["pass"]]
     print(json.dumps({"cases": len(rows), "failed": failed, "output": str(out)}))

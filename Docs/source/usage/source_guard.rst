@@ -99,7 +99,9 @@ ledger reports realized total energy change and a thermal-only counterfactual
 using the same three random draws; the incremental redirect share includes its
 noise cross term. These attributions sum to the realized ion change. Thermal
 exchange has sampling and operator-splitting error and is not conserved exactly
-by the stochastic OU model. No realized-energy correction is introduced.
+by the stochastic OU model. A separate frozen-state nonrelativistic OU expectation
+is reported to distinguish time/grid bias from realized sampling variation; it is
+not an exact relativistic expectation. No realized-energy correction is introduced.
 
 Declined modeled Ohmic heating is tallied before redirection. This is not total
 field dissipation: heating and field resistivity parsers may differ. Vacuum or

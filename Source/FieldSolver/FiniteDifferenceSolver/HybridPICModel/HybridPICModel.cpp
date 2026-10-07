@@ -12245,6 +12245,7 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         m_source_guard.guards(HybridSourceEligibility::Thermal);
     bool const audit_exchange = m_source_guard.enabled();
     amrex::Real actual_ion_J = 0, thermal_ion_J = 0, redirect_ion_J = 0;
+    amrex::Real expected_thermal_J = 0, expected_redirect_J = 0;
     bool const do_redir = (redirect_E != nullptr);
     if (!do_relax && !do_redir) { return; }
 
@@ -12498,7 +12499,7 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         amrex::MultiFab realized;
         if (audit_exchange) {
             // J per cell, already macro-weighted. No per-particle scratch array.
-            realized.define(pba, pdm, 3, 0);
+            realized.define(pba, pdm, 5, 0);
             realized.setVal(0);
         }
 
@@ -12567,6 +12568,14 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                     auto const before=Algorithms::KineticEnergy(uxp[ip],uyp[ip],uzp[ip],m_i);
                     auto const thermal_sigma=std::sqrt(amrex::max(0._prt,
                         -kb*Te_K*std::expm1(-2._prt*nu_dt)/m_i));
+                    auto const meanx=uxp[ip]-drag*(uxp[ip]-uix);
+                    auto const meany=uyp[ip]-drag*(uyp[ip]-uiy);
+                    auto const meanz=uzp[ip]-drag*(uzp[ip]-uiz);
+                    auto const u2=uxp[ip]*uxp[ip]+uyp[ip]*uyp[ip]+uzp[ip]*uzp[ip];
+                    // Exact nonrelativistic OU expectation for this frozen state.
+                    // Realized tallies above/below retain relativistic lab-frame KE.
+                    auto const expected=0.5_prt*m_i*(meanx*meanx+meany*meany+meanz*meanz-u2+
+                                                     3._prt*thermal_sigma*thermal_sigma);
                     auto const tx=uxp[ip]-drag*(uxp[ip]-uix)+thermal_sigma*rx;
                     auto const ty=uyp[ip]-drag*(uyp[ip]-uiy)+thermal_sigma*ry;
                     auto const tz=uzp[ip]-drag*(uzp[ip]-uiz)+thermal_sigma*rz;
@@ -12580,6 +12589,8 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,0),weight[ip]*total);
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,1),weight[ip]*thermal);
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,2),weight[ip]*(total-thermal));
+                    amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,3),weight[ip]*expected);
+                    amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,4),weight[ip]*1.5_prt*E_s);
                 } else {
                 uxp[ip] += -drag*(uxp[ip]-uix) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
                 uyp[ip] += -drag*(uyp[ip]-uiy) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
@@ -12591,6 +12602,8 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
             actual_ion_J += realized.sum(0);
             thermal_ion_J += realized.sum(1);
             redirect_ion_J += realized.sum(2);
+            expected_thermal_J += realized.sum(3);
+            expected_redirect_J += realized.sum(4);
         }
     }
 
@@ -12607,6 +12620,12 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
     }
     if (audit_exchange) {
         m_source_guard.RecordIon(actual_ion_J, thermal_ion_J, redirect_ion_J, dt, do_redir);
+        amrex::Print() << std::setprecision(17) << "[source_guard_expectation] epoch="
+            << m_source_guard.epoch() << " nonrel_thermal_J=" << expected_thermal_J
+            << " nonrel_redirect_J=" << expected_redirect_J
+            << " nonrel_thermal_residual_J=" << expected_thermal_J +
+                m_source_guard.electronEnergy(HybridSourceEligibility::Thermal)
+            << " realized_minus_nonrel_expected_J=" << thermal_ion_J-expected_thermal_J << '\n';
     }
 
 }
