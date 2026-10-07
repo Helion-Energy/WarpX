@@ -53,6 +53,8 @@ public:
     void RecordIon (amrex::Real actual_J, amrex::Real thermal_J, amrex::Real redirect_J,
                     amrex::Real dt, bool has_redirect);
     void Phase (int lev, char const* phase, HybridPICModel const& model, bool abort = false);
+    // NVCC extended device lambdas require a public enclosing member function.
+    void Coverage (int lev, amrex::MultiFab const* previous);
     amrex::Real electronEnergy (Channel c) const { return m_last_electron_J[c]; }
     amrex::Real declinedOhmic () const { return m_declined_ohmic_J; }
     amrex::Real unevaluableOhmic () const { return m_unevaluable_ohmic_nodes; }
@@ -102,7 +104,6 @@ private:
     std::array<std::unique_ptr<amrex::MultiFab>,3> m_before, m_delta;
     std::array<amrex::Real,3> m_last_electron_J{};
     amrex::Real m_declined_ohmic_J = 0, m_unevaluable_ohmic_nodes = 0, m_last_ion_J = 0;
-    void Coverage (int lev, amrex::MultiFab const* previous);
     void Export (int lev, char const* phase) const;
 };
 #endif
