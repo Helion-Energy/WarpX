@@ -32,6 +32,18 @@ int main (int argc,char** argv)
         gp.query("minimum_resident_markers",minimum);
         gp.query("axis_cells",axis);
         pp.query("ppc",ppc);
+        int ppc2=ppc; pp.query("ppc2",ppc2);
+        bool const dust=ppc<minimum || ppc2<minimum;
+        AMREX_ALWAYS_ASSERT(rho.boxArray().size()==2);
+        for(int b=0;b<2;++b) {
+            AMREX_ALWAYS_ASSERT(rho.boxArray()[b].length(0)==17 &&
+                                rho.boxArray()[b].length(1)==9);
+        }
+        if(amrex::ParallelDescriptor::NProcs()==2)
+            AMREX_ALWAYS_ASSERT(rho.DistributionMap()[0]!=rho.DistributionMap()[1]);
+        amrex::Print()<<"SOURCE_GUARD_LAYOUT boxes=2 axial_cells_per_box=8 ranks="
+            <<amrex::ParallelDescriptor::NProcs()<<" owners="
+            <<rho.DistributionMap()[0]<<','<<rho.DistributionMap()[1]<<'\n';
         amrex::Real n=1.e19_rt,bad_n=1.e17_rt,dt=1.e-9_rt;
         bool defect=true,redirect=false,thermal=true,stopping=true,unequal=false,changed_mask=false;
         pp.query("n",n); pp.query("bad_n",bad_n); pp.query("defect",defect);
@@ -55,7 +67,7 @@ int main (int argc,char** argv)
             for(amrex::MFIter mfi(rho);mfi.isValid();++mfi) {
                 auto const r=rho.array(mfi);
                 amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
-                    if(defect && i==8) r(i,j,k)=bad_n*PhysConst::q_e;
+                    if(defect && i==8 && j==9) r(i,j,k)=bad_n*PhysConst::q_e;
                 });
             }
             rho.OverrideSync(geom.periodicity()); rho.FillBoundary(geom.periodicity());
@@ -79,18 +91,18 @@ int main (int argc,char** argv)
                 auto const a=guard.nodes().const_array(mfi);
                 auto const out=error.array(mfi);
                 amrex::ParallelFor(mfi.validbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k) {
-                    int expected=(ppc<minimum?2:0)|(i<=axis && axis>0?4:0);
-                    if(n<=floor || (defect && bad_n<=floor && i>=7 && i<=9)) expected|=1;
+                    int expected=(dust?2:0)|(i<=axis && axis>0?4:0);
+                    if(n<=floor || (defect && bad_n<=floor && i>=7 && i<=9 && j>=8 && j<=10)) expected|=1;
                     out(i,j,k,0)=std::abs(a(i,j,k,0)-expected);
                     out(i,j,k,1)=std::abs(a(i,j,k,1)-expected);
                 });
             }
             AMREX_ALWAYS_ASSERT(error.norminf(0)==0 && error.norminf(1)==0);
             auto const counts=guard.counts().norminf(0);
-            AMREX_ALWAYS_ASSERT(counts==ppc);
+            AMREX_ALWAYS_ASSERT(counts==ppc && guard.counts().norminf(2)==ppc2);
             // Independent support points around the axis cutoff, including a
             // zero-weight excluded corner at r=(axis+1)*dr.
-            if(ppc>=minimum && n>h.m_n_floor && axis>0) {
+            if(!dust && n>h.m_n_floor && axis>0) {
                 amrex::MultiFab probes(te.boxArray(),te.DistributionMap(),1,0); probes.setVal(0);
                 auto const lo=geom.ProbLoArray(), inv=geom.InvCellSizeArray(), dx=geom.CellSizeArray();
                 for(amrex::MFIter mfi(probes);mfi.isValid();++mfi) {
@@ -143,7 +155,7 @@ int main (int argc,char** argv)
             h.m_include_temperature_relaxation=false;
             h.QDSMCApplyIonHeating(0,dt,&redirected,nullptr);
             h.m_include_temperature_relaxation=relax;
-            if(guard.guards(HybridSourceEligibility::Ohmic) && ppc<minimum)
+            if(guard.guards(HybridSourceEligibility::Ohmic) && dust)
                 AMREX_ALWAYS_ASSERT(guard.ionEnergy()==0);
         }
         if(thermal) {
@@ -169,7 +181,7 @@ int main (int argc,char** argv)
                 AMREX_ALWAYS_ASSERT(error.norminf(0)==0);
             }
             h.QDSMCApplyIonHeating(0,dt,nullptr,&ti);
-            if(guard.guards(HybridSourceEligibility::Thermal) && (ppc<minimum || n<=h.m_n_floor)) {
+            if(guard.guards(HybridSourceEligibility::Thermal) && (dust || n<=h.m_n_floor)) {
                 AMREX_ALWAYS_ASSERT(guard.electronEnergy(HybridSourceEligibility::Thermal)==0);
                 AMREX_ALWAYS_ASSERT(guard.ionEnergy()==0);
             }
@@ -187,7 +199,7 @@ int main (int argc,char** argv)
             auto const staged=h.EnergyVolumeIntegral(sum,0,0);
             auto const tol=4096*std::numeric_limits<amrex::Real>::epsilon()*before;
             AMREX_ALWAYS_ASSERT(std::abs(staged-loss)<=tol);
-            if(guard.guards(HybridSourceEligibility::Stopping) && (ppc<minimum||n<=h.m_n_floor))
+            if(guard.guards(HybridSourceEligibility::Stopping) && (dust||n<=h.m_n_floor))
                 AMREX_ALWAYS_ASSERT(loss==0 && staged==0);
             amrex::MultiFab capacity(rho.boxArray(),rho.DistributionMap(),1,rho.nGrowVect());
             capacity.setVal(2.e19_rt*PhysConst::q_e);

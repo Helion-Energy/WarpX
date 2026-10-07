@@ -39,6 +39,7 @@ def main():
         ("at_density", ["source_test.n=1.e17", "source_test.defect=0"]),
         ("above_density", ["source_test.n=1.000001e17", "source_test.defect=0"]),
         ("defect_above", ["source_test.bad_n=1.000001e17"]),
+        ("unequal_counts", ["ions2.num_particles_per_cell_each_dim=1 2 4", "source_test.ppc2=8"]),
         ("unequal_weights", ["source_test.unequal=1"]),
         ("redirect", ["source_test.redirect=1", "source_test.thermal=0", "source_test.stopping=0"]),
         ("redirect_dust", ["source_test.redirect=1", "source_test.thermal=0", "source_test.stopping=0", "hybrid_pic_model.source_guard.minimum_resident_markers=17"]),

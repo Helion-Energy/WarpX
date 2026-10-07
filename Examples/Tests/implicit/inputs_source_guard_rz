@@ -118,3 +118,7 @@ ions2.ux_th = sqrt(10*q_e/(4*m_p))/299792458
 ions2.uy_th = sqrt(10*q_e/(4*m_p))/299792458
 ions2.uz_th = sqrt(10*q_e/(4*m_p))/299792458
 hybrid_pic_model.joule_redirect_allow_undamped = 1
+
+# Two real axial boxes, including a shared node at z-index 8.
+amr.max_grid_size_x = 16
+amr.max_grid_size_y = 8
