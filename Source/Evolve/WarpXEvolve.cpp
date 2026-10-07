@@ -346,6 +346,27 @@ WarpX::Evolve (int numsteps)
             ExecutePythonCallback("beforeEsolve");
             HybridPICEvolveFields();
             ExecutePythonCallback("afterEsolve");
+
+            // Density-band statistics feeding must run at the accepted explicit
+            // endpoint as well as in ThetaImplicitHybrid. HybridPICEvolveFields
+            // has just deposited rho^{n+1}; splitting here leaves the field
+            // update unchanged and makes the children available to the next
+            // particle deposit and to this step's diagnostics.
+            const amrex::Real rho_floor =
+                m_hybrid_pic_model->m_n_floor * PhysConst::q_e;
+            for (int isp = 0; isp < mypc->nSpecies(); ++isp) {
+                auto* pc = dynamic_cast<PhysicalParticleContainer*>(
+                    &mypc->GetParticleContainer(isp));
+                if (pc == nullptr) { continue; }
+                const int interval = pc->HybridSplitInterval();
+                if (interval <= 0 || ((step + 1) % interval != 0)) { continue; }
+                const amrex::MultiFab& rho0 =
+                    *m_fields.get(warpx::fields::FieldType::rho_fp, 0);
+                pc->SplitDepletedBand(rho0,
+                    pc->HybridSplitBandLo()*rho_floor,
+                    pc->HybridSplitBandHi()*rho_floor, 0);
+                pc->Redistribute();
+            }
         }
 
         bool const do_diagnostic = (multi_diags->DoComputeAndPack(step) || reduced_diags->DoDiags(step));
