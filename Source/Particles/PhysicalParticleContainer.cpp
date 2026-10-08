@@ -106,6 +106,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -1030,8 +1031,8 @@ PhysicalParticleContainer::SplitParticles (int lev)
     // Position setters use the iterator interface, which exposes mutable SoA
     // storage through a const view. The destination is a tile, not an iterator.
     struct TileView {
-        ParticleTileType& tile;
-        auto& GetStructOfArrays () const { return tile.GetStructOfArrays(); }
+        ParticleTileType* tile;
+        [[nodiscard]] auto& GetStructOfArrays () const { return tile->GetStructOfArrays(); }
     };
     for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
     {
@@ -1057,11 +1058,11 @@ PhysicalParticleContainer::SplitParticles (int lev)
 
         auto& dst_tile = pctmp_split.DefineAndReturnParticleTile(
             lev, pti.index(), pti.LocalTileIndex());
-        dst_tile.resize(num_parents*num_children);
+        dst_tile.resize(static_cast<std::size_t>(num_parents)*num_children);
         const auto src = src_tile.getParticleTileData();
         const auto dst = dst_tile.getParticleTileData();
         const auto GetPosition = GetParticlePosition<PIdx>(src_tile);
-        const auto SetPosition = SetParticlePosition<PIdx>(TileView{dst_tile});
+        const auto SetPosition = SetParticlePosition<PIdx>(TileView{&dst_tile});
         amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (int i) {
             if (amrex::ConstParticleIDWrapper{idcpu[i]} != LongParticleIds::DoSplitParticleID) {
                 return;

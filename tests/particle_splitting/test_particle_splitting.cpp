@@ -16,13 +16,15 @@
 
 #include <array>
 #include <cmath>
+#include <exception>
+#include <iostream>
 #include <limits>
 #include <string>
 #include <vector>
 
 using namespace amrex::literals;
 
-int main (int argc, char* argv[])
+int main (int argc, char* argv[]) try
 {
     // Initialize a small, empty simulation, then insert only four markers
     // needed by the test. Force device memory on GPU builds.
@@ -71,8 +73,9 @@ int main (int argc, char* argv[])
 #endif
     for (int i = 1; i < argc; ++i) { args.emplace_back(argv[i]); }
     std::vector<char*> ptrs;
+    ptrs.reserve(args.size());
     for (auto& arg : args) { ptrs.push_back(arg.data()); }
-    int nargs = static_cast<int>(ptrs.size());
+    const int nargs = static_cast<int>(ptrs.size());
     char** pargs = ptrs.data();
     warpx::initialization::initialize_external_libraries(nargs, pargs);
     {
@@ -82,7 +85,7 @@ int main (int argc, char* argv[])
             warpx.GetPartContainer().GetParticleContainer(0));
         int split_type = 0;
         int attributes = 0;
-        amrex::ParmParse pp("test");
+        const amrex::ParmParse pp("test");
         pp.get("split_type", split_type);
         pp.get("add_attributes", attributes);
         if (attributes) {
@@ -95,12 +98,17 @@ int main (int argc, char* argv[])
         amrex::Vector<amrex::ParticleReal> z{0.375_prt, 0.49_prt, 0.625_prt, 0.75_prt};
 #ifdef WARPX_DIM_3D
         y.assign(4, 0.375_prt);
+#elif defined(WARPX_DIM_RSPHERE)
+        // Keep the final marker inside r < 1 while retaining a nonzero polar angle.
+        x[3] = 0.5_prt;
 #endif
         amrex::Vector<amrex::ParticleReal> ux{1.0e5_prt, 4.0e5_prt, -2.0e5_prt, 3.0e5_prt};
         amrex::Vector<amrex::ParticleReal> uy{2.0e5_prt, -2.0e5_prt, 3.0e5_prt, -1.0e5_prt};
         amrex::Vector<amrex::ParticleReal> uz{-3.0e5_prt, 4.0e5_prt, 1.0e5_prt, 2.0e5_prt};
         amrex::Vector<amrex::Vector<amrex::ParticleReal>> weights{{8.0_prt, 16.0_prt, 4.0_prt, 2.0_prt}};
         pc.AddNParticles(0, 4, x, y, z, ux, uy, uz, 1, weights, 0, {}, 0);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(pc.TotalNumberOfParticles() == 4,
+            "All four test markers must be inside the domain before splitting");
         for (WarpXParIter pti(pc, 0); pti.isValid(); ++pti) {
             auto data = pti.GetParticleTile().getParticleTileData();
             amrex::ParallelFor(pti.numParticles(), [=] AMREX_GPU_DEVICE (int i) {
@@ -194,7 +202,11 @@ int main (int argc, char* argv[])
                 if (parent < 2) {
                     AMREX_ALWAYS_ASSERT(std::abs(host[0][i] - weights[0][parent]/children)
                         <= tol*weights[0][parent]/children);
+#if AMREX_SPACEDIM == 1
+                    AMREX_ALWAYS_ASSERT(shifted_axes == 1);
+#else
                     AMREX_ALWAYS_ASSERT(shifted_axes == (split_type == 0 ? AMREX_SPACEDIM : 1));
+#endif
                     AMREX_ALWAYS_ASSERT(amrex::ConstParticleIDWrapper{ids[i]} ==
                         amrex::LongParticleIds::NoSplitParticleID);
                 } else {
@@ -234,4 +246,13 @@ int main (int argc, char* argv[])
         WarpX::Finalize();
     }
     warpx::initialization::finalize_external_libraries();
+}
+catch (const std::exception& error)
+{
+    std::cerr << "Particle splitting test failed: " << error.what() << '\n';
+    return 1;
+}
+catch (...)
+{
+    return 1;
 }
