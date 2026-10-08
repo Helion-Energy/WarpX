@@ -911,6 +911,12 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_fd_max_subcycles > 0,
             "hybrid_pic_model.qdsmc_conduction_fd_max_subcycles must be "
             "positive");
+        pp_hybrid.query("qdsmc_conduction_rkl_max_stages",
+                        m_cond_rkl_max_stages);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_rkl_max_stages == 0 || m_cond_rkl_max_stages >= 2,
+            "hybrid_pic_model.qdsmc_conduction_rkl_max_stages must be "
+            "0 (unlimited) or >= 2");
         std::string fdtime = "ssprk2";
         pp_hybrid.query("qdsmc_conduction_fd_time", fdtime);
         if (fdtime == "ssprk2") { m_cond_fd_time = 0; }
@@ -16024,7 +16030,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         mask_err ? &floor_mask : nullptr, &heat, true,
         any_boundary ? QdsmcRKIntegrator::StageValidity([&] () {
             return stage_values_finite;
-        }) : QdsmcRKIntegrator::StageValidity{});
+        }) : QdsmcRKIntegrator::StageValidity{}, m_cond_rkl_max_stages);
     auto const st = integ.Advance(T_cur, dt_c);
     report.completed_time = st.t_done;
     report.attempts = st.n_attempts;

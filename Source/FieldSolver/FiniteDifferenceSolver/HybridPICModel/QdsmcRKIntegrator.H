@@ -138,13 +138,20 @@ public:
                        amrex::iMultiFab const* err_mask = nullptr,
                        Auxiliary* auxiliary = nullptr,
                        bool validate_stages = false,
-                       StageValidity stage_validity = {})
+                       StageValidity stage_validity = {},
+                       int rkl_max_stages = 0)
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)), m_rtol(rtol), m_atol(atol),
           m_safety(safety), m_max_growth(max_growth),
           m_max_attempts(max_attempts), m_err_mask(err_mask), m_aux(auxiliary),
           m_validate_stages(validate_stages),
-          m_stage_validity(std::move(stage_validity)) {}
+          m_stage_validity(std::move(stage_validity)),
+          m_rkl_max_stages(rkl_max_stages)
+    {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            rkl_max_stages == 0 || rkl_max_stages >= 2,
+            "RKL2 maximum stage count must be zero (unlimited) or >= 2");
+    }
 
     /** Advance y in place from t = 0 to t_end. y's ghost refresh is the
      *  RHS functor's job; on return y's ghosts are stale. */
@@ -389,7 +396,17 @@ public:
                   m_safety * dt_expl * 0.25_rt *
                       (amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt));
           }
-          // Recorded after the budget clamp, so it reports the stage
+          // Optional temporal refinement: bound each complete super-step,
+          // shorten tau consistently, then integrate the remaining interval.
+          // This changes neither the RHS nor the total requested time. A
+          // stage cap is not an SSP or positivity guarantee.
+          if (m_rkl_max_stages > 0 && s > m_rkl_max_stages) {
+              s = m_rkl_max_stages;
+              tau = amrex::min(
+                  tau, m_safety * dt_expl * 0.25_rt *
+                           (amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt));
+          }
+          // Recorded after both clamps, so it reports the stage
           // count actually taken rather than the one requested.
           st.s_max = std::max(st.s_max, s);
 
@@ -835,6 +852,7 @@ private:
     mutable std::unique_ptr<amrex::ReduceData<int>> m_finite_data;
     bool m_validate_stages = false;
     StageValidity m_stage_validity;
+    int m_rkl_max_stages = 0;
     mutable amrex::Vector<amrex::Real> m_aux_entry, m_aux0, m_auxjm2;
     mutable amrex::Vector<amrex::Vector<amrex::Real>> m_aux_k;
     mutable amrex::Real m_last_cap = 0.0, m_required_cap = 0.0;

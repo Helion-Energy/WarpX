@@ -2812,6 +2812,12 @@ public:
      *  error-adaptive on top of the stability ceiling. Input:
      *  qdsmc_conduction_fd_time = ssprk2 | rkf45 | rkl2. */
     int m_cond_fd_time = 0;
+    /** Optional limit on the stages in each RKL2 super-step. Zero preserves
+     * the existing unlimited selection; values >= 2 shorten super-steps and
+     * integrate the remainder within the unchanged total attempts budget.
+     * This is temporal refinement, not an SSP or positivity guarantee.
+     * Input: qdsmc_conduction_rkl_max_stages. */
+    int m_cond_rkl_max_stages = 0;
     /** FD adaptive-integrator error tolerances (weighted max-norm,
      *  accept at err <= 1): relative and absolute [K]. Inputs:
      *  qdsmc_conduction_fd_rtol / _atol. */

@@ -106,6 +106,43 @@ main (int argc, char** argv) {
             AMREX_ALWAYS_ASSERT(st.failure && st.t_done == 0.0 &&
                                 heat.value[0] == 7.0 && st.n_attempts == 0);
         }
+        // Refining complete RKL super-steps must cover the whole interval,
+        // conserve the passive loss account, and approach analytic decay.
+        for (int const stage_cap : {2, 8}) {
+            y.setVal(1.0);
+            RK::Auxiliary heat{{0.0}, {0.0}};
+            auto rhs = [&] (amrex::MultiFab& state, amrex::MultiFab& k) {
+                heat.rate[0] = state.min(0);
+                amrex::MultiFab::Copy(k, state, 0, 0, 1, 0);
+                k.mult(-1.0);
+            };
+            RK rk(RK::Scheme::RKL2, rhs, [] () { return 0.001; },
+                  1.e-6, 1.e-10, 0.9, 2.0, 100000, {}, nullptr, &heat,
+                  true, {}, stage_cap);
+            auto const st = rk.Advance(y, 1.0);
+            AMREX_ALWAYS_ASSERT(!st.failure && std::abs(st.t_done-1.0) < 1.e-12);
+            AMREX_ALWAYS_ASSERT(st.s_max <= stage_cap && st.n_attempts > stage_cap);
+            AMREX_ALWAYS_ASSERT(std::abs(y.min(0)-std::exp(-1.0)) < 1.e-5);
+            AMREX_ALWAYS_ASSERT(std::abs(y.min(0)-1.0+heat.value[0]) < 1.e-11);
+            amrex::Print() << "RK_STAGE_CAP_PASS cap=" << stage_cap
+                << " stages=" << st.n_attempts << " error="
+                << std::abs(y.min(0)-std::exp(-1.0)) << "\n";
+        }
+        // A cap must not turn exhausted attempts into false completion;
+        // provisional auxiliary energy is restored on the incomplete call.
+        {
+            y.setVal(1.0);
+            RK::Auxiliary heat{{7.0}, {0.0}};
+            auto rhs = [&] (amrex::MultiFab&, amrex::MultiFab& k) {
+                k.setVal(-1.0); heat.rate[0] = 1.0;
+            };
+            RK rk(RK::Scheme::RKL2, rhs, [] () { return 0.001; },
+                  1.e-6, 1.e-10, 0.9, 2.0, 3, {}, nullptr, &heat,
+                  true, {}, 2);
+            auto const st = rk.Advance(y, 1.0);
+            AMREX_ALWAYS_ASSERT(st.failure && st.t_done < 1.0 &&
+                                st.n_attempts <= 3 && heat.value[0] == 7.0);
+        }
         amrex::Print() << "RK_ACCOUNTING_PASS\n";
     }
     amrex::Finalize();
