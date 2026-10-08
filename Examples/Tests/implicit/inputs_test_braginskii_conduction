@@ -150,3 +150,6 @@ hybrid_pic_model.qdsmc_conduction_fixed_coulomb_log = 10
 hybrid_pic_model.qdsmc_conduction_fd_limiter = none
 hybrid_pic_model.qdsmc_conduction_fd_order = 4
 hybrid_pic_model.qdsmc_conduction_fd_time = ssprk2
+
+hybrid_pic_model.qdsmc_conduction_flux_limit_factor = 0
+hybrid_pic_model.qdsmc_conduction_vacuum_fast_front = 0

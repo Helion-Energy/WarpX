@@ -21,8 +21,8 @@ flux(amrex::Real r, amrex::Real z, int mode) {
     amrex::Real const tr=-10*twopi*std::sin(twopi*r)*std::cos(twopi*z)*PhysConst::q_e/PhysConst::kb;
     amrex::Real const tz=-10*twopi*std::cos(twopi*r)*std::sin(twopi*z)*PhysConst::q_e/PhysConst::kb;
     // null: divergence-free poloidal field with null at (r=0,z=0.5).
-    amrex::Real const br=mode==0?0.0:mode==1?0.00006:0.001*r;
-    amrex::Real const bz=mode==0?0.0:mode==1?0.00008:0.001*(1-2*z);
+    amrex::Real const br=mode==0?0.0:mode==1?0.00006:mode==3?0.06:0.001*r;
+    amrex::Real const bz=mode==0?0.0:mode==1?0.00008:mode==3?0.08:0.001*(1-2*z);
     amrex::Real const b2=br*br+bz*bz;
     amrex::Real const tau=3.44e5*std::pow(T,1.5)/(3.e15*10.0);
     amrex::Real const x2=std::pow(PhysConst::q_e*tau/PhysConst::m_e,2)*b2;
@@ -49,19 +49,24 @@ int main(int argc,char** argv) {
         auto& te=*sim.m_fields.get(FieldType::hybrid_electron_temperature_fp,0);
         auto& rho=*sim.m_fields.get(FieldType::rho_fp,0);
         auto const& geom=sim.Geom(0); auto dx=geom.CellSizeArray(); auto plo=geom.ProbLoArray();
-        int mode=0; amrex::Real capfactor=1;
-        amrex::ParmParse pp("physical_test");pp.query("mode",mode);pp.query("capacity_factor",capfactor);
+        int mode=0, legs=0; amrex::Real capfactor=1;
+        amrex::ParmParse pp("physical_test");pp.query("mode",mode);pp.query("capacity_factor",capfactor);pp.query("legs",legs);
         hp.m_qdsmc_n_floor=3.e21*capfactor;
         hp.m_qdsmc_halo_unfreeze=true;
         hp.m_cond_te_floor=0;
         for(int d=0;d<AMREX_SPACEDIM;++d)for(int s=0;s<2;++s)hp.m_cond_bc[d][s]=0;
+        if (legs) {
+            hp.m_cond_bc[1][0]=3; hp.m_cond_bc[1][1]=3;
+            hp.m_cond_leg_length=.25; hp.m_cond_leg_Te_wall=.5;
+            hp.m_cond_leg_flux_limit=0;
+        }
         for(int d=0;d<3;++d){
             auto& f=*sim.m_fields.get(FieldType::Bfield_fp,ablastr::fields::Direction{d},0);
             amrex::Real const ro=f.ixType().nodeCentered(0)?0:.5, zo=f.ixType().nodeCentered(1)?0:.5;
             for(amrex::MFIter mfi(f);mfi.isValid();++mfi){auto a=f.array(mfi);
                 amrex::ParallelFor(mfi.fabbox(),[=] AMREX_GPU_DEVICE(int i,int j,int k){
                     amrex::Real const r=plo[0]+(i+ro)*dx[0],z=plo[1]+(j+zo)*dx[1];
-                    a(i,j,k)=d==0?(mode==0?0:mode==1?.00006:.001*r):d==2?(mode==0?0:mode==1?.00008:.001*(1-2*z)):0;
+                    a(i,j,k)=d==0?(mode==0?0:mode==1?.00006:mode==3?.06:.001*r):d==2?(mode==0?0:mode==1?.00008:mode==3?.08:.001*(1-2*z)):0;
                 });
             }
         }
@@ -72,14 +77,15 @@ int main(int argc,char** argv) {
         amrex::MultiFab initial(te.boxArray(),te.DistributionMap(),1,te.nGrowVect());
         amrex::MultiFab::Copy(initial,te,0,0,1,te.nGrowVect());
         amrex::MultiFab result(te.boxArray(),te.DistributionMap(),3,0);
-        auto const c=EvaluateBraginskiiConductivity(3.e21,1010,0,1.e5,10);
-        amrex::Real const dt=.005*dx[0]*dx[0]/(c.parallel_physical/(1.5*3.e21*capfactor*PhysConst::kb));
-        amrex::Real residual=0;int stages=0;
+        auto const c=EvaluateBraginskiiConductivity(3.e21,1010,mode==3?.1:0,1.e5,10);
+        amrex::Real const dt=.005*dx[0]*dx[0]/(c.parallel_used/(1.5*3.e21*capfactor*PhysConst::kb));
+        amrex::Real residual=0, outward=0;int stages=0;
         for(int n=0;n<3;++n){
             amrex::MultiFab::Copy(te,initial,0,0,1,te.nGrowVect());
             hp.QdsmcConductionOnceFDAtState(0,dt/std::pow(2,n),true,rho,0);
             auto const& rep=hp.m_cond_last_report;
-            residual=amrex::max(residual,std::abs(rep.residual)/rep.energy_before[0]);stages+=rep.accepted;
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(mode!=3 || rep.parallel_capped_nodes>0,"Native parallel cap was not exercised");
+            residual=amrex::max(residual,std::abs(rep.residual)/rep.energy_before[0]);stages+=rep.accepted;for(auto q:rep.outward_heat)outward+=q;
             amrex::MultiFab::Copy(result,te,0,n,1,0);
         }
         auto own=amrex::OwnerMask(te,geom.periodicity());
@@ -100,8 +106,9 @@ int main(int argc,char** argv) {
         amrex::ParallelDescriptor::ReduceRealSum(sums,3);
         amrex::Print()<<"PHYSICAL_OPERATOR mode="<<mode<<" n="<<geom.Domain().length(0)<<" capacity_factor="<<capfactor
           <<" relative_L2="<<std::sqrt(sums[0]/sums[1])<<" temporal_sensitivity="<<std::sqrt(sums[2]/sums[1])
-          <<" energy_residual="<<residual<<" stages="<<stages<<" min_Te_K="<<te.min(0)<<"\n";
+          <<" leg_heat_J="<<outward<<" energy_residual="<<residual<<" stages="<<stages<<" min_Te_K="<<te.min(0)<<"\n";
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::sqrt(sums[0]/sums[1])<.03 && residual<1.e-11 && te.min(0)>0,"Physical continuum/conservation test failed");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!legs || outward>0,"Physical leg flux was not exercised");
         WarpX::Finalize();
     }
     warpx::initialization::finalize_external_libraries();
