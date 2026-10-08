@@ -23,5 +23,10 @@ struct QdsmcConductionReport {
     // and closed subset. Subsets are not extra reservoirs.
     std::array<amrex::Real, 6> energy_before{}, energy_after{};
     amrex::Real residual = 0.0;
+    // Sampled valid owned open nodes, final accepted state, every configured interval.
+    // n_phys, n_capacity [m^-3], chi_perp, chi_par_phys, chi_par_used [m^2/s], Hall.
+    bool physical_coefficients_sampled = false;
+    std::array<amrex::Real, 6> coefficient_min{}, coefficient_max{};
+    amrex::Real coefficient_nodes = 0.0, parallel_capped_nodes = 0.0;
 };
 #endif

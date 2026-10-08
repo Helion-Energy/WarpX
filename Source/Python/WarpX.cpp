@@ -417,6 +417,11 @@ void init_WarpX (py::module& m)
                 out["energy_before_J"] = r.energy_before;
                 out["energy_after_J"] = r.energy_after;
                 out["residual_J"] = r.residual;
+                out["physical_coefficients_sampled"] = r.physical_coefficients_sampled;
+                out["coefficient_min"] = r.coefficient_min;
+                out["coefficient_max"] = r.coefficient_max;
+                out["coefficient_nodes"] = r.coefficient_nodes;
+                out["parallel_capped_nodes"] = r.parallel_capped_nodes;
                 return out;
             },
             "Last successful FD conduction call; heat in joules, physical heat "

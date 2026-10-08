@@ -4,6 +4,7 @@
 #ifndef WARPX_QDSMC_CONDUCTION_BOUNDARY_H_
 #define WARPX_QDSMC_CONDUCTION_BOUNDARY_H_
 #include "Utils/WarpXConst.H"
+#include "BraginskiiConductivity.H"
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
@@ -17,14 +18,19 @@
 struct QdsmcConductionLeg {
     amrex::ParserExecutor<3> kappa;
     amrex::Real length, reservoir, eta, speed_coefficient, time;
+    bool physical = false;
+    amrex::Real max_anisotropy = 1.e5, fixed_log = 0.0;
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
     flux (amrex::Real const tb, amrex::Real const neff,
-          amrex::Real const ncap) const {
+          amrex::Real const ncap, amrex::Real const nphys = 0.0,
+          amrex::Real const B = 0.0) const {
         amrex::Real const t = amrex::max(tb, amrex::Real(0.0));
-        amrex::Real const conductivity =
-            amrex::max(kappa(ncap, t * PhysConst::kb / PhysConst::q_e, time),
-                       amrex::Real(0.0));
+        amrex::Real const conductivity = physical
+            ? EvaluateBraginskiiConductivity(nphys, t * PhysConst::kb / PhysConst::q_e,
+                                             B, max_anisotropy, fixed_log).parallel_used
+            : amrex::max(kappa(ncap, t * PhysConst::kb / PhysConst::q_e, time),
+                         amrex::Real(0.0));
         amrex::Real const q =
             conductivity * amrex::max(t - reservoir, amrex::Real(0.0)) / length;
         amrex::Real const cap =
@@ -40,11 +46,12 @@ struct QdsmcConductionLeg {
      */
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
     slope (amrex::Real const tb, amrex::Real const neff, amrex::Real const ncap,
-           amrex::Real const q) const {
+           amrex::Real const q, amrex::Real const nphys = 0.0,
+           amrex::Real const B = 0.0) const {
         amrex::Real const scale = amrex::max(std::abs(tb), amrex::Real(1.0));
         amrex::Real const h = amrex::Real(1.e-5) * scale;
-        amrex::Real const qp = flux(tb + h, neff, ncap);
-        amrex::Real const qm = flux(tb - h, neff, ncap);
+        amrex::Real const qp = flux(tb + h, neff, ncap, nphys, B);
+        amrex::Real const qm = flux(tb - h, neff, ncap, nphys, B);
         amrex::Real const secant = tb > reservoir ? q / (tb - reservoir) : 0.0;
         return 2.0 *
                amrex::max(secant,

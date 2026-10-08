@@ -10,6 +10,7 @@
  */
 
 #include "HybridPICModel.H"
+#include "BraginskiiConductivity.H"
 #include "HybridSourceCheck.H"
 
 #include "BraginskiiViscosity.H"
@@ -833,7 +834,31 @@ void HybridPICModel::ReadParameters ()
     // tensor always ships, kappa_perp = 0 is just the trivial setting).
     m_include_thermal_conduction =
         pp_hybrid.query("qdsmc_kappa_par(n,Te,t)", m_kappa_par_expression);
-    pp_hybrid.query("qdsmc_kappa_perp(n,Te,t)", m_kappa_perp_expression);
+    bool const has_perp_parser =
+        pp_hybrid.query("qdsmc_kappa_perp(n,Te,t)", m_kappa_perp_expression);
+    std::string conduction_model = "parser";
+    pp_hybrid.query("qdsmc_conduction_model", conduction_model);
+    if (conduction_model == "braginskii_z1") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_include_thermal_conduction && !has_perp_parser,
+            "braginskii_z1 conflicts with conductivity parsers; remove both parsers");
+        m_cond_model = 1;
+        m_include_thermal_conduction = true;
+    } else {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(conduction_model == "parser",
+            "qdsmc_conduction_model must be parser or braginskii_z1");
+    }
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_max_anisotropy",
+                                   m_cond_max_anisotropy);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_fixed_coulomb_log",
+                                   m_cond_fixed_coulomb_log);
+    pp_hybrid.query("qdsmc_conduction_coefficient_interval", m_cond_coefficient_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(m_cond_max_anisotropy) && m_cond_max_anisotropy >= 1.0_rt &&
+        std::isfinite(m_cond_fixed_coulomb_log) &&
+        (m_cond_fixed_coulomb_log == 0.0_rt || m_cond_fixed_coulomb_log >= 2.0_rt) &&
+        m_cond_coefficient_interval > 0,
+        "physical conduction requires finite anisotropy>=1, log=0 or >=2, interval>0");
     pp_hybrid.query("qdsmc_conduction_isotropic", m_cond_isotropic);
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_iso_B",
                                    m_cond_iso_B);
@@ -978,6 +1003,21 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.qdsmc_conduction_max_hop must be positive");
     pp_hybrid.query("qdsmc_conduction_vacuum_fast_front",
                     m_cond_vacuum_fast_front);
+
+    if (m_cond_model == 1) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_operator == 1 && m_cond_chi_max == 0.0_rt &&
+            m_cond_chi_par_max <= 0.0_rt && !m_cond_isotropic &&
+            m_cond_iso_B <= 0.0_rt && m_cond_flux_limit_factor == 0.0_rt &&
+            !m_cond_vacuum_fast_front,
+            "braginskii_z1 requires FD with no legacy chi caps, isotropization, "
+            "bulk flux limiter or vacuum fast front; boundary flux limits remain separate");
+        amrex::Print() << "[qdsmc] physical Z1 Braginskii: real electron mass; "
+            << "physical density excludes pedestal; max anisotropy="
+            << m_cond_max_anisotropy << "; Coulomb log="
+            << (m_cond_fixed_coulomb_log > 0 ? "fixed" : "NRL two-branch (minimum 2)")
+            << " " << m_cond_fixed_coulomb_log << "\n";
+    }
 
     // PHYSICAL Braginskii electron viscosity (energy-BOOKED). Distinct in
     // every way from the hyper-resistivity that shares its grad^2 form --
@@ -2830,6 +2870,8 @@ void HybridPICModel::AuditTransportPrandtl () const
     // nothing that could be wrong.
     if (!m_solve_electron_energy_equation) { return; }
     if (!m_include_electron_viscosity) { return; }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_model == 0,
+        "braginskii_z1 with electron viscosity needs a physical Prandtl audit; unsupported");
     if (!m_include_thermal_conduction) {
         // Same argument, other leg, but worth a line rather than silence: a
         // viscous ceiling with no conduction to balance clamps against
@@ -14060,6 +14102,8 @@ HybridPICModel::ApplyQdsmcConductionLegBC (int const lev, int const d, int const
                                            amrex::MultiFab const& rho,
                                            amrex::Real const t_now) const
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_model == 0,
+        "physical conductivity requires the stage-resolved FD leg boundary");
     // Robin (series-conductance) condition on the boundary node row, see
     // the member doc of m_cond_leg_length. The FD operator is nodal with
     // no node beyond a non-periodic face (face_flux: "outside a
@@ -14408,6 +14452,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     amrex::Real const me = PhysConst::m_e;
     auto const kappa_par_ex  = m_kappa_par;
     auto const kappa_perp_ex = m_kappa_perp;
+    bool const physical_conduction = m_cond_model == 1;
+    amrex::Real const max_anisotropy = m_cond_max_anisotropy;
+    amrex::Real const fixed_log = m_cond_fixed_coulomb_log;
     amrex::Real const n_floor = m_qdsmc_n_floor;
     // Halo unfreeze: the open set becomes every node with n > 0; b_ne (heat
     // capacity, chi, harmonic face density) stays floored at n_floor.
@@ -14482,6 +14529,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         b_open,
         b_ebm,
         b_neff,
+        b_nphys,
         b_ncomp
     };
     amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 3);
@@ -14527,6 +14575,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             b_arr(i,j,k,BNE::b_B2)   = B2;
             b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
             b_arr(i, j, k, BNE::b_neff) = ne_raw;
+            b_arr(i, j, k, BNE::b_nphys) = amrex::max(rho_arr(i,j,k)/qe, 0.0_rt);
             b_arr(i, j, k, BNE::b_open) = (ne_raw > n_open && !covered) ? 1.0_rt : 0.0_rt;
             b_arr(i,j,k,BNE::b_ebm)  = covered ? 0.0_rt : 1.0_rt;
         });
@@ -14611,10 +14660,18 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 amrex::Real const uby = b_arr(i,j,k,BNE::b_by);
                 amrex::Real const ubz = b_arr(i,j,k,BNE::b_bz);
 
-                amrex::Real chi_par =
-                    kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
-                amrex::Real chi_perp = (unmag && !iso_any) ? chi_par :
-                    kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+                amrex::Real chi_par, chi_perp;
+                if (physical_conduction) {
+                    auto const c = EvaluateBraginskiiConductivity(
+                        b_arr(i,j,k,BNE::b_nphys), Te_eV, std::sqrt(B2),
+                        max_anisotropy, fixed_log);
+                    chi_par = c.parallel_used / (1.5_rt * ne * kb);
+                    chi_perp = c.perpendicular / (1.5_rt * ne * kb);
+                } else {
+                    chi_par = kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+                    chi_perp = (unmag && !iso_any) ? chi_par :
+                        kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+                }
                 chi_par  = amrex::max(chi_par,  0.0_rt);
                 chi_perp = amrex::max(chi_perp, 0.0_rt);
 
@@ -14677,7 +14734,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     // parser references Te and the bulk flux limiter is disabled, the tensor
     // and its bulk bound are invariant. Cache only that proven special case;
     // the external leg and its gate still get re-evaluated at every RHS.
-    bool const fixed_tensor = f_lim <= 0.0_rt && m_kappa_par_parser &&
+    bool const fixed_tensor = !physical_conduction && f_lim <= 0.0_rt && m_kappa_par_parser &&
                               m_kappa_perp_parser &&
                               !m_kappa_par_parser->symbols().contains("Te") &&
                               !m_kappa_perp_parser->symbols().contains("Te");
@@ -14690,7 +14747,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     amrex::Real const perp_ceiling = m_cond_chi_max;
     amrex::Real const par_ceiling = m_cond_chi_par_max > 0.0_rt
                                        ? m_cond_chi_par_max : perp_ceiling;
-    bool const tensor_envelope = m_cond_fd_time == 2 && !fixed_tensor &&
+    bool const tensor_envelope = !physical_conduction && m_cond_fd_time == 2 && !fixed_tensor &&
                                  perp_ceiling > 0.0_rt &&
                                  std::isfinite(perp_ceiling) &&
                                  std::isfinite(par_ceiling);
@@ -15477,7 +15534,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         sonic ? m_gamma * kb / WallCapIonMass() : kb / me;
     QdsmcConductionLeg const leg{
         kappa_par_ex,          m_cond_leg_length, m_cond_leg_Te_wall * qe / kb,
-        m_cond_leg_flux_limit, speed_coefficient, t_now};
+        m_cond_leg_flux_limit, speed_coefficient, t_now,
+        physical_conduction, max_anisotropy, fixed_log};
     amrex::Real const gate_temperature = amrex::max(leg.reservoir, te_floor_K);
     // EB ring geometry and prescribed temperature are fixed during this call.
     amrex::MultiFab eb_wall;
@@ -15943,10 +16001,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                                     open ? t(inner[0], inner[1], inner[2]) : tb;
                                 if (source > gate_temperature) {
                                     amrex::Real const q =
-                                        leg.flux(tb, neff, nc);
+                                        leg.flux(tb, neff, nc, b(i,j,k,BNE::b_nphys), std::sqrt(b(i,j,k,BNE::b_B2)));
                                     power[a] = q * av[a] * vol;
                                     stiffness +=
-                                        leg.slope(tb, neff, nc, q) * av[a] / cv;
+                                        leg.slope(tb, neff, nc, q, b(i,j,k,BNE::b_nphys),
+                                                  std::sqrt(b(i,j,k,BNE::b_B2))) * av[a] / cv;
                                 }
                             }
                         }
@@ -16080,6 +16139,44 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     if (!std::isfinite(report.residual)) {
         return fail("nonfinite conduction heat account");
     }
+    if (physical_conduction && warpx.getistep(lev) % m_cond_coefficient_interval == 0) {
+        amrex::Real const huge = std::numeric_limits<amrex::Real>::max();
+        amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpSum, amrex::ReduceOpSum> op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real> data(op);
+        using Tuple = typename decltype(data)::Type;
+        for (MFIter mfi(T_cur, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = T_cur.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const own = thermal_owner->const_array(mfi);
+            op.eval(mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                    if (!own(i,j,k) || b(i,j,k,BNE::b_open) < 0.5_rt) {
+                        return {huge,huge,huge,huge,huge,huge,
+                                -huge,-huge,-huge,-huge,-huge,-huge,0.0_rt,0.0_rt};
+                    }
+                    auto const c = EvaluateBraginskiiConductivity(
+                        b(i,j,k,BNE::b_nphys), t(i,j,k)*kb/qe,
+                        std::sqrt(b(i,j,k,BNE::b_B2)), max_anisotropy, fixed_log);
+                    amrex::Real const nc = b(i,j,k,BNE::b_ne);
+                    amrex::Real const np = b(i,j,k,BNE::b_nphys);
+                    amrex::Real const cp = c.perpendicular/(1.5_rt*nc*kb);
+                    amrex::Real const pp = c.parallel_physical/(1.5_rt*nc*kb);
+                    amrex::Real const pu = c.parallel_used/(1.5_rt*nc*kb);
+                    return {np,nc,cp,pp,pu,c.hall,np,nc,cp,pp,pu,c.hall,
+                            1.0_rt,c.parallel_used < c.parallel_physical ? 1.0_rt : 0.0_rt};
+                });
+        }
+        auto const v = data.value(op);
+        report.coefficient_min = {amrex::get<0>(v), amrex::get<1>(v), amrex::get<2>(v), amrex::get<3>(v), amrex::get<4>(v), amrex::get<5>(v)};
+        report.coefficient_max = {amrex::get<6>(v), amrex::get<7>(v), amrex::get<8>(v), amrex::get<9>(v), amrex::get<10>(v), amrex::get<11>(v)};
+        amrex::ParallelDescriptor::ReduceRealMin(report.coefficient_min.data(),6);
+        amrex::ParallelDescriptor::ReduceRealMax(report.coefficient_max.data(),6);
+        report.coefficient_nodes = amrex::get<12>(v);
+        report.parallel_capped_nodes = amrex::get<13>(v);
+        amrex::ParallelDescriptor::ReduceRealSum(report.coefficient_nodes);
+        amrex::ParallelDescriptor::ReduceRealSum(report.parallel_capped_nodes);
+        report.physical_coefficients_sampled = true;
+    }
     // Commit Te and historical normalized, inward-positive tallies together.
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
@@ -16123,6 +16220,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             }
             out << "]";
         };
+        if (report.physical_coefficients_sampled) {
+            array("coefficient_min", report.coefficient_min);
+            array("coefficient_max", report.coefficient_max);
+            out << ",\"coefficient_nodes\":" << report.coefficient_nodes
+                << ",\"parallel_capped_nodes\":" << report.parallel_capped_nodes;
+        }
         array("outward_heat_J", report.outward_heat);
         array("entry_heat_J", report.entry_heat);
         array("energy_before_J", report.energy_before);

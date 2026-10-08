@@ -2721,6 +2721,12 @@ public:
      * W/(m K)); kappa_perp has its own optional parser and defaults to 0.
      * Only consulted when m_solve_electron_energy_equation is on. */
     bool m_include_thermal_conduction = false;
+    // 0: legacy parser; 1: physical Z1 full-Hall, with only parallel limited.
+    int m_cond_model = 0;
+    amrex::Real m_cond_max_anisotropy = 1.e5;
+    // 0: two-branch NRL log (minimum 2); >0: explicit fixed-log approximation.
+    amrex::Real m_cond_fixed_coulomb_log = 0.0;
+    int m_cond_coefficient_interval = 10;
     /** Isotropic-conduction options (b-hat noise at small |B|; see the
      * QdsmcConductionOnce kernel comment): qdsmc_conduction_isotropic
      * conducts at the cross-field rate everywhere (chi_par := chi_perp, the
