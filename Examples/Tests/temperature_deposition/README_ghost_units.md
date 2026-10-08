@@ -36,8 +36,8 @@ convolves that support with the separable binomial kernel; it never reads deposi
 moment buffers to construct the expected result. This is distinct from assuming
 finite random samples must produce a uniform population temperature.
 
-Qualification receipts and exact reproducible compiler/link/launcher commands:
-`/home/st247c/src/agent_workspace/artifacts/circuit-rz-temperature-bias-20260929/temperature-ghost-units-r01/`.
+Qualification receipts and exact reproducible compiler/link/launcher commands are
+retained with the originating campaign outside the source repository.
 `MATRIX_RAW.json` records52 before/after executions; `ANALYSIS.json` and
 `PARTICLE_ORACLE.json` preserve all criteria and failures. `REBUILD_R03_PASS.json`
 pins final fixture/binaries. `BUILD_PASS.json` pins copied exactcc2RZ and retained
