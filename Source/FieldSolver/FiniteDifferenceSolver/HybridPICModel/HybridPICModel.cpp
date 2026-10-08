@@ -9403,6 +9403,30 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 
 void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
 {
+    // Optional read-only phase maximum probe for low-PPC startup diagnosis.
+    // No clipping, source eligibility changes, or field writes occur here.
+    static int const max_cadence = [] () {
+        char const* s = std::getenv("WARPX_QDSMC_PHASE_MAXTE");
+        if (s == nullptr) { return 0; }
+        char* end = nullptr;
+        long const v = std::strtol(s, &end, 10);
+        return (end != s && v >= 1) ? static_cast<int>(v) : 1;
+    }();
+    if (max_cadence > 0) {
+        auto& wx = WarpX::GetInstance();
+        int const step_max = wx.getistep(lev);
+        if (step_max % max_cadence == 0) {
+            auto const& tmax_field =
+                *wx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+            amrex::Real const mx = tmax_field.max(0);
+            amrex::IntVect const loc_max = tmax_field.maxIndex(0);
+            amrex::Print() << "[qdsmc-phase-maxte] step=" << step_max
+                << " phase=" << phase << " maxTe_eV=" << mx * PhysConst::kb / PhysConst::q_e
+                << " at (" << loc_max[0] << ","
+                << ((AMREX_SPACEDIM > 1) ? loc_max[1] : 0) << ","
+                << ((AMREX_SPACEDIM > 2) ? loc_max[2] : 0) << ")\n";
+        }
+    }
     m_source_guard.Phase(lev, phase, *this);
     // WARPX_QDSMC_PHASE_MINTE=N: per-phase minimum-T_e tracer (see header
     // doc). MultiFab::min/minIndex are collective and device-safe; both
