@@ -68,17 +68,17 @@ int main(int argc, char* argv[]) try
             AMREX_ALWAYS_ASSERT(pc.TotalNumberOfParticles()==0);
             // Axis, radial wall, both axial walls, grid/rank interfaces,
             // exactly/above target, excluded density band, and an empty cell.
-            const std::array<double,10> rs{1e-10,.9999999999,.2,.3,.5000000001,.49,.65,.7,.875,.9};
-            const std::array<double,10> zs{1e-10,.6,.9999999999,1e-10,.49,.5000000001,.65,.7,.25,.9};
-            const std::array<int,10> count{1,2,3,target-1,1+isp,2,target,target+1,1,0};
+            const std::array<double,12> rs{1e-10,.9999999999,.2,.3,.5000000001,.49,.65,.7,.875,.9,0,.5};
+            const std::array<double,12> zs{1e-10,.6,.9999999999,1e-10,.49,.5000000001,.65,.7,.25,.9,.3125,.5625};
+            const std::array<int,12> count{1,2,3,target-1,1+isp,2,target,target+1,1,0,1,1};
             amrex::Vector<amrex::ParticleReal> x,y,z,ux,uy,uz;
             amrex::Vector<amrex::Vector<amrex::ParticleReal>> weight(1);
             std::vector<int> expected_count,cell_r,cell_z;
             std::vector<double> r0,theta0;
-            for (int cell=0; cell<10; ++cell) {
+            for (int cell=0; cell<12; ++cell) {
                 for (int n=0; n<count[cell]; ++n) {
                     const int p=static_cast<int>(x.size());
-                    const double theta=.13*(p%11);
+                    const double theta=cell>=10 ? 0 : .13*(p%11);
                     x.push_back(rs[cell]*std::cos(theta)); y.push_back(rs[cell]*std::sin(theta));
                     z.push_back(zs[cell]);
                     ux.push_back(1e5*(p+1)); uy.push_back((p%2?1:-1)*2e5); uz.push_back(3e5);
@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) try
             // towards PPC nor be resurrected by splitting.
             x.push_back(x[0]); y.push_back(y[0]); z.push_back(z[0]);
             ux.push_back(1e5*(valid_parents+1)); uy.push_back(0); uz.push_back(0); weight[0].push_back(1000);
-            pc.AddNParticles(0,static_cast<int>(x.size()),x,y,z,ux,uy,uz,1,weight,0,{},-1);
+            pc.AddNParticles(0,static_cast<int>(x.size()),x,y,z,ux,uy,uz,1,weight,0,{},0,-1);
             for (WarpXParIter pti(pc,0); pti.isValid(); ++pti) {
                 const auto a=pti.GetParticleTile().getParticleTileData();
                 amrex::ParallelFor(pti.numParticles(),[=] AMREX_GPU_DEVICE(int i) {
