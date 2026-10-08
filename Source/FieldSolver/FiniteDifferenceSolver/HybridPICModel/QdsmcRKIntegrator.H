@@ -402,8 +402,12 @@ public:
           // stage cap is not an SSP or positivity guarantee.
           if (m_rkl_max_stages > 0 && s > m_rkl_max_stages) {
               s = m_rkl_max_stages;
+              // Leave the configured safety margin BELOW the current
+              // ceiling also after validation divides by m_safety. At
+              // exact saturation, even a tiny nonlinear coefficient
+              // increase invalidates the very next stage.
               tau = amrex::min(
-                  tau, m_safety * dt_expl * 0.25_rt *
+                  tau, m_safety * m_safety * dt_expl * 0.25_rt *
                            (amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt));
           }
           // Recorded after both clamps, so it reports the stage

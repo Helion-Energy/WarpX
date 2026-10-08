@@ -128,6 +128,24 @@ main (int argc, char** argv) {
                 << " stages=" << st.n_attempts << " error="
                 << std::abs(y.min(0)-std::exp(-1.0)) << "\n";
         }
+        // A capped super-step needs headroom for coefficients that evolve
+        // during its stages. Exact ceiling saturation fails after one stage
+        // even for this tiny change; do not relax the stage validation.
+        {
+            y.setVal(1.0);
+            int calls = 0;
+            auto rhs = [&] (amrex::MultiFab&, amrex::MultiFab& k) {
+                ++calls; k.setVal(-1.0);
+            };
+            RK rk(RK::Scheme::RKL2, rhs,
+                  [&] () { return calls == 1 ? 0.001 : 0.001*(1.0-1.e-8); },
+                  1.e-6, 1.e-10, 0.9, 2.0, 10000, {}, nullptr, nullptr,
+                  true, {}, 8);
+            auto const st = rk.Advance(y, 0.1);
+            AMREX_ALWAYS_ASSERT(!st.failure && std::abs(st.t_done-0.1) < 1.e-12);
+            AMREX_ALWAYS_ASSERT(std::abs(y.min(0)-0.9) < 1.e-12 && st.s_max <= 8);
+            amrex::Print() << "RK_STAGE_CAP_EVOLVING_CEILING_PASS\n";
+        }
         // A cap must not turn exhausted attempts into false completion;
         // provisional auxiliary energy is restored on the incomplete call.
         {
