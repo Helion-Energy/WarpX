@@ -3250,8 +3250,10 @@ class MCCCollisions(CollisionBase):
     background_temperature: float | str = Field(
         description="The temperature of the background. An string expression as a function of (x, y, z, t) can be used."
     )
-    scattering_processes: dict[str, dict[str, Species | int | float | str]] = Field(
-        description="The scattering process to use and any needed information. Each entry of a process's dictionary is written as ``<collision>.<process>_<key>``, so any per-process input parameter can be given here, e.g. ``cross_section``, ``energy``, ``scattering_angle_model``, ``scattering_anisotropy``, and for ``ionization`` also ``energy_sharing``, ``opal_w`` and ``secondary_angle_model``."
+    scattering_processes: dict[
+        str, dict[str, Species | int | float | str | list[Species | str]]
+    ] = Field(
+        description="The scattering process to use and any needed information. Each entry of a process's dictionary is written as ``<collision>.<process>_<key>``, so any per-process input parameter can be given here, e.g. ``cross_section``, ``energy``, ``scattering_angle_model``, ``scattering_anisotropy``, and for ``ionization`` also ``energy_sharing``, ``opal_w`` and ``secondary_angle_model``. A ``two_product_reaction`` (or ``two_product_reaction_<name>``) given ``product_species`` (two species) changes the projectile's species: it and a background particle become the two products, with the reaction energy minus ``energy`` released in the centre-of-mass frame, and ``background_consumed`` (default 1) background particles are removed per event when the background depletes. An excitation or two-product process given ``fragment_species`` (two species, possibly the same) breaks the background particle (``fragmenting = 'target'``, the default) or the projectile (``'projectile'``) into them, after the pair scatters paying ``energy``; the fragments share ``fragment_energy`` (eV) back to back. With ``ejected_species`` the projectile also ejects an electron into it (dissociative ionization), the two sharing what is left equally or by Opal's law with width ``ejected_opal_w`` (eV). A fragmenting projectile given ``recoil_species`` also turns the recoiling background particle into a particle of that species (a charge transfer that breaks the projectile); the masses must balance over all three products."
     )
     background_mass: float | None = Field(
         default=None,
@@ -3321,6 +3323,10 @@ class MCCCollisions(CollisionBase):
             for key, val in kw.items():
                 if key == "species":
                     val = val.name
+                elif key in ("product_species", "fragment_species"):
+                    val = [getattr(v, "name", v) for v in val]
+                elif key in ("ejected_species", "recoil_species"):
+                    val = getattr(val, "name", val)
                 collision.add_new_attr(process + "_" + key, val)
 
 

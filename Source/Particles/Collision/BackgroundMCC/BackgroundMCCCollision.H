@@ -107,7 +107,84 @@ public:
                                  amrex::Real t
                                  );
 
+    /** Perform the background reactions of one kind
+     *
+     * The projectile and a background molecule become two particles of the
+     * product species, with the process's angle model and reaction energy
+     * applied in the centre-of-mass frame. The projectile is removed, and
+     * the consumed background molecules are deposited into the depletion
+     * accumulator.
+     *
+     * @param[in] lev the mesh-refinement level
+     * @param[in,out] cost pointer to (load balancing) cost
+     * @param[in,out] species1 the projectile species
+     * @param[in] ir index of the reaction in m_reactions
+     * @param[in,out] product1,product2 containers receiving the products
+     * @param[in,out] ejected container receiving ejected electrons, or nullptr
+     * @param t current time
+     */
+    void doBackgroundReaction (
+        int lev, amrex::LayoutData<amrex::Real>* cost,
+        WarpXParticleContainer& species1, int ir,
+        WarpXParticleContainer& product1, WarpXParticleContainer& product2,
+        WarpXParticleContainer* ejected, amrex::Real t);
+
 private:
+
+    /** A background reaction: a pass of its own that creates particles.
+     *
+     *  Three modes, all set per process in the inputs:
+     *  - exchange: a `two_product_reaction[_<name>]` given
+     *    `<process>_product_species = A B`. The projectile and a background
+     *    molecule become A + B; the projectile is removed.
+     *  - fragment the target: any excitation or two-product process given
+     *    `<process>_fragment_species = A B` (A and B may be the same species).
+     *    The projectile scatters, paying `<process>_energy`; the molecule
+     *    breaks into A + B, which share `<process>_fragment_energy` back to
+     *    back about the molecule's post-collision velocity.
+     *    With `<process>_ejected_species = E` the projectile also ejects an
+     *    electron into E (dissociative ionization); the two electrons share
+     *    what is left after the cost, equally or by `<process>_ejected_opal_w`.
+     *  - fragment the projectile: the same with
+     *    `<process>_fragmenting = projectile`. The projectile breaks into A + B;
+     *    the molecule recoils and stays part of the background, or, with
+     *    `<process>_recoil_species = R`, leaves it as a particle of R (a charge
+     *    transfer that breaks the projectile: D3+ + D2 -> D + D2 + D2+). The
+     *    masses must balance over all three products.
+     *  Fragmentation channels with the same products and mode share one pass
+     *  (one majorant over their summed cross sections; each event picks its
+     *  channel in proportion to its cross section), as ionization channels
+     *  do. Without these keys a process keeps its historical meaning. */
+    static constexpr int ReactionExchange = 0;
+    static constexpr int FragmentTarget = 1;
+    static constexpr int FragmentProjectile = 2;
+    struct BackgroundReaction {
+        /** The channels: one for an exchange, every fragmentation channel with
+         *  the same products and mode otherwise */
+        amrex::Vector<ScatteringProcess> m_process;
+        amrex::Vector<std::string> m_channel_names;
+        amrex::Gpu::DeviceVector<ScatteringProcess::Executor> m_exe;
+        /** Kinetic energy release of each channel's fragments, eV */
+        amrex::Vector<amrex::ParticleReal> m_fragment_energy_h;
+        amrex::Gpu::DeviceVector<amrex::ParticleReal> m_fragment_energy;
+        /** The third product's species, empty for none. Target fragmentation:
+         *  an electron the projectile ejects (dissociative ionization); the
+         *  energy left after the cost is shared between the two electrons,
+         *  equally or, per channel, by Opal's law with width w (eV).
+         *  Projectile fragmentation: the recoiling molecule. */
+        std::string m_ejected_species;
+        amrex::Vector<amrex::ParticleReal> m_opal_w_h;
+        amrex::Gpu::DeviceVector<amrex::ParticleReal> m_opal_w;
+        int m_mode = ReactionExchange;
+        std::string m_product_species[2];
+        /** Background molecules consumed per event (deposited as depletion) */
+        int m_background_consumed = 1;
+        amrex::ParticleReal m_product_mass[2] = {0, 0};
+        amrex::ParticleReal m_third_mass = 0;
+        amrex::ParticleReal m_nu_max = 0;
+        amrex::ParticleReal m_total_collision_prob = 0;
+    };
+    amrex::Vector<BackgroundReaction> m_reactions;
 
     amrex::Vector<ScatteringProcess> m_scattering_processes;
     amrex::Vector<ScatteringProcess> m_ionization_processes;
