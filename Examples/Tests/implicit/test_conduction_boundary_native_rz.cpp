@@ -280,6 +280,26 @@ int main (int argc, char** argv)
                     dt = std::numeric_limits<amrex::Real>::denorm_min();
                     expect_failure = true;
                 }
+            } else if (mode == "hot_bath") {
+                hp.m_cond_bc_Te[0][1] = 500.0;
+                hp.m_cond_bc[1][1] = 0;
+            } else if (mode == "temperature_upper" || mode == "temperature_lower" ||
+                       mode == "temperature_final" || mode == "temperature_budget" ||
+                       mode == "temperature_nonfinite" || mode == "temperature_late") {
+                // Keep a uniform physical solution; inject a provisional stage
+                // after its cap check. Every public tally must remain atomic.
+                hp.m_cond_bc[0][1] = 0;
+                hp.m_cond_bc[1][1] = 0;
+                te.setVal(100.0 * kelvin);
+                hp.m_cond_te_floor_mask = true;
+                bool const final = mode == "temperature_final" || mode == "temperature_budget";
+                bool const late = mode == "temperature_late";
+                hp.m_cond_rkl_max_stages = final || late ? 2 : 8;
+                setenv("WARPX_TEST_COND_STATE_AT", final ? "2" : "5", 1);
+                setenv("WARPX_TEST_COND_STATE_K", mode == "temperature_lower" ? "-1000000" :
+                    (mode == "temperature_nonfinite" ? "inf" : "1000000000"), 1);
+                if (mode == "temperature_budget") { hp.m_cond_fd_max_subcycles = 2; }
+                expect_failure = mode == "temperature_budget" || mode == "temperature_nonfinite";
             } else if (mode == "gate_retry") {
                 hp.m_cond_bc[0][1] = 0;
                 hp.m_cond_leg_length = 1.e-6;
@@ -353,6 +373,26 @@ int main (int argc, char** argv)
             if (mode == "gate_retry") {
                 AMREX_ALWAYS_ASSERT(ok && report.retries > 0 && report.rejected_work > 0);
             }
+            if (mode.rfind("temperature_", 0) == 0) {
+                unsetenv("WARPX_TEST_COND_STATE_AT");
+                unsetenv("WARPX_TEST_COND_STATE_K");
+                if (mode == "temperature_nonfinite") {
+                    AMREX_ALWAYS_ASSERT(!ok && report.admissibility_retries == 0);
+                    AMREX_ALWAYS_ASSERT(report.failure.find("nonfinite") != std::string::npos);
+                } else {
+                    AMREX_ALWAYS_ASSERT(report.admissibility_retries == 1 && report.retries == 1);
+                    AMREX_ALWAYS_ASSERT(report.rejected_work ==
+                        (mode == "temperature_final" || mode == "temperature_budget" ? 2 :
+                         (mode == "temperature_late" ? 1 : 5)));
+                    if (!expect_failure) {
+                        AMREX_ALWAYS_ASSERT(ok && report.completed_time == dt);
+                        AMREX_ALWAYS_ASSERT(std::abs(te.min(0)/kelvin-100.0) < 1.e-7 &&
+                                            std::abs(te.max(0)/kelvin-100.0) < 1.e-7);
+                        AMREX_ALWAYS_ASSERT(report.floor_heat == 0.0 && report.floor_raw_heat == 0.0 &&
+                                            report.floor_count == 0.0);
+                    }
+                }
+            }
             if (expect_failure) {
                 AMREX_ALWAYS_ASSERT(!ok);
                 amrex::MultiFab::Subtract(before, te, 0, 0, 1, te.nGrowVect());
@@ -392,6 +432,12 @@ int main (int argc, char** argv)
                         std::abs(independent_after - report.energy_after[0]) <=
                         256 * std::numeric_limits<amrex::Real>::epsilon() *
                             std::abs(independent_after));
+                }
+                if (mode == "hot_bath") {
+                    AMREX_ALWAYS_ASSERT(te.max(0)/kelvin <= 500.0 + 1.e-8);
+                    AMREX_ALWAYS_ASSERT(te.min(0)/kelvin >= 2.0 - 1.e-8);
+                    AMREX_ALWAYS_ASSERT(report.entry_heat[1] > 0.0 &&
+                                        report.admissibility_retries == 0);
                 }
                 if (mode == "growth_capped") {
                     amrex::Real const imposed = 1.e10 * 2*MathConst::pi*phi[0] *

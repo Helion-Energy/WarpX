@@ -16,7 +16,10 @@ struct QdsmcConductionReport {
     std::string failure;
     amrex::Real requested_time = 0.0, completed_time = 0.0;
     int attempts = 0, accepted = 0, s_max = 0;
-    int retries = 0, rejected_work = 0;
+    int retries = 0, rejected_work = 0, admissibility_retries = 0;
+    // Last finite rejected stage; bounds include reservoirs and imposed fluxes.
+    amrex::Real rejected_temperature_min = 0.0, rejected_temperature_max = 0.0;
+    amrex::Real temperature_bound_min = 0.0, temperature_bound_max = 0.0;
     amrex::Real attempted_dt = 0.0, required_cap = 0.0, observed_cap = 0.0;
     amrex::Real rejected_dt = 0.0, rejected_required_cap = 0.0, rejected_observed_cap = 0.0;
     std::array<amrex::Real, 7> outward_heat{};

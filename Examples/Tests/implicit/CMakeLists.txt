@@ -1135,7 +1135,23 @@ if(TARGET lib_rz)
         set_tests_properties(test_rz_qdsmc_rkl_retry_mpi PROPERTIES
             TIMEOUT 120 PROCESSORS 2 ENVIRONMENT "OMP_NUM_THREADS=1")
     endif()
+    add_executable(test_qdsmc_rkl_admissibility test_qdsmc_rkl_admissibility.cpp)
+    target_link_libraries(test_qdsmc_rkl_admissibility PRIVATE lib_rz)
+    target_include_directories(test_qdsmc_rkl_admissibility PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_qdsmc_rkl_admissibility)
+    endif()
+    add_test(NAME test_rz_qdsmc_rkl_admissibility COMMAND test_qdsmc_rkl_admissibility)
+    set_tests_properties(test_rz_qdsmc_rkl_admissibility PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+    if(WarpX_MPI AND AMReX_GPU_BACKEND STREQUAL "NONE")
+        add_test(NAME test_rz_qdsmc_rkl_admissibility_mpi
+            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_qdsmc_rkl_admissibility> ${MPIEXEC_POSTFLAGS})
+        set_tests_properties(test_rz_qdsmc_rkl_admissibility_mpi PROPERTIES
+            TIMEOUT 120 PROCESSORS 2 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endif()
     foreach(mode IN ITEMS pinned entry floor_equal floor_invalid conflict budget corner floor retry_floor retry_budget retry_underflow
+                          temperature_upper temperature_lower temperature_final temperature_budget temperature_nonfinite temperature_late hot_bath
                           gate_retry growth_failure growth_capped nonfinite_rhs density_cap density_closed capped_wall ghost eb_invalid eb_equal eb_capped pedestal)
         set(extra_options)
         set(boundary_dt 1.e-7)
@@ -1146,6 +1162,8 @@ if(TARGET lib_rz)
         if(mode MATCHES "^density_")
             set(boundary_dt 1.e-10)
             list(APPEND extra_options boundary_test.density=5.e13 hybrid_pic_model.qdsmc_n_floor=1.e14)
+        elseif(mode MATCHES "^temperature_")
+            set(boundary_dt 1.e-5)
         elseif(mode STREQUAL "retry_floor")
             set(boundary_dt 1.e-6)
         elseif(mode STREQUAL "floor" OR mode MATCHES "^retry_")

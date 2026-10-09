@@ -74,3 +74,54 @@ accounting and native conduction tests remain regression gates.
 
 This is numerical recovery within a conduction call, not checkpoint recovery,
 a relaxation of the conduction physics, or a production campaign qualification.
+
+Finite-temperature admissibility
+--------------------------------
+
+RKL conduction also validates every provisional temperature state, including
+its final stage. A finite spectral-ceiling check alone does not establish that
+the temperature trajectory is physically admissible. The check observes the
+minimum after physical boundary constraints but before numerical floor clipping,
+and the maximum after projection. A nonfinite raw state remains a hard failure,
+even if a boundary constraint or floor could conceal it.
+
+A whole-call temperature envelope is frozen after entry boundary projection.
+It includes the initial active temperatures, prescribed wall temperatures, leg
+reservoir/gate temperatures and the configured floor. At elapsed time ``t``, the
+bounds are::
+
+    lower(t) = initial_min - t * max_prescribed_cooling_rate
+    upper(t) = initial_max + t * max_prescribed_heating_rate
+
+The prescribed-flux rates use the same nodal heat capacity and physical wall
+area/volume metric as the RHS, summing positive and negative contributions at
+corners separately before taking global maxima. Thus imposed heat fluxes may
+legitimately drive temperatures outside the initial range. Physical boundary
+reactions and the floor values are unchanged. The envelope is not reset after
+accepted super-steps, so repeated small excursions cannot ratchet up its bounds.
+The roundoff allowance is ``128*epsilon*s*s*max(1 K,abs(lower),abs(upper))`` for
+an ``s``-stage plan; it does not change the spectral-ceiling tolerance.
+
+A finite violation rejects the whole super-step through the existing transaction,
+including all provisional heat, floor energy/count/mask, and accepted-work
+statistics. Duration is halved persistently and the stage plan is recomputed;
+a temperature violation does not invent an observed spectral-ceiling violation.
+The same consecutive-retry and attempted-work budgets apply. Nonfinite state,
+invalid bounds and lack of represented progress remain explicit failures.
+``admissibility_retries`` distinguishes these rejections from ceiling rejections;
+optional reports record the last rejected temperature extrema and their bounds
+in kelvin. The extrema share the existing projection reduction, followed by one
+collective maximum per RKL stage. SSPRK2/RKF45 are unchanged.
+
+``test_rz_qdsmc_rkl_admissibility`` covers finite upper/lower excursions, floor
+concealment, last-stage rejection, repeated rejection, retry/work exhaustion and
+nonfinite priority. Controlled excursions use the 168/168/176-stage plans and
+three temperature-growth ratios from a failed application case; these are
+transaction regressions, not an exact spatial replay. Native temperature tests
+cover MPI-local upper/lower/final/late-stage rejection and failure atomicity.
+Existing imposed-flux/floor cases and ``hot_bath`` check legitimate boundary
+heating/cooling; the conservative-reference and energy-closure gates still apply.
+
+This guard is not an error estimator or a change to the spatial operator. If the
+spatial discretization itself violates the envelope even as duration shrinks,
+the call fails within its finite budgets instead of accepting the excursion.

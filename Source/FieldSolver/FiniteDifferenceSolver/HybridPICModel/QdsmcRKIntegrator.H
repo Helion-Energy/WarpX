@@ -33,6 +33,7 @@ struct QdsmcRKStats
     // includes failed work; accepted and the dt trajectory include only
     // stages belonging to completed super-steps.
     int n_retries = 0, n_rejected_work = 0;
+    int n_admissibility_retries = 0;
     amrex::Real attempted_dt = 0.0;
     amrex::Real rejected_dt = 0.0, rejected_required_cap = 0.0, rejected_observed_cap = 0.0;
     amrex::Real t_done = 0.0;
@@ -138,6 +139,15 @@ public:
         std::function<void ()> restore;
     };
 
+    enum class StageAcceptance { accept, retry, invalid };
+    /** Optional RKL state test after every projected stage, including the last.
+     * elapsed is physical time from Advance entry; stages is the current plan.
+     * The callback may inspect raw-state observations saved by post_step before
+     * projection. Decisions must be identical on all ranks. Finite violations
+     * return retry; nonfinite state or invalid bounds return invalid. */
+    using Admissibility = std::function<StageAcceptance (
+        amrex::MultiFab const&, amrex::Real elapsed, int stages)>;
+
     /** err_mask (optional): cells with a nonzero mask value are excluded
      *  from the error-norm reduction. For states owned by a post-step
      *  projection (e.g. a positivity floor): the projection re-creates a
@@ -158,14 +168,16 @@ public:
                        bool validate_stages = false,
                        StageValidity stage_validity = {},
                        int rkl_max_stages = 0,
-                       AttemptHooks attempt_hooks = {})
+                       AttemptHooks attempt_hooks = {},
+                       Admissibility admissibility = {})
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)), m_rtol(rtol), m_atol(atol),
           m_safety(safety), m_max_growth(max_growth),
           m_max_attempts(max_attempts), m_err_mask(err_mask), m_aux(auxiliary),
           m_validate_stages(validate_stages),
           m_stage_validity(std::move(stage_validity)),
-          m_rkl_max_stages(rkl_max_stages), m_attempt_hooks(std::move(attempt_hooks))
+          m_rkl_max_stages(rkl_max_stages), m_attempt_hooks(std::move(attempt_hooks)),
+          m_admissibility(std::move(admissibility))
     {
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
             rkl_max_stages == 0 || rkl_max_stages >= 2,
@@ -186,6 +198,7 @@ public:
 
         m_failure = nullptr;
         m_stage_cap_failed = false;
+        m_admissibility_failed = false;
         m_required_cap = 0.0_rt;
         m_last_cap = 0.0_rt;
         if (m_validate_stages && !m_stage_validity) {
@@ -511,12 +524,13 @@ public:
                 }
             }
             if (m_post_step) { m_post_step(y, mu_t1*tau); }
+            CheckRKLStage(y, st.t_done + mu_t1*tau, s);
             book(mu_t1*tau);
             amrex::Real c_prev = mu_t1;
             amrex::Real b_jm1 = 1.0_rt/3.0_rt;     // b_1
             amrex::Real b_jm2 = 1.0_rt/3.0_rt;     // b_0
 
-            for (int j = 2; j <= s; ++j) {
+            for (int j = 2; j <= s && !m_failure; ++j) {
                 // y holds Y_{j-1} (with its post-step mutation): evaluate
                 // M(Y_{j-1}) (ghost refresh is the RHS functor's job),
                 // then one fused launch computes Y_j in the exact
@@ -571,6 +585,7 @@ public:
                 }
                 amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
                 if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
+                CheckRKLStage(y, st.t_done + cj*tau, s);
                 book((cj - c_prev)*tau);
                 c_prev = cj;
                 b_jm2 = b_jm1;
@@ -586,8 +601,9 @@ public:
                 }
                 if (m_attempt_hooks.restore) { m_attempt_hooks.restore(); }
                 st.n_rejected_work += st.n_attempts - work_entry;
-                if (!m_stage_cap_failed) { break; }
+                if (!m_stage_cap_failed && !m_admissibility_failed) { break; }
                 ++st.n_retries;
+                if (m_admissibility_failed) { ++st.n_admissibility_retries; }
                 st.rejected_dt = tau;
                 st.rejected_required_cap = m_required_cap;
                 st.rejected_observed_cap = m_last_cap;
@@ -600,9 +616,15 @@ public:
                 // Recompute s using the observed ceiling with headroom; never
                 // relax the stage-validation guard to manufacture acceptance.
                 amrex::Real const margin = amrex::min(0.9_rt, m_safety);
-                retry_cap = amrex::min(retry_cap, margin * m_last_cap);
-                retry_tau = amrex::min(0.5_rt * tau,
-                                      tau * (margin * (m_last_cap / m_required_cap)));
+                retry_tau = 0.5_rt * tau;
+                if (m_stage_cap_failed) {
+                    retry_cap = amrex::min(retry_cap, margin * m_last_cap);
+                    retry_tau = amrex::min(retry_tau,
+                                          tau * (margin * (m_last_cap / m_required_cap)));
+                }
+                // An admissibility violation need not violate the spectral
+                // ceiling. Shorten physical duration and recompute the plan;
+                // do not manufacture a fictitious observed ceiling.
                 if (!(retry_tau > 0.0_rt) || st.t_done + retry_tau <= st.t_done ||
                     !(retry_cap > 0.0_rt)) {
                     m_failure = "RKL timestep underflow or no progress after rejection";
@@ -610,6 +632,7 @@ public:
                 }
                 m_failure = nullptr;
                 m_stage_cap_failed = false;
+                m_admissibility_failed = false;
                 continue;
             }
             st.n_accepted = accepted.n_accepted;
@@ -898,6 +921,21 @@ public:
 
 private:
     void
+    CheckRKLStage (amrex::MultiFab const& y, amrex::Real const elapsed,
+                   int const stages) const {
+        if (!m_admissibility) { return; }
+        auto const decision = m_admissibility(y, elapsed, stages);
+        if (decision == StageAcceptance::retry) {
+            m_failure = "RKL stage temperature admissibility violation";
+            m_admissibility_failed = true;
+        } else if (decision == StageAcceptance::invalid) {
+            m_failure = "nonfinite or invalid RKL stage admissibility state/bounds";
+            m_admissibility_failed = false;
+            m_stage_cap_failed = false;
+        }
+    }
+
+    void
     EvaluateRhs (amrex::MultiFab& y, amrex::MultiFab& k,
                  int const stage) const {
         if (m_failure) {
@@ -962,11 +1000,13 @@ private:
     StageValidity m_stage_validity;
     int m_rkl_max_stages = 0;
     AttemptHooks m_attempt_hooks;
+    Admissibility m_admissibility;
     mutable amrex::Vector<amrex::Real> m_aux_entry, m_aux0, m_auxjm2;
     mutable amrex::Vector<amrex::Vector<amrex::Real>> m_aux_k;
     mutable amrex::Real m_last_cap = 0.0, m_required_cap = 0.0;
     mutable char const* m_failure = nullptr;
     mutable bool m_stage_cap_failed = false;
+    mutable bool m_admissibility_failed = false;
 };
 
 #endif // WARPX_QDSMCRKINTEGRATOR_H_

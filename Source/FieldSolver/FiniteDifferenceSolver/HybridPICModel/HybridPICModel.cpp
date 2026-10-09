@@ -15743,6 +15743,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     bool const trace_stage_minima =
         std::getenv("WARPX_TEST_COND_STAGE_MINIMA") != nullptr;
     int projection_stage = 0;
+    int test_state_stage = 0;
+    char const* const test_state_at = std::getenv("WARPX_TEST_COND_STATE_AT");
+    char const* const test_state_value = std::getenv("WARPX_TEST_COND_STATE_K");
 #endif
     bool const mask_err = m_cond_te_floor_mask && te_floor_K > 0.0_rt;
     amrex::iMultiFab floor_mask;
@@ -15751,16 +15754,29 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         floor_mask.setVal(0);
     }
 
+    bool const guard_temperature = m_cond_fd_time == 2;
+    // Projected maximum and pre-floor minimum share the projection reduction.
+    // Boundary constraints are physical; numerical floor clipping must not hide
+    // a finite undershoot. Nonfinite raw values always remain terminal.
+    std::array<amrex::Real, 3> stage_extrema{};
     amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
                      amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
-                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum>
+                     amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax>
         projection_op;
     amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real,
                       amrex::Real, amrex::Real, amrex::Real, amrex::Real,
-                      amrex::Real>
+                      amrex::Real, amrex::Real, amrex::Real, amrex::Real>
         projection_data(projection_op);
     auto project = [&] (amrex::MultiFab& state, bool const entry) {
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
+        // Test-only finite excursion on one rank, after the RHS/cap checks.
+        // Selecting the last stage verifies the complete-step acceptance gate.
+        if (!entry && test_state_at && test_state_value &&
+            ++test_state_stage == std::atoi(test_state_at) &&
+            amrex::ParallelDescriptor::MyProc() == amrex::ParallelDescriptor::NProcs()-1) {
+            state.setVal(std::atof(test_state_value));
+        }
         amrex::Real const pre_min =
             trace_stage_minima && !entry ? state.min(0) : 0.0_rt;
 #endif
@@ -15771,6 +15787,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         auto& data = projection_data;
         ResetConductionReduction(op, data);
         using Tuple = typename decltype(projection_data)::Type;
+#ifndef AMREX_USE_GPU
+        for (auto& value : data.reference()) {
+            amrex::get<9>(value) = std::numeric_limits<amrex::Real>::lowest();
+            amrex::get<10>(value) = std::numeric_limits<amrex::Real>::lowest();
+        }
+#endif
 #ifdef AMREX_USE_GPU
         auto const temperatures = state.arrays();
         auto const pin_arrays = pins.const_arrays();
@@ -15797,6 +15819,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
 #endif
                     amrex::Real const old = t(i, j, k);
+                    bool const observe = guard_temperature &&
+                        b(i, j, k, BNE::b_neff) > 0.0_rt &&
+                        b(i, j, k, BNE::b_ebm) != 0.0_rt;
+                    amrex::Real const empty = std::numeric_limits<amrex::Real>::lowest();
+                    amrex::Real const invalid = guard_temperature && !std::isfinite(old)
+                                                   ? 1.0_rt : 0.0_rt;
                     int const node[3] = {i, j, k};
                     bool constrained = eb_iso && p(i, j, k, 6) >= 0.0_rt;
                     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
@@ -15807,7 +15835,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     }
                     if (!constrained &&
                         (entry || te_floor_K <= 0.0_rt || old >= te_floor_K)) {
-                        return {0., 0., 0., 0., 0., 0., 0., 0., 0.};
+                        return {0., 0., 0., 0., 0., 0., 0., 0., 0.,
+                                observe ? -old : empty, observe ? old : empty, invalid};
                     }
                     amrex::Real fixed = -1.0_rt, lower = -1.0_rt;
                     for (int a = 0; a < 7; ++a) {
@@ -15862,8 +15891,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             count = 1.0_rt;
                         }
                     }
-                    return {h[0], h[1], h[2],   h[3], h[4],
-                            h[5], h[6], dfloor, count};
+                    return {h[0], h[1], h[2], h[3], h[4], h[5], h[6], dfloor, count,
+                            observe ? -target : empty, observe ? t(i,j,k) : empty,
+                            invalid != 0.0_rt || (guard_temperature &&
+                                (!std::isfinite(target) || !std::isfinite(t(i,j,k))))
+                                ? 1.0_rt : 0.0_rt};
                 });
 #ifndef AMREX_USE_GPU
         }
@@ -15883,6 +15915,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         heat.value[7] += h[7];
         floor_raw += h[7];
         floor_count += h[8];
+        if (guard_temperature) {
+            stage_extrema = {amrex::get<9>(v), amrex::get<10>(v), amrex::get<11>(v)};
+        }
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
         if (trace_stage_minima && !entry) {
             amrex::Real const post_min = state.min(0);
@@ -15893,6 +15928,101 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
 #endif
     };
     project(T_cur, true);
+
+    // Freeze a whole-call maximum-principle envelope after physical entry pins.
+    // Reservoirs and floor values extend the initial range. Prescribed Neumann
+    // powers alone can drive it farther; bound their temperature rates using
+    // the same density capacity and dual-volume wall metric as eval_rhs.
+    // Keep this envelope across accepted super-steps to prevent bound drift.
+    amrex::Real admissible_min = 0.0_rt, admissible_max = 0.0_rt;
+    amrex::Real cooling_bound = 0.0_rt, heating_bound = 0.0_rt;
+    if (guard_temperature) {
+        amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMax,
+                         amrex::ReduceOpMax, amrex::ReduceOpMax> op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real> data(op);
+        using Tuple = typename decltype(data)::Type;
+        for (MFIter mfi(T_cur, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const t = T_cur.const_array(mfi);
+            auto const b = bne.const_array(mfi);
+            auto const p = pins.const_array(mfi);
+            op.eval(mfi.tilebox(), data,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
+                    if (b(i,j,k,BNE::b_neff) <= 0.0_rt || b(i,j,k,BNE::b_ebm) == 0.0_rt) {
+                        return {std::numeric_limits<amrex::Real>::max(),
+                                std::numeric_limits<amrex::Real>::lowest(), 0., 0.};
+                    }
+                    amrex::Real lo = t(i,j,k), hi = t(i,j,k);
+                    if (te_floor_K > 0.0_rt) {
+                        lo = amrex::min(lo, te_floor_K);
+                        hi = amrex::max(hi, te_floor_K);
+                    }
+                    for (int a = 0; a < 7; ++a) {
+                        if (p(i,j,k,a) >= 0.0_rt) {
+                            lo = amrex::min(lo, p(i,j,k,a));
+                            hi = amrex::max(hi, p(i,j,k,a));
+                        }
+                    }
+                    amrex::Real cooling = 0.0_rt, heating = 0.0_rt;
+                    amrex::Real const cv = 1.5_rt * kb * b(i,j,k,BNE::b_ne);
+                    int const node[3] = {i,j,k};
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        for (int side = 0; side < 2; ++side) {
+                            int const a = 2*d + side;
+                            if (node[d] != (side ? dom_hi[d] : dom_lo[d])) { continue; }
+                            if (bc[a] == 3) { lo = amrex::min(lo, gate_temperature); }
+                            if (bc[a] == 2) {
+                                amrex::Real const rate = prescribed[a] * av[a] / cv;
+                                cooling += amrex::max(rate, 0.0_rt);
+                                heating += amrex::max(-rate, 0.0_rt);
+                            }
+                        }
+                    }
+                    return {lo, hi, cooling, heating};
+                });
+        }
+        auto const v = data.value(op);
+        admissible_min = amrex::get<0>(v);
+        admissible_max = amrex::get<1>(v);
+        cooling_bound = amrex::get<2>(v);
+        heating_bound = amrex::get<3>(v);
+        amrex::ParallelDescriptor::ReduceRealMin(admissible_min);
+        std::array<amrex::Real, 3> maxima{admissible_max, cooling_bound, heating_bound};
+        amrex::ParallelDescriptor::ReduceRealMax(maxima.data(), 3);
+        admissible_max = maxima[0]; cooling_bound = maxima[1]; heating_bound = maxima[2];
+    }
+    QdsmcRKIntegrator::Admissibility admissibility;
+    if (guard_temperature) {
+        admissibility = [&] (amrex::MultiFab const&, amrex::Real const elapsed,
+                            int const stages) {
+            using Acceptance = QdsmcRKIntegrator::StageAcceptance;
+            amrex::ParallelDescriptor::ReduceRealMax(stage_extrema.data(), 3);
+            if (stage_extrema[2] != 0.0_rt) { return Acceptance::invalid; }
+            if (stage_extrema[1] == std::numeric_limits<amrex::Real>::lowest()) {
+                return Acceptance::accept; // no active thermal nodes on any rank
+            }
+            amrex::Real const lower = admissible_min - elapsed * cooling_bound;
+            amrex::Real const upper = admissible_max + elapsed * heating_bound;
+            amrex::Real const observed_min = -stage_extrema[0];
+            amrex::Real const observed_max = stage_extrema[1];
+            if (!std::isfinite(lower) || !std::isfinite(upper) || lower > upper ||
+                !std::isfinite(observed_min) || !std::isfinite(observed_max)) {
+                return Acceptance::invalid;
+            }
+            // RKL recurrence roundoff grows with the stage polynomial degree.
+            // This is roundoff headroom, not a physical temperature ceiling.
+            amrex::Real const tolerance = 128.0_rt * std::numeric_limits<amrex::Real>::epsilon() *
+                amrex::Real(stages) * amrex::Real(stages) *
+                amrex::max(1.0_rt, amrex::max(std::abs(lower), std::abs(upper)));
+            if (observed_min < lower - tolerance || observed_max > upper + tolerance) {
+                report.rejected_temperature_min = observed_min;
+                report.rejected_temperature_max = observed_max;
+                report.temperature_bound_min = lower;
+                report.temperature_bound_max = upper;
+                return Acceptance::retry;
+            }
+            return Acceptance::accept;
+        };
+    }
 
     amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
                      amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
@@ -16132,13 +16262,14 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         any_boundary ? QdsmcRKIntegrator::StageValidity([&] () {
             return stage_values_finite;
         }) : QdsmcRKIntegrator::StageValidity{}, m_cond_rkl_max_stages,
-        std::move(attempt_hooks));
+        std::move(attempt_hooks), std::move(admissibility));
     auto const st = integ.Advance(T_cur, dt_c);
     report.completed_time = st.t_done;
     report.attempts = st.n_attempts;
     report.accepted = st.n_accepted;
     report.s_max = st.s_max;
     report.retries = st.n_retries;
+    report.admissibility_retries = st.n_admissibility_retries;
     report.rejected_work = st.n_rejected_work;
     report.attempted_dt = st.attempted_dt;
     report.required_cap = st.required_cap;
@@ -16151,6 +16282,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             << (use_rho_new ? 2 : 1) << " requested_dt=" << dt_c
             << " completed_dt=" << st.t_done << " stage_updates=" << st.n_attempts
             << " rkl_s=" << st.s_max << " retries=" << st.n_retries
+            << " admissibility_retries=" << st.n_admissibility_retries
+            << " rejected_temperature_min_K=" << report.rejected_temperature_min
+            << " rejected_temperature_max_K=" << report.rejected_temperature_max
+            << " temperature_bound_min_K=" << report.temperature_bound_min
+            << " temperature_bound_max_K=" << report.temperature_bound_max
             << " rejected_work=" << st.n_rejected_work << " attempted_dt=" << st.attempted_dt
             << " rejected_dt=" << st.rejected_dt
             << " rejected_required_cap=" << st.rejected_required_cap
@@ -16268,6 +16404,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             << ",\"accepted\":" << report.accepted
             << ",\"rkl_s_max\":" << report.s_max
             << ",\"retries\":" << report.retries
+            << ",\"admissibility_retries\":" << report.admissibility_retries
+            << ",\"rejected_temperature_min_K\":" << report.rejected_temperature_min
+            << ",\"rejected_temperature_max_K\":" << report.rejected_temperature_max
+            << ",\"temperature_bound_min_K\":" << report.temperature_bound_min
+            << ",\"temperature_bound_max_K\":" << report.temperature_bound_max
             << ",\"rejected_work\":" << report.rejected_work
             << ",\"attempted_dt_s\":" << report.attempted_dt
             << ",\"required_cap_s\":" << report.required_cap
@@ -16306,6 +16447,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                        << " attempts=" << st.n_attempts
                        << " rkl2_s_max=" << st.s_max
                        << " retries=" << st.n_retries
+                       << " admissibility_retries=" << st.n_admissibility_retries
                        << " rejected_work=" << st.n_rejected_work
                        << " t_done_frac=" << (dt_c > 0 ? st.t_done / dt_c : 1)
                        << " E_cap_J=" << report.energy_after[0]
