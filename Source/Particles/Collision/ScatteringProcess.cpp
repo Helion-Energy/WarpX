@@ -146,7 +146,10 @@ ScatteringProcess::parseProcessType(const std::string& scattering_process)
         return ScatteringProcessType::ELASTIC;
     } else if (scattering_process == "charge_exchange") {
         return ScatteringProcessType::CHARGE_EXCHANGE;
-    } else if (scattering_process == "two_product_reaction") {
+    } else if (scattering_process == "two_product_reaction" ||
+               scattering_process.rfind("two_product_reaction_", 0) == 0) {
+        // `two_product_reaction_<name>` adds further reactions beside
+        // `two_product_reaction`; background MCC runs each in its own pass.
         return ScatteringProcessType::TWOPRODUCT_REACTION;
     } else if (scattering_process == "ionization" ||
                scattering_process.rfind("ionization_", 0) == 0) {
