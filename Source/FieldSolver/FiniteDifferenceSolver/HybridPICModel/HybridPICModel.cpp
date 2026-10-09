@@ -15738,7 +15738,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     std::array<amrex::Real, 7> entry_heat{};
     amrex::Real floor_raw = 0.0_rt, floor_count = 0.0_rt;
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
-    // Optional native acceptance trace. This adds collectives only in test
+    // Optional provisional-stage trace (including rejected attempts). This adds collectives only in test
     // builds with this environment variable set; production has no trace.
     bool const trace_stage_minima =
         std::getenv("WARPX_TEST_COND_STAGE_MINIMA") != nullptr;
@@ -16066,6 +16066,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         boundary_s_max = amrex::get<7>(v);
         boundary_invalid = amrex::get<8>(v);
     };
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+    // Deterministic rank-local tightening, only in native test builds. This
+    // counter measures attempted work and deliberately survives rollback.
+    int test_cap_evaluations = 0;
+    char const* const test_reject_at = std::getenv("WARPX_TEST_COND_REJECT_AT");
+#endif
     auto cap = [&] () -> amrex::Real {
         amrex::Real const s_max = stable_rate();
         if (bound_debug) {
@@ -16074,11 +16080,47 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         if (!std::isfinite(s_max)) {
             return 0.0_rt;
         }
-        return s_max > 0.0_rt ? fd_cfl * edge_scale / s_max
-                              : std::numeric_limits<amrex::Real>::max();
+        amrex::Real ceiling = s_max > 0.0_rt ? fd_cfl * edge_scale / s_max
+                                            : std::numeric_limits<amrex::Real>::max();
+#ifdef WARPX_CONDUCTION_TEST_HOOKS
+        if (test_reject_at) {
+            if (++test_cap_evaluations == std::atoi(test_reject_at) &&
+                amrex::ParallelDescriptor::MyProc() == amrex::ParallelDescriptor::NProcs()-1) {
+                ceiling *= 0.001_rt;
+            }
+            amrex::ParallelDescriptor::ReduceRealMin(ceiling);
+        }
+#endif
+        return ceiling;
     };
     auto post_step = [&] (amrex::MultiFab& state, amrex::Real) {
         project(state, false);
+    };
+    // The integrator owns valid T and tableau-weighted heat rollback. Raw
+    // projection activity and the exclusion mask are caller-owned side effects.
+    // Ghosts, xi, flux-budget scratch and reductions are rebuilt by the next
+    // RHS/projection; invalidate cached coefficients instead of copying them.
+    amrex::Real saved_floor_raw = 0.0_rt, saved_floor_count = 0.0_rt;
+    amrex::iMultiFab saved_floor_mask;
+    if (m_cond_fd_time == 2 && mask_err) {
+        saved_floor_mask.define(floor_mask.boxArray(), floor_mask.DistributionMap(), 1, 0);
+    }
+    QdsmcRKIntegrator::AttemptHooks attempt_hooks;
+    attempt_hooks.save = [&] () {
+        saved_floor_raw = floor_raw;
+        saved_floor_count = floor_count;
+        if (mask_err) { amrex::iMultiFab::Copy(saved_floor_mask, floor_mask, 0, 0, 1, 0); }
+    };
+    attempt_hooks.restore = [&] () {
+        floor_raw = saved_floor_raw;
+        floor_count = saved_floor_count;
+        if (mask_err) { amrex::iMultiFab::Copy(floor_mask, saved_floor_mask, 0, 0, 1, 0); }
+        tensor_built = false;
+        bulk_rate_built = false;
+        cached_bulk_rate = 0.0_rt;
+        boundary_s_max = 0.0_rt;
+        boundary_invalid = 0.0_rt;
+        stage_values_finite = false;
     };
     QdsmcRKIntegrator const integ(
         m_cond_fd_time == 2 ? QdsmcRKIntegrator::Scheme::RKL2
@@ -16089,17 +16131,30 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         mask_err ? &floor_mask : nullptr, &heat, true,
         any_boundary ? QdsmcRKIntegrator::StageValidity([&] () {
             return stage_values_finite;
-        }) : QdsmcRKIntegrator::StageValidity{}, m_cond_rkl_max_stages);
+        }) : QdsmcRKIntegrator::StageValidity{}, m_cond_rkl_max_stages,
+        std::move(attempt_hooks));
     auto const st = integ.Advance(T_cur, dt_c);
     report.completed_time = st.t_done;
     report.attempts = st.n_attempts;
     report.accepted = st.n_accepted;
     report.s_max = st.s_max;
+    report.retries = st.n_retries;
+    report.rejected_work = st.n_rejected_work;
+    report.attempted_dt = st.attempted_dt;
+    report.required_cap = st.required_cap;
+    report.observed_cap = st.observed_cap;
+    report.rejected_dt = st.rejected_dt;
+    report.rejected_required_cap = st.rejected_required_cap;
+    report.rejected_observed_cap = st.rejected_observed_cap;
     if (st.failure) {
         amrex::Print() << "[qdsmc] conduction rejection: half="
             << (use_rho_new ? 2 : 1) << " requested_dt=" << dt_c
             << " completed_dt=" << st.t_done << " stage_updates=" << st.n_attempts
-            << " rkl_s=" << st.s_max << " required_cap=" << st.required_cap
+            << " rkl_s=" << st.s_max << " retries=" << st.n_retries
+            << " rejected_work=" << st.n_rejected_work << " attempted_dt=" << st.attempted_dt
+            << " rejected_dt=" << st.rejected_dt
+            << " rejected_required_cap=" << st.rejected_required_cap
+            << " rejected_observed_cap=" << st.rejected_observed_cap << " required_cap=" << st.required_cap
             << " observed_cap=" << st.observed_cap << " bulk=" << last_bulk_rate
             << " leg=" << last_leg_rate << " tensor_envelope=" << tensor_envelope
             << " reason=" << st.failure << "\n";
@@ -16211,7 +16266,15 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             << ",\"completed_time_s\":" << report.completed_time
             << ",\"attempts\":" << report.attempts
             << ",\"accepted\":" << report.accepted
-            << ",\"rkl_s_max\":" << report.s_max;
+            << ",\"rkl_s_max\":" << report.s_max
+            << ",\"retries\":" << report.retries
+            << ",\"rejected_work\":" << report.rejected_work
+            << ",\"attempted_dt_s\":" << report.attempted_dt
+            << ",\"required_cap_s\":" << report.required_cap
+            << ",\"observed_cap_s\":" << report.observed_cap
+            << ",\"rejected_dt_s\":" << report.rejected_dt
+            << ",\"rejected_required_cap_s\":" << report.rejected_required_cap
+            << ",\"rejected_observed_cap_s\":" << report.rejected_observed_cap;
         auto array = [&] (char const* name, auto const& values) {
             out << ",\"" << name << "\":[";
             for (std::size_t n = 0; n < values.size(); ++n) {
@@ -16242,6 +16305,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                        << (use_rho_new ? 2 : 1) << " accepted=" << st.n_accepted
                        << " attempts=" << st.n_attempts
                        << " rkl2_s_max=" << st.s_max
+                       << " retries=" << st.n_retries
+                       << " rejected_work=" << st.n_rejected_work
                        << " t_done_frac=" << (dt_c > 0 ? st.t_done / dt_c : 1)
                        << " E_cap_J=" << report.energy_after[0]
                        << " E_eff_J=" << report.energy_after[1]

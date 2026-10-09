@@ -16,6 +16,9 @@ struct QdsmcConductionReport {
     std::string failure;
     amrex::Real requested_time = 0.0, completed_time = 0.0;
     int attempts = 0, accepted = 0, s_max = 0;
+    int retries = 0, rejected_work = 0;
+    amrex::Real attempted_dt = 0.0, required_cap = 0.0, observed_cap = 0.0;
+    amrex::Real rejected_dt = 0.0, rejected_required_cap = 0.0, rejected_observed_cap = 0.0;
     std::array<amrex::Real, 7> outward_heat{};
     std::array<amrex::Real, 7> entry_heat{}; // positive into constrained state
     amrex::Real floor_heat = 0.0, floor_raw_heat = 0.0, floor_count = 0.0;

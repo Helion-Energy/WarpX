@@ -69,9 +69,11 @@ main (int argc, char** argv) {
                                 1.e-12);
             AMREX_ALWAYS_ASSERT(std::abs(y.min(0) - std::exp(-1.0)) < 1.e-6);
         }
-        // A finite but newly insufficient ceiling is a failure, not success.
+        // Invalid ceilings fail immediately; an impossibly tight valid ceiling
+        // retries but exhausts the bounded work budget without completion.
         for (amrex::Real const bad :
-             {0.0, 1.e-8, std::numeric_limits<amrex::Real>::quiet_NaN()}) {
+             {0.0, -1.0, 1.e-8, std::numeric_limits<amrex::Real>::infinity(),
+              std::numeric_limits<amrex::Real>::quiet_NaN()}) {
             y.setVal(1.0);
             int calls = 0;
             RK::Auxiliary heat{{7.0}, {0.0}};
@@ -84,7 +86,7 @@ main (int argc, char** argv) {
                 RK::Scheme::RKL2, rhs, [&] () { return calls < 2 ? 1.0 : bad; },
                 1.e-6, 1.e-10, 0.9, 2.0, 100, {}, nullptr, &heat, true);
             auto const st = rk.Advance(y, 0.8);
-            AMREX_ALWAYS_ASSERT(st.failure && st.t_done == 0.0 &&
+            AMREX_ALWAYS_ASSERT(st.failure && st.t_done < 0.8 &&
                                 heat.value[0] == 7.0);
         }
         // Fused validation must still reject an invalid input even if the
@@ -104,7 +106,7 @@ main (int argc, char** argv) {
                   [&] () { return finite; });
             auto const st = rk.Advance(y, 0.8);
             AMREX_ALWAYS_ASSERT(st.failure && st.t_done == 0.0 &&
-                                heat.value[0] == 7.0 && st.n_attempts == 0);
+                                heat.value[0] == 7.0 && st.n_attempts == 1);
         }
         // Refining complete RKL super-steps must cover the whole interval,
         // conserve the passive loss account, and approach analytic decay.

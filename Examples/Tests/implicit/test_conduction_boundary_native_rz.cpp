@@ -262,15 +262,27 @@ int main (int argc, char** argv)
                      (phi[0] - dx[0] / 2) * (phi[0] - dx[0] / 2));
                 expected_corner_heat = 1.5 * PhysConst::kb * density * 100 *
                                        (2.0 - 0.5) * kelvin / 6 * area * dt;
-            } else if (mode == "floor") {
+            } else if (mode == "floor" || mode == "retry_floor" || mode == "retry_budget" || mode == "retry_underflow") {
                 hp.m_cond_bc[0][1] = 2;
                 hp.m_cond_bc_q[0][1] = -1.e8;
                 hp.m_cond_bc[1][1] = 0;
                 te.setVal(100.0 * kelvin);
-            } else if (mode == "gate_failure") {
+                if (mode == "retry_floor" || mode == "retry_budget") {
+                    setenv("WARPX_TEST_COND_REJECT_AT", "5", 1);
+                    hp.m_cond_te_floor_mask = true;
+                    hp.m_cond_rkl_max_stages = 8;
+                    if (mode == "retry_budget") {
+                        hp.m_cond_fd_max_subcycles = 8;
+                        expect_failure = true;
+                    }
+                }
+                if (mode == "retry_underflow") {
+                    dt = std::numeric_limits<amrex::Real>::denorm_min();
+                    expect_failure = true;
+                }
+            } else if (mode == "gate_retry") {
                 hp.m_cond_bc[0][1] = 0;
                 hp.m_cond_leg_length = 1.e-6;
-                expect_failure = true;
                 for (amrex::MFIter mfi(te); mfi.isValid(); ++mfi) {
                     auto const t = te.array(mfi);
                     amrex::ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE(
@@ -313,6 +325,14 @@ int main (int argc, char** argv)
             auto const wall_before = hp.GetQdsmcWallTally(0, 1);
             auto const leg_before = hp.GetQdsmcLegTally(1, 1);
             auto const floor_before = hp.m_cond_floor_tally;
+            auto const eb_before = hp.m_cond_eb_tally;
+            std::array<amrex::Real, 2*AMREX_SPACEDIM> walls_before{}, legs_before{};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                for (int side = 0; side < 2; ++side) {
+                    walls_before[2*d+side] = hp.GetQdsmcWallTally(d, side);
+                    legs_before[2*d+side] = hp.GetQdsmcLegTally(d, side);
+                }
+            }
             amrex::Real const independent_before =
                 mode == "corner" ? 0.0 : energy();
             bool const ok = hp.TryQdsmcConductionOnceFDAtState(
@@ -324,7 +344,15 @@ int main (int argc, char** argv)
                            << " residual_J=" << report.residual
                            << " floor_J=" << report.floor_heat
                            << " floor_raw_J=" << report.floor_raw_heat
-                           << " s_max=" << report.s_max << "\n";
+                           << " s_max=" << report.s_max << " retries=" << report.retries
+                           << " rejected_work=" << report.rejected_work << "\n";
+            if (mode == "retry_floor" || mode == "retry_budget") {
+                unsetenv("WARPX_TEST_COND_REJECT_AT");
+                AMREX_ALWAYS_ASSERT(report.retries == 1 && report.rejected_work == 5);
+            }
+            if (mode == "gate_retry") {
+                AMREX_ALWAYS_ASSERT(ok && report.retries > 0 && report.rejected_work > 0);
+            }
             if (expect_failure) {
                 AMREX_ALWAYS_ASSERT(!ok);
                 amrex::MultiFab::Subtract(before, te, 0, 0, 1, te.nGrowVect());
@@ -332,13 +360,24 @@ int main (int argc, char** argv)
                 AMREX_ALWAYS_ASSERT(wall_before == hp.GetQdsmcWallTally(0, 1));
                 AMREX_ALWAYS_ASSERT(leg_before == hp.GetQdsmcLegTally(1, 1));
                 AMREX_ALWAYS_ASSERT(floor_before == hp.m_cond_floor_tally);
+                AMREX_ALWAYS_ASSERT(eb_before == hp.m_cond_eb_tally && !report.completed);
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    for (int side = 0; side < 2; ++side) {
+                        AMREX_ALWAYS_ASSERT(walls_before[2*d+side] == hp.GetQdsmcWallTally(d, side));
+                        AMREX_ALWAYS_ASSERT(legs_before[2*d+side] == hp.GetQdsmcLegTally(d, side));
+                    }
+                }
+                if (mode == "retry_underflow") {
+                    AMREX_ALWAYS_ASSERT(report.failure.find("underflow") != std::string::npos);
+                    AMREX_ALWAYS_ASSERT(report.completed_time == 0.0 && report.accepted == 0);
+                }
                 if (mode == "nonfinite_rhs") {
                     AMREX_ALWAYS_ASSERT(report.failure.find("nonfinite") != std::string::npos);
                 }
-                if (mode == "gate_failure" || mode == "growth_failure") {
-                    AMREX_ALWAYS_ASSERT(
-                        report.failure.find("stage stability") !=
-                        std::string::npos);
+                if (mode == "growth_failure" || mode == "retry_budget") {
+                    AMREX_ALWAYS_ASSERT(report.retries > 0);
+                    AMREX_ALWAYS_ASSERT(report.failure.find("budget") != std::string::npos ||
+                                        report.failure.find("underflow") != std::string::npos);
                 }
             } else {
                 AMREX_ALWAYS_ASSERT(ok && report.completed);
@@ -442,6 +481,34 @@ int main (int argc, char** argv)
                     AMREX_ALWAYS_ASSERT(std::abs(observed - tensor_rate) <
                                         1.e-4 * std::abs(tensor_rate));
                 }
+                if (mode == "retry_floor") {
+                    // Resolve the same physical interval using conservative
+                    // two-stage steps and no injected rejection. Check both
+                    // temperature accuracy and the independent energy ledger.
+                    amrex::MultiFab recovered(te.boxArray(), te.DistributionMap(), 1, 0);
+                    amrex::MultiFab::Copy(recovered, te, 0, 0, 1, 0);
+                    amrex::MultiFab::Copy(te, before, 0, 0, 1, te.nGrowVect());
+                    hp.m_cond_rkl_max_stages = 2;
+                    hp.m_cond_fd_cfl *= 0.001;
+                    QdsmcConductionReport reference;
+                    AMREX_ALWAYS_ASSERT(hp.TryQdsmcConductionOnceFDAtState(
+                        0, dt, false, rho, 0.0, reference));
+                    AMREX_ALWAYS_ASSERT(reference.retries == 0 && reference.completed_time == dt);
+                    amrex::MultiFab::Subtract(recovered, te, 0, 0, 1, 0);
+                    amrex::Real const relative_temperature = recovered.norminf()/before.norminf();
+                    amrex::Real const relative_energy = std::abs(reference.energy_after[0]-
+                        report.energy_after[0])/report.energy_before[0];
+                    amrex::Real reference_exchange = std::abs(reference.floor_heat);
+                    for (auto q : reference.outward_heat) { reference_exchange += std::abs(q); }
+                    AMREX_ALWAYS_ASSERT(std::abs(reference.residual) <=
+                        256*std::numeric_limits<amrex::Real>::epsilon()*
+                        (std::abs(reference.energy_before[0])+std::abs(reference.energy_after[0]))+
+                        1.e-11*reference_exchange);
+                    amrex::Print() << "NATIVE_RETRY_REFERENCE temperature_relative="
+                                   << relative_temperature << " energy_relative=" << relative_energy
+                                   << " reference_residual_J=" << reference.residual << "\n";
+                    AMREX_ALWAYS_ASSERT(relative_temperature < 1.e-4 && relative_energy < 1.e-4);
+                }
                 if (mode == "ghost") {
                     amrex::MultiFab reference(te.boxArray(),
                                               te.DistributionMap(), 1, 0);
@@ -478,7 +545,7 @@ int main (int argc, char** argv)
                         std::abs(report.outward_heat[1] / expected_corner_heat +
                                  1.0) < 1.e-10);
                 }
-                if (mode == "floor") {
+                if (mode == "floor" || mode == "retry_floor") {
                     AMREX_ALWAYS_ASSERT(report.floor_heat > 0 &&
                                         report.floor_count > 0);
                 }

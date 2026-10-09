@@ -29,6 +29,12 @@ struct QdsmcRKStats
 {
     int n_attempts = 0;
     int n_accepted = 0;
+    // RKL: rejected super-steps and discarded stage evaluations. Attempts
+    // includes failed work; accepted and the dt trajectory include only
+    // stages belonging to completed super-steps.
+    int n_retries = 0, n_rejected_work = 0;
+    amrex::Real attempted_dt = 0.0;
+    amrex::Real rejected_dt = 0.0, rejected_required_cap = 0.0, rejected_observed_cap = 0.0;
     amrex::Real t_done = 0.0;
     amrex::Real dt_last = 0.0;
     // dt trajectory (accepted steps): discriminates a cap/physics-bound
@@ -60,8 +66,8 @@ struct QdsmcRKStats
  *  valid region only. An optional stability-ceiling functor cap() is
  *  consulted at each attempt entry; validate_stages additionally checks
  *  every stage (coefficient state is a side effect of rhs). A stage ceiling
- *  violation rejects an adaptive attempt or fails RKL. Explicit RK on a
- *  diffusive spectrum is stability-limited, and the embedded error
+ *  violation rejects an adaptive attempt or retries a smaller RKL super-step.
+ *  Explicit RK on a diffusive spectrum is stability-limited, and the embedded error
  *  alone detects the instability edge only after noise has grown.
  *
  *  Schemes:
@@ -120,6 +126,18 @@ public:
      *  0.986 -> 0.967 from N=64 -> 128 on the conduction slab). */
     using PostStep = std::function<void (amrex::MultiFab&, amrex::Real)>;
 
+    /** RKL super-step transaction for caller-owned side effects of rhs and
+     * post_step. save runs before the entry RHS; restore runs on rejection,
+     * after the valid state and auxiliary values/rates are restored. Caches
+     * may be invalidated instead of copied, provided the next RHS rebuilds
+     * them before use. Callbacks must not publish provisional effects. The
+     * caller still owns whole-call commit/rollback (including on failure).
+     * cap and StageValidity must return identical decisions on every rank. */
+    struct AttemptHooks {
+        std::function<void ()> save;
+        std::function<void ()> restore;
+    };
+
     /** err_mask (optional): cells with a nonzero mask value are excluded
      *  from the error-norm reduction. For states owned by a post-step
      *  projection (e.g. a positivity floor): the projection re-creates a
@@ -139,14 +157,15 @@ public:
                        Auxiliary* auxiliary = nullptr,
                        bool validate_stages = false,
                        StageValidity stage_validity = {},
-                       int rkl_max_stages = 0)
+                       int rkl_max_stages = 0,
+                       AttemptHooks attempt_hooks = {})
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)), m_rtol(rtol), m_atol(atol),
           m_safety(safety), m_max_growth(max_growth),
           m_max_attempts(max_attempts), m_err_mask(err_mask), m_aux(auxiliary),
           m_validate_stages(validate_stages),
           m_stage_validity(std::move(stage_validity)),
-          m_rkl_max_stages(rkl_max_stages)
+          m_rkl_max_stages(rkl_max_stages), m_attempt_hooks(std::move(attempt_hooks))
     {
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
             rkl_max_stages == 0 || rkl_max_stages >= 2,
@@ -159,11 +178,16 @@ public:
     {
         using namespace amrex::literals;
         QdsmcRKStats st;
-        if (t_end <= 0.0_rt) { return st; }
+        if (!std::isfinite(t_end) || t_end < 0.0_rt) {
+            st.failure = "invalid integration interval";
+            return st;
+        }
+        if (t_end == 0.0_rt) { return st; }
 
         m_failure = nullptr;
         m_stage_cap_failed = false;
         m_required_cap = 0.0_rt;
+        m_last_cap = 0.0_rt;
         if (m_validate_stages && !m_stage_validity) {
             m_finite_data =
                 std::make_unique<amrex::ReduceData<int>>(m_finite_op);
@@ -230,8 +254,7 @@ public:
             if (m_stage_cap_failed) {
                 // The existing adaptive methods already own attempt rejection.
                 // Rewind their passive accounts as well as the field, and retry
-                // below the newly observed ceiling. RKL has no retry
-                // controller.
+                // below the newly observed ceiling.
                 amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
                 if (m_aux) {
                     m_aux->value = m_aux0;
@@ -292,12 +315,13 @@ public:
    *  state differently from a sum of stage-time increments. Auxiliary
    *  corrections follow the same homogeneous recurrence as the state.
    *  With validate_stages, each RHS rechecks the ceiling required by
-   *  the chosen tau/s; a newly insufficient ceiling fails the call.
+   *  the chosen tau/s; a newly insufficient ceiling rolls back the complete
+   *  super-step and retries with persistent reduced duration/ceiling bounds.
    *  Stage states are built in the caller's y (the
    *  ghosted buffer the RHS functor refreshes); Y_{j-1}, Y_{j-2},
    *  M(Y_0) are archived in ghostless temporaries. Stats: n_attempts
-   *  and n_accepted count STAGES (one RHS evaluation each, the work
-   *  unit the attempts budget bounds); the dt trajectory books the
+   *  counts all stage evaluations (including failed evaluations); n_accepted
+   *  counts only stages of completed super-steps; the dt trajectory books the
    *  per-stage increments. The stage count of a super-step is sized
    *  to the remaining budget BEFORE the recurrence starts -- the
    *  recurrence cannot stop midway (intermediate stages are not
@@ -318,19 +342,31 @@ public:
       amrex::MultiFab my0(y.boxArray(), y.DistributionMap(), nc, 0);
       amrex::MultiFab mjm1(y.boxArray(), y.DistributionMap(), nc, 0);
 
+      // Preserve the no-rejection arithmetic and stage trajectory, but keep
+      // provisional statistics private until the entire super-step succeeds.
+      QdsmcRKStats accepted;
       auto book = [&] (amrex::Real const dts) {
-          ++st.n_attempts;
-          ++st.n_accepted;
-          st.dt_last = dts;
-          if (st.n_accepted == 1) {
-              st.dt_first = dts;
-              st.dt_min = dts;
-              st.dt_max = dts;
+          ++accepted.n_accepted;
+          accepted.dt_last = dts;
+          if (accepted.n_accepted == 1) {
+              accepted.dt_first = dts;
+              accepted.dt_min = dts;
+              accepted.dt_max = dts;
           } else {
-              st.dt_min = amrex::min(st.dt_min, dts);
-              st.dt_max = amrex::max(st.dt_max, dts);
+              accepted.dt_min = amrex::min(accepted.dt_min, dts);
+              accepted.dt_max = amrex::max(accepted.dt_max, dts);
           }
       };
+
+      amrex::Real retry_tau = t_end;
+      amrex::Real retry_cap = std::numeric_limits<amrex::Real>::max();
+      amrex::Vector<amrex::Real> rate_entry;
+      int consecutive_retries = 0;
+      constexpr int max_retries = 32;
+      if (!(m_safety > 0.0_rt && m_safety <= 1.0_rt) || !std::isfinite(m_safety)) {
+          m_failure = "invalid RKL safety factor";
+          return Finish(st, t_end);
+      }
 
       while (st.t_done < t_end * (1.0_rt - 1.0e-12_rt)) {
           if (m_max_attempts - st.n_attempts < 2) {
@@ -339,19 +375,36 @@ public:
 
           // Entry evaluation M(Y_0) (side effect: the ceiling functor's
           // coefficient state) and the stability-sized stage count.
+          int const work_entry = st.n_attempts;
+          st.attempted_dt = 0.0_rt; // no duration is selected until the entry RHS is valid
+          accepted = st;
+          if (m_attempt_hooks.save) { m_attempt_hooks.save(); }
+          if (m_aux) { rate_entry = m_aux->rate; }
           m_required_cap = 0.0_rt;
           if (m_aux) {
               m_aux0 = m_aux->value;
               m_auxjm2 = m_aux->value;
           }
+          ++st.n_attempts;
           EvaluateRhs(y, my0, 0);
           if (m_failure) {
+              ++st.n_rejected_work;
+              if (m_aux) { m_aux->rate = rate_entry; }
+              if (m_attempt_hooks.restore) { m_attempt_hooks.restore(); }
               break;
           }
-          amrex::Real const dt_expl =
+          amrex::Real const entry_cap =
               m_cap ? (m_validate_stages ? m_last_cap : m_cap())
                     : std::numeric_limits<amrex::Real>::max();
-          amrex::Real tau = t_end - st.t_done;
+          if (!(entry_cap > 0.0_rt) || !std::isfinite(entry_cap)) {
+              m_failure = "invalid stability ceiling";
+              ++st.n_rejected_work;
+              if (m_aux) { m_aux->rate = rate_entry; }
+              if (m_attempt_hooks.restore) { m_attempt_hooks.restore(); }
+              break;
+          }
+          amrex::Real const dt_expl = amrex::min(entry_cap, retry_cap);
+          amrex::Real tau = amrex::min(t_end - st.t_done, retry_tau);
           int s = 2;
           if (tau > m_safety * dt_expl) {
               amrex::Real const nn = tau / (m_safety * dt_expl);
@@ -388,7 +441,7 @@ public:
                   s = std::max(2, static_cast<int>(s_real));
               }
           }
-          int const s_budget = m_max_attempts - st.n_attempts;
+          int const s_budget = m_max_attempts - work_entry;
           if (s > s_budget) {
               s = std::max(2, s_budget);
               tau = amrex::min(
@@ -412,7 +465,8 @@ public:
           }
           // Recorded after both clamps, so it reports the stage
           // count actually taken rather than the one requested.
-          st.s_max = std::max(st.s_max, s);
+          accepted.s_max = std::max(st.s_max, s);
+          st.attempted_dt = tau;
 
           amrex::Real const ssq =
               amrex::Real(s) * (amrex::Real(s) + 1.0_rt) - 2.0_rt;
@@ -423,6 +477,14 @@ public:
           // Euler update in one fused launch, in place of a copy, a
           // LinComb, and two archive copies)
           amrex::Real const mu_t1 = w1 / 3.0_rt; // b_1 w_1
+          if (!(tau > 0.0_rt) || !std::isfinite(tau) || st.t_done + tau <= st.t_done ||
+              !(mu_t1 * tau > 0.0_rt) || !(m_required_cap > 0.0_rt)) {
+              m_failure = "RKL timestep underflow or no progress";
+              ++st.n_rejected_work;
+              if (m_aux) { m_aux->rate = rate_entry; }
+              if (m_attempt_hooks.restore) { m_attempt_hooks.restore(); }
+              break;
+          }
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -462,10 +524,9 @@ public:
                 // LinComb + 3 Saxpy sequence (bit-identical), reading
                 // Y_{j-1} from y before overwriting and re-archiving it
                 // as the next stage's Y_{j-2}.
+                ++st.n_attempts;
                 EvaluateRhs(y, mjm1, 1);
-                if (m_failure) {
-                    return Finish(st, t_end);
-                }
+                if (m_failure) { break; }
                 amrex::Real const rj = amrex::Real(j);
                 amrex::Real const bj =
                     (rj*rj + rj - 2.0_rt)/(2.0_rt*rj*(rj + 1.0_rt));
@@ -515,7 +576,50 @@ public:
                 b_jm2 = b_jm1;
                 b_jm1 = bj;
             }
+            if (m_failure) {
+                // Y_j is not a physical-time solution. Restore Y_0, including
+                // projection corrections and caller-owned passive effects.
+                amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
+                if (m_aux) {
+                    m_aux->value = m_aux0;
+                    m_aux->rate = rate_entry;
+                }
+                if (m_attempt_hooks.restore) { m_attempt_hooks.restore(); }
+                st.n_rejected_work += st.n_attempts - work_entry;
+                if (!m_stage_cap_failed) { break; }
+                ++st.n_retries;
+                st.rejected_dt = tau;
+                st.rejected_required_cap = m_required_cap;
+                st.rejected_observed_cap = m_last_cap;
+                if (++consecutive_retries > max_retries) {
+                    m_failure = "RKL consecutive retry budget exhausted";
+                    break;
+                }
+                // Keep both bounds across re-entry AND successful super-steps:
+                // sizing from the restored entry state must not undo shrinkage.
+                // Recompute s using the observed ceiling with headroom; never
+                // relax the stage-validation guard to manufacture acceptance.
+                amrex::Real const margin = amrex::min(0.9_rt, m_safety);
+                retry_cap = amrex::min(retry_cap, margin * m_last_cap);
+                retry_tau = amrex::min(0.5_rt * tau,
+                                      tau * (margin * (m_last_cap / m_required_cap)));
+                if (!(retry_tau > 0.0_rt) || st.t_done + retry_tau <= st.t_done ||
+                    !(retry_cap > 0.0_rt)) {
+                    m_failure = "RKL timestep underflow or no progress after rejection";
+                    break;
+                }
+                m_failure = nullptr;
+                m_stage_cap_failed = false;
+                continue;
+            }
+            st.n_accepted = accepted.n_accepted;
+            st.dt_first = accepted.dt_first;
+            st.dt_last = accepted.dt_last;
+            st.dt_min = accepted.dt_min;
+            st.dt_max = accepted.dt_max;
+            st.s_max = accepted.s_max;
             st.t_done += tau;
+            consecutive_retries = 0;
         }
         return Finish(st, t_end);
     }
@@ -857,6 +961,7 @@ private:
     bool m_validate_stages = false;
     StageValidity m_stage_validity;
     int m_rkl_max_stages = 0;
+    AttemptHooks m_attempt_hooks;
     mutable amrex::Vector<amrex::Real> m_aux_entry, m_aux0, m_auxjm2;
     mutable amrex::Vector<amrex::Vector<amrex::Real>> m_aux_k;
     mutable amrex::Real m_last_cap = 0.0, m_required_cap = 0.0;
