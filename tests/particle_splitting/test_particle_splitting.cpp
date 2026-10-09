@@ -73,9 +73,11 @@ int main (int argc, char* argv[]) try
 #endif
     for (int i = 1; i < argc; ++i) { args.emplace_back(argv[i]); }
     std::vector<char*> ptrs;
-    ptrs.reserve(args.size());
+    ptrs.reserve(args.size() + 1);
     for (auto& arg : args) { ptrs.push_back(arg.data()); }
-    const int nargs = static_cast<int>(ptrs.size());
+    const int nargs = static_cast<int>(args.size());
+    // MPI initialization requires the same argv[argc] null sentinel as main().
+    ptrs.push_back(nullptr);
     char** pargs = ptrs.data();
     warpx::initialization::initialize_external_libraries(nargs, pargs);
     {
