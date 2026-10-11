@@ -21,6 +21,7 @@
 #   include "FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H"
 #endif
 #include "HybridPICModel/HybridPICModel.H"
+#include "HybridPICModel/MotionalFieldCartesian.H"
 #include "HybridPICModel/MotionalFieldRZ.H"
 #include "HybridPICModel/QdsmcVolumeElement.H"
 #include "Utils/TextMsg.H"
@@ -1966,6 +1967,46 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
     }
 
+#if defined(WARPX_DIM_3D)
+    bool const compatible_motional = hybrid_model->m_energy_conserving_motional;
+    MotionalFieldCartesian motional_geometry;
+    ablastr::fields::VectorField motional_lengths = {nullptr, nullptr, nullptr};
+    if (compatible_motional) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == ablastr::utils::enums::GridType::Staggered &&
+            warpx.finestLevel() == 0 && floor_w == 0.0_rt &&
+            !hybrid_model->m_esolve_curlcurl && switch_mode == VacuumSeamSwitchMode::Edge &&
+            (!EB::enabled() || (hybrid_model->m_use_conformal_eb &&
+                               hybrid_model->m_conformal_wall_conductor)),
+            "Cartesian energy_conserving_motional requires single-level staggered e_form, "
+            "a hard density floor, edge vacuum switch, and no EB or a conformal conductor EB");
+        auto const& geom = warpx.Geom(lev);
+        motional_geometry.vn = MakeQdsmcVolumeElement(geom, amrex::IndexType(IntVect::TheNodeVector()));
+        motional_geometry.floor = rho_floor;
+        motional_geometry.vacuum = holmstrom_vacuum_region;
+        motional_geometry.smooth = holmstrom_smooth;
+        motional_geometry.inv_width = holmstrom_inv_width;
+        for (int d = 0; d < 3; ++d) {
+            motional_geometry.lo[d] = geom.Domain().smallEnd(d);
+            motional_geometry.hi[d] = geom.Domain().bigEnd(d);
+            motional_geometry.periodic[d] = geom.isPeriodic(d);
+            motional_geometry.dx[d] = geom.CellSize(d);
+            motional_geometry.pec_lo[d] = WarpX::field_boundary_lo[d] == FieldBoundaryType::PEC;
+            motional_geometry.pec_hi[d] = WarpX::field_boundary_hi[d] == FieldBoundaryType::PEC;
+            motional_geometry.pmc_lo[d] = WarpX::field_boundary_lo[d] == FieldBoundaryType::PMC;
+            motional_geometry.pmc_hi[d] = WarpX::field_boundary_hi[d] == FieldBoundaryType::PMC;
+            motional_geometry.ve[d] = MakeQdsmcVolumeElement(geom, Efield[d]->ixType());
+        }
+        if (EB::enabled()) {
+            motional_lengths = warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+            for (int d = 0; d < 3; ++d) {
+                eb_update_E[d]->FillBoundary(geom.periodicity());
+                motional_lengths[d]->FillBoundary(geom.periodicity());
+            }
+        }
+    }
+#endif
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -1978,6 +2019,20 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
 
+#if defined(WARPX_DIM_3D)
+        auto motional = motional_geometry;
+        if (compatible_motional && EB::enabled()) {
+            for (int d = 0; d < 3; ++d) {
+                motional.update[d] = eb_update_E[d]->const_array(mfi);
+                motional.length[d] = motional_lengths[d]->const_array(mfi);
+            }
+        }
+#endif
+#if defined(WARPX_DIM_3D)
+        auto const rho_motional = rhofield.const_array(mfi);
+        auto const ped_motional = use_pedestal ? rho_ped_mf->const_array(mfi)
+                                             : Array4<Real const>{};
+#endif
         Array4<Real> const& enE_nodal = enE_nodal_mf.array(mfi);
         Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
         Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
@@ -2023,9 +2078,21 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
             // calculate enE = (J - Ji) x B (without the Hall term the total
             // current drops out and this is the ideal -u_i x B motional
             // field)
-            const Real jex = (include_hall_term ? jx_interp : 0.0_rt) - jix_interp;
-            const Real jey = (include_hall_term ? jy_interp : 0.0_rt) - jiy_interp;
-            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
+            Real jex = (include_hall_term ? jx_interp : 0.0_rt) - jix_interp;
+            Real jey = (include_hall_term ? jy_interp : 0.0_rt) - jiy_interp;
+            Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
+#if defined(WARPX_DIM_3D)
+            if (compatible_motional) {
+                Real const rn = amrex::max(rho_floor, rho_motional(i,j,k) +
+                                          (use_pedestal ? ped_motional(i,j,k) : 0.0_rt));
+                jex = -rn * motional.gather(Jix,Jx,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,k,0);
+                jey = -rn * motional.gather(Jiy,Jy,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,k,1);
+                jez = -rn * motional.gather(Jiz,Jz,rho_motional,ped_motional,
+                                            use_pedestal,include_hall_term,i,j,k,2);
+            }
+#endif
             enE_nodal(i, j, k, 0) = (
                 jey * Bz_interp
                 - jez * By_interp
@@ -2099,6 +2166,16 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
             amrex::Gpu::synchronize();
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
+
+#if defined(WARPX_DIM_3D)
+        auto motional = motional_geometry;
+        if (compatible_motional && EB::enabled()) {
+            for (int d = 0; d < 3; ++d) {
+                motional.update[d] = eb_update_E[d]->const_array(mfi);
+                motional.length[d] = motional_lengths[d]->const_array(mfi);
+            }
+        }
+#endif
 
         // Extract field data for this grid/tile
         Array4<Real> const& Ex = Efield[0]->array(mfi);
@@ -2198,6 +2275,12 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tex, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
+#if defined(WARPX_DIM_3D)
+            if (compatible_motional && !motional.active(i,j,k,0)) {
+                Ex(i,j,k) = 0.0_rt;
+                return;
+            }
+#endif
             if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
@@ -2223,7 +2306,15 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
+                auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
+#if defined(WARPX_DIM_3D)
+                if (compatible_motional) {
+                    auto const sqrt_gate = motional.gate_sqrt(rho,i,j,k,0);
+                    // Existing pressure/motional branch applies g below.
+                    enE_x = sqrt_gate > 0.0_rt
+                        ? motional.scatter(enE,i,j,k,0) / sqrt_gate : 0.0_rt;
+                }
+#endif
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(
@@ -2321,6 +2412,12 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tey, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
             // Skip field update in the embedded boundaries
+#if defined(WARPX_DIM_3D)
+            if (compatible_motional && !motional.active(i,j,k,1)) {
+                Ey(i,j,k) = 0.0_rt;
+                return;
+            }
+#endif
             if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
@@ -2346,7 +2443,15 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
+                auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
+#if defined(WARPX_DIM_3D)
+                if (compatible_motional) {
+                    auto const sqrt_gate = motional.gate_sqrt(rho,i,j,k,1);
+                    // Existing pressure/motional branch applies g below.
+                    enE_y = sqrt_gate > 0.0_rt
+                        ? motional.scatter(enE,i,j,k,1) / sqrt_gate : 0.0_rt;
+                }
+#endif
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(
@@ -2442,6 +2547,12 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tez, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
+#if defined(WARPX_DIM_3D)
+            if (compatible_motional && !motional.active(i,j,k,2)) {
+                Ez(i,j,k) = 0.0_rt;
+                return;
+            }
+#endif
             if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
@@ -2467,7 +2578,15 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
+                auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
+#if defined(WARPX_DIM_3D)
+                if (compatible_motional) {
+                    auto const sqrt_gate = motional.gate_sqrt(rho,i,j,k,2);
+                    // Existing pressure/motional branch applies g below.
+                    enE_z = sqrt_gate > 0.0_rt
+                        ? motional.scatter(enE,i,j,k,2) / sqrt_gate : 0.0_rt;
+                }
+#endif
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = HybridSmoothFloor(

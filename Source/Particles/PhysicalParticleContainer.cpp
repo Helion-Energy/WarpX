@@ -43,6 +43,7 @@
 #ifdef AMREX_USE_EB
 #   include "EmbeddedBoundary/ParticleBoundaryProcess.H"
 #   include "EmbeddedBoundary/ParticleScraper.H"
+#   include <AMReX_EBFabFactory.H>
 #endif
 #include "WarpX.H"
 
@@ -1185,6 +1186,170 @@ PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
                 }
                 dst.m_rdata[radial_index][j] = static_cast<ParticleReal>(rnew);
                 dst.m_rdata[PIdx::z][j] = static_cast<ParticleReal>(znew);
+                dst.m_rdata[PIdx::w][j] = src.m_rdata[PIdx::w][i]/factor;
+                dst.m_idcpu[j] = SetParticleIDandCPU(first_id+j, cpu);
+            }
+            src.m_idcpu[i] = ParticleIdCpus::Invalid;
+        });
+        Gpu::streamSynchronize();
+        n_parents += parent_count.dataValue();
+        n_children += child_count;
+    }
+    // Children stay in their parent's cell, so redistribution cannot create an
+    // unaccounted physical-boundary loss. The caller removes invalid parents.
+    children.Redistribute();
+    addParticles(children, true);
+    ParallelDescriptor::ReduceLongSum(n_parents);
+    ParallelDescriptor::ReduceLongSum(n_children);
+    if (n_parents > 0) {
+        amrex::Print() << "SplitDepletedBand [" << species_name << "]: " << n_parents
+                       << " parents -> " << n_children << " cell-local children; target=" << target << "\n";
+    }
+#elif defined(WARPX_DIM_3D)
+    const auto& geom = Geom(lev);
+    const auto plo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+    const auto dxi = geom.InvCellSizeArray();
+    const auto domain_lo = geom.Domain().smallEnd();
+    constexpr int radial_index = PIdx::x;
+    // Cartesian cell coordinates are computed from stored positions, not a gather.
+    iMultiFab counts(ParticleBoxArray(lev), ParticleDistributionMap(lev), 1, 0);
+    counts.setVal(0);
+    for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti) {
+        const auto src = pti.GetParticleTile().getParticleTileData();
+        const auto cnt = counts.array(pti);
+        const auto box = counts[pti].box() & geom.Domain();
+        amrex::For(pti.numParticles(), [=] AMREX_GPU_DEVICE (long i) {
+            if (!ConstParticleIDWrapper{src.m_idcpu[i]}.is_valid()) { return; }
+            const Real rp = src.m_rdata[radial_index][i];
+            const Real zp = src.m_rdata[PIdx::z][i];
+            const Real yp = src.m_rdata[PIdx::y][i];
+            const int ci = static_cast<int>(Math::floor((rp-plo[0])*dxi[0])) + domain_lo[0];
+            const int cj = static_cast<int>(Math::floor((yp-plo[1])*dxi[1])) + domain_lo[1];
+            const int ck = static_cast<int>(Math::floor((zp-plo[2])*dxi[2])) + domain_lo[2];
+            // An implicit caller may still have particles awaiting physical BC
+            // or redistribution. Leave those particles for the normal caller.
+            if (!box.contains(IntVect(ci, cj, ck))) { return; }
+            Gpu::Atomic::AddNoRet(&cnt(ci, cj, ck), 1);
+        });
+    }
+
+    PhysicalParticleContainer children(&WarpX::GetInstance());
+    const auto real_names = GetRealSoANames();
+    const auto int_names = GetIntSoANames();
+    for (int c = 0; c < NumRuntimeRealComps(); ++c) {
+        children.AddRealComp(real_names[NArrayReal+c]);
+    }
+    for (int c = 0; c < NumRuntimeIntComps(); ++c) {
+        children.AddIntComp(int_names[NArrayInt+c]);
+    }
+    children.AllocData();
+    const int target = m_hybrid_split_target_ppc;
+    const int cpu = ParallelDescriptor::MyProc();
+    long n_parents = 0;
+    long n_children = 0;
+    for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(pti.numParticles() <= std::numeric_limits<int>::max(),
+                                        "Too many particles in one density-band split tile");
+        const int np = static_cast<int>(pti.numParticles());
+        if (np == 0) { continue; }
+        const auto src = pti.GetParticleTile().getParticleTileData();
+        const auto cnt = counts.const_array(pti);
+        const auto rho = a_rho.const_array(pti);
+        const auto box = counts[pti].box() & geom.Domain();
+#ifdef AMREX_USE_EB
+        Array4<EBCellFlag const> eb_flags;
+        if (EB::enabled()) {
+            eb_flags = WarpX::GetInstance().fieldEBFactory(lev).getMultiEBCellFlagFab().const_array(pti);
+        }
+#endif
+        Gpu::DeviceVector<int> multiplicity(np);
+        Gpu::DeviceVector<long> offsets(np);
+        auto* factors = multiplicity.data();
+        auto* out_offsets = offsets.data();
+        Gpu::DeviceScalar<long> parent_count(0);
+        auto* parent_count_ptr = parent_count.dataPtr();
+        amrex::For(np, [=] AMREX_GPU_DEVICE (int i) {
+            factors[i] = 0;
+            if (!ConstParticleIDWrapper{src.m_idcpu[i]}.is_valid()) { return; }
+            const Real rp = src.m_rdata[radial_index][i];
+            const Real zp = src.m_rdata[PIdx::z][i];
+            const Real yp = src.m_rdata[PIdx::y][i];
+            const int ci = static_cast<int>(Math::floor((rp-plo[0])*dxi[0])) + domain_lo[0];
+            const int cj = static_cast<int>(Math::floor((yp-plo[1])*dxi[1])) + domain_lo[1];
+            const int ck = static_cast<int>(Math::floor((zp-plo[2])*dxi[2])) + domain_lo[2];
+            if (!box.contains(IntVect(ci, cj, ck))) { return; }
+            const int n = cnt(ci, cj, ck);
+            if (n <= 0 || n >= target) { return; }
+            // Select the whole cell from its mean nodal charge density. A
+            // nearest-node test can otherwise select only some of its parents.
+            Real rv = 0.0;
+            for (int di=0; di<2; ++di) {
+                for (int dj=0; dj<2; ++dj) {
+                    for (int dk=0; dk<2; ++dk) { rv += rho(ci+di,cj+dj,ck+dk); }
+                }
+            }
+            rv = Real(0.125)*std::abs(rv);
+#ifdef AMREX_USE_EB
+            if (eb_flags && eb_flags(ci,cj,ck).isCovered()) { return; }
+#endif
+            if (rv < a_band_lo || rv > a_band_hi) { return; }
+            factors[i] = 1 + (target-1)/n;
+            Gpu::Atomic::AddNoRet(parent_count_ptr, 1L);
+        });
+        const long child_count = Scan::PrefixSum<long>(np,
+            [=] AMREX_GPU_DEVICE (int i) -> long { return factors[i]; },
+            [=] AMREX_GPU_DEVICE (int i, long offset) { out_offsets[i] = offset; },
+            Scan::Type::exclusive, Scan::retSum);
+        if (child_count == 0) { continue; }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(child_count <= std::numeric_limits<int>::max(),
+                                        "Too many children in one density-band split tile");
+        auto& dst_tile = children.DefineAndReturnParticleTile(lev, pti.index(), pti.LocalTileIndex());
+        dst_tile.resize(child_count);
+        const auto dst = dst_tile.getParticleTileData();
+        const Long first_id = ParticleType::NextID();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(first_id < LongParticleIds::NoSplitParticleID-child_count,
+                                        "Particle IDs exhausted during density-band splitting");
+        ParticleType::NextID(first_id+child_count);
+        amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (int i) {
+            const int factor = factors[i];
+            if (factor == 0) { return; }
+            const ParticleReal rp = src.m_rdata[radial_index][i];
+            const ParticleReal zp = src.m_rdata[PIdx::z][i];
+            const ParticleReal yp = src.m_rdata[PIdx::y][i];
+            const int ci = static_cast<int>(Math::floor((rp-plo[0])*dxi[0])) + domain_lo[0];
+            const int cj = static_cast<int>(Math::floor((yp-plo[1])*dxi[1])) + domain_lo[1];
+            const int ck = static_cast<int>(Math::floor((zp-plo[2])*dxi[2])) + domain_lo[2];
+            const Real rlo = plo[0] + (ci-domain_lo[0])*dx[0];
+            const Real ylo = plo[1] + (cj-domain_lo[1])*dx[1];
+            const Real zlo = plo[2] + (ck-domain_lo[2])*dx[2];
+            // Symmetric pairs preserve the spatial centroid. In cut cells
+            // leave positions unchanged: in-cell jitter alone is not EB-safe.
+            bool regular = true;
+#ifdef AMREX_USE_EB
+            regular = !eb_flags || eb_flags(ci,cj,ck).isRegular();
+#endif
+            const Real dr = regular ? Real(0.25)*amrex::max(Real(0), amrex::min(rp-rlo, rlo+dx[0]-rp)) : Real(0);
+            const Real dy = regular ? Real(0.25)*amrex::max(Real(0), amrex::min(yp-ylo, ylo+dx[1]-yp)) : Real(0);
+            const Real dz = regular ? Real(0.25)*amrex::max(Real(0), amrex::min(zp-zlo, zlo+dx[2]-zp)) : Real(0);
+            const int pairs = factor/2;
+            for (int child = 0; child < factor; ++child) {
+                const long j = out_offsets[i]+child;
+                amrex::copyParticle(dst, src, i, j);
+                Real rnew = rp;
+                Real znew = zp;
+                Real ynew = yp;
+                if (child < 2*pairs) {
+                    const int pair = child/2;
+                    const Real sign = child%2 == 0 ? Real(-1) : Real(1);
+                    const Real fraction = Real(pair+1)/Real(pairs);
+                    if (pair%3 == 0) { rnew += sign*fraction*dr; }
+                    else if (pair%3 == 1) { ynew += sign*fraction*dy; }
+                    else { znew += sign*fraction*dz; }
+                }
+                dst.m_rdata[radial_index][j] = static_cast<ParticleReal>(rnew);
+                dst.m_rdata[PIdx::z][j] = static_cast<ParticleReal>(znew);
+                dst.m_rdata[PIdx::y][j] = static_cast<ParticleReal>(ynew);
                 dst.m_rdata[PIdx::w][j] = src.m_rdata[PIdx::w][i]/factor;
                 dst.m_idcpu[j] = SetParticleIDandCPU(first_id+j, cpu);
             }

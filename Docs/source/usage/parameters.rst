@@ -2208,14 +2208,20 @@ Particle initialization
     :default: ``0``
     :optional:
 
-    With the hybrid-PIC (Ohm's law) solver: every ``hybrid_split_interval`` steps, split
-    particles (via the ``split_type`` scheme) in cells whose macroparticle count has dropped
-    below ``hybrid_split_target_ppc`` and whose charge density lies inside the band
-    ``[hybrid_split_band_lo, hybrid_split_band_hi]`` (in units of the Ohm's-law density floor).
-    Restores deposition statistics in transport-depleted low-density cells, where hybrid-PIC
-    field noise is largest. ``0`` disables. The trigger is self-limiting (cells at or above the
-    target count stop splitting), but the band must exclude true vacuum: a band reaching density
-    zero pumps the entire floored exterior toward the target count.
+    With the hybrid-PIC (Ohm's law) solver in RZ, XZ, or Cartesian 3D, replenish
+    occupied cells every ``hybrid_split_interval`` steps when their macroparticle
+    count is below ``hybrid_split_target_ppc`` and their mean nodal charge density
+    lies in ``[hybrid_split_band_lo, hybrid_split_band_hi]`` (in units of the
+    Ohm's-law density floor). ``0`` disables this operation.
+
+    Each selected parent is replaced by enough equal-weight children to reach
+    the occupied-cell floor in one call. Children inherit momentum and runtime
+    attributes and stay in the parent's cell; symmetric position offsets preserve
+    its weighted centroid. This path does not use the AMR ``split_type`` scheme.
+    In Cartesian 3D, covered EB cells are excluded and children in cut cells retain
+    the parent's position to avoid artificial wall loss. Empty cells are not seeded.
+    Splitting preserves the existing distribution; it does not create independent
+    velocity samples or replace physical transport into empty cells.
 
 .. pp:param:: <species_name>.hybrid_split_target_ppc
     :type: ``int``
@@ -6097,13 +6103,17 @@ Maxwell solver: kinetic-fluid hybrid
 .. pp:param:: hybrid_pic_model.energy_conserving_motional
 
     ``bool`` (default ``false``)
-    Gather electron velocity from the physical RZ Yee edges, evaluate its cross
+    Gather electron velocity from the physical Yee edges, evaluate its cross
     product with B on nodes, and return the force with the physical-volume adjoint
     of that gather. This enforces zero electron work by the motional/Hall term,
     including across density jumps. PEC projections and square roots of any
-    Holmstrom gates occur on both sides of the pair. Requires single-level m=0 RZ,
-    the axis at r=0, no embedded boundary, the e-form Ohm solver, and a hard density
-    floor. It adds no thermal source.
+    Holmstrom gates occur on both sides of the pair. Requires a single level,
+    the staggered e-form Ohm solver, and a hard density floor. In m=0 RZ, the axis
+    must be at r=0 and embedded boundaries are unsupported. In Cartesian 3D,
+    the vacuum seam switch must be ``edge``; embedded boundaries must use
+    ``use_conformal_eb = 1`` and ``conformal_wall_model = conductor``. Cut and
+    covered ECT edges are projected out of both the gather and its adjoint,
+    matching the constitutive conducting-wall condition. It adds no thermal source.
 
 .. pp:param:: hybrid_pic_model.qdsmc_full_pedestal_transport
 
