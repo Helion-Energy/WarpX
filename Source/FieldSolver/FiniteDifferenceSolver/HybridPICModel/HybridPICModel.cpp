@@ -203,10 +203,10 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.temperature_deposition_interval must be >= 1");
 
     pp_hybrid.query("hyper_resistivity_curl_curl", m_hyper_res_curl_curl);
-#if !(defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER))
+#if !(defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_3D))
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_hyper_res_curl_curl,
         "hybrid_pic_model.hyper_resistivity_curl_curl is implemented for "
-        "the RZ solver only (the Cartesian conversion is a follow-up)");
+        "RZ and 3D Cartesian solvers only");
 #endif
     // Booked hyper-resistive dissipation (m_hyper_res_heating member doc).
     // Its prerequisites (eta_H present, energy equation on) are asserted in
@@ -339,6 +339,10 @@ void HybridPICModel::ReadParameters ()
     }
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
     pp_hybrid.query("hyper_resistivity_curlcurl", m_hyper_resistivity_curlcurl);
+#if defined(WARPX_DIM_3D)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(m_hyper_res_curl_curl && m_hyper_resistivity_curlcurl),
+        "Select only one curl-curl hyper-resistivity implementation");
+#endif
 
     m_n_floor_given =
         utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
@@ -1907,7 +1911,11 @@ void HybridPICModel::AllocateLevelMFs (
     // per Ohm-solve call. Gate on the expression, not
     // m_include_hyper_resistivity_term: that flag is derived in InitData,
     // after this allocation runs.
-    if ((m_eta_h_expression != "0.0") && m_hyper_resistivity_curlcurl) {
+    bool need_hyper_scratch = m_hyper_resistivity_curlcurl;
+#if defined(WARPX_DIM_3D)
+    need_hyper_scratch = need_hyper_scratch || m_hyper_res_curl_curl;
+#endif
+    if ((m_eta_h_expression != "0.0") && need_hyper_scratch) {
         const amrex::IntVect B_stag_hr[3] =
             {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
         const amrex::IntVect J_stag_hr[3] =

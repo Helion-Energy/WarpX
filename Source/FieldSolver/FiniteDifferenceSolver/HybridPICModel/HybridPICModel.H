@@ -3836,7 +3836,12 @@ public:
      *  without adjoint pairing admit positive-real grid-scale
      *  eigenvalues). Boundary statement: the operator ends one node
      *  inside non-periodic domain faces (r_max wall, non-periodic z) and
-     *  carries no wall flux — no pass reads a domain ghost. RZ only.
+     *  carries no wall flux — no pass reads a domain ghost in RZ. In 3D,
+     *  a physical-dual-volume adjoint pairs the Yee curls, with conductor
+     *  edges projected out on both sides and covered EB faces excluded.
+     *  It supports single-level staggered Cartesian grids, with either no
+     *  EB or a conformal conductor wall; the curl pair excludes physical-domain
+     *  current/flux ghosts. Coefficient interpolation uses filled rho/B halos.
      *  Default off (the Laplacian path is bit-identical legacy).
      *  Input: hyper_resistivity_curl_curl. */
     bool m_hyper_res_curl_curl = false;

@@ -4595,6 +4595,27 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.solve_electron_energy_equation`. Off (the default)
     is bit-identical to the legacy unbooked stabiliser.
 
+.. pp:param:: hybrid_pic_model.hyper_resistivity_curl_curl
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Apply the adjoint-paired curl-curl stabilizer instead of a component
+    Laplacian. The established RZ implementation remains unchanged. In 3D,
+    use the Cartesian Yee curl and its physical-dual-volume adjoint, so
+    :math:`\sum V_e J E_H = \sum V_f \eta_H |\mathrm{curl}(P J)|^2`
+    for nonnegative coefficients, with covered faces omitted and conductor
+    edges projected out on both sides by :math:`P`. Supports single-level
+    staggered grids with no EB or a conformal conductor ECT wall. Domain-face
+    half volumes are included; the curl pair excludes physical-domain current
+    and flux ghosts (coefficient interpolation uses filled rho/B halos). Periodic
+    discrete gradients remain in the null space. The applied-field heating
+    mirror follows the same operator; particle-push calls omit the stabilizer.
+
+    This is distinct from the older ``hyper_resistivity_curlcurl`` option;
+    do not enable both. This option preserves the RZ donor input spelling
+    when moving to Cartesian/ECT geometry.
+
 .. pp:param:: hybrid_pic_model.hyper_resistivity_curlcurl
     :type: ``bool``
     :default: ``0``

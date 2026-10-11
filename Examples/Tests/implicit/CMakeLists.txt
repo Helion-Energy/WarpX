@@ -575,6 +575,49 @@ if(TARGET lib_rz)
     endforeach()
 endif()
 
+# Native work, gradient-null and applied-field-mirror certificates for curl-curl.
+if(TARGET lib_3d)
+    add_executable(test_hyperres_work_3d test_hyperres_work_3d.cpp)
+    target_link_libraries(test_hyperres_work_3d PRIVATE lib_3d)
+    target_include_directories(test_hyperres_work_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_hyperres_work_3d)
+    endif()
+    foreach(box IN ITEMS 8 16)
+        foreach(bc IN ITEMS periodic pec pmc ect)
+            if(bc STREQUAL "ect" AND NOT WarpX_EB)
+                continue()
+            endif()
+            set(extra)
+            if(bc STREQUAL "periodic")
+                set(field_bc "periodic periodic periodic")
+                set(particle_bc "periodic periodic periodic")
+            elseif(bc STREQUAL "ect")
+                set(field_bc "pec pec pmc")
+                set(particle_bc "reflecting reflecting reflecting")
+                list(APPEND extra "warpx.eb_implicit_function=sqrt(x*x+y*y)-0.24"
+                    hybrid_pic_model.use_conformal_eb=1
+                    hybrid_pic_model.conformal_wall_model=conductor)
+            else()
+                set(field_bc "${bc} ${bc} ${bc}")
+                set(particle_bc "reflecting reflecting reflecting")
+            endif()
+            set(test_name test_3d_hyperres_work_${bc}_${box})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+            add_test(NAME ${test_name} COMMAND test_hyperres_work_3d
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_motional_work
+                amr.max_grid_size=${box} hybrid_pic_model.hyper_resistivity_curl_curl=1
+                "hybrid_pic_model.plasma_hyper_resistivity(rho,B)=1.e-7*(1+0.05*rho+0.1*B)"
+                "boundary.field_lo=${field_bc}" "boundary.field_hi=${field_bc}"
+                "boundary.particle_lo=${particle_bc}" "boundary.particle_hi=${particle_bc}"
+                ${extra})
+            set_tests_properties(${test_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+        endforeach()
+    endforeach()
+endif()
+
 # The default prescribed-drive recovery must expose the same map to full
 # residuals and Jacobian probes. The frozen arm verifies test sensitivity.
 if(TARGET lib_rz)
@@ -1807,7 +1850,7 @@ if(TARGET lib_3d)
                 set(field_bc "${bc} ${bc} ${bc}")
                 set(particle_bc "reflecting reflecting reflecting")
             endif()
-            foreach(vacuum IN ITEMS off hard smooth donor)
+            foreach(vacuum IN ITEMS off hard smooth narrow)
                 set(vacuum_args hybrid_pic_model.holmstrom_vacuum_region=1)
                 if(vacuum STREQUAL "off")
                     set(vacuum_args hybrid_pic_model.holmstrom_vacuum_region=0)
@@ -1818,19 +1861,19 @@ if(TARGET lib_3d)
                 else()
                     list(APPEND vacuum_args hybrid_pic_model.holmstrom_transition_width=0.01)
                 endif()
-            foreach(hall IN ITEMS 0 1)
-                set(test_name test_3d_motional_work_${bc}_${box}_hall${hall}_${vacuum})
-                file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
-                add_test(NAME ${test_name} COMMAND test_motional_work_3d
-                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_motional_work
-                    amr.max_grid_size=${box} motional_test.hall=${hall}
-                    "boundary.field_lo=${field_bc}" "boundary.field_hi=${field_bc}"
-                    "boundary.particle_lo=${particle_bc}" "boundary.particle_hi=${particle_bc}"
-                    ${extra} ${vacuum_args})
-                set_tests_properties(${test_name} PROPERTIES
-                    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
-                    TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
-            endforeach()
+                foreach(hall IN ITEMS 0 1)
+                    set(test_name test_3d_motional_work_${bc}_${box}_hall${hall}_${vacuum})
+                    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+                    add_test(NAME ${test_name} COMMAND test_motional_work_3d
+                        ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_motional_work
+                        amr.max_grid_size=${box} motional_test.hall=${hall}
+                        "boundary.field_lo=${field_bc}" "boundary.field_hi=${field_bc}"
+                        "boundary.particle_lo=${particle_bc}" "boundary.particle_hi=${particle_bc}"
+                        ${extra} ${vacuum_args})
+                    set_tests_properties(${test_name} PROPERTIES
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+                        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+                endforeach()
             endforeach()
         endforeach()
     endforeach()

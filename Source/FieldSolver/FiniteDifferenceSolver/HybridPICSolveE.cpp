@@ -22,6 +22,7 @@
 #endif
 #include "HybridPICModel/HybridPICModel.H"
 #include "HybridPICModel/MotionalFieldCartesian.H"
+#include "HybridPICModel/HyperResistivityCartesian.H"
 #include "HybridPICModel/MotionalFieldRZ.H"
 #include "HybridPICModel/QdsmcVolumeElement.H"
 #include "Utils/TextMsg.H"
@@ -1960,8 +1961,12 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     // coefficient inside the outer curl (energy-sign-definite for varying
     // eta_H), precomputed by the caller (HybridPICModel::HybridPICSolveE)
     // from the same plasma current the kernels bind below.
+    bool compatible_hyper = false;
+#if defined(WARPX_DIM_3D)
+    compatible_hyper = hybrid_model->m_hyper_res_curl_curl;
+#endif
     const bool hyperres_curlcurl = include_hyper_resistivity_term
-        && hybrid_model->m_hyper_resistivity_curlcurl;
+        && (hybrid_model->m_hyper_resistivity_curlcurl || compatible_hyper);
     ablastr::fields::VectorField eH_mf = {nullptr, nullptr, nullptr};
     if (hyperres_curlcurl) {
         eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
@@ -1971,11 +1976,12 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
     bool const compatible_motional = hybrid_model->m_energy_conserving_motional;
     MotionalFieldCartesian motional_geometry;
     ablastr::fields::VectorField motional_lengths = {nullptr, nullptr, nullptr};
-    if (compatible_motional) {
+    if (compatible_motional || compatible_hyper) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::grid_type == ablastr::utils::enums::GridType::Staggered &&
-            warpx.finestLevel() == 0 && floor_w == 0.0_rt &&
-            !hybrid_model->m_esolve_curlcurl && switch_mode == VacuumSeamSwitchMode::Edge &&
+            warpx.finestLevel() == 0 && (!compatible_motional ||
+            (floor_w == 0.0_rt && !hybrid_model->m_esolve_curlcurl &&
+             switch_mode == VacuumSeamSwitchMode::Edge)) &&
             (!EB::enabled() || (hybrid_model->m_use_conformal_eb &&
                                hybrid_model->m_conformal_wall_conductor)),
             "Cartesian energy_conserving_motional requires single-level staggered e_form, "
@@ -2004,6 +2010,10 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                 motional_lengths[d]->FillBoundary(geom.periodicity());
             }
         }
+    }
+    if (compatible_hyper && include_hyper_resistivity_term && include_resistivity) {
+        ComputeHyperResistivityCartesian(warpx,lev,Jfield,Bfield,rhofield,
+            motional_geometry,eta_h,hyper_resistivity_has_B_dependence);
     }
 #endif
 
@@ -2363,6 +2373,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // coefficient inside the outer curl; composed by the
                     // caller (eta_H face-averaged there).
                     Ex(i, j, k) += eHx(i, j, k);
+                    if (eh_x) { eh_x(i,j,k) = eHx(i,j,k); }
                 } else if (include_hyper_resistivity_term && include_resistivity) {
                     // Truncated identity (-lap J = curl curl J only at
                     // div J = 0); trajectory-preserving default.
@@ -2500,6 +2511,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // coefficient inside the outer curl; composed by the
                     // caller (eta_H face-averaged there).
                     Ey(i, j, k) += eHy(i, j, k);
+                    if (eh_y) { eh_y(i,j,k) = eHy(i,j,k); }
                 } else if (include_hyper_resistivity_term && include_resistivity) {
                     // Truncated identity; trajectory-preserving default.
 
@@ -2635,6 +2647,7 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // coefficient inside the outer curl; composed by the
                     // caller (eta_H face-averaged there).
                     Ez(i, j, k) += eHz(i, j, k);
+                    if (eh_z) { eh_z(i,j,k) = eHz(i,j,k); }
                 } else if (include_hyper_resistivity_term && include_resistivity) {
                     // Truncated identity; trajectory-preserving default.
 
