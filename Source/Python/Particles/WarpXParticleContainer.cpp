@@ -6,7 +6,10 @@
 
 #include "Python/pyWarpX.H"
 
+#include <Particles/PhysicalParticleContainer.H>
 #include <Particles/WarpXParticleContainer.H>
+
+#include <cmath>
 
 
 void init_WarpXParIter (py::module& m)
@@ -147,6 +150,35 @@ dt: float
   Time step for particle level
 relative_time: float
   Time at which to deposit J, relative to the time of the current positions of the particles)pbdoc"
+        )
+        .def("split_depleted_band",
+            [](WarpXParticleContainer& pc, const amrex::MultiFab& rho,
+               amrex::Real band_lo, amrex::Real band_hi, int lev)
+            {
+                auto* physical = dynamic_cast<PhysicalParticleContainer*>(&pc);
+                if (physical == nullptr || physical->HybridSplitInterval() <= 0) {
+                    throw py::value_error("Species must have hybrid splitting configured");
+                }
+                if (lev != 0 || !std::isfinite(band_lo) || !std::isfinite(band_hi)
+                    || band_lo < 0.0 || band_hi <= band_lo) {
+                    throw py::value_error("Require level zero and a finite nonnegative density band");
+                }
+                if (rho.nComp() != 1 || !rho.ixType().nodeCentered()
+                    || amrex::convert(rho.boxArray(), amrex::IntVect(0)) != pc.ParticleBoxArray(lev)
+                    || rho.DistributionMap() != pc.ParticleDistributionMap(lev)) {
+                    throw py::value_error("Density must be scalar nodal data on the particle layout");
+                }
+                physical->SplitDepletedBand(rho, band_lo, band_hi, lev);
+                physical->Redistribute();
+            },
+            py::arg("rho"), py::arg("band_lo"), py::arg("band_hi"), py::arg("lev")=0,
+            R"pbdoc(Collectively condition occupied cells with the configured hybrid splitter.
+
+Call only at a quiescent initialization or accepted-step boundary, on all MPI
+ranks. No time advance, field deposition, temperature seeding, or field solve
+is performed. The caller supplies a valid carried nodal charge-density image;
+the next normal deposition accounts for the conservative particle split.
+Empty cells remain empty. Level zero is the qualified restart-loader scope.)pbdoc"
         )
         .def("get_number_density",
             [](WarpXParticleContainer& pc, int lev)
