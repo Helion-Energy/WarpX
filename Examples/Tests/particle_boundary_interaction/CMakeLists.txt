@@ -11,7 +11,7 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
         add_test(NAME test_3d_eb_standoff_geometry_${padding}
             COMMAND test_eb_standoff_3d
             ${CMAKE_CURRENT_SOURCE_DIR}/../implicit/inputs_test_3d_motional_work
-            "amr.n_cell=160 160 16" "amr.max_grid_size=40" "amr.blocking_factor=8"
+            "amr.n_cell=160 160 16" "amr.max_grid_size=80 40 16" "amr.blocking_factor=8"
             "geometry.prob_lo=-0.22222222222222222 -0.22222222222222222 -0.109375"
             "geometry.prob_hi=0.22222222222222222 0.22222222222222222 0.109375"
             "boundary.field_lo=pec pec neumann" "boundary.field_hi=pec pec neumann"
@@ -28,7 +28,7 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
             PROPERTIES TIMEOUT 180 LABELS "particle_boundary")
     endforeach()
     foreach(mode IN ITEMS startup reject footprint subcycle split restart shape2)
-        if(NOT mode STREQUAL reject)
+        if(NOT "${mode}" STREQUAL "reject")
             set(padding 12)
             set(reject 0)
         else()
@@ -58,7 +58,7 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
         add_test(NAME test_3d_eb_standoff_${mode}
             COMMAND test_eb_standoff_3d
             ${CMAKE_CURRENT_SOURCE_DIR}/../implicit/inputs_test_3d_motional_work
-            "amr.n_cell=160 160 16" "amr.max_grid_size=40" "amr.blocking_factor=8"
+            "amr.n_cell=160 160 16" "amr.max_grid_size=80 40 16" "amr.blocking_factor=8"
             "geometry.prob_lo=-0.22222222222222222 -0.22222222222222222 -0.109375"
             "geometry.prob_hi=0.22222222222222222 0.22222222222222222 0.109375"
             "boundary.field_lo=pec pec neumann" "boundary.field_hi=pec pec neumann"
