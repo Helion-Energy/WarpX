@@ -10,6 +10,7 @@
 #include "ablastr/utils/TextMsg.H"
 
 #include <AMReX_Array.H>
+#include <AMReX_Array4.H>
 #include <AMReX_Extension.H>
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_IndexType.H>

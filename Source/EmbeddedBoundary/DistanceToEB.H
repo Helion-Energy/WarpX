@@ -20,6 +20,45 @@
 namespace DistanceToEB
 {
 
+#if defined(WARPX_DIM_3D)
+// Gradient of the very same trilinear interpolant used to locate contact.
+// Smoothing adjacent cell gradients can point a grazing reflected trajectory
+// into that interpolant's solid side even at an exactly bracketed contact.
+AMREX_GPU_HOST_DEVICE AMREX_INLINE amrex::GpuArray<amrex::ParticleReal, 3>
+surface_normal(amrex::ParticleReal x, amrex::ParticleReal y, amrex::ParticleReal z,
+               amrex::GpuArray<amrex::Real, 3> const &lo,
+               amrex::GpuArray<amrex::Real, 3> const &dxi,
+               amrex::Array4<const amrex::Real> const &phi) noexcept
+{
+    int i, j, k;
+    amrex::Real weights[3][2];
+    ablastr::particles::compute_weights<amrex::IndexType::NODE>(x, y, z, lo, dxi, i, j, k, weights);
+    amrex::GpuArray<amrex::ParticleReal, 3> gradient{0., 0., 0.};
+    for (int a = 0; a < 2; ++a)
+    {
+        for (int b = 0; b < 2; ++b)
+        {
+            gradient[0] += (phi(i + 1, j + a, k + b) - phi(i, j + a, k + b)) * dxi[0] *
+                           weights[1][a] * weights[2][b];
+            gradient[1] += (phi(i + a, j + 1, k + b) - phi(i + a, j, k + b)) * dxi[1] *
+                           weights[0][a] * weights[2][b];
+            gradient[2] += (phi(i + a, j + b, k + 1) - phi(i + a, j + b, k)) * dxi[2] *
+                           weights[0][a] * weights[1][b];
+        }
+    }
+    auto const norm = std::sqrt(gradient[0] * gradient[0] + gradient[1] * gradient[1] +
+                                gradient[2] * gradient[2]);
+    if (norm > 0.)
+    {
+        for (int d = 0; d < 3; ++d)
+        {
+            gradient[d] /= norm;
+        }
+    }
+    return gradient;
+}
+#endif
+
 AMREX_GPU_HOST_DEVICE AMREX_INLINE
 amrex::Real dot_product (const amrex::RealVect& a, const amrex::RealVect& b) noexcept
 {

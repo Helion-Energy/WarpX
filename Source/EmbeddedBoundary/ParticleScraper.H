@@ -13,14 +13,17 @@
 #include <ablastr/particles/NodalFieldGather.H>
 
 #include <AMReX.H>
+#include <AMReX_GpuAtomic.H>
+#include <AMReX_GpuMemory.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_Particle.H>
-#include <AMReX_RandomEngine.H>
 #include <AMReX_REAL.H>
+#include <AMReX_RandomEngine.H>
 #include <AMReX_TypeTraits.H>
 #include <AMReX_Vector.H>
 
 #include <algorithm>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -193,6 +196,21 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 {
     BL_PROFILE("scrapeParticlesAtEB");
 
+    using PData = typename PC::ParticleTileType::ParticleTileDataType;
+    using Result = std::invoke_result_t<
+        F, PData &, int, SetParticlePosition<PIdx> const &, amrex::ParticleReal,
+        amrex::ParticleReal, amrex::ParticleReal, amrex::Array4<const amrex::Real> const &,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &, amrex::RandomEngine const &>;
+    constexpr bool checked_contact = std::is_same_v<Result, bool> && AMREX_SPACEDIM == 3;
+    std::optional<amrex::Gpu::DeviceScalar<int>> contact_error;
+    int *error = nullptr;
+    if constexpr (checked_contact)
+    {
+        contact_error.emplace(0);
+        error = contact_error->dataPtr();
+    }
+
     for (int lev = lev_min; lev <= lev_max; ++lev)
     {
         const auto plo = pc.Geom(lev).ProbLoArray();
@@ -234,10 +252,30 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 
                 if (distance_to_eb_value < phi_threshold)
                 {
-                    f(ptd, ip, setPosition, xp, yp, zp, distance_to_eb_arr, plo, dxi, engine);
+                    if constexpr (checked_contact)
+                    {
+                        if (!f(ptd, ip, setPosition, xp, yp, zp, distance_to_eb_arr, plo, dxi,
+                               engine))
+                        {
+                            // ParallelForRNG is not a SIMD loop on CPU. The
+                            // host/device atomic also covers concurrent OMP tiles.
+                            amrex::HostDevice::Atomic::Add(error, 1);
+                        }
+                    }
+                    else
+                    {
+                        f(ptd, ip, setPosition, xp, yp, zp, distance_to_eb_arr, plo, dxi, engine);
+                    }
                 }
             });
         }
+    }
+    if constexpr (checked_contact)
+    {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            contact_error->dataValue() == 0,
+            "EB particle contact could not be bracketed or contained. "
+            "Check initial wall containment and the particle timestep.");
     }
 }
 
