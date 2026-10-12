@@ -238,6 +238,9 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
             amrex::ParallelForRNG( np,
             [=] AMREX_GPU_DEVICE (const int ip, amrex::RandomEngine const& engine) noexcept
             {
+                // NVCC requires captures to be established outside a
+                // constexpr-if branch, even for the discarded handler path.
+                amrex::ignore_unused(f, setPosition, error);
                 // skip particles that are already flagged for removal
                 if (!amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.is_valid()) { return; }
 
@@ -252,7 +255,7 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 
                 if (distance_to_eb_value < phi_threshold)
                 {
-                    if constexpr (checked_contact)
+                    if constexpr (std::is_same_v<Result, bool> && AMREX_SPACEDIM == 3)
                     {
                         if (!f(ptd, ip, setPosition, xp, yp, zp, distance_to_eb_arr, plo, dxi,
                                engine))
