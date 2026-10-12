@@ -1312,7 +1312,7 @@ void MultiParticleContainer::ScrapeParticlesAtEB (
 
 void MultiParticleContainer::TallyParticlesToBeCollectedAtEB (
     ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-    amrex::Real const standoff_cells)
+    amrex::Real const standoff_cells, int const only_species)
 {
     using namespace amrex::literals;
 
@@ -1325,6 +1325,7 @@ void MultiParticleContainer::TallyParticlesToBeCollectedAtEB (
 
     for (int isp = 0; isp < nSpecies(); ++isp)
     {
+        if (only_species >= 0 && isp != only_species) { continue; }
         auto & pc = *allcontainers[isp];
         amrex::ParticleReal const q = pc.getCharge();
         amrex::ParticleReal const m = pc.getMass();

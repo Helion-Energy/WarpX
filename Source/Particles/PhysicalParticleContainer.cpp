@@ -1259,8 +1259,16 @@ PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
         const auto box = counts[pti].box() & geom.Domain();
 #ifdef AMREX_USE_EB
         Array4<EBCellFlag const> eb_flags;
+        Array4<Real const> standoff_phi;
+        Real standoff = 0;
         if (EB::enabled()) {
-            eb_flags = WarpX::GetInstance().fieldEBFactory(lev).getMultiEBCellFlagFab().const_array(pti);
+            auto& warpx = WarpX::GetInstance();
+            eb_flags = warpx.fieldEBFactory(lev).getMultiEBCellFlagFab().const_array(pti);
+            if (WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating) {
+                standoff_phi = warpx.m_fields.get(warpx::fields::FieldType::distance_to_eb, lev)
+                                   ->const_array(pti);
+                standoff = WarpX::eb_standoff_cells*amrex::max(dx[0], amrex::max(dx[1],dx[2]));
+            }
         }
 #endif
         Gpu::DeviceVector<int> multiplicity(np);
@@ -1328,6 +1336,19 @@ PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
             bool regular = true;
 #ifdef AMREX_USE_EB
             regular = !eb_flags || eb_flags(ci,cj,ck).isRegular();
+            // A regular cell can intersect the insulating collection shell.
+            // Jitter only if every corner clears it: trilinear interpolation
+            // then bounds every child in this cell. Otherwise clone in place,
+            // retaining weight, energy, momentum and spatial centroid exactly.
+            if (standoff_phi) {
+                for (int di=0; di<2; ++di) {
+                    for (int dj=0; dj<2; ++dj) {
+                        for (int dk=0; dk<2; ++dk) {
+                            regular = regular && standoff_phi(ci+di,cj+dj,ck+dk) >= standoff;
+                        }
+                    }
+                }
+            }
 #endif
             const Real dr = regular ? Real(0.25)*amrex::max(Real(0), amrex::min(rp-rlo, rlo+dx[0]-rp)) : Real(0);
             const Real dy = regular ? Real(0.25)*amrex::max(Real(0), amrex::min(yp-ylo, ylo+dx[1]-yp)) : Real(0);

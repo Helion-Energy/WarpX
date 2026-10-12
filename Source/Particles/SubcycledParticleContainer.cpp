@@ -12,6 +12,7 @@
 #   include "EmbeddedBoundary/ParticleScraper.H"
 #endif
 #include "Fields.H"
+#include "Particles/MultiParticleContainer.H"
 #include "Particles/ParticleBoundaryBuffer.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
@@ -460,7 +461,13 @@ SubcycledParticleContainer::HandleBoundariesSubcycle (amrex::Real cur_time, amre
         }
         else
         {
-            scrapeParticlesAtEB(*this, distance_to_eb, ParticleBoundaryProcess::Absorb());
+            bool const insulating = WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating;
+            amrex::Real const band = insulating ? WarpX::eb_standoff_cells : 0._rt;
+            if (insulating) {
+                warpx.GetPartContainer().TallyParticlesToBeCollectedAtEB(
+                    distance_to_eb, band, getSpeciesId());
+            }
+            scrapeParticlesAtEB(*this, distance_to_eb, ParticleBoundaryProcess::Absorb(), band);
             boundary_buffer.gatherParticlesFromEmbeddedBoundaries(
                 *this, getSpeciesId(), distance_to_eb, cur_time, dt_sub);
             deleteInvalidParticles();

@@ -270,6 +270,14 @@ public:
      */
     static inline amrex::Real eb_standoff_cells = amrex::Real(2.0);
 
+    /** Optional EB geometry padding, independent of field-solver guards.
+     *  FillSignedDistance saturates at (padding+1)*min(dx). */
+    static inline int eb_distance_guard_cells = 0;
+
+    /** Optional validated interior cylinder for a fail-closed charge/current
+     *  footprint check (3D insulating EB only); zero disables the check. */
+    static inline amrex::Real eb_footprint_cylinder_radius = 0.0;
+
     //! Integers that correspond to the time dependency of J (constant, linear)
     //! and rho (linear, quadratic) for the PSATD algorithm
     static inline auto time_dependency_J = TimeDependencyJ::Default;

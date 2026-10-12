@@ -9863,8 +9863,13 @@ void HybridPICModel::QDSMCApplyInsulatingEBFill (int const lev) const
     // floor nodes farther from the wall keep the QDSMCUpdateTe stale-T_e
     // semantics unchanged.
     amrex::Real const band_bound = (WarpX::eb_standoff_cells + 1.0_rt) * dx_max;
-    int const n_sweeps =
-        static_cast<int>(std::ceil(WarpX::eb_standoff_cells)) + 3;
+    amrex::Real dx_min = geom.CellSize(0);
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) {
+        dx_min = amrex::min(dx_min, geom.CellSize(d));
+    }
+    // A band measured in max(dx) needs enough one-index onion sweeps even
+    // on stretched grids. This preserves the old count on cubic grids.
+    int const n_sweeps = static_cast<int>(std::ceil(band_bound/dx_min)) + 2;
 
     auto const n_floor = m_qdsmc_n_floor;
 

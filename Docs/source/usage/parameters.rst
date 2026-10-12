@@ -1308,8 +1308,9 @@ additionally define the electric potential at the embedded boundary with an anal
 
     * ``insulating``: A collecting wall held off the plasma by a maintained density standoff band.
       Particles are collected where the signed distance to the embedded boundary falls below
-      :pp:param:`boundary.eb_standoff_cells` cells, so no charge is ever deposited against the wall,
-      and the collected charge and kinetic energy are tallied per species (accessible from Python
+      :pp:param:`boundary.eb_standoff_cells` cells. Choose enough clearance for the particle
+      shape, filtering, and motion before collection; a positive band alone does not guarantee
+      that the deposition footprint misses the wall. The collected charge and kinetic energy are tallied per species (accessible from Python
       through ``warpx.get_eb_collected_charge(species_name)`` and ``warpx.get_eb_collected_energy(species_name)``).
       With the hybrid-PIC electron energy equation
       (:pp:param:`hybrid_pic_model.solve_electron_energy_equation`), the electron temperature is
@@ -1327,6 +1328,39 @@ additionally define the electric potential at the embedded boundary with an anal
 
     Width of the insulating wall's standoff band, in cells (measured with the largest cell size
     of the level). Only used with ``boundary.eb_type = insulating``.
+
+    The band must remain strictly below the AMReX signed-distance ceiling,
+    ``min(cell_size) * (EB_geometry_guards + 1)``. An unsupported band aborts
+    before collection. Insulating particles are also collected at initialization,
+    including checkpoint restarts, before the first advance.
+
+.. pp:param:: boundary.eb_distance_guard_cells
+    :type: ``integer``
+    :default: ``0``
+    :optional:
+
+    Minimum geometry padding used by the embedded-boundary factory, EB2
+    construction, and the stored nodal distance field. Zero preserves the field-solver-derived padding. Increasing
+    this value extends AMReX's signed-distance range without changing the
+    electromagnetic solver's guard cells or the embedded surface. The distance
+    remains a near-boundary, facet-based approximation, not a global exact
+    signed-distance field. Validate the resulting band for the chosen geometry,
+    particle shape, filtering, and current-deposition trajectories.
+
+.. pp:param:: boundary.eb_footprint_cylinder_radius
+    :type: ``float``
+    :default: ``0.``
+    :optional:
+
+    Optional fail-closed current-deposition check for a 3D insulating wall.
+    A positive value specifies a cylinder about the z axis, in meters, that
+    must lie wholly inside regular (uncut) EB cells; initialization verifies
+    this certificate. Before every explicit charged-particle current deposit,
+    both reconstructed Esirkepov endpoints and a conservative shape, staggering,
+    and bilinear-filter envelope must fit inside that cylinder. This includes
+    alpha subcycle deposits. A violation aborts before the deposit, including
+    optimized CPU/GPU builds. It neither clips trajectories nor changes the
+    deposition/gather algorithm. Zero disables this extra check.
 
 .. pp:param:: warpx.eb_ect_balanced_borrow
     :type: ``integer``

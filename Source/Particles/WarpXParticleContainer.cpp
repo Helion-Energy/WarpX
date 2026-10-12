@@ -467,6 +467,44 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
     // Number of guard cells for local deposition of J
     const WarpX& warpx = WarpX::GetInstance();
 
+#if defined(WARPX_DIM_3D)
+    if (WarpX::eb_footprint_cylinder_radius > 0.0 && m_charge != 0.0) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(push_type == PushType::Explicit,
+            "Insulating cylinder footprint guard requires explicit particles");
+        auto const get_position = GetParticlePosition<PIdx>(pti, offset);
+        auto const* ux = uxp.dataPtr()+offset;
+        auto const* uy = uyp.dataPtr()+offset;
+        auto const* uz = uzp.dataPtr()+offset;
+        auto const dx = Geom(lev).CellSizeArray();
+        auto const passes = warpx.bilinear_filter.npass_each_dir;
+        // Shape half width, filter passes, and half-cell current staggering.
+        // Both reconstructed endpoints bound the whole Esirkepov segment.
+        Real const sx = (0.5*(WarpX::nox+1) + 0.5 +
+            (WarpX::use_filter ? passes[0] : 0))*dx[0];
+        Real const sy = (0.5*(WarpX::noy+1) + 0.5 +
+            (WarpX::use_filter ? passes[1] : 0))*dx[1];
+        Real const radius2 = WarpX::eb_footprint_cylinder_radius *
+                             WarpX::eb_footprint_cylinder_radius;
+        Real const t0 = relative_time-0.5*dt, t1 = relative_time+0.5*dt;
+        amrex::Gpu::DeviceScalar<int> failed(0);
+        auto* failure = failed.dataPtr();
+        amrex::For(np_to_deposit, [=] AMREX_GPU_DEVICE(long i) {
+            ParticleReal x,y,z;
+            get_position(i,x,y,z);
+            Real const gi = 1.0/std::sqrt(1.0 +
+                (ux[i]*ux[i]+uy[i]*uy[i]+uz[i]*uz[i])*PhysConst::inv_c2);
+            Real const bx = amrex::max(std::abs(x+t0*ux[i]*gi),
+                                      std::abs(x+t1*ux[i]*gi))+sx;
+            Real const by = amrex::max(std::abs(y+t0*uy[i]*gi),
+                                      std::abs(y+t1*uy[i]*gi))+sy;
+            if (!(bx*bx+by*by < radius2)) { amrex::Gpu::Atomic::AddNoRet(failure,1); }
+        });
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(failed.dataValue() == 0,
+            "Insulating EB particle/current footprint leaves the validated interior cylinder; "
+            "increase standoff or reduce displacement before depositing");
+    }
+#endif
+
     const amrex::IntVect& ng_J = warpx.get_ng_depos_J();
 
     // Extract deposition order and check that particles shape fits within the guard cells.

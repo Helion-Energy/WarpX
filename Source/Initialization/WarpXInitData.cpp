@@ -844,6 +844,13 @@ WarpX::InitData ()
         reduced_diags->InitData();
     }
 
+    // Enforce an insulating collection shell on both fresh loads and
+    // checkpoints before initial moment deposition or any particle push.
+    if (EB::enabled() && eb_boundary_type == EmbeddedBoundaryType::Insulating) {
+        mypc->ScrapeParticlesAtEB(m_fields.get_mr_levels(FieldType::distance_to_eb, finest_level));
+        mypc->deleteInvalidParticles();
+    }
+
     ComputeMaxStep();
 
     ComputePMLFactors();

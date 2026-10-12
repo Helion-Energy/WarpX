@@ -309,6 +309,21 @@ void WarpX::MakeWarpX ()
         // surface and holds a zero-normal-gradient T_e/P_e fill into the band
         // (hybrid electron energy equation).
         pp_boundary.query_enum_case_insensitive("eb_type", eb_boundary_type);
+        pp_boundary.query("eb_distance_guard_cells", eb_distance_guard_cells);
+        utils::parser::queryWithParser(pp_boundary, "eb_footprint_cylinder_radius",
+                                       eb_footprint_cylinder_radius);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(eb_footprint_cylinder_radius >= 0.0 &&
+            std::isfinite(eb_footprint_cylinder_radius),
+            "boundary.eb_footprint_cylinder_radius must be finite and nonnegative");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(eb_footprint_cylinder_radius == 0.0 ||
+            eb_boundary_type == EmbeddedBoundaryType::Insulating,
+            "boundary.eb_footprint_cylinder_radius requires an insulating EB");
+#if !defined(WARPX_DIM_3D)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(eb_footprint_cylinder_radius == 0.0,
+            "boundary.eb_footprint_cylinder_radius requires 3D Cartesian geometry");
+#endif
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(eb_distance_guard_cells >= 0,
+            "boundary.eb_distance_guard_cells must be nonnegative");
         if (eb_boundary_type == EmbeddedBoundaryType::Insulating) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 eb_particle_boundary == ParticleBoundaryType::Absorbing,
@@ -2611,7 +2626,8 @@ WarpX::AllocLevelData (int lev, const BoxArray& ba, const DistributionMapping& d
 #ifdef AMREX_USE_EB
     bool const eb_enabled = EB::enabled();
     if (eb_enabled) {
-        int const max_guard = guard_cells.ng_FieldSolver.max();
+        int const max_guard = std::max(guard_cells.ng_FieldSolver.max(),
+                                       eb_distance_guard_cells);
         auto const* eb_index_space = GetEBIndexSpace(lev);
         m_field_factory[lev] = amrex::makeEBFabFactory(eb_index_space, Geom(lev), ba, dm,
                                                        {max_guard, max_guard, max_guard},
@@ -2867,7 +2883,7 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
 
     if (EB::enabled()) {
         constexpr int nc_ls = 1;
-        amrex::IntVect const ng_ls(2);
+        amrex::IntVect const ng_ls(std::max(2, eb_distance_guard_cells));
         //EB level set
         m_fields.alloc_init(FieldType::distance_to_eb, lev, amrex::convert(ba, IntVect::TheNodeVector()), dm, nc_ls, ng_ls, 0.0_rt);
         // Whether to reduce the particle shape to order 1 when close to the EB

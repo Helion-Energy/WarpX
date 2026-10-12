@@ -25,6 +25,7 @@
 #   include <AMReX_REAL.H>
 #   include <AMReX_SPACE.H>
 
+#  include <algorithm>
 #  include <cstdlib>
 #  include <string>
 
@@ -101,12 +102,14 @@ WarpX::InitEB ()
         if (m_build_eb_data_per_level) {
             // Build the EB data independently at each mesh-refinement level's own resolution.
             for (int ilev = 0; ilev <= maxLevel(); ++ilev) {
-                amrex::EB2::Build(gshop, Geom(ilev), 0, 20);
+                amrex::EB2::Build(gshop, Geom(ilev), 0, 20,
+                                 std::max(4, eb_distance_guard_cells));
                 m_eb_index_space.push_back(&(amrex::EB2::IndexSpace::top()));
             }
         } else {
             // Build the EB data once at the finest level and coarsen it for coarser levels.
-            amrex::EB2::Build(gshop, Geom(maxLevel()), maxLevel(), maxLevel()+20);
+            amrex::EB2::Build(gshop, Geom(maxLevel()), maxLevel(), maxLevel()+20,
+                             std::max(4, eb_distance_guard_cells));
         }
     } else {
         amrex::ParmParse pp_eb2("eb2");
@@ -118,12 +121,13 @@ WarpX::InitEB ()
         if (m_build_eb_data_per_level) {
             // Build the EB data independently at each mesh-refinement level's own resolution.
             for (int ilev = 0; ilev <= maxLevel(); ++ilev) {
-                amrex::EB2::Build(Geom(ilev), 0, 20);
+                amrex::EB2::Build(Geom(ilev), 0, 20, std::max(4, eb_distance_guard_cells));
                 m_eb_index_space.push_back(&(amrex::EB2::IndexSpace::top()));
             }
         } else {
             // Build the EB data once at the finest level and coarsen it for coarser levels.
-            amrex::EB2::Build(Geom(maxLevel()), maxLevel(), maxLevel()+20);
+            amrex::EB2::Build(Geom(maxLevel()), maxLevel(), maxLevel()+20,
+                             std::max(4, eb_distance_guard_cells));
         }
     }
 #endif
@@ -142,7 +146,49 @@ WarpX::ComputeDistanceToEB ()
         auto const* eb_index_space = GetEBIndexSpace(lev);
         const amrex::EB2::Level& eb_level = eb_index_space->getLevel(Geom(lev));
         auto const eb_fact = fieldEBFactory(lev);
+        if (eb_boundary_type == EmbeddedBoundaryType::Insulating) {
+            auto const dx = Geom(lev).CellSizeArray();
+            amrex::Real const dx_min = amrex::min(AMREX_D_DECL(dx[0], dx[1], dx[2]));
+            amrex::Real const dx_max = amrex::max(AMREX_D_DECL(dx[0], dx[1], dx[2]));
+            amrex::Real const roof = dx_min *
+                (eb_fact.getMultiEBCellFlagFab().nGrow()+1);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(eb_standoff_cells*dx_max < roof,
+                "Insulating EB standoff reaches the AMReX signed-distance ceiling; "
+                "increase boundary.eb_distance_guard_cells before collecting particles");
+            amrex::Print() << "Insulating EB distance support: level=" << lev
+                           << " standoff_m=" << eb_standoff_cells*dx_max
+                           << " distance_ceiling_m=" << roof
+                           << " geometry_guards=" << eb_fact.getMultiEBCellFlagFab().nGrow()
+                           << "\n";
+        }
         amrex::FillSignedDistance(*m_fields.get(FieldType::distance_to_eb, lev), eb_level, eb_fact, 1);
+#if defined(WARPX_DIM_3D)
+        if (eb_footprint_cylinder_radius > 0.0) {
+            // Certify every cell intersecting the interior cylinder is regular.
+            auto const dx = Geom(lev).CellSizeArray();
+            auto const plo = Geom(lev).ProbLoArray();
+            auto const radius2 = eb_footprint_cylinder_radius*eb_footprint_cylinder_radius;
+            amrex::Gpu::DeviceScalar<int> bad(0);
+            auto* failure = bad.dataPtr();
+            auto const& flag_mf = eb_fact.getMultiEBCellFlagFab();
+            for (amrex::MFIter mfi(flag_mf); mfi.isValid(); ++mfi) {
+                auto const flag = flag_mf.const_array(mfi);
+                amrex::For(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i,int j,int k) {
+                    auto const xl = plo[0]+i*dx[0], xh = xl+dx[0];
+                    auto const yl = plo[1]+j*dx[1], yh = yl+dx[1];
+                    auto const x = xl > 0.0 ? xl : (xh < 0.0 ? -xh : 0.0);
+                    auto const y = yl > 0.0 ? yl : (yh < 0.0 ? -yh : 0.0);
+                    if (x*x+y*y < radius2 && !flag(i,j,k).isRegular()) {
+                        amrex::Gpu::Atomic::AddNoRet(failure,1);
+                    }
+                });
+            }
+            int failures = bad.dataValue();
+            amrex::ParallelDescriptor::ReduceIntSum(failures);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(failures == 0,
+                "Requested insulating footprint cylinder intersects a cut or covered EB cell");
+        }
+#endif
     }
 #endif
 }

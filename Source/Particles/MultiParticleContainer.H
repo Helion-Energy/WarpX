@@ -589,7 +589,7 @@ private:
     public:
     void TallyParticlesToBeCollectedAtEB (
         ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-        amrex::Real standoff_cells);
+        amrex::Real standoff_cells, int only_species = -1);
     private:
 
     void ReadParameters ();
