@@ -34,74 +34,8 @@ using namespace amrex;
 using warpx::fields::FieldType;
 
 #if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
-namespace
-{
-    /** Endpoint-min nodal decision density for vacuum_seam_switch_mode =
-     *  "node": the minimum nodal rho over the staggered component's edge
-     *  endpoints (the same nodes the legacy edge average reads).
-     *  Vacuum-favoring: the unguarded Hall branch runs only where every
-     *  endpoint is above the floor. */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-    amrex::Real NodalSwitchRho (
-        amrex::Array4<amrex::Real const> const& rho,
-        amrex::GpuArray<int,3> const& stag,
-        int i, int j, int k)
-    {
-        const int ni = (stag[0] == 0) ? 2 : 1;
-        const int nj = (stag[1] == 0) ? 2 : 1;
-        const int nk = (stag[2] == 0) ? 2 : 1;
-        amrex::Real r = rho(i, j, k);
-        for (int kk = 0; kk < nk; ++kk) {
-        for (int jj = 0; jj < nj; ++jj) {
-        for (int ii = 0; ii < ni; ++ii) {
-            r = amrex::min(r, rho(i+ii, j+jj, k+kk));
-        }}}
-        return r;
-    }
-
-    /** Adjacent-cell decision density for vacuum_seam_switch_mode = "cell":
-     *  the minimum over the component's adjacent cells of the node-averaged
-     *  rho -- one piecewise-constant-per-cell decision for all three E
-     *  components, reflection- and C4-equivariant, vacuum-favoring like
-     *  "node". */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-    amrex::Real CellSwitchRho (
-        amrex::Array4<amrex::Real const> const& rho,
-        amrex::GpuArray<int,3> const& stag,
-        int i, int j, int k)
-    {
-        using namespace amrex::literals;
-        int off_lo[3] = {0, 0, 0};
-        int span[3] = {1, 1, 1};
-        int const ic[3] = {i, j, k};
-        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-            off_lo[d] = (stag[d] == 1) ? -1 : 0;
-            span[d] = 2;
-        }
-        // Running minimum over the adjacent cells: max() is the identity
-        // element for min (no cell average can exceed it), not an overflow
-        // guard. The outer loops visit every cell that touches this E
-        // component (two per direction where the component is nodal, one
-        // where it is cell-centered); the inner loops form each cell's
-        // node-averaged rho (sum/cnt, cnt = 2^AMREX_SPACEDIM); the result is
-        // the minimum of those cell averages -- vacuum-favoring.
-        amrex::Real rho_cell_min = std::numeric_limits<amrex::Real>::max();
-        for (int ok = off_lo[2]; ok <= 0; ++ok) {
-        for (int oj = off_lo[1]; oj <= 0; ++oj) {
-        for (int oi = off_lo[0]; oi <= 0; ++oi) {
-            amrex::Real sum = 0.0_rt;
-            int cnt = 0;
-            for (int kk = 0; kk < span[2]; ++kk) {
-            for (int jj = 0; jj < span[1]; ++jj) {
-            for (int ii = 0; ii < span[0]; ++ii) {
-                sum += rho(ic[0]+oi+ii, ic[1]+oj+jj, ic[2]+ok+kk);
-                cnt += 1;
-            }}}
-            rho_cell_min = amrex::min(rho_cell_min, sum/static_cast<amrex::Real>(cnt));
-        }}}
-        return rho_cell_min;
-    }
-}
+using warpx::hybrid::NodalSwitchRho;
+using warpx::hybrid::CellSwitchRho;
 #endif
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
@@ -1980,15 +1914,16 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::grid_type == ablastr::utils::enums::GridType::Staggered &&
             warpx.finestLevel() == 0 && (!compatible_motional ||
-            (floor_w == 0.0_rt && !hybrid_model->m_esolve_curlcurl &&
-             switch_mode == VacuumSeamSwitchMode::Edge)) &&
-            (!EB::enabled() || (hybrid_model->m_use_conformal_eb &&
-                               hybrid_model->m_conformal_wall_conductor)),
-            "Cartesian energy_conserving_motional requires single-level staggered e_form, "
-            "a hard density floor, edge vacuum switch, and no EB or a conformal conductor EB");
+            (floor_w == 0.0_rt && !hybrid_model->m_esolve_curlcurl)) &&
+            (!EB::enabled() || !hybrid_model->m_use_conformal_eb ||
+                               hybrid_model->m_conformal_wall_conductor),
+            "Cartesian compatible operators require single-level staggered e_form, "
+            "a hard density floor, and no EB, staircase EB, or a conformal conductor EB");
         auto const& geom = warpx.Geom(lev);
         motional_geometry.vn = MakeQdsmcVolumeElement(geom, amrex::IndexType(IntVect::TheNodeVector()));
         motional_geometry.floor = rho_floor;
+        motional_geometry.switch_mode = switch_mode;
+        motional_geometry.conformal = hybrid_model->m_use_conformal_eb;
         motional_geometry.vacuum = holmstrom_vacuum_region;
         motional_geometry.smooth = holmstrom_smooth;
         motional_geometry.inv_width = holmstrom_inv_width;
@@ -2004,10 +1939,14 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
             motional_geometry.ve[d] = MakeQdsmcVolumeElement(geom, Efield[d]->ixType());
         }
         if (EB::enabled()) {
-            motional_lengths = warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+            if (motional_geometry.conformal) {
+                motional_lengths = warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+            }
             for (int d = 0; d < 3; ++d) {
                 eb_update_E[d]->FillBoundary(geom.periodicity());
-                motional_lengths[d]->FillBoundary(geom.periodicity());
+                if (motional_lengths[d]) {
+                    motional_lengths[d]->FillBoundary(geom.periodicity());
+                }
             }
         }
     }
@@ -2034,7 +1973,9 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         if (compatible_motional && EB::enabled()) {
             for (int d = 0; d < 3; ++d) {
                 motional.update[d] = eb_update_E[d]->const_array(mfi);
-                motional.length[d] = motional_lengths[d]->const_array(mfi);
+                if (motional_lengths[d]) {
+                    motional.length[d] = motional_lengths[d]->const_array(mfi);
+                }
             }
         }
 #endif
@@ -2182,7 +2123,9 @@ FiniteDifferenceSolver::HybridPICSolveECartesian (
         if (compatible_motional && EB::enabled()) {
             for (int d = 0; d < 3; ++d) {
                 motional.update[d] = eb_update_E[d]->const_array(mfi);
-                motional.length[d] = motional_lengths[d]->const_array(mfi);
+                if (motional_lengths[d]) {
+                    motional.length[d] = motional_lengths[d]->const_array(mfi);
+                }
             }
         }
 #endif

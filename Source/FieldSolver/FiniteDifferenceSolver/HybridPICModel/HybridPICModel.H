@@ -14,6 +14,7 @@
 
 #include "HybridPICModel_fwd.H"
 #include "QdsmcConductionReport.H"
+#include "VacuumSeam.H"
 #include "HybridSourceEligibility.H"
 
 #include "Fields.H"
@@ -91,16 +92,7 @@ amrex::Real HybridExtSubWeight (amrex::Real rho, amrex::Real rho_floor,
 
 class PoissonBoundaryHandler;
 
-/** Sampling of the density that decides the vacuum-seam treatment of the
- *  generalized Ohm's law: the holmstrom vacuum branch when
- *  hybrid_pic_model.holmstrom_vacuum_region is on and the density-floor
- *  selection of the guarded Hall term otherwise. Node and Cell are
- *  vacuum-favoring and supported in Cartesian geometry only. */
-AMREX_ENUM(VacuumSeamSwitchMode,
-    Edge, /**< legacy per-component edge average; the E components of a cell can take inconsistent branches at the plasma/vacuum seam */
-    Node, /**< minimum over the component's edge-endpoint nodes */
-    Cell  /**< minimum over the component's adjacent cells of the node-averaged density: a single decision for all three components of an index */
-);
+
 
 /**
  * \brief This class contains the parameters needed to evaluate hybrid field

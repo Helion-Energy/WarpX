@@ -27,7 +27,8 @@ inline void ComputeHyperResistivityCartesian (WarpX &warpx, int lev,
     using namespace ablastr::coarsen::sample;
     auto K = warpx.m_fields.get_alldirs("hybrid_hyperres_curlJ_fp", lev);
     auto EH = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
-    auto lengths = EB::enabled() ? warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev)
+    auto lengths = EB::enabled() && geometry.conformal
+                                 ? warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev)
                                  : ablastr::fields::VectorField{nullptr, nullptr, nullptr};
     auto const &geom = warpx.Geom(lev);
     amrex::GpuArray<QdsmcVolumeElement, 3> vf;
@@ -51,7 +52,7 @@ inline void ComputeHyperResistivityCartesian (WarpX &warpx, int lev,
                 for (int d = 0; d < 3; ++d)
                 {
                     mask.update[d] = warpx.GetEBUpdateEFlag()[lev][d]->const_array(mfi);
-                    mask.length[d] = lengths[d]->const_array(mfi);
+                    if (lengths[d]) { mask.length[d] = lengths[d]->const_array(mfi); }
                 }
                 face_mask = warpx.GetEBUpdateBFlag()[lev][c]->const_array(mfi);
             }
@@ -108,7 +109,7 @@ inline void ComputeHyperResistivityCartesian (WarpX &warpx, int lev,
                 for (int d = 0; d < 3; ++d)
                 {
                     mask.update[d] = warpx.GetEBUpdateEFlag()[lev][d]->const_array(mfi);
-                    mask.length[d] = lengths[d]->const_array(mfi);
+                    if (lengths[d]) { mask.length[d] = lengths[d]->const_array(mfi); }
                 }
             }
             amrex::GpuArray<amrex::Array4<amrex::Real const>, 3> values;

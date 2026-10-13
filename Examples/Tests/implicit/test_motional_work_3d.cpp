@@ -2,6 +2,7 @@
 // Test the applied native Ohm operator, with no reconstructed force formula.
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/MotionalFieldCartesian.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "Initialization/WarpXInit.H"
 #include "WarpX.H"
@@ -110,6 +111,70 @@ int main (int argc, char **argv)
                 }
             }
             rho.FillBoundary(geom.periodicity());
+            // Independent reference sampling on the same mixed-density seam.
+            // Work conservation alone would not catch silently retaining edge mode.
+            MotionalFieldCartesian sampling;
+            sampling.switch_mode = hp.m_vacuum_seam_switch_mode;
+            sampling.floor = hp.m_n_floor * PhysConst::q_e;
+            sampling.vacuum = hp.m_holmstrom_vacuum_region;
+            sampling.smooth = hp.m_holmstrom_transition_width > 0.0_rt;
+            sampling.inv_width = sampling.smooth
+                ? 1.0_rt / (hp.m_holmstrom_transition_width * sampling.floor) : 0.0_rt;
+            amrex::Real difference_from_edge = 0.0_rt;
+            for (int c = 0; c < 3; ++c)
+            {
+                amrex::MultiFab checks(Ji[c]->boxArray(), Ji[c]->DistributionMap(), 4, 0);
+                for (amrex::MFIter mfi(checks); mfi.isValid(); ++mfi)
+                {
+                    auto const out = checks.array(mfi);
+                    auto const r = rho.const_array(mfi);
+                    auto const p = ped ? ped->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+                    bool const has_ped = ped != nullptr;
+                    amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                    {
+                        auto const edge = 0.5_rt * (r(i,j,k) + r(i+(c==0),j+(c==1),k+(c==2)));
+                        amrex::Real expected = edge;
+                        if (sampling.switch_mode == VacuumSeamSwitchMode::Node)
+                        {
+                            expected = amrex::min(r(i,j,k), r(i+(c==0),j+(c==1),k+(c==2)));
+                        }
+                        else if (sampling.switch_mode == VacuumSeamSwitchMode::Cell)
+                        {
+                            expected = std::numeric_limits<amrex::Real>::max();
+                            for (int a=0; a<4; ++a)
+                            {
+                                int cell[3] = {i,j,k};
+                                cell[(c+1)%3] -= a%2;
+                                cell[(c+2)%3] -= a/2;
+                                amrex::Real sum = 0.0_rt;
+                                for (int b=0; b<8; ++b)
+                                {
+                                    sum += r(cell[0]+b%2,cell[1]+(b/2)%2,cell[2]+b/4);
+                                }
+                                expected = amrex::min(expected, sum/8.0_rt);
+                            }
+                        }
+                        amrex::Real const raw = sampling.switch_mode != VacuumSeamSwitchMode::Edge &&
+                            expected < sampling.floor ? sampling.floor : edge;
+                        amrex::Real const ped_edge = has_ped
+                            ? 0.5_rt*(p(i,j,k)+p(i+(c==0),j+(c==1),k+(c==2))) : 0.0_rt;
+                        auto const denom = amrex::max(sampling.floor, raw+ped_edge);
+                        auto const gate = !sampling.vacuum ? 1.0_rt : sampling.smooth
+                            ? std::sqrt(0.5_rt*(1.0_rt+std::tanh((expected-sampling.floor)*sampling.inv_width)))
+                            : (expected < sampling.floor ? 0.0_rt : 1.0_rt);
+                        out(i,j,k,0) = std::abs(expected-sampling.decision_density(r,i,j,k,c));
+                        out(i,j,k,1) = std::abs(expected-edge);
+                        out(i,j,k,2) = std::abs(denom-sampling.density(r,p,has_ped,i,j,k,c));
+                        out(i,j,k,3) = std::abs(gate-sampling.gate_sqrt(r,i,j,k,c));
+                    });
+                }
+                AMREX_ALWAYS_ASSERT(checks.norm0(0) < 1.e-13_rt*sampling.floor);
+                AMREX_ALWAYS_ASSERT(checks.norm0(2) < 1.e-13_rt*sampling.floor);
+                AMREX_ALWAYS_ASSERT(checks.norm0(3) < 1.e-13_rt);
+                difference_from_edge += checks.norm0(1);
+            }
+            AMREX_ALWAYS_ASSERT(sampling.switch_mode == VacuumSeamSwitchMode::Edge ||
+                                difference_from_edge > 0.01_rt*sampling.floor);
             for (int c = 0; c < 3; ++c)
             {
                 Ji[c]->FillBoundary(geom.periodicity());

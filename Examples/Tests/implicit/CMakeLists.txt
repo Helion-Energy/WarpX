@@ -584,20 +584,23 @@ if(TARGET lib_3d)
         setup_target_for_cuda_compilation(test_hyperres_work_3d)
     endif()
     foreach(box IN ITEMS 8 16)
-        foreach(bc IN ITEMS periodic pec pmc ect)
-            if(bc STREQUAL "ect" AND NOT WarpX_EB)
+        foreach(bc IN ITEMS periodic pec pmc ect staircase)
+            if((bc STREQUAL "ect" OR bc STREQUAL "staircase") AND NOT WarpX_EB)
                 continue()
             endif()
             set(extra)
             if(bc STREQUAL "periodic")
                 set(field_bc "periodic periodic periodic")
                 set(particle_bc "periodic periodic periodic")
-            elseif(bc STREQUAL "ect")
+            elseif(bc STREQUAL "ect" OR bc STREQUAL "staircase")
                 set(field_bc "pec pec pmc")
                 set(particle_bc "reflecting reflecting reflecting")
                 list(APPEND extra "warpx.eb_implicit_function=sqrt(x*x+y*y)-0.24"
                     hybrid_pic_model.use_conformal_eb=1
                     hybrid_pic_model.conformal_wall_model=conductor)
+                if(bc STREQUAL "staircase")
+                    list(APPEND extra hybrid_pic_model.use_conformal_eb=0)
+                endif()
             else()
                 set(field_bc "${bc} ${bc} ${bc}")
                 set(particle_bc "reflecting reflecting reflecting")
@@ -1823,6 +1826,26 @@ if(TARGET lib_rz)
     endif()
 endif()
 
+# Integrated cell-seam smokes retain elliptic inertia, conduction and splitting.
+if(TARGET app_3d AND WarpX_EB)
+    foreach(conformal IN ITEMS 0 1)
+        set(test_name test_3d_cell_seam_coupled_ect${conformal})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND $<TARGET_FILE:app_3d>
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_coupled_port
+            hybrid_pic_model.use_conformal_eb=${conformal}
+            hybrid_pic_model.vacuum_seam_switch_mode=cell
+            hybrid_pic_model.holmstrom_vacuum_region=1
+            hybrid_pic_model.qdsmc_conduction_fd_cfl=0.2
+            hybrid_pic_model.qdsmc_conduction_rkl_max_stages=5000
+            hybrid_pic_model.qdsmc_conduction_fd_max_subcycles=250000
+            "hybrid_pic_model.plasma_hyper_resistivity(rho,B)=0.125*(0.0375/pi)^2*B/max(rho,16.02176634)")
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
+            TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+endif()
+
 # Native applied-operator certificate for the Cartesian volume-adjoint Lorentz force.
 if(TARGET lib_3d)
     add_executable(test_motional_work_3d test_motional_work_3d.cpp)
@@ -1832,24 +1855,28 @@ if(TARGET lib_3d)
         setup_target_for_cuda_compilation(test_motional_work_3d)
     endif()
     foreach(box IN ITEMS 8 16)
-        foreach(bc IN ITEMS periodic pec pmc ect)
-            if(bc STREQUAL "ect" AND NOT WarpX_EB)
+        foreach(bc IN ITEMS periodic pec pmc ect staircase)
+            if((bc STREQUAL "ect" OR bc STREQUAL "staircase") AND NOT WarpX_EB)
                 continue()
             endif()
             set(extra)
             if(bc STREQUAL "periodic")
                 set(field_bc "periodic periodic periodic")
                 set(particle_bc "periodic periodic periodic")
-            elseif(bc STREQUAL "ect")
+            elseif(bc STREQUAL "ect" OR bc STREQUAL "staircase")
                 set(field_bc "pec pec pmc")
                 set(particle_bc "reflecting reflecting reflecting")
                 list(APPEND extra "warpx.eb_implicit_function=sqrt(x*x+y*y)-0.24"
                     hybrid_pic_model.use_conformal_eb=1
                     hybrid_pic_model.conformal_wall_model=conductor)
+                if(bc STREQUAL "staircase")
+                    list(APPEND extra hybrid_pic_model.use_conformal_eb=0)
+                endif()
             else()
                 set(field_bc "${bc} ${bc} ${bc}")
                 set(particle_bc "reflecting reflecting reflecting")
             endif()
+            foreach(seam IN ITEMS edge node cell)
             foreach(vacuum IN ITEMS off hard smooth narrow)
                 set(vacuum_args hybrid_pic_model.holmstrom_vacuum_region=1)
                 if(vacuum STREQUAL "off")
@@ -1863,17 +1890,22 @@ if(TARGET lib_3d)
                 endif()
                 foreach(hall IN ITEMS 0 1)
                     set(test_name test_3d_motional_work_${bc}_${box}_hall${hall}_${vacuum})
+                    if(NOT seam STREQUAL "edge")
+                        string(APPEND test_name "_${seam}")
+                    endif()
                     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
                     add_test(NAME ${test_name} COMMAND test_motional_work_3d
                         ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_motional_work
                         amr.max_grid_size=${box} motional_test.hall=${hall}
                         "boundary.field_lo=${field_bc}" "boundary.field_hi=${field_bc}"
                         "boundary.particle_lo=${particle_bc}" "boundary.particle_hi=${particle_bc}"
+                        hybrid_pic_model.vacuum_seam_switch_mode=${seam}
                         ${extra} ${vacuum_args})
                     set_tests_properties(${test_name} PROPERTIES
                         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name}
                         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
                 endforeach()
+            endforeach()
             endforeach()
         endforeach()
     endforeach()

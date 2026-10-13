@@ -121,7 +121,9 @@ int main(int argc, char **argv)
             }
             // Apply the same conductor projection used for the plasma current.
             MotionalFieldCartesian projection;
-            auto lengths = EB::enabled() ? w.m_fields.get_alldirs(FieldType::edge_lengths, 0)
+            projection.conformal = hp.m_use_conformal_eb;
+            auto lengths = EB::enabled() && projection.conformal
+                                         ? w.m_fields.get_alldirs(FieldType::edge_lengths, 0)
                                          : ablastr::fields::VectorField{nullptr, nullptr, nullptr};
             for (int d = 0; d < 3; ++d)
             {
@@ -134,7 +136,7 @@ int main(int argc, char **argv)
                 Ji[d]->setVal(0.0_rt);
                 if (EB::enabled())
                 {
-                    lengths[d]->FillBoundary(geom.periodicity());
+                    if (lengths[d]) { lengths[d]->FillBoundary(geom.periodicity()); }
                     w.GetEBUpdateEFlag()[0][d]->FillBoundary(geom.periodicity());
                 }
             }
@@ -148,7 +150,7 @@ int main(int argc, char **argv)
                         for (int d = 0; d < 3; ++d)
                         {
                             mask.update[d] = w.GetEBUpdateEFlag()[0][d]->const_array(mfi);
-                            mask.length[d] = lengths[d]->const_array(mfi);
+                            if (lengths[d]) { mask.length[d] = lengths[d]->const_array(mfi); }
                         }
                     }
                     auto j = J[c]->array(mfi);

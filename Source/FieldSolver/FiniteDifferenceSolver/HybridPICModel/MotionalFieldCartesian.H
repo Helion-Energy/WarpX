@@ -3,6 +3,7 @@
 #define WARPX_MOTIONAL_FIELD_CARTESIAN_H_
 
 #include "QdsmcVolumeElement.H"
+#include "VacuumSeam.H"
 
 #include <AMReX_Array4.H>
 #include <AMReX_GpuContainers.H>
@@ -26,7 +27,8 @@ struct MotionalFieldCartesian
     QdsmcVolumeElement vn;
     amrex::GpuArray<QdsmcVolumeElement, 3> ve{};
     amrex::Real floor = 0.0, inv_width = 0.0;
-    bool vacuum = false, smooth = false;
+    VacuumSeamSwitchMode switch_mode = VacuumSeamSwitchMode::Edge;
+    bool vacuum = false, smooth = false, conformal = true;
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE bool active (int i, int j, int k, int c) const
     {
@@ -43,9 +45,11 @@ struct MotionalFieldCartesian
                 return false;
             }
         }
-        // Same criterion/tolerance as HybridPICModel::ZeroConductorEdges.
+        // Staircase uses the native update mask (partially open edges active).
+        // ECT additionally projects cut edges, as ZeroConductorEdges does.
         return !update[c] ||
-               (update[c](i, j, k) != 0 && length[c](i, j, k) >= (1.0 - 1.e-6) * dx[c]);
+               (update[c](i, j, k) != 0 &&
+                (!conformal || length[c](i, j, k) >= (1.0 - 1.e-6) * dx[c]));
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real weight (int i, int j, int k, int c,
@@ -72,12 +76,32 @@ struct MotionalFieldCartesian
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+    decision_density (amrex::Array4<amrex::Real const> const &rho,
+                      int i, int j, int k, int c) const
+    {
+        amrex::GpuArray<int, 3> const stag{c != 0, c != 1, c != 2};
+        if (switch_mode == VacuumSeamSwitchMode::Node)
+        {
+            return warpx::hybrid::NodalSwitchRho(rho, stag, i, j, k);
+        }
+        if (switch_mode == VacuumSeamSwitchMode::Cell)
+        {
+            return warpx::hybrid::CellSwitchRho(rho, stag, i, j, k);
+        }
+        return raw_density(rho, i, j, k, c);
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
     density (amrex::Array4<amrex::Real const> const &rho,
              amrex::Array4<amrex::Real const> const &ped, bool has_ped, int i, int j, int k,
              int c) const
     {
-        return amrex::max(floor, raw_density(rho, i, j, k, c) +
-                                     (has_ped ? raw_density(ped, i, j, k, c) : 0.0));
+        // Match the receiving edge denominator, including the guarded Hall
+        // branch when Holmstrom is OFF. Pedestal is not a vacuum decision.
+        auto const raw = (switch_mode != VacuumSeamSwitchMode::Edge &&
+                          decision_density(rho, i, j, k, c) < floor)
+                             ? floor : raw_density(rho, i, j, k, c);
+        return amrex::max(floor, raw + (has_ped ? raw_density(ped, i, j, k, c) : 0.0));
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
@@ -87,7 +111,7 @@ struct MotionalFieldCartesian
         {
             return 1.0;
         }
-        amrex::Real const raw = raw_density(rho, i, j, k, c);
+        amrex::Real const raw = decision_density(rho, i, j, k, c);
         if (!smooth)
         {
             return raw < floor ? 0.0 : 1.0;

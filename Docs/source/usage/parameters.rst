@@ -4640,7 +4640,8 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`\sum V_e J E_H = \sum V_f \eta_H |\mathrm{curl}(P J)|^2`
     for nonnegative coefficients, with covered faces omitted and conductor
     edges projected out on both sides by :math:`P`. Supports single-level
-    staggered grids with no EB or a conformal conductor ECT wall. Domain-face
+    staggered grids with no EB, a native staircase EB, or a conformal conductor
+    ECT wall. Staircase projects covered edges; ECT also projects cut edges. Domain-face
     half volumes are included; the curl pair excludes physical-domain current
     and flux ghosts (coefficient interpolation uses filled rho/B halos). Periodic
     discrete gradients remain in the null space. The applied-field heating
@@ -6165,10 +6166,13 @@ Maxwell solver: kinetic-fluid hybrid
     Holmstrom gates occur on both sides of the pair. Requires a single level,
     the staggered e-form Ohm solver, and a hard density floor. In m=0 RZ, the axis
     must be at r=0 and embedded boundaries are unsupported. In Cartesian 3D,
-    the vacuum seam switch must be ``edge``; embedded boundaries must use
-    ``use_conformal_eb = 1`` and ``conformal_wall_model = conductor``. Cut and
-    covered ECT edges are projected out of both the gather and its adjoint,
-    matching the constitutive conducting-wall condition. It adds no thermal source.
+    ``edge``, ``node`` and ``cell`` vacuum seam switches are supported, using
+    the same density decision and square-root gate in the gather and adjoint.
+    Embedded boundaries may use the native staircase mask or conformal
+    conductor ECT. Covered edges are projected out of both sides; ECT also
+    projects cut edges, matching its constitutive conductor condition. The
+    cell-based guarded density denominator is paired even with Holmstrom off.
+    No thermal source is added. The transparent conformal wall is unsupported.
 
 .. pp:param:: hybrid_pic_model.qdsmc_full_pedestal_transport
 
