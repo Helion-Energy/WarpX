@@ -9,6 +9,7 @@
 #include <AMReX_REAL.H>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 /** Z=1 electron transport (trace alpha approximation). Density is physical
  * electron density in m^-3, temperature eV, B tesla, kappa W/(m K).
@@ -43,23 +44,38 @@ EvaluateBraginskiiConductivity (amrex::Real const density,
         amrex::max(amrex::Real(2.0), temperature < 10.0
                     ? 23.0 - 0.5 * log_n_cm + 1.5 * log_t
                     : 24.0 - 0.5 * log_n_cm + log_t);
-    amrex::Real const tau = 3.44e11 * temperature * std::sqrt(temperature) /
-                           (density * c.coulomb_log);
-    c.hall = PhysConst::q_e * B * tau / PhysConst::m_e;
-    amrex::Real const base = density * PhysConst::kb *
-        (PhysConst::q_e * temperature) * tau / PhysConst::m_e;
+    // Cancel density in n*tau before floating-point evaluation. The
+    // physical density may be positive but arbitrarily small in deposited
+    // particle tails; forming tau first can overflow and produce 0*inf.
+    amrex::Real const n_tau = 3.44e11 * temperature * std::sqrt(temperature) /
+                             c.coulomb_log;
+    amrex::Real const base = PhysConst::kb *
+        (PhysConst::q_e * temperature) * n_tau / PhysConst::m_e;
     c.parallel_physical = base * (11.92 / 3.7703);
-    amrex::Real factor;
-    if (c.hall <= 1.0) {
+    amrex::Real const omega_n_tau = (PhysConst::q_e / PhysConst::m_e) *
+                                   std::abs(B) * n_tau;
+    if (omega_n_tau <= density) {
+        // B=0 must not form 0*infinite collision time in an empty tail.
+        c.hall = omega_n_tau / density;
         amrex::Real const x2 = c.hall * c.hall;
-        factor = (4.664 * x2 + 11.92) / (x2*x2 + 14.79*x2 + 3.7703);
+        c.perpendicular = base * (4.664*x2 + 11.92) /
+                          (x2*x2 + 14.79*x2 + 3.7703);
     } else {
-        // Reciprocal form avoids x^4 overflow in strongly magnetized cells.
-        amrex::Real const inv = 1.0 / c.hall;
+        // Evaluate the magnetized factor from n/(omega*n_tau), including its
+        // zero-density limit. Hall is diagnostic and may exceed Real range;
+        // the transport coefficients remain finite without a density floor.
+        amrex::Real const inv = density / omega_n_tau;
+        c.hall = inv > 0.0 ? 1.0 / inv : std::numeric_limits<amrex::Real>::infinity();
         amrex::Real const y = inv * inv;
-        factor = y * (4.664 + 11.92*y) / (1.0 + 14.79*y + 3.7703*y*y);
+        amrex::Real const shape =
+            (4.664 + 11.92*y) / (1.0 + 14.79*y + 3.7703*y*y);
+        c.perpendicular = ((base * inv) * inv) * shape;
+        // Apply the anisotropy cap before a tiny perpendicular coefficient
+        // rounds to zero, preserving a representable capped parallel value.
+        c.parallel_used = amrex::min(c.parallel_physical,
+            (((base * inv) * max_anisotropy) * inv) * shape);
+        return c;
     }
-    c.perpendicular = base * factor;
     c.parallel_used = amrex::min(c.parallel_physical, max_anisotropy*c.perpendicular);
     return c;
 }
