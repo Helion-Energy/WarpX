@@ -9686,6 +9686,16 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCFoldInsulatingDeposits()");
 
+    // This legacy fold recovers entropy that the non-pedestal density-floor
+    // guard discards. A pedestal instead keeps every positive-weight node
+    // live in QDSMCUpdateTe, so that entropy is already recovered locally.
+    // In full-pedestal transport, SetK also carries max(n+n_ped,n_floor),
+    // whereas the legacy own-marker subtraction below uses physical n.
+    // Folding then labels the pedestal's valid entropy as spill even at
+    // dt=0 and heats adjacent above-floor nodes without matching weight.
+    // EB marker reflection and the geometric temperature fill still apply.
+    if (DensityPedestal(lev) != nullptr) { return; }
+
     auto & warpx = WarpX::GetInstance();
     amrex::Geometry const & geom = warpx.Geom(lev);
     amrex::Periodicity const & period = geom.periodicity();

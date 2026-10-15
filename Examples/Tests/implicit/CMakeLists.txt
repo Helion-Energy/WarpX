@@ -1910,3 +1910,20 @@ if(TARGET lib_3d)
         endforeach()
     endforeach()
 endif()
+
+# A stationary pedestal-supported halo must not pump entropy across n_floor.
+if(WarpX_LIB AND "3" IN_LIST WarpX_DIMS)
+    add_executable(test_pedestal_transport_identity_3d test_pedestal_transport_identity_3d.cpp)
+    target_link_libraries(test_pedestal_transport_identity_3d PRIVATE lib_3d)
+    target_include_directories(test_pedestal_transport_identity_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_pedestal_transport_identity_3d)
+    endif()
+    foreach(full IN ITEMS 0 1)
+        add_test(NAME test_3d_pedestal_transport_identity_full${full}
+            COMMAND test_pedestal_transport_identity_3d
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_pedestal_transport_identity_3d
+                hybrid_pic_model.qdsmc_full_pedestal_transport=${full}
+                amrex.the_arena_init_size=0 amrex.the_arena_is_managed=0)
+    endforeach()
+endif()
