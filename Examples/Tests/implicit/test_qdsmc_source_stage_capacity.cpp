@@ -66,6 +66,13 @@ main (int argc, char** argv) {
         auto const lo = g.ProbLoArray();
         auto const R = g.ProbHi(0);
         auto const zhi = g.Domain().bigEnd(1) + 1;
+#if defined(WARPX_DIM_3D)
+        auto const dlo = g.Domain().smallEnd();
+        auto const node_box = amrex::surroundingNodes(g.Domain());
+        auto const dhi = node_box.bigEnd();
+        amrex::GpuArray<int, 3> periodic{};
+        for (int d = 0; d < 3; ++d) { periodic[d] = g.isPeriodic(d); }
+#endif
         constexpr amrex::Real t0 = 100._rt * PhysConst::q_e / PhysConst::kb;
         amrex::MultiFab source_te(te.boxArray(), te.DistributionMap(), 1,
                                   te.nGrowVect());
@@ -116,12 +123,24 @@ main (int argc, char** argv) {
                        weights = wt.const_array(mfi);
             amrex::ParallelFor(
                 mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+#if defined(WARPX_DIM_3D)
+                    // Cartesian nodal dual volume; sum_unique below removes
+                    // duplicated FAB nodes and periodic images exactly once.
+                    int const node[3] = {i, j, k};
+                    auto volume = dx[0] * dx[1] * dx[2];
+                    for (int d = 0; d < 3; ++d) {
+                        if (!periodic[d] && (node[d] == dlo[d] || node[d] == dhi[d])) {
+                            volume *= .5_rt;
+                        }
+                    }
+#else
                     auto const r = lo[0] + i * dx[0];
                     auto const rl = amrex::max(0._rt, r - .5_rt * dx[0]),
                                rh = amrex::min(R, r + .5_rt * dx[0]);
                     auto const volume =
                         j == zhi ? 0._rt
                                  : MathConst::pi * (rh * rh - rl * rl) * dx[1];
+#endif
                     a(i, j, k, 0) = volume * cold * (s(i, j, k) - t0);
                     a(i, j, k, 1) = volume * cnew * (s(i, j, k) - t0);
                     a(i, j, k, 2) = volume * cnew * (t(i, j, k) - c(i, j, k));
@@ -132,7 +151,11 @@ main (int argc, char** argv) {
                     a(i, j, k, 6) = std::abs(c(i, j, k) - t0 * recover_factor);
                 });
         }
+#if defined(WARPX_DIM_3D)
+        auto const volume = g.ProbLength(0) * g.ProbLength(1) * g.ProbLength(2);
+#else
         auto const volume = MathConst::pi * R * R * g.ProbLength(1);
+#endif
         auto const input = q * volume;
         auto const old_energy = out.sum_unique(0, false, g.periodicity());
         auto const new_energy = out.sum_unique(1, false, g.periodicity());

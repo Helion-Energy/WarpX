@@ -46,7 +46,11 @@ int main (int argc, char** argv)
         auto const dx = geom.CellSizeArray();
         auto const radius = geom.ProbHi(0);
         auto const nr = geom.Domain().bigEnd(0) + 1;
+#if defined(WARPX_DIM_3D)
+        auto const volume = geom.ProbLength(0)*geom.ProbLength(1)*geom.ProbLength(2);
+#else
         auto const volume = MathConst::pi * radius * radius * geom.ProbLength(1);
+#endif
         amrex::MultiFab error(te.boxArray(), te.DistributionMap(), 1, 0);
         auto relative_error = [&] (amrex::MultiFab const& field, amrex::Real expected)
         {
@@ -59,10 +63,15 @@ int main (int argc, char** argv)
         auto const gm1 = hp.m_gamma - 1.0_rt;
         auto const dt = 1.e-5_rt, heat = dt * 1.e-5_rt * 1.e10_rt;
         auto const cond_dt = 1.e-7_rt, flux = 1.e4_rt;
+#if defined(WARPX_DIM_3D)
+        auto const wall_area = geom.ProbLength(1)*geom.ProbLength(2);
+        auto const area_over_volume = 2.0_rt/dx[0];
+#else
         auto const wall_area = 2.0_rt * MathConst::pi * radius * geom.ProbLength(1);
         auto const wall_shell = MathConst::pi *
             (radius * radius - std::pow(radius - 0.5_rt * dx[0], 2));
         auto const area_over_volume = 2.0_rt * MathConst::pi * radius / wall_shell;
+#endif
         // The source reads species moments independently of total rho. Supply
         // the same prescribed physical state to both, as in the PC source test.
         sim.m_fields.get("rho_fp_ions", 0)->setVal(nnew * PhysConst::q_e);
@@ -148,11 +157,18 @@ int main (int argc, char** argv)
                 auto const e = error.array(mfi);
                 auto const t = te.const_array(mfi);
                 amrex::ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+#if defined(WARPX_DIM_3D)
+                    // Only x is nonperiodic in this fixture. Unique periodic
+                    // nodes are selected by sum_unique below.
+                    auto const weight = (i == 0 || i == nr) ? 0.5_rt : 1.0_rt;
+                    e(i,j,k) = (t(i,j,k)-t0)*cond_capacity*weight*dx[0]*dx[1]*dx[2];
+#else
                     auto const r = i * dx[0];
                     auto const rl = amrex::max(0.0_rt, r - 0.5_rt * dx[0]);
                     auto const rh = amrex::min(radius, r + 0.5_rt * dx[0]);
                     e(i,j,k) = (t(i,j,k) - t0) * cond_capacity *
                         MathConst::pi * (rh * rh - rl * rl) * dx[1];
+#endif
                 });
             }
             auto const delivered = error.sum_unique(0, false, geom.periodicity());

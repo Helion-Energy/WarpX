@@ -1035,6 +1035,26 @@ if(TARGET lib_3d)
     endif()
 endif()
 
+# Covered-node temperature independence, including mixed stencils and wall caps.
+if(TARGET lib_3d AND WarpX_EB)
+    add_executable(test_conduction_eb_mask_3d test_conduction_eb_mask_3d.cpp)
+    target_link_libraries(test_conduction_eb_mask_3d PRIVATE lib_3d)
+    target_include_directories(test_conduction_eb_mask_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_conduction_eb_mask_3d)
+    endif()
+    find_package(Python REQUIRED COMPONENTS Interpreter)
+    add_test(NAME test_3d_conduction_eb_mask
+        COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_conduction_eb_mask_3d.py
+            --executable $<TARGET_FILE:test_conduction_eb_mask_3d>
+            --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_eb_mask_3d)
+    set_tests_properties(test_3d_conduction_eb_mask PROPERTIES
+        TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;eb;native")
+endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/conduction_3d_qualification.cmake)
+
 # This gate is intentionally the normal-eligibility correction only. The full
 # axis/wall upgrade is not certified by an axial-mode test.
 if(TARGET test_conduction_order_rz OR TARGET test_conduction_order_3d)
@@ -1261,10 +1281,12 @@ endif()
 
 # Instrument only this translation unit in test builds; production builds with
 # BUILD_TESTING=OFF contain no environment-controlled ghost mutation.
-if(TARGET lib_rz)
-    set_property(SOURCE ${WarpX_SOURCE_DIR}/Source/FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.cpp
-        TARGET_DIRECTORY lib_rz APPEND PROPERTY COMPILE_DEFINITIONS WARPX_CONDUCTION_TEST_HOOKS)
-endif()
+foreach(dim IN ITEMS rz 3d)
+    if(TARGET lib_${dim})
+        set_property(SOURCE ${WarpX_SOURCE_DIR}/Source/FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.cpp
+            TARGET_DIRECTORY lib_${dim} APPEND PROPERTY COMPILE_DEFINITIONS WARPX_CONDUCTION_TEST_HOOKS)
+    endif()
+endforeach()
 
 if(TARGET lib_rz)
     add_executable(test_conduction_boundary_evolve_rz test_conduction_boundary_evolve_rz.cpp)

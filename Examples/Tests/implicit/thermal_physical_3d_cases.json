@@ -1,0 +1,806 @@
+[
+  {
+    "name": "rkl-mode0-ref8192",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=1"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "rkl-mode1-ref8192",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=1",
+      "physical_test.evolve=1"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "rkl-mode3-ref8192",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=3",
+      "physical_test.evolve=1"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "rkl-mode4-ref8192",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=1"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+18-T0.5-mode0",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+18",
+      "physical_test.temperature_eV=0.5"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+18-T0.5-mode1",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=1",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+18",
+      "physical_test.temperature_eV=0.5"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+18-T0.5-mode4",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+18",
+      "physical_test.temperature_eV=0.5"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+20-T500-mode0",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+20",
+      "physical_test.temperature_eV=500"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+20-T500-mode1",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=1",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+20",
+      "physical_test.temperature_eV=500"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+20-T500-mode4",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+20",
+      "physical_test.temperature_eV=500"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+22-T10000-mode0",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+22",
+      "physical_test.temperature_eV=10000"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+22-T10000-mode1",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=1",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+22",
+      "physical_test.temperature_eV=10000"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-n1e+22-T10000-mode4",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.density=1e+22",
+      "physical_test.temperature_eV=10000"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-floored-mode0",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.capacity_factor=10"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-floored-mode1",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=1",
+      "physical_test.evolve=0",
+      "physical_test.capacity_factor=10"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-floored-mode4",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.capacity_factor=10"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-pedestal-mode0",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=5e21"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-pedestal-mode1",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=1",
+      "physical_test.evolve=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=5e21"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "continuum-pedestal-mode4",
+    "args": [
+      "amr.n_cell=64 64 64",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=5e21"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n0-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=0",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n0-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n0-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=0",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n0-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-280-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-280",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-280-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-280",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-280-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-280",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-280-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-280",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-15-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-15",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-15-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-15",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-15-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-15",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e-15-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e-15",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+14-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=100000000000000.0",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+14-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=100000000000000.0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+14-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=100000000000000.0",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+14-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=100000000000000.0",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+18-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e+18",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+18-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e+18",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+18-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e+18",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n1e+18-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=1e+18",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n3e+21-mode0-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=3e+21",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n3e+21-mode0-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=3e+21",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n3e+21-mode4-ped0",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=3e+21",
+      "hybrid_pic_model.density_pedestal=0",
+      "physical_test.pedestal_density=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "n3e+21-mode4-ped1",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=4",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.density=3e+21",
+      "hybrid_pic_model.density_pedestal=1",
+      "physical_test.pedestal_density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "closed-floor-n1e-280",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.unfreeze=0",
+      "physical_test.density=1e-280"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "closed-floor-n1e+14",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.unfreeze=0",
+      "physical_test.density=100000000000000.0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "closed-floor-n1e+18",
+    "args": [
+      "amr.n_cell=16 16 16",
+      "physical_test.mode=0",
+      "physical_test.evolve=0",
+      "physical_test.guard_only=1",
+      "physical_test.unfreeze=0",
+      "physical_test.density=1e+18"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "null-resolution128",
+    "args": [
+      "amr.n_cell=128 128 128",
+      "physical_test.mode=2",
+      "physical_test.evolve=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  },
+  {
+    "name": "null-resolution256",
+    "args": [
+      "amr.n_cell=256 256 256",
+      "physical_test.mode=2",
+      "physical_test.evolve=0"
+    ],
+    "prefixes": [
+      "BRAGINSKII_3D_RESULT ",
+      "BRAGINSKII_RKL_RESULT ",
+      "BRAGINSKII_GUARD_RESULT "
+    ],
+    "record_count": 1
+  }
+]

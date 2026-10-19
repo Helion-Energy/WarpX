@@ -1,0 +1,814 @@
+[
+  {
+    "id": "flux_in-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-0-0-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-0-0-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_in-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-0-1-ssprk2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-0-1-rkl2",
+    "args": [
+      "boundary_test.axis=0",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_in-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-1-0-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-1-0-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_in-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-1-1-ssprk2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-1-1-rkl2",
+    "args": [
+      "boundary_test.axis=1",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_in-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-2-0-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-2-0-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=0",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_in-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_out-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "leg_capped-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "conflict-2-1-ssprk2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=ssprk2"
+    ]
+  },
+  {
+    "id": "flux_in-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "flux_out-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=flux",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.flux=-10000"
+    ]
+  },
+  {
+    "id": "pinned-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=pinned",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_uncapped-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "leg_capped-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=leg_corner",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2",
+      "boundary_test.eta=1e-5"
+    ]
+  },
+  {
+    "id": "floor-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=floor",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "conflict-2-1-rkl2",
+    "args": [
+      "boundary_test.axis=2",
+      "boundary_test.side=1",
+      "boundary_test.mode=conflict",
+      "hybrid_pic_model.qdsmc_conduction_fd_time=rkl2"
+    ]
+  },
+  {
+    "id": "closed",
+    "args": [
+      "boundary_test.mode=closed"
+    ]
+  },
+  {
+    "id": "floor_invalid",
+    "args": [
+      "boundary_test.mode=floor_invalid"
+    ]
+  },
+  {
+    "id": "retry_floor",
+    "args": [
+      "boundary_test.mode=retry_floor",
+      "boundary_test.dt=1e-5"
+    ]
+  },
+  {
+    "id": "retry_budget",
+    "args": [
+      "boundary_test.mode=retry_budget",
+      "boundary_test.dt=1e-5"
+    ]
+  },
+  {
+    "id": "nonfinite_rhs",
+    "args": [
+      "boundary_test.mode=nonfinite_rhs"
+    ]
+  }
+]

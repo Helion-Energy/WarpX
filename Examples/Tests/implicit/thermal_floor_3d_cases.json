@@ -1,0 +1,118 @@
+[
+  {
+    "name": "sync0-pedoff",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=0",
+      "hybrid_pic_model.density_pedestal=0",
+      "hybrid_pic_model.density_pedestal_track_floor=0",
+      "hybrid_pic_model.qdsmc_n_floor=3e18",
+      "hybrid_pic_model.qdsmc_te_n_floor=2e18",
+      "audit.initial_cond=3e18",
+      "audit.initial_te=2e18"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "sync0-pedfixed",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "hybrid_pic_model.density_pedestal_track_floor=0",
+      "hybrid_pic_model.qdsmc_n_floor=3e18",
+      "hybrid_pic_model.qdsmc_te_n_floor=2e18",
+      "audit.initial_cond=3e18",
+      "audit.initial_te=2e18"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "sync0-pedtracking",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=0",
+      "hybrid_pic_model.density_pedestal=1",
+      "hybrid_pic_model.density_pedestal_track_floor=1",
+      "hybrid_pic_model.qdsmc_n_floor=3e18",
+      "hybrid_pic_model.qdsmc_te_n_floor=2e18",
+      "audit.initial_cond=3e18",
+      "audit.initial_te=2e18"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "sync1-pedoff",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=1",
+      "hybrid_pic_model.density_pedestal=0",
+      "hybrid_pic_model.density_pedestal_track_floor=0"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "sync1-pedfixed",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=1",
+      "hybrid_pic_model.density_pedestal=1",
+      "hybrid_pic_model.density_pedestal_track_floor=0"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "sync1-pedtracking",
+    "args": [
+      "hybrid_pic_model.qdsmc_sync_density_floors=1",
+      "hybrid_pic_model.density_pedestal=1",
+      "hybrid_pic_model.density_pedestal_track_floor=1"
+    ],
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5
+  },
+  {
+    "name": "negative-invalid",
+    "args": [
+      "audit.mode=invalid"
+    ],
+    "reject": true,
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5,
+    "reject_message": "SetDensityFloor requires a finite floor, strictly positive"
+  },
+  {
+    "name": "negative-conflict",
+    "args": [
+      "audit.mode=conflict"
+    ],
+    "reject": true,
+    "prefixes": [
+      "FLOOR_SYNC_STEP ",
+      "FLOOR_SYNC "
+    ],
+    "record_count": 5,
+    "reject_message": "qdsmc_sync_density_floors requires the QDSMC floor to equal n_floor"
+  }
+]

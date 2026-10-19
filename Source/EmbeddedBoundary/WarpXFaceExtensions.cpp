@@ -579,7 +579,9 @@ WarpX::ComputeFaceExtensions ()
     // and reduced to the owners between/after the passes. Single-box
     // non-periodic layouts skip every reduction and keep the historical
     // communication-free behavior bit-identically.
-    const bool multi_box = (boxArray(maxLevel()).size() > 1)
+    // Fresh level creation has allocated B before AmrCore installs its BoxArray.
+    // The field layout is authoritative on fresh loads, restarts and regrids.
+    const bool multi_box = (Bfield[0]->boxArray().size() > 1)
         || Geom(maxLevel()).isAnyPeriodic();
     m_ect_needs_seam_sync = multi_box;
 
