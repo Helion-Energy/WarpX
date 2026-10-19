@@ -787,8 +787,19 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
         if (WarpX::current_deposition_algo == CurrentDepositionAlgo::Esirkepov) {
             if (push_type == PushType::Explicit) {
 
+                // Hybrid charge deposition retains the configured particle shape.
+                // Switching only the current shape at the two trajectory endpoints
+                // violates continuity with that charge and introduces O(1/dt)
+                // currents when a particle crosses a reduced-shape mask interface.
+                // Keep the existing reduction for electromagnetic and RZ paths.
+#if defined(WARPX_DIM_3D)
+                bool const reduce_current_shape = EB::enabled() &&
+                    WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC;
+#else
+                bool const reduce_current_shape = EB::enabled();
+#endif
                 amrex::Array4<const int> eb_reduce_particle_shape;
-                if (EB::enabled()) {
+                if (reduce_current_shape) {
                     eb_reduce_particle_shape = (*warpx.GetEBReduceParticleShapeFlag()[lev])[pti].array();
                 }
 
@@ -799,7 +810,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         jx_arr, jy_arr, jz_arr,
                         np_to_deposit, dt, relative_time, dinv, xyzmin, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        eb_reduce_particle_shape, EB::enabled() );
+                        eb_reduce_particle_shape, reduce_current_shape );
                 } else if (WarpX::nox == 2){
                     doEsirkepovDepositionShapeN<2>(
                         GetPosition, wp.dataPtr() + offset, uxp.dataPtr() + offset,
@@ -807,7 +818,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         jx_arr, jy_arr, jz_arr,
                         np_to_deposit, dt, relative_time, dinv, xyzmin, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        eb_reduce_particle_shape, EB::enabled() );
+                        eb_reduce_particle_shape, reduce_current_shape );
                 } else if (WarpX::nox == 3){
                     doEsirkepovDepositionShapeN<3>(
                         GetPosition, wp.dataPtr() + offset, uxp.dataPtr() + offset,
@@ -815,7 +826,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         jx_arr, jy_arr, jz_arr,
                         np_to_deposit, dt, relative_time, dinv, xyzmin, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        eb_reduce_particle_shape, EB::enabled() );
+                        eb_reduce_particle_shape, reduce_current_shape );
                 } else if (WarpX::nox == 4){
                     doEsirkepovDepositionShapeN<4>(
                         GetPosition, wp.dataPtr() + offset, uxp.dataPtr() + offset,
@@ -823,7 +834,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
                         jx_arr, jy_arr, jz_arr,
                         np_to_deposit, dt, relative_time, dinv, xyzmin, lo, q,
                         WarpX::n_rz_azimuthal_modes,
-                        eb_reduce_particle_shape, EB::enabled() );
+                        eb_reduce_particle_shape, reduce_current_shape );
                 }
 
             } else if (push_type == PushType::Implicit) {

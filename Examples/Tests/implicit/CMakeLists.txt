@@ -1054,6 +1054,7 @@ if(TARGET lib_3d AND WarpX_EB)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/conduction_3d_qualification.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/hybrid_current_shape_3d.cmake)
 
 # This gate is intentionally the normal-eligibility correction only. The full
 # axis/wall upgrade is not certified by an axial-mode test.
