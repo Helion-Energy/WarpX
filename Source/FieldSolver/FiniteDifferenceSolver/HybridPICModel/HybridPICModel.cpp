@@ -18,6 +18,7 @@
 #include "QdsmcConductionBoundary.H"
 #include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
+#include "QdsmcFailureCapture.H"
 #include "QdsmcVolumeElement.H"
 
 #include <ablastr/coarsen/sample.H>
@@ -87,6 +88,23 @@ struct ViscousWorkRZStencil {
 #endif
 } // namespace
 using warpx::fields::FieldType;
+
+namespace {
+void AppendQdsmcElectromagneticCapture (
+    WarpX const& w, int lev, std::vector<QdsmcFailureCapture::Field>& fields) {
+    using ablastr::fields::Direction;
+    for(auto const& item:std::array<std::pair<FieldType,char const*>,4>{{
+        {FieldType::Efield_fp,"E"},{FieldType::Bfield_fp,"B"},
+        {FieldType::current_fp,"J_ion"},{FieldType::hybrid_current_fp_plasma,"J_plasma"}}}) {
+        for(int c=0;c<3;++c) {
+            if(w.m_fields.has(item.first,Direction{c},lev)) {
+                fields.emplace_back(std::string(item.second)+"_"+"xyz"[c],
+                                    w.m_fields.get(item.first,Direction{c},lev));
+            }
+        }
+    }
+}
+} // namespace
 
 HybridPICModel::HybridPICModel ()
 {
@@ -13739,6 +13757,25 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
         amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
         amrex::Real const te_max_eV = te_max_K / K_per_eV;
         if (te_max_eV > m_te_abort_threshold_eV) {
+            if(auto* capture=QdsmcFailureCapture::FromEnvironment()) {
+                auto owner=amrex::OwnerMask(Te,warpx.Geom(lev).periodicity());
+                auto real_owner=QdsmcFailureCapture::RealMask(*owner);
+                std::vector<QdsmcFailureCapture::Field> fields{{"Te",&Te},{"rho",&rho_ab},{"owner",real_owner.get()}};
+                AppendQdsmcElectromagneticCapture(warpx,lev,fields);
+                if(warpx.m_fields.has(FieldType::distance_to_eb,lev))fields.emplace_back("distance_to_eb",warpx.m_fields.get(FieldType::distance_to_eb,lev));
+                if(auto const* pedestal=DensityPedestal(lev))fields.emplace_back("density_pedestal",pedestal);
+                auto num=QdsmcFailureCapture::Number;
+                std::ostringstream meta;
+                meta<<"\"classification\":\"terminal_post_source\",\"reason\":\"temperature abort threshold\""
+                    <<",\"step\":"<<warpx.getistep(lev)<<",\"time_s\":"<<num(warpx.gett_new(lev))
+                    <<",\"level\":"<<lev<<",\"max_Te_eV\":"<<num(te_max_eV)
+                    <<",\"abort_threshold_eV\":"<<num(m_te_abort_threshold_eV)
+                    <<",\"open_gate\":\"rho > q_e * n_floor; native abort gate\""
+                    <<",\"density_floor_m3\":"<<num(m_n_floor)
+                    <<",\"tensor_available\":false,\"tensor_unavailable_reason\":\"conduction scratch lifetime ended before post-source abort\""
+                    <<",\"EM_fields_native_storage_not_retimed\":true";
+                capture->Write("terminal_post_source:temperature abort threshold",true,capture->BeginCall(),meta.str(),fields);
+            }
             m_source_guard.Phase(lev, "temperature_abort", *this, true);
             WARPX_ABORT_WITH_MESSAGE(
                 "QDSMC electron energy equation: open-set (n > n_floor) "
@@ -14450,6 +14487,10 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
 
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
+    auto* const capture=QdsmcFailureCapture::FromEnvironment();
+    long const capture_call=capture?capture->BeginCall():0;
+    long capture_rhs_count=0,capture_tensor_rhs=0;
+    bool capture_flux_valid=false,capture_rhs_valid=false;
 
     amrex::Geometry const & geom = warpx.Geom(lev);
     amrex::Periodicity const & period = geom.periodicity();
@@ -14984,6 +15025,15 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     bool const flux_budget = m_cond_flux_budget && (m_cond_te_floor > 0.0_rt);
     amrex::Real const budget_floor_K = m_cond_te_floor * qe / kb;
     amrex::Real const budget_dt = (dt_c > 0.0_rt) ? dt_c : 1.0_rt;
+    amrex::MultiFab capture_flux,capture_rhs_state,capture_tensor_state,capture_last_rhs;
+    if(capture) {
+        capture_flux.define(Te.boxArray(),Te.DistributionMap(),3*AMREX_SPACEDIM,0);
+        capture_rhs_state.define(Te.boxArray(),Te.DistributionMap(),1,ngT);
+        capture_tensor_state.define(Te.boxArray(),Te.DistributionMap(),1,ngT);
+        capture_last_rhs.define(Te.boxArray(),Te.DistributionMap(),1,0);
+        capture_rhs_state.setVal(0.0_rt);
+        capture_tensor_state.setVal(0.0_rt);
+    }
     amrex::MultiFab fcache, rbud;
     if (flux_budget) {
         // SPACEDIM face components (F at the node's HI face in each
@@ -14994,6 +15044,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         rbud.setVal(1.0_rt);
     }
     auto eval_bulk_rhs = [&] (amrex::MultiFab& Tin, amrex::MultiFab& Kout) {
+        if(capture) { ++capture_rhs_count;capture_flux.setVal(0.0_rt); }
         ablastr::utils::communication::FillBoundary(
             Tin, WarpX::do_single_precision_comms, period, true);
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
@@ -15020,9 +15071,16 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             }
         }
 #endif
+        if(capture) {
+            amrex::MultiFab::Copy(capture_rhs_state,Tin,0,0,1,amrex::min(Tin.nGrowVect(),capture_rhs_state.nGrowVect()));
+        }
         if (!fixed_tensor || !tensor_built) {
             build_xi(Tin);
             tensor_built = true;
+            if(capture) {
+                capture_tensor_rhs=capture_rhs_count;
+                amrex::MultiFab::Copy(capture_tensor_state,Tin,0,0,1,amrex::min(Tin.nGrowVect(),capture_tensor_state.nGrowVect()));
+            }
         }
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -15040,6 +15098,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 ? fcache.array(mfi) : amrex::Array4<amrex::Real>{};
             amrex::Array4<amrex::Real> const rb_arr = flux_budget
                 ? rbud.array(mfi) : amrex::Array4<amrex::Real>{};
+            auto const diagnostic_flux=capture?capture_flux.array(mfi):amrex::Array4<amrex::Real>{};
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -15210,6 +15269,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             * (Tat(m1) - Tat(m0)) * dxi_g[g];
                     }
 
+                    // Observe the value already computed by this kernel.
+                    // Only the HI-face evaluation writes this node's scratch.
+                    amrex::Real const normal_flux=diagnostic_flux?kfac*F:0.0_rt;
                     // cross-derivative fluxes: Sharma-Hammett limited
                     // transverse face gradient (sh modes) or the
                     // SMART-limited pseudo-advection recast
@@ -15289,6 +15351,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         }
                         amrex::Real const tUU = is_open(uu) ? Tat(uu) : tU;
                         F += v * qdsmc_fd_face_value(tUU, tU, tD, fd_limiter, fd_lim_width);
+                    }
+                    if(diagnostic_flux && m0[0]==i && m0[1]==j && m0[2]==k) {
+                        diagnostic_flux(i,j,k,g)=normal_flux;
+                        diagnostic_flux(i,j,k,AMREX_SPACEDIM+g)=kfac*F;
+                        diagnostic_flux(i,j,k,2*AMREX_SPACEDIM+g)=kfac*F-normal_flux;
                     }
                     return kfac*F;
                 };
@@ -15837,7 +15904,95 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                       amrex::Real, amrex::Real, amrex::Real, amrex::Real,
                       amrex::Real, amrex::Real, amrex::Real, amrex::Real>
         projection_data(projection_op);
+    QdsmcRKIntegrator::AttemptObservation capture_context;
+    auto capture_state = [&] (amrex::MultiFab const& state,
+                             amrex::MultiFab const* rhs, char const* kind,
+                             char const* reason, amrex::Real required,
+                             amrex::Real observed, bool terminal) {
+        if (!capture) { return; }
+        std::string const key=std::string(kind)+":"+reason;
+        if (!capture->Wants(key,terminal)) { return; }
+        auto ownership=QdsmcFailureCapture::RealMask(*thermal_owner);
+        std::vector<QdsmcFailureCapture::Field> fields{
+            {"Te",&state},{"Te_committed",&Te},{"rho",&rho},{"bne",&bne},{"owner",ownership.get()},
+            {"pins",&pins},{"RHS",rhs},{"density_pedestal",ped_mf},
+            {"distance_to_eb",eb_dist},{"eb_wall",eb_iso?&eb_wall:nullptr},
+            {"xi",capture_tensor_rhs>0?&xi:nullptr},
+            {"Te_rhs_input",capture_rhs_count>0?&capture_rhs_state:nullptr},
+            {"Te_tensor_input",capture_tensor_rhs>0?&capture_tensor_state:nullptr},
+            {"RHS_last",capture_rhs_valid?&capture_last_rhs:nullptr},
+            {"face_flux",capture_flux_valid?&capture_flux:nullptr}};
+        AppendQdsmcElectromagneticCapture(warpx,lev,fields);
+        auto num=QdsmcFailureCapture::Number;
+        auto quote=QdsmcFailureCapture::Quote;
+        std::ostringstream meta;
+        meta<<"\"classification\":"<<quote(kind)<<",\"reason\":"<<quote(reason)
+            <<",\"step\":"<<warpx.getistep(lev)<<",\"time_s\":"<<num(t_now)
+            <<",\"level\":"<<lev<<",\"half\":"<<(use_rho_new?2:1)
+            <<",\"requested_interval_s\":"<<num(dt_c)
+            <<",\"rhs_evaluation\":"<<capture_rhs_count
+            <<",\"last_tensor_build_rhs\":"<<capture_tensor_rhs
+            <<",\"tensor_cache_age_rhs\":"<<(capture_rhs_count-capture_tensor_rhs)
+            <<",\"tensor_valid\":"<<(tensor_built?"true":"false")
+            <<",\"bulk_bound_cached\":"<<(bulk_rate_built?"true":"false")
+            <<",\"cached_bulk_rate\":"<<num(cached_bulk_rate)
+            <<",\"last_bulk_rate\":"<<num(last_bulk_rate)
+            <<",\"last_leg_rate\":"<<num(last_leg_rate)
+            <<",\"boundary_rate_max\":"<<num(boundary_s_max)
+            <<",\"required_cap\":"<<num(required)<<",\"observed_cap\":"<<num(observed)
+            <<",\"density_floor_m3\":"<<num(n_floor)<<",\"temperature_floor_K\":"<<num(te_floor_K)
+            <<",\"bne_components\":[\"unit_bx\",\"unit_by\",\"unit_bz\",\"B_squared\",\"capacity_density\",\"open\",\"eb_open\",\"effective_density\",\"physical_density\"]"
+            <<",\"xi_components\":\"upper triangular symmetric tensor in grid-axis order\""
+            <<",\"face_flux_components\":\"normal, total, total-minus-normal; each group in grid-axis order; HI face indexed by its lower node\""
+            <<",\"face_flux_sign\":\"positive kappa grad(T); RHS is positive divergence\""
+            <<",\"flux_before_budget\":true,\"flux_budget_enabled\":"<<(flux_budget?"true":"false")
+            <<",\"flux_rhs_evaluation\":"<<capture_rhs_count
+            <<",\"state_relation_to_flux\":"<<quote(rhs?"same evaluated state":"last evaluated RHS; this state may differ or may not have been evaluated")
+            <<",\"state_ghosts\":"<<quote(rhs?"refreshed by evaluated RHS":"preserved as held; may be stale")
+            <<",\"Te_committed_scope\":\"native caller state; unchanged until the complete conduction call commits\""
+            <<",\"terminal_state_scope\":\"last accepted internal state after attempt rollback; earlier accepted internal substeps may remain; auxiliary accounts may be rolled back to call entry\""
+            <<",\"observer_context_valid\":"<<(capture_context.valid?"true":"false");
+        if(capture_context.valid) {
+            auto const& stats=capture_context.stats;
+            meta<<",\"stage\":"<<capture_context.stage<<",\"stages\":"<<capture_context.stages
+                <<",\"completed_interval_s\":"<<num(stats.t_done)
+                <<",\"attempted_interval_s\":"<<num(stats.attempted_dt)
+                <<",\"attempted_stage_work\":"<<stats.n_attempts
+                <<",\"accepted_stages\":"<<stats.n_accepted
+                <<",\"retries\":"<<stats.n_retries<<",\"rejected_stage_work\":"<<stats.n_rejected_work;
+        }
+        auto heat_values=heat.value,heat_rates=heat.rate;
+        amrex::ParallelDescriptor::ReduceRealSum(heat_values.data(),int(heat_values.size()));
+        amrex::ParallelDescriptor::ReduceRealSum(heat_rates.data(),int(heat_rates.size()));
+        auto vector_json=[&](char const* name,amrex::Vector<amrex::Real> const& values){
+            meta<<",\""<<name<<"\":[";bool first=true;for(auto value:values){if(!first)meta<<',';first=false;meta<<num(value);}meta<<']';
+        };
+        vector_json("heat_values_J_global",heat_values);vector_json("heat_rates_W_global",heat_rates);
+        meta<<",\"heat_accounts_scope\":\"global sums of diagnostic copies; native accounts unchanged\"";
+        meta<<",\"coordinate_system\":"<<geom.Coord()<<",\"cell_size_m\":[";
+        for(int d=0;d<AMREX_SPACEDIM;++d){if(d)meta<<',';meta<<num(geom.CellSize(d));}
+        meta<<"],\"prob_lo_m\":[";
+        for(int d=0;d<AMREX_SPACEDIM;++d){if(d)meta<<',';meta<<num(geom.ProbLo(d));}
+        meta<<"],\"EM_fields_native_storage_not_retimed\":true";
+        capture->Write(key,terminal,capture_call,meta.str(),fields);
+    };
     auto project = [&] (amrex::MultiFab& state, bool const entry) {
+        if(capture && !entry && capture->Wants("negative_provisional:open temperature below zero")) {
+            amrex::ReduceOps<amrex::ReduceOpMin> op;
+            amrex::ReduceData<amrex::Real> data(op);
+            auto const huge=std::numeric_limits<amrex::Real>::max();
+            for(MFIter mfi(state);mfi.isValid();++mfi) {
+                auto const t=state.const_array(mfi),b=bne.const_array(mfi);
+                auto const own=thermal_owner->const_array(mfi);
+                op.eval(mfi.validbox(),data,[=]AMREX_GPU_DEVICE(int i,int j,int k)->amrex::GpuTuple<amrex::Real>{
+                    return {own(i,j,k)&&b(i,j,k,BNE::b_open)>0.5_rt&&std::isfinite(t(i,j,k))?t(i,j,k):huge};
+                });
+            }
+            amrex::Real minimum=amrex::get<0>(data.value(op));
+            amrex::ParallelDescriptor::ReduceRealMin(minimum);
+            if(minimum<0.0_rt)capture_state(state,nullptr,"negative_provisional","open temperature below zero",0.0_rt,0.0_rt,false);
+        }
+
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
         // Test-only finite excursion on one rank, after the RHS/cap checks.
         // Selecting the last stage verifies the complete-step acceptance gate.
@@ -16102,12 +16257,14 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         boundary_data(boundary_op);
     auto eval_rhs = [&] (amrex::MultiFab& state, amrex::MultiFab& rhs) {
         eval_bulk_rhs(state, rhs);
+        if(capture)capture_flux_valid=true;
         for (auto& v : heat.rate) {
             v = 0.0_rt;
         }
         boundary_s_max = 0.0_rt;
         boundary_invalid = 0.0_rt;
         if (!any_boundary) {
+            if(capture) { amrex::MultiFab::Copy(capture_last_rhs,rhs,0,0,1,0);capture_rhs_valid=true; }
             return;
         }
         auto& op = boundary_op;
@@ -16264,6 +16421,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         heat.rate[6] = amrex::get<6>(v);
         boundary_s_max = amrex::get<7>(v);
         boundary_invalid = amrex::get<8>(v);
+        if(capture) { amrex::MultiFab::Copy(capture_last_rhs,rhs,0,0,1,0);capture_rhs_valid=true; }
     };
 #ifdef WARPX_CONDUCTION_TEST_HOOKS
     // Deterministic rank-local tightening, only in native test builds. This
@@ -16305,6 +16463,13 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         saved_floor_mask.define(floor_mask.boxArray(), floor_mask.DistributionMap(), 1, 0);
     }
     QdsmcRKIntegrator::AttemptHooks attempt_hooks;
+    if(capture) {
+        attempt_hooks.observation=&capture_context;
+        attempt_hooks.rejected_state=[&](amrex::MultiFab const& state,amrex::MultiFab const* rhs,
+                                        char const* reason,amrex::Real required,amrex::Real observed) {
+            capture_state(state,rhs,"rejected_rhs",reason,required,observed,false);
+        };
+    }
     attempt_hooks.save = [&] () {
         saved_floor_raw = floor_raw;
         saved_floor_count = floor_count;
@@ -16333,6 +16498,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         }) : QdsmcRKIntegrator::StageValidity{}, m_cond_rkl_max_stages,
         std::move(attempt_hooks), std::move(admissibility));
     auto const st = integ.Advance(T_cur, dt_c);
+    if(capture)capture_context.stats=st;
     report.completed_time = st.t_done;
     report.attempts = st.n_attempts;
     report.accepted = st.n_accepted;
@@ -16347,6 +16513,10 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     report.rejected_required_cap = st.rejected_required_cap;
     report.rejected_observed_cap = st.rejected_observed_cap;
     if (st.failure) {
+        if(capture) {
+            capture_context.stats=st;
+            capture_state(T_cur,nullptr,"terminal_rolled_back",st.failure,st.required_cap,st.observed_cap,true);
+        }
         amrex::Print() << "[qdsmc] conduction rejection: half="
             << (use_rho_new ? 2 : 1) << " requested_dt=" << dt_c
             << " completed_dt=" << st.t_done << " stage_updates=" << st.n_attempts
@@ -16366,9 +16536,11 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         return fail(st.failure);
     }
     if (!T_cur.is_finite()) {
+        if(capture)capture_state(T_cur,nullptr,"terminal_final","nonfinite final conduction state",st.required_cap,st.observed_cap,true);
         return fail("nonfinite final conduction state");
     }
     if (st.t_done < dt_c * (1.0_rt - 1.e-12_rt)) {
+        if(capture)capture_state(T_cur,nullptr,"terminal_incomplete","incomplete conduction interval",st.required_cap,st.observed_cap,true);
         return fail("incomplete conduction interval");
     }
     // One accepted-call collective for heat, projections and raw floor

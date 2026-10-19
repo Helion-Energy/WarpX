@@ -134,9 +134,21 @@ public:
      * them before use. Callbacks must not publish provisional effects. The
      * caller still owns whole-call commit/rollback (including on failure).
      * cap and StageValidity must return identical decisions on every rank. */
+    struct AttemptObservation {
+        QdsmcRKStats stats;
+        int stage = -1;
+        int stages = 0;
+        bool valid = false; // RKL2 context; other schemes leave this false.
+    };
     struct AttemptHooks {
         std::function<void ()> save;
         std::function<void ()> restore;
+        // Read-only observation before any rejected state is rolled back.
+        std::function<void (amrex::MultiFab const&, amrex::MultiFab const*,
+                            char const*, amrex::Real, amrex::Real)> rejected_state;
+        // Optional caller-owned diagnostic context, never used by the solver.
+        AttemptObservation* observation;
+        AttemptHooks () : observation(nullptr) {}
     };
 
     enum class StageAcceptance { accept, retry, invalid };
@@ -190,6 +202,9 @@ public:
     {
         using namespace amrex::literals;
         QdsmcRKStats st;
+        if (m_attempt_hooks.observation) {
+            *m_attempt_hooks.observation = AttemptObservation{};
+        }
         if (!std::isfinite(t_end) || t_end < 0.0_rt) {
             st.failure = "invalid integration interval";
             return st;
@@ -399,6 +414,7 @@ public:
               m_auxjm2 = m_aux->value;
           }
           ++st.n_attempts;
+          ObserveRKL2(st, 0, 0);
           EvaluateRhs(y, my0, 0);
           if (m_failure) {
               ++st.n_rejected_work;
@@ -523,6 +539,7 @@ public:
                     m_aux->value[a] = m_aux0[a] + mu_t1 * tau * m_aux_k[0][a];
                 }
             }
+            ObserveRKL2(st, 1, s);
             if (m_post_step) { m_post_step(y, mu_t1*tau); }
             CheckRKLStage(y, st.t_done + mu_t1*tau, s);
             book(mu_t1*tau);
@@ -539,6 +556,7 @@ public:
                 // Y_{j-1} from y before overwriting and re-archiving it
                 // as the next stage's Y_{j-2}.
                 ++st.n_attempts;
+                ObserveRKL2(st, j-1, s);
                 EvaluateRhs(y, mjm1, 1);
                 if (m_failure) { break; }
                 amrex::Real const rj = amrex::Real(j);
@@ -584,6 +602,7 @@ public:
                     }
                 }
                 amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
+                ObserveRKL2(st, j, s);
                 if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
                 CheckRKLStage(y, st.t_done + cj*tau, s);
                 book((cj - c_prev)*tau);
@@ -920,6 +939,11 @@ public:
     }
 
 private:
+    void ObserveRKL2 (QdsmcRKStats const& stats, int stage, int stages) const {
+        if (m_attempt_hooks.observation) {
+            *m_attempt_hooks.observation = AttemptObservation{stats, stage, stages, true};
+        }
+    }
     void
     CheckRKLStage (amrex::MultiFab const& y, amrex::Real const elapsed,
                    int const stages) const {
@@ -943,6 +967,10 @@ private:
         }
         if (m_validate_stages && !m_stage_validity && !StageIsFinite(y)) {
             m_failure = "nonfinite stage state";
+            if (m_attempt_hooks.rejected_state) {
+                m_attempt_hooks.rejected_state(y, nullptr, m_failure,
+                                               m_required_cap, m_last_cap);
+            }
             return;
         }
         m_rhs(y, k);
@@ -967,6 +995,10 @@ private:
                                              : "nonfinite stage RHS";
                 m_stage_cap_failed = false;
             }
+        }
+        if (m_failure && m_attempt_hooks.rejected_state) {
+            m_attempt_hooks.rejected_state(y, &k, m_failure,
+                                           m_required_cap, m_last_cap);
         }
     }
 
