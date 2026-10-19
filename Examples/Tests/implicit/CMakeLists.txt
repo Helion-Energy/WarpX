@@ -1977,3 +1977,18 @@ if(TARGET lib_3d)
         endif()
     endforeach()
 endif()
+
+if(TARGET lib_3d)
+    add_executable(test_native_rng_checkpoint_3d test_native_rng_checkpoint.cpp)
+    target_link_libraries(test_native_rng_checkpoint_3d PRIVATE lib_3d)
+    target_include_directories(test_native_rng_checkpoint_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_native_rng_checkpoint_3d)
+    endif()
+    add_test(NAME test_3d_native_rng_checkpoint
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_native_rng_checkpoint.py
+            --executable $<TARGET_FILE:test_native_rng_checkpoint_3d>
+            --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_test_3d_native_rng_checkpoint
+            --output-parent ${CMAKE_CURRENT_BINARY_DIR}/native_rng_checkpoint_3d)
+    set_tests_properties(test_3d_native_rng_checkpoint PROPERTIES TIMEOUT 600 LABELS "HYBRID;restart;native;RNG")
+endif()
