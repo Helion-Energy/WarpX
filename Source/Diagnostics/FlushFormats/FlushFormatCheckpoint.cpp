@@ -10,6 +10,7 @@
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
+#include "Utils/NativeRngState.H"
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
@@ -200,6 +201,15 @@ FlushFormatCheckpoint::WriteToFile (
     WriteReducedDiagsData(checkpointname);
 
     WriteHybridPICData(checkpointname);
+
+    if (warpx_rng::Enabled()) {
+        std::ostringstream layout;
+        layout << warpx.finestLevel() << '\n';
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            layout << warpx.boxArray(lev) << warpx.DistributionMap(lev);
+        }
+        warpx_rng::WriteCheckpoint(checkpointname, layout.str());
+    }
 
     VisMF::SetHeaderVersion(current_version);
 

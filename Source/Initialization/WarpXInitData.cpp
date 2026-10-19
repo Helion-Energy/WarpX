@@ -8,6 +8,7 @@
  *
  * License: BSD-3-Clause-LBNL
  */
+#include "Utils/NativeRngState.H"
 #include "WarpX.H"
 #include "Circuit/CircuitCoupling.H"
 
@@ -934,6 +935,15 @@ WarpX::InitData ()
         }
     }
     else {
+        // Restore after restart initialization, before user callbacks can consume RNG.
+        if (warpx_rng::Enabled()) {
+            std::ostringstream layout;
+            layout << finestLevel() << '\n';
+            for (int lev = 0; lev <= finestLevel(); ++lev) {
+                layout << boxArray(lev) << DistributionMap(lev);
+            }
+            warpx_rng::ReadCheckpoint(restart_chkfile, layout.str());
+        }
         ExecutePythonCallback("afterInitatRestart");
     }
 
