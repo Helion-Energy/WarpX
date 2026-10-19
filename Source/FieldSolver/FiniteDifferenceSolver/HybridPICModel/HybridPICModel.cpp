@@ -14720,9 +14720,18 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             cp = amrex::min(cp, dom_hi[g]);
                             cm = amrex::max(cm, dom_lo[g]);
                         }
-                        if (cp == cm) { continue; }
                         int p[3] = {i, j, k}, m[3] = {i, j, k};
                         p[g] = cp; m[g] = cm;
+                        // A covered or density-closed neighbor is not a
+                        // temperature sample. Use the same one-sided
+                        // closure as at a physical domain boundary.
+                        if (b_arr(p[0],p[1],p[2],BNE::b_open) <= 0.5_rt) {
+                            cp = node[g]; p[g] = cp;
+                        }
+                        if (b_arr(m[0],m[1],m[2],BNE::b_open) <= 0.5_rt) {
+                            cm = node[g]; m[g] = cm;
+                        }
+                        if (cp == cm) { continue; }
                         gT[gd2ax[g]] =
                             (T_arr(p[0],p[1],p[2]) - T_arr(m[0],m[1],m[2]))
                             * dxi_g[g] / amrex::Real(cp - cm);
@@ -15050,6 +15059,9 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 auto Tat = [&] (int const p[3]) {
                     return tc(p[0], p[1], p[2]);
                 };
+                auto is_open = [&] (int const p[3]) {
+                    return b_arr(p[0],p[1],p[2],BNE::b_open) > 0.5_rt;
+                };
                 // clamped shift along grid dim g (non-periodic walls)
                 auto shift = [&] (int const p[3], int const g, int const off,
                                   int q[3]) {
@@ -15066,6 +15078,10 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     int qp[3], qm[3];
                     shift(p, h, +1, qp);
                     shift(p, h, -1, qm);
+                    // Closed samples have no fluid temperature. Collapse
+                    // that side to the open anchor, as for a box wall.
+                    if (!is_open(qp)) { qp[h] = p[h]; }
+                    if (!is_open(qm)) { qm[h] = p[h]; }
                     if (qp[h] == qm[h]) { return 0.0_rt; }
                     return (Tat(qp) - Tat(qm)) * dxi_g[h]
                            / amrex::Real(qp[h] - qm[h]);
@@ -15134,6 +15150,17 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                         use4 = (m0[g] - 2 >= dom_lo[g]) &&
                                (m0[g] + 3 <= dom_hi[g]);
                     }
+                    if (use4) {
+                        // A zero tensor at a covered node does not remove
+                        // its temperature from the derivative at an open
+                        // node. Every point in the normal window must be
+                        // open before the wide derivative can be used.
+                        for (int m = 0; m < 6; ++m) {
+                            int w[3] = {m0[0], m0[1], m0[2]};
+                            w[g] += m - 2;
+                            use4 = use4 && is_open(w);
+                        }
+                    }
                     bool const use4_normal = use4;
                     if (use4) {
                         for (int h = 0; h < AMREX_SPACEDIM; ++h) {
@@ -15141,6 +15168,24 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             use4 = use4 &&
                                    (m0[h] - 2 >= dom_lo[h]) &&
                                    (m0[h] + 2 <= dom_hi[h]);
+                        }
+                    }
+
+                    if (use4) {
+                        // Mixed derivatives read a transverse window at
+                        // each of the four interpolated flux nodes. Keep
+                        // their eligibility independent of the normal
+                        // contribution, but require every sample to be open.
+                        for (int h = 0; h < AMREX_SPACEDIM; ++h) {
+                            if (h == g) { continue; }
+                            for (int l = 0; l < 4; ++l) {
+                                for (int m = 0; m < 5; ++m) {
+                                    int w[3] = {m0[0], m0[1], m0[2]};
+                                    w[g] += l - 1;
+                                    w[h] += m - 2;
+                                    use4 = use4 && is_open(w);
+                                }
+                            }
                         }
                     }
 
@@ -15191,7 +15236,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                                 -> amrex::Real {
                                 int q[3];
                                 shift(p, h, sgn, q);
-                                if (q[h] == p[h]) { return 0.0_rt; }
+                                if (q[h] == p[h] || !is_open(q)) { return 0.0_rt; }
                                 return amrex::Real(sgn)*(Tat(q) - Tat(p))
                                        *dxi_g[h];
                             };
@@ -15242,7 +15287,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                             tU = Tat(m1); tD = Tat(m0);
                             shift(m1, g, +1, uu);
                         }
-                        F += v * qdsmc_fd_face_value(Tat(uu), tU, tD, fd_limiter, fd_lim_width);
+                        amrex::Real const tUU = is_open(uu) ? Tat(uu) : tU;
+                        F += v * qdsmc_fd_face_value(tUU, tU, tD, fd_limiter, fd_lim_width);
                     }
                     return kfac*F;
                 };
