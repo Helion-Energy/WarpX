@@ -3865,6 +3865,12 @@ public:
 
     /** External E/B fields */
     bool m_add_external_fields = false;
+    /** True only while the explicit advance has stripped external B from
+     * Bfield_fp. Conduction reconstructs the physical field in its gather;
+     * the plasma-current curl keeps the response field. At initialized and
+     * accepted states, and throughout implicit thermal solves, B is total. */
+    bool m_explicit_B_is_response = false;
+
     /** Which magnetic field the Ohm kernels receive when external
      * vector-potential fields are enabled. Both schemes advance the
      * external flux analytically from A(t) (wall boundary conditions act

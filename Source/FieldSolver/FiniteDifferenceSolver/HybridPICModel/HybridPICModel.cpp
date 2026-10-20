@@ -93,9 +93,10 @@ namespace {
 void AppendQdsmcElectromagneticCapture (
     WarpX const& w, int lev, std::vector<QdsmcFailureCapture::Field>& fields) {
     using ablastr::fields::Direction;
-    for(auto const& item:std::array<std::pair<FieldType,char const*>,4>{{
+    for(auto const& item:std::array<std::pair<FieldType,char const*>,6>{{
         {FieldType::Efield_fp,"E"},{FieldType::Bfield_fp,"B"},
-        {FieldType::current_fp,"J_ion"},{FieldType::hybrid_current_fp_plasma,"J_plasma"}}}) {
+        {FieldType::current_fp,"J_ion"},{FieldType::hybrid_current_fp_plasma,"J_plasma"},
+        {FieldType::hybrid_E_fp_external,"E_external"},{FieldType::hybrid_B_fp_external,"B_external"}}}) {
         for(int c=0;c<3;++c) {
             if(w.m_fields.has(item.first,Direction{c},lev)) {
                 fields.emplace_back(std::string(item.second)+"_"+"xyz"[c],
@@ -13773,7 +13774,8 @@ void HybridPICModel::ApplyQdsmcEnergySourcesImpl (int const lev, amrex::Real con
                     <<",\"open_gate\":\"rho > q_e * n_floor; native abort gate\""
                     <<",\"density_floor_m3\":"<<num(m_n_floor)
                     <<",\"tensor_available\":false,\"tensor_unavailable_reason\":\"conduction scratch lifetime ended before post-source abort\""
-                    <<",\"EM_fields_native_storage_not_retimed\":true";
+                    <<",\"EM_fields_native_storage_not_retimed\":true"
+                    <<",\"B_storage_is_plasma_response\":"<<(m_explicit_B_is_response?"true":"false");
                 capture->Write("terminal_post_source:temperature abort threshold",true,capture->BeginCall(),meta.str(),fields);
             }
             m_source_guard.Phase(lev, "temperature_abort", *this, true);
@@ -14511,6 +14513,22 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     amrex::MultiFab const & By = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{1}, lev);
     amrex::MultiFab const & Bz = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{2}, lev);
 
+    // Explicit field pushes store the response B. Reconstruct physical B
+    // only in the conduction gather; adding it to Bfield_fp would pollute
+    // the plasma-current curl with the discrete curl of the imposed coil.
+    // Direct kernel callers and implicit thermal solves already supply total B.
+    bool const add_external_B = m_explicit_B_is_response;
+    ablastr::fields::VectorField B_external{};
+    if (add_external_B) {
+        WARPX_ALWAYS_ASSERT(m_add_external_fields && m_external_split && !m_external_unified);
+        B_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, lev);
+        for (int d = 0; d < 3; ++d) {
+            auto const& native = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{d}, lev);
+            WARPX_ALWAYS_ASSERT(B_external[d]->boxArray() == native.boxArray());
+            WARPX_ALWAYS_ASSERT(amrex::min(B_external[d]->nGrowVect(), native.nGrowVect()) == native.nGrowVect());
+        }
+    }
+
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
     amrex::Real const me = PhysConst::m_e;
@@ -14611,6 +14629,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         amrex::Array4<amrex::Real const> const & Bx_arr  = Bx.const_array(mfi);
         amrex::Array4<amrex::Real const> const & By_arr  = By.const_array(mfi);
         amrex::Array4<amrex::Real const> const & Bz_arr  = Bz.const_array(mfi);
+        amrex::Array4<amrex::Real const> const Bex = add_external_B
+            ? B_external[0]->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::Array4<amrex::Real const> const Bey = add_external_B
+            ? B_external[1]->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::Array4<amrex::Real const> const Bez = add_external_B
+            ? B_external[2]->const_array(mfi) : amrex::Array4<amrex::Real const>{};
         amrex::Array4<amrex::Real const> const & phi_arr = has_eb
             ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
         amrex::Array4<amrex::Real const> ped_arr;
@@ -14625,11 +14649,17 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             amrex::Real const ne_raw =
                 use_ped ? rho_arr(i, j, k) / qe + ped_arr(i, j, k) / qe : rho_arr(i, j, k) / qe;
             amrex::Real const bxv = ablastr::coarsen::sample::Interp(
-                Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0);
+                Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0)
+                + (add_external_B ? ablastr::coarsen::sample::Interp(
+                    Bex, Bx_stag, nd_x, coarsen, i, j, k, 0) : 0.0_rt);
             amrex::Real const byv = ablastr::coarsen::sample::Interp(
-                By_arr, By_stag, nd_y, coarsen, i, j, k, 0);
+                By_arr, By_stag, nd_y, coarsen, i, j, k, 0)
+                + (add_external_B ? ablastr::coarsen::sample::Interp(
+                    Bey, By_stag, nd_y, coarsen, i, j, k, 0) : 0.0_rt);
             amrex::Real const bzv = ablastr::coarsen::sample::Interp(
-                Bz_arr, Bz_stag, nd_z, coarsen, i, j, k, 0);
+                Bz_arr, Bz_stag, nd_z, coarsen, i, j, k, 0)
+                + (add_external_B ? ablastr::coarsen::sample::Interp(
+                    Bez, Bz_stag, nd_z, coarsen, i, j, k, 0) : 0.0_rt);
             amrex::Real const B2 = bxv*bxv + byv*byv + bzv*bzv;
             bool const unmag = (B2 <= 0.0_rt);
             amrex::Real const Binv = unmag ? 0.0_rt : 1.0_rt/std::sqrt(B2);
@@ -15952,6 +15982,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
             <<",\"Te_committed_scope\":\"native caller state; unchanged until the complete conduction call commits\""
             <<",\"terminal_state_scope\":\"last accepted internal state after attempt rollback; earlier accepted internal substeps may remain; auxiliary accounts may be rolled back to call entry\""
             <<",\"observer_context_valid\":"<<(capture_context.valid?"true":"false");
+        meta<<",\"B_storage_is_plasma_response\":"<<(m_explicit_B_is_response?"true":"false");
         if(capture_context.valid) {
             auto const& stats=capture_context.stats;
             meta<<",\"stage\":"<<capture_context.stage<<",\"stages\":"<<capture_context.stages

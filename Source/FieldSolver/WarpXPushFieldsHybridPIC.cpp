@@ -45,6 +45,8 @@ void WarpX::HybridPICEvolveFields ()
     // Get flag to include external fields.
     const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
 
+    WARPX_ALWAYS_ASSERT(!m_hybrid_pic_model->m_explicit_B_is_response);
+
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
         // Get the external fields
@@ -63,6 +65,8 @@ void WarpX::HybridPICEvolveFields ()
             }
         }
     }
+
+    m_hybrid_pic_model->m_explicit_B_is_response = add_external_fields;
 
     // The particles have now been pushed to their t_{n+1} positions.
     // Perform charge deposition at t_{n+1} and current deposition at t_{n+1/2}.
@@ -181,6 +185,15 @@ void WarpX::HybridPICEvolveFields ()
         WarpX::sync_nodal_points
     );
 
+    if (add_external_fields) {
+        // Match the midpoint response B before PC thermal transport.
+        // The second magnetic half-push uses the same external state.
+        m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
+            gett_old(0) + 0.5_rt*dt[0],
+            0.5_rt*dt[0]);
+    }
+
+
     // qdsmc_time_advance = pc: single mid-step corrector transport
     // T_e^n -> T_e^{n+1} using V_e^{n+1/2}(J_i^{n+1/2}, B^{n+1/2},
     // rho^{n+1/2}). Must run AFTER the first B half-push (B^{n+1/2} in the
@@ -206,12 +219,6 @@ void WarpX::HybridPICEvolveFields ()
         );
     }
 
-    if (add_external_fields) {
-        // Get the external fields at E^{n+1/2}
-        m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
-            gett_old(0) + 0.5_rt*dt[0],
-            0.5_rt*dt[0]);
-    }
 
     // Re-center the per-species friction linearization on the half-step
     // fields before the second half-step B-advance: refresh J_plasma from
@@ -330,6 +337,8 @@ void WarpX::HybridPICEvolveFields ()
             }
         }
     }
+
+    m_hybrid_pic_model->m_explicit_B_is_response = false;
 
     // Copy the rho^{n+1} values to rho_fp_temp and the J_i^{n+1/2} values to
     // current_fp_temp since at the next step those values will be needed as
