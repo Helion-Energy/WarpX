@@ -9,6 +9,7 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "Utils/NativeRngState.H"
+#include "Utils/NativeParticleIdState.H"
 #include "WarpX.H"
 #include "Circuit/CircuitCoupling.H"
 
@@ -943,6 +944,7 @@ WarpX::InitData ()
                 layout << boxArray(lev) << DistributionMap(lev);
             }
             warpx_rng::ReadCheckpoint(restart_chkfile, layout.str());
+            warpx_particle_ids::ReadCheckpoint(restart_chkfile, layout.str());
         }
         ExecutePythonCallback("afterInitatRestart");
     }

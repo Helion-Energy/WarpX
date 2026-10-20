@@ -11,6 +11,8 @@
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "Utils/NativeRngState.H"
+#include "Utils/NativeParticleIdState.H"
+#include <AMReX_AsyncOut.H>
 #include "Utils/CartesianHybridHistory.H"
 #include "WarpX.H"
 
@@ -65,6 +67,8 @@ FlushFormatCheckpoint::WriteToFile (
     ABLASTR_PROFILE("FlushFormatCheckpoint::WriteToFile()");
 
     auto & warpx = WarpX::GetInstance();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!warpx_rng::Enabled() || !amrex::AsyncOut::UseAsyncOut(),
+        "Exact native RNG/particle-ID checkpoints require amrex.async_out=0");
 
     const VisMF::Header::Version current_version = VisMF::GetHeaderVersion();
     VisMF::SetHeaderVersion(amrex::VisMF::Header::NoFabHeader_v1);
@@ -213,6 +217,7 @@ FlushFormatCheckpoint::WriteToFile (
             layout << warpx.boxArray(lev) << warpx.DistributionMap(lev);
         }
         warpx_rng::WriteCheckpoint(checkpointname, layout.str());
+        warpx_particle_ids::WriteCheckpoint(checkpointname, layout.str());
     }
 
     VisMF::SetHeaderVersion(current_version);
