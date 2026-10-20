@@ -12,6 +12,7 @@
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/EBJBoundary.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
+#include "Python/callbacks.H"
 #include "Utils/TextMsg.H"
 #include "Fluids/MultiFluidContainer.H"
 #include "Fluids/WarpXFluidContainer.H"
