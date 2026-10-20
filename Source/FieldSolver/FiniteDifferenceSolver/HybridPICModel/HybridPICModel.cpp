@@ -12406,7 +12406,7 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
     bool const do_relax = m_include_temperature_relaxation;
     bool const guarded_relaxation = do_relax &&
         m_source_guard.guards(HybridSourceEligibility::Thermal);
-    bool const audit_exchange = m_source_guard.enabled();
+    bool const audit_exchange = m_source_guard.auditing();
     amrex::Real actual_ion_J = 0, thermal_ion_J = 0, redirect_ion_J = 0;
     amrex::Real expected_thermal_J = 0, expected_redirect_J = 0;
     bool const do_redir = (redirect_E != nullptr);

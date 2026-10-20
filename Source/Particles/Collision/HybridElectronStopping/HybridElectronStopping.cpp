@@ -106,7 +106,7 @@ HybridElectronStopping::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, 
     int const n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
     bool const galerkin_interpolation = WarpX::galerkin_interpolation;
 
-    bool const audit = hybrid_model->m_source_guard.enabled();
+    bool const audit = hybrid_model->m_source_guard.auditing();
     amrex::Real const initial_energy = audit ? species.sumParticleEnergy() : 0;
     for (int lev = 0; lev <= species.finestLevel(); ++lev) {
         ablastr::fields::VectorField Ve_fp = warpx.m_fields.get_alldirs("Ve_fp", lev);

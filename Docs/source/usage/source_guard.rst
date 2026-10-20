@@ -143,3 +143,27 @@ abort, a bounded native neighborhood is saved before stopping. Existing physical
 health thresholds must remain in place. Production startup, memory overhead,
 source-power sensitivity, and fusion/confinement interpretation require separate
 qualification by the run owner.
+
+
+Diagnostic-only source energy accounting
+---------------------------------------
+
+``hybrid_pic_model.source_guard.audit_only = 1`` (default: ``0``) records
+source energy transfers in single-level explicit electron-energy runs,
+including Cartesian 3D. It requires ``source_guard.enabled = 0``. It does
+not enable source eligibility masks, replace electron-ion rates, refresh
+ion moments, or reject interactions. The RZ-only physical guard retains
+its existing geometry restriction.
+
+The electron ledger integrates the change in temperature using the receiving
+source-stage heat capacity, including the density pedestal and physical
+nodal dual volumes. The ion ledger reports realized relativistic lab-frame
+energy changes and a separately labelled nonrelativistic OU expectation.
+Stopping records signed particle energy and staged electron delivery.
+The two PC source halves have distinct ``source_audit_batch`` epochs.
+
+These are diagnostic accounts, not a conservative source correction. A nonzero
+paired residual may include finite-step splitting, deposition/gather mismatch,
+moment lag, particle sampling, and the distinction between relativistic energy
+and a nonrelativistic expectation. Enabling diagnostics does not qualify the
+physical model or establish exact electron-plus-ion conservation.

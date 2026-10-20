@@ -27,6 +27,8 @@ public:
     void ReadParameters ();
     void Validate (HybridPICModel const& model) const;
     bool enabled () const { return m_enabled; }
+    // Audit-only mode never enables masks, shared rates, or moment refreshes.
+    bool auditing () const { return m_enabled || m_audit_only; }
     bool guards (Channel c) const { return m_enabled && m_channels[c]; }
     void Prepare (int lev, amrex::MultiFab const& rho, HybridPICModel const& model);
     void BeginBatch (int lev, amrex::MultiFab const& rho, HybridPICModel const& model);
@@ -91,6 +93,7 @@ public:
 
 private:
     bool m_enabled = false;
+    bool m_audit_only = false;
     std::array<bool,3> m_channels{{true,true,true}};
     std::vector<std::string> m_background;
     int m_minimum = 16, m_axis_cells = 1, m_diagnostic_interval = 1, m_export_interval = 0;

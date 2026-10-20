@@ -43,6 +43,9 @@ void HybridSourceEligibility::ReadParameters ()
 {
     amrex::ParmParse pp("hybrid_pic_model.source_guard");
     pp.query("enabled", m_enabled);
+    pp.query("audit_only", m_audit_only);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(m_enabled && m_audit_only),
+        "source_guard.audit_only requires source_guard.enabled = 0");
     pp.query("ohmic", m_channels[Ohmic]);
     pp.query("thermal_relaxation", m_channels[Thermal]);
     pp.query("alpha_stopping", m_channels[Stopping]);
@@ -66,6 +69,16 @@ void HybridSourceEligibility::ReadParameters ()
 
 void HybridSourceEligibility::Validate (HybridPICModel const& model) const
 {
+    if (m_audit_only) {
+        auto const& w = WarpX::GetInstance();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(w.maxLevel() == 0 &&
+            model.m_solve_electron_energy_equation && w.evolve_scheme == EvolveScheme::Explicit,
+            "source_guard.audit_only requires single-level explicit electron-energy evolution");
+        amrex::Print() << "[source_audit] diagnostics_only=1 physical_source_guards=0 "
+            << "electron_integral=physical_dual_volume ion_energy=relativistic_lab_frame "
+            << "ion_expectation=nonrelativistic_ou\n";
+        return;
+    }
     if (!m_enabled) { return; }
     auto& w = WarpX::GetInstance();
 #if !defined(WARPX_DIM_RZ)
@@ -96,8 +109,21 @@ void HybridSourceEligibility::Validate (HybridPICModel const& model) const
 void HybridSourceEligibility::BeginBatch (int lev, amrex::MultiFab const& rho,
                                           HybridPICModel const& model)
 {
-    if (!m_enabled) { return; }
+    if (!auditing()) { return; }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_batch,"source_guard: nested source batch");
+    if (m_audit_only) {
+        // Give both PC half-stages distinct accounting epochs without preparing
+        // RZ-only eligibility masks or modifying any physical source state.
+        ++m_epoch;
+        m_last_electron_J.fill(0);
+        m_last_ion_J = 0;
+        m_batch = true;
+        auto const& w = WarpX::GetInstance();
+        amrex::Print() << std::setprecision(17) << "[source_audit_batch] epoch=" << m_epoch
+            << " step=" << w.getistep(0) << " time=" << w.gett_new(0) << " level=" << lev
+            << '\n';
+        return;
+    }
     Prepare(lev,rho,model);
     m_batch = true;
 }
@@ -252,7 +278,7 @@ amrex::MultiFab const& HybridSourceEligibility::Relaxation (std::string const& s
 
 void HybridSourceEligibility::BeginChannel (Channel c, amrex::MultiFab const& te)
 {
-    if(!m_enabled) return;
+    if (!auditing()) { return; }
     m_before[c]=std::make_unique<amrex::MultiFab>(te.boxArray(),te.DistributionMap(),1,0);
     m_delta[c]=std::make_unique<amrex::MultiFab>(te.boxArray(),te.DistributionMap(),1,0);
     amrex::MultiFab::Copy(*m_before[c],te,0,0,1,0);
@@ -261,7 +287,7 @@ void HybridSourceEligibility::EndChannel (int lev,Channel c,amrex::Real dt,
     amrex::MultiFab const& te,amrex::MultiFab const& capacity,
     amrex::MultiFab const* pedestal,amrex::Real gamma)
 {
-    if(!m_enabled) return;
+    if (!auditing()) { return; }
     amrex::MultiFab energy(te.boxArray(),te.DistributionMap(),1,0);
     bool const ped=pedestal!=nullptr;
     for(amrex::MFIter mfi(energy);mfi.isValid();++mfi) {

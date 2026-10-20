@@ -2035,3 +2035,42 @@ if(TARGET test_external_conduction_3d AND Python_FOUND)
             TIMEOUT 120 LABELS "HYBRID;external;native")
     endforeach()
 endif()
+
+
+# Diagnostic-only source accounting must work without the RZ physical guard.
+foreach(audit_dim IN ITEMS 3d rz)
+    if(TARGET lib_${audit_dim})
+        add_executable(test_source_audit_${audit_dim} test_source_audit.cpp)
+        target_link_libraries(test_source_audit_${audit_dim} PRIVATE lib_${audit_dim})
+        target_include_directories(test_source_audit_${audit_dim} PRIVATE ${WarpX_SOURCE_DIR}/Source)
+        if(WarpX_COMPUTE STREQUAL "CUDA")
+            setup_target_for_cuda_compilation(test_source_audit_${audit_dim})
+        endif()
+        foreach(audit_mode IN ITEMS 0 1)
+            set(audit_name test_source_audit_${audit_dim}_mode${audit_mode})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${audit_name})
+            add_test(NAME ${audit_name} COMMAND test_source_audit_${audit_dim}
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_source_audit_${audit_dim}
+                hybrid_pic_model.source_guard.audit_only=${audit_mode}
+                audit.nped=5.e18)
+            set_tests_properties(${audit_name} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${audit_name}
+                TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;source_audit")
+        endforeach()
+        if(Python_FOUND)
+            add_test(NAME test_source_audit_${audit_dim}_invariance
+                COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_source_audit.py
+                    --off ${CMAKE_CURRENT_BINARY_DIR}/test_source_audit_${audit_dim}_mode0
+                    --on ${CMAKE_CURRENT_BINARY_DIR}/test_source_audit_${audit_dim}_mode1)
+            set_tests_properties(test_source_audit_${audit_dim}_invariance PROPERTIES
+                DEPENDS "test_source_audit_${audit_dim}_mode0;test_source_audit_${audit_dim}_mode1"
+                TIMEOUT 30 LABELS "HYBRID;source_audit")
+            add_test(NAME test_source_audit_${audit_dim}_exclusive_mode
+                COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_source_audit.py
+                    --reject-executable $<TARGET_FILE:test_source_audit_${audit_dim}>
+                    --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_source_audit_${audit_dim})
+            set_tests_properties(test_source_audit_${audit_dim}_exclusive_mode PROPERTIES
+                TIMEOUT 60 LABELS "HYBRID;source_audit")
+        endif()
+    endif()
+endforeach()
