@@ -14520,12 +14520,12 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     bool const add_external_B = m_explicit_B_is_response;
     ablastr::fields::VectorField B_external{};
     if (add_external_B) {
-        WARPX_ALWAYS_ASSERT(m_add_external_fields && m_external_split && !m_external_unified);
+        AMREX_ALWAYS_ASSERT(m_add_external_fields && m_external_split && !m_external_unified);
         B_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, lev);
         for (int d = 0; d < 3; ++d) {
             auto const& native = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{d}, lev);
-            WARPX_ALWAYS_ASSERT(B_external[d]->boxArray() == native.boxArray());
-            WARPX_ALWAYS_ASSERT(amrex::min(B_external[d]->nGrowVect(), native.nGrowVect()) == native.nGrowVect());
+            AMREX_ALWAYS_ASSERT(B_external[d]->boxArray() == native.boxArray());
+            AMREX_ALWAYS_ASSERT(amrex::min(B_external[d]->nGrowVect(), native.nGrowVect()) == native.nGrowVect());
         }
     }
 

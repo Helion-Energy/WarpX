@@ -45,7 +45,7 @@ void WarpX::HybridPICEvolveFields ()
     // Get flag to include external fields.
     const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
 
-    WARPX_ALWAYS_ASSERT(!m_hybrid_pic_model->m_explicit_B_is_response);
+    AMREX_ALWAYS_ASSERT(!m_hybrid_pic_model->m_explicit_B_is_response);
 
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
