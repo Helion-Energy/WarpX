@@ -9,6 +9,7 @@
  * License: BSD-3-Clause-LBNL
  */
 
+#include "Particles/Algorithms/ParticleIdentityOrder.H"
 #include "HybridPICModel.H"
 #include "BoundaryConditions/WarpX_PEC.H"
 #include "BraginskiiConductivity.H"
@@ -12711,9 +12712,20 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
             auto const tally = audit_exchange ? realized.array(pti) : amrex::Array4<amrex::Real>{};
             auto const* weight = pti.GetAttribs(PIdx::w).dataPtr();
 
+            // Cell sorting and restart redistribution can permute storage.
+            // Associate draws with full particle identities within this tile,
+            // while preserving the original OU law and inactive-particle branch.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                np <= std::numeric_limits<int>::max(),
+                "Thermal identity ordering requires a particle tile smaller than INT_MAX.");
+            amrex::Gpu::DeviceVector<int> draw_order(static_cast<int>(np));
+            auto* const ordered = draw_order.data();
+            warpx::particles::ParticleIdentityOrder(
+                static_cast<int>(np), ptd.m_idcpu, ordered);
             amrex::ParallelForRNG(np,
-                [=] AMREX_GPU_DEVICE (long ip, amrex::RandomEngine const& engine)
+                [=] AMREX_GPU_DEVICE (long draw, amrex::RandomEngine const& engine)
             {
+                long const ip = ordered[draw];
                 auto const p = WarpXParticleContainer::ParticleType(ptd, ip);
                 const auto [ii, jj, kk] = amrex::getParticleCell(p, plo, dxi).dim3();
                 amrex::ParticleReal const nu   = coef_arr(ii,jj,kk,0);
