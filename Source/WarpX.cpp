@@ -2626,8 +2626,15 @@ WarpX::AllocLevelData (int lev, const BoxArray& ba, const DistributionMapping& d
 #ifdef AMREX_USE_EB
     bool const eb_enabled = EB::enabled();
     if (eb_enabled) {
-        int const max_guard = std::max(guard_cells.ng_FieldSolver.max(),
-                                       eb_distance_guard_cells);
+        int max_guard = std::max(guard_cells.ng_FieldSolver.max(),
+                                 eb_distance_guard_cells);
+#if defined(WARPX_DIM_3D)
+        // Hybrid external-field initialization reads the complete E/B guard
+        // region. The EB metrics and update masks must cover that same region.
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+            max_guard = std::max(max_guard, guard_cells.ng_alloc_EB.max());
+        }
+#endif
         auto const* eb_index_space = GetEBIndexSpace(lev);
         m_field_factory[lev] = amrex::makeEBFabFactory(eb_index_space, Geom(lev), ba, dm,
                                                        {max_guard, max_guard, max_guard},
@@ -2882,6 +2889,14 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     }
 
     if (EB::enabled()) {
+        amrex::IntVect eb_metric_guards = guard_cells.ng_FieldSolver;
+#if defined(WARPX_DIM_3D)
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                eb_metric_guards[d] = std::max(eb_metric_guards[d], ngEB[d]);
+            }
+        }
+#endif
         constexpr int nc_ls = 1;
         amrex::IntVect const ng_ls(std::max(2, eb_distance_guard_cells));
         //EB level set
@@ -2904,18 +2919,18 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
                 // `ComputeExternalFieldOnGridUsingParser`). This matches the
                 // initialization of the corresponding PML flags in PML.cpp.
                 AllocInitMultiFab(m_eb_update_E[lev][0], amrex::convert(ba, Ex_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[x]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_E[x]", 1);
                 AllocInitMultiFab(m_eb_update_E[lev][1], amrex::convert(ba, Ey_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[y]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_E[y]", 1);
                 AllocInitMultiFab(m_eb_update_E[lev][2], amrex::convert(ba, Ez_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[z]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_E[z]", 1);
 
                 AllocInitMultiFab(m_eb_update_B[lev][0], amrex::convert(ba, Bx_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[x]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_B[x]", 1);
                 AllocInitMultiFab(m_eb_update_B[lev][1], amrex::convert(ba, By_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[y]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_B[y]", 1);
                 AllocInitMultiFab(m_eb_update_B[lev][2], amrex::convert(ba, Bz_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]", 1);
+                                  eb_metric_guards, lev, "m_eb_update_B[z]", 1);
             }
             // The conformal (ECT) EB MultiFabs below are used by the ECT Maxwell
             // solver and by the hybrid-PIC conformal wall.
@@ -2923,19 +2938,19 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
 
                 //! EB: Lengths of the mesh edges
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
 
                 //! EB: Areas of the mesh faces
                 m_fields.alloc_init(FieldType::face_areas, Direction{0}, lev, amrex::convert(ba, Bx_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
                 m_fields.alloc_init(FieldType::face_areas, Direction{1}, lev, amrex::convert(ba, By_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
                 m_fields.alloc_init(FieldType::face_areas, Direction{2}, lev, amrex::convert(ba, Bz_nodal_flag),
-                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                    dm, ncomps, eb_metric_guards, 0.0_rt);
 
                 AllocInitMultiFab(m_flag_info_face[lev][0], amrex::convert(ba, Bx_nodal_flag), dm, ncomps,
                                   guard_cells.ng_FieldSolver, lev, "m_flag_info_face[x]");

@@ -213,7 +213,14 @@ WarpX::RemakeLevel (int lev, Real /*time*/, const BoxArray& ba, const Distributi
 
         if (eb_enabled) {
 #ifdef AMREX_USE_EB
-            int const max_guard = guard_cells.ng_FieldSolver.max();
+            int max_guard = guard_cells.ng_FieldSolver.max();
+#if defined(WARPX_DIM_3D)
+            // Match the hybrid metric/mask allocation after redistribution.
+            if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+                max_guard = std::max(max_guard, guard_cells.ng_alloc_EB.max());
+                max_guard = std::max(max_guard, eb_distance_guard_cells);
+            }
+#endif
             auto const* eb_index_space = GetEBIndexSpace(lev);
             m_field_factory[lev] = amrex::makeEBFabFactory(eb_index_space, Geom(lev), ba, dm,
                                                            {max_guard, max_guard, max_guard},
