@@ -38,7 +38,8 @@ VarianceAccumulationBuffer::VarianceAccumulationBuffer (ablastr::fields::MultiLe
             amrex::IntVect const& ng = T_vf[lev][Direction{idir}]->nGrowVect();
 
             warpx.m_fields.alloc_init("variance_buffer_w_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
-            warpx.m_fields.alloc_init("variance_buffer_wsq_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
+            // Reliability components: tail sum, tail squared sum, dominant weight.
+            warpx.m_fields.alloc_init("variance_buffer_wsq_" + m_species_name, Direction{idir}, lev, ba, dm, 3, ng, 0.0_rt);
             warpx.m_fields.alloc_init("variance_buffer_w2_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
             warpx.m_fields.alloc_init("variance_buffer_vbar_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
 

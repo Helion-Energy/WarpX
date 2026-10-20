@@ -2457,7 +2457,7 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
 
             WarpXSumGuardCells(*w2_mf, periodicity, w2_mf->nGrowVect(), 0, 1);
             auto* wsq_mf = local_temperature_arrays->get("wsq", Direction{idir}, lev);
-            WarpXSumGuardCells(*wsq_mf, periodicity, wsq_mf->nGrowVect(), 0, 1);
+            WarpXSumGuardCells(*wsq_mf, periodicity, wsq_mf->nGrowVect(), 0, 3);
         }
 
         // Get MF pointers for all deposition multifabs
@@ -2513,17 +2513,20 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
             amrex::ParallelFor(tbx, tby, tbz,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
-                        wx_arr(i,j,k), wsqx_arr(i,j,k), w2x_arr(i,j,k),
+                        wx_arr(i,j,k), wsqx_arr(i,j,k,0), wsqx_arr(i,j,k,1),
+                        wsqx_arr(i,j,k,2), w2x_arr(i,j,k),
                         vxbar_arr(i,j,k), varx_arr(i,j,k), single_pass);
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
-                        wy_arr(i,j,k), wsqy_arr(i,j,k), w2y_arr(i,j,k),
+                        wy_arr(i,j,k), wsqy_arr(i,j,k,0), wsqy_arr(i,j,k,1),
+                        wsqy_arr(i,j,k,2), w2y_arr(i,j,k),
                         vybar_arr(i,j,k), vary_arr(i,j,k), single_pass);
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     warpx::particles::deposition::normalizeTemperatureMoments(
-                        wz_arr(i,j,k), wsqz_arr(i,j,k), w2z_arr(i,j,k),
+                        wz_arr(i,j,k), wsqz_arr(i,j,k,0), wsqz_arr(i,j,k,1),
+                        wsqz_arr(i,j,k,2), w2z_arr(i,j,k),
                         vzbar_arr(i,j,k), varz_arr(i,j,k), single_pass);
                 });
         }

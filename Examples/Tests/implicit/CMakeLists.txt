@@ -2192,3 +2192,38 @@ if(TARGET lib_3d)
             hybrid_pic_model.include_electron_inertia_elliptic=0)
     set_tests_properties(test_3d_covered_recovery_regular PROPERTIES TIMEOUT 120)
 endif()
+
+if(TARGET lib_3d)
+    add_executable(test_temperature_stability_3d test_temperature_stability.cpp)
+    target_link_libraries(test_temperature_stability_3d PRIVATE lib_3d)
+    target_include_directories(test_temperature_stability_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_temperature_stability_3d)
+    endif()
+    add_test(NAME test_3d_temperature_stability COMMAND test_temperature_stability_3d)
+    set_tests_properties(test_3d_temperature_stability PROPERTIES TIMEOUT 120)
+    foreach(shape IN ITEMS plane oblique cylinder sphere)
+        if(shape STREQUAL "plane")
+            set(phi "x-0.0073")
+        elseif(shape STREQUAL "oblique")
+            set(phi "x+0.37*y+0.21*z-0.0107")
+        elseif(shape STREQUAL "cylinder")
+            set(phi "sqrt((x-0.008)^2+(y-0.008)^2)-0.006")
+        else()
+            set(phi "sqrt((x-0.008)^2+(y-0.008)^2+(z-0.008)^2)-0.006")
+        endif()
+        foreach(sign IN ITEMS 1.e30 -1.e30)
+            string(REPLACE "-" "negative" sign_name "${sign}")
+            add_test(NAME test_3d_covered_recovery_${shape}_${sign_name}
+                COMMAND test_covered_temperature_recovery_3d
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_electron_inertia_restart_3d
+                    hybrid_pic_model.include_electron_inertia_elliptic=0
+                    "warpx.eb_implicit_function=${phi}" "recovery_test.covered_entropy=${sign}"
+                    "boundary.field_lo=pec pec pmc" "boundary.field_hi=pec pec pmc"
+                    "boundary.particle_lo=reflecting reflecting reflecting"
+                    "boundary.particle_hi=reflecting reflecting reflecting")
+            set_tests_properties(test_3d_covered_recovery_${shape}_${sign_name}
+                PROPERTIES TIMEOUT 120)
+        endforeach()
+    endforeach()
+endif()

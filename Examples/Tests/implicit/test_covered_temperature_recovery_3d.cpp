@@ -40,10 +40,24 @@ int main (int argc, char** argv)
         pp.query("covered_entropy",covered_entropy);
         pp.query("zero_weight",zero_weight);
         amrex::MultiFab expected(te.boxArray(),te.DistributionMap(),1,te.nGrowVect());
-        te.setVal(old_te);
+        // EB distance has fewer guards than Te. Establish the physical nodal
+        // classification on available native distance, then propagate valid
+        // ownership into deep internal guards before manufacturing coherent data.
+        amrex::MultiFab covered_mask(te.boxArray(),te.DistributionMap(),1,te.nGrowVect());
+        covered_mask.setVal(0);
         for (amrex::MFIter mfi(te); mfi.isValid(); ++mfi) {
+            auto const mask = covered_mask.array(mfi);
             auto const ph = has_eb ? phi->const_array(mfi) : amrex::Array4<amrex::Real const>{};
             auto const ph_box = has_eb ? phi->fabbox(mfi.index()) : mfi.fabbox();
+            amrex::ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i,int j,int k) {
+                mask(i,j,k) = has_eb && ph_box.contains(amrex::IntVect(i,j,k)) &&
+                    ph(i,j,k)<=0 ? 1 : 0;
+            });
+        }
+        covered_mask.FillBoundary(w.Geom(0).periodicity());
+        te.setVal(old_te);
+        for (amrex::MFIter mfi(te); mfi.isValid(); ++mfi) {
+            auto const mask = covered_mask.const_array(mfi);
             auto const ke = entropy.array(mfi), wt = weights.array(mfi);
             auto const den = rho.array(mfi), ped = pedestal.array(mfi);
             auto const exact = expected.array(mfi);
@@ -52,8 +66,7 @@ int main (int argc, char** argv)
             AMREX_ALWAYS_ASSERT(rho.fabbox(mfi.index()).contains(mfi.fabbox()));
             AMREX_ALWAYS_ASSERT(pedestal.fabbox(mfi.index()).contains(mfi.fabbox()));
             amrex::ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i,int j,int k) {
-                bool const covered = has_eb && ph_box.contains(amrex::IntVect(i,j,k)) &&
-                    ph(i,j,k)<=0;
+                bool const covered = mask(i,j,k)>0;
                 amrex::Real const nped = covered ? 0 : ped_density;
                 amrex::Real const n = covered ? -density : density;
                 amrex::Real const weight = covered ? (zero_weight ? 0 : 1.e-6*density) :
@@ -75,11 +88,9 @@ int main (int argc, char** argv)
         using Tuple = decltype(data)::Type;
         for (amrex::MFIter mfi(te); mfi.isValid(); ++mfi) {
             auto const t = te.const_array(mfi), exact = expected.const_array(mfi);
-            auto const ph = has_eb ? phi->const_array(mfi) : amrex::Array4<amrex::Real const>{};
-            auto const ph_box = has_eb ? phi->fabbox(mfi.index()) : mfi.fabbox();
+            auto const mask = covered_mask.const_array(mfi);
             ops.eval(mfi.fabbox(),data,[=] AMREX_GPU_DEVICE (int i,int j,int k)->Tuple {
-                bool const covered = has_eb && ph_box.contains(amrex::IntVect(i,j,k)) &&
-                    ph(i,j,k)<=0;
+                bool const covered = mask(i,j,k)>0;
                 auto const error = std::abs(t(i,j,k)-exact(i,j,k))/old_te;
                 bool const bad = !std::isfinite(t(i,j,k));
                 return {covered ? error : 0, covered ? 0 : error,

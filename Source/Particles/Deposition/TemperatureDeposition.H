@@ -34,23 +34,25 @@
 
 namespace warpx::particles::deposition {
 
-/** Normalize the weighted moments for independent, common-variance samples.
+/** Normalize weighted moments without subtracting nearly equal numbers.
  *
- * With a_p = particle weight times the deposition shape, the unbiased variance
- * is [sum a_p (v_p-vbar)^2 / W] / [1 - sum (a_p/W)^2]. The denominator reduces
- * to (n-1)/n only for equal effective weights. A common grid-volume factor
- * cancels, including in RZ. Empty and numerically single-sample nodes have no
- * variance information and are explicitly reset to zero.
+ * Let a_p = w_p / W from the first deposit. The second pass separates a
+ * possible dominant a_p > 3/4 from the tail. With d the dominant weight,
+ * r = sum(tail) and q = sum(tail^2), the pair-weight factor is
+ * 2*d*r + r*r - q. Dividing by (d+r)^2 gives the usual reliability
+ * 1 - sum((w_p/sum(w))^2), without cancellation when one weight dominates.
+ * When no weight dominates, the subtraction is bounded away from zero.
+ * The second-pass normalization also cancels first-pass W roundoff.
  */
 AMREX_GPU_HOST_DEVICE AMREX_INLINE
 void normalizeTemperatureMoments (
-    amrex::Real sumw, amrex::Real normalized_wsq, amrex::Real sumwv2,
+    amrex::Real sumw, amrex::Real tail_sum, amrex::Real tail_sq,
+    amrex::Real dominant, amrex::Real sumwv2,
     amrex::Real& mean, amrex::Real& variance, bool single_pass)
 {
     using namespace amrex::literals;
-    // Invalid moments must remain visible to diagnostics/guards rather than
-    // being mistaken for an empty or single-sample node.
-    if (!std::isfinite(sumw) || !std::isfinite(normalized_wsq) ||
+    if (!std::isfinite(sumw) || !std::isfinite(tail_sum) ||
+        !std::isfinite(tail_sq) || !std::isfinite(dominant) ||
         !std::isfinite(sumwv2) || !std::isfinite(mean)) {
         mean = std::numeric_limits<amrex::Real>::quiet_NaN();
         variance = mean;
@@ -58,27 +60,50 @@ void normalizeTemperatureMoments (
     }
     variance = 0._rt;
     if (sumw > 0._rt) {
-        mean /= sumw;
-        if (!std::isfinite(mean)) {
+        const amrex::Real normalization = dominant + tail_sum;
+        if (!(normalization > 0._rt)) {
             variance = std::numeric_limits<amrex::Real>::quiet_NaN();
+            mean = variance;
             return;
         }
-        const amrex::Real reliability = 1._rt - normalized_wsq;
+        mean = (mean / sumw) / normalization;
+        if (!std::isfinite(mean)) {
+            variance = std::numeric_limits<amrex::Real>::quiet_NaN();
+            mean = variance;
+            return;
+        }
+        const amrex::Real pair_factor =
+            2._rt * dominant * tail_sum + (tail_sum * tail_sum - tail_sq);
+        const amrex::Real reliability = pair_factor / (normalization * normalization);
         constexpr amrex::Real tolerance = 32 * std::numeric_limits<amrex::Real>::epsilon();
         if (reliability > tolerance) {
-            amrex::Real central_moment = sumwv2 / sumw;
+            amrex::Real central_moment = (sumwv2 / sumw) / normalization;
             if (single_pass) {
                 central_moment -= mean * mean;
             }
             variance = central_moment / reliability;
-            // A raw second moment can lose non-negativity through cancellation.
-            // Clamp only finite values, preserving any arithmetic failure.
             if (std::isfinite(variance) && variance < 0._rt) {
                 variance = 0._rt;
             }
         }
     } else {
         mean = 0._rt;
+    }
+}
+
+/** Accumulate scale-free reliability moments into three components. */
+AMREX_GPU_HOST_DEVICE AMREX_INLINE
+void depositTemperatureReliability (
+    amrex::Real a, amrex::Array4<amrex::Real> const& moments,
+    amrex::IntVectND<3> const& index)
+{
+    using namespace amrex::literals;
+    if (a > 0.75_rt) {
+        // At most one particle can carry more than 3/4 of the weight.
+        amrex::Gpu::Atomic::AddNoRet(&moments(index[0], index[1], index[2], 2), a);
+    } else {
+        amrex::Gpu::Atomic::AddNoRet(&moments(index[0], index[1], index[2], 0), a);
+        amrex::Gpu::Atomic::AddNoRet(&moments(index[0], index[1], index[2], 1), a*a);
     }
 }
 
@@ -143,23 +168,21 @@ void varianceDepositionSubKernel(
             &vzbar_arr(izv[0], izv[1], izv[2], 0), wpz_var*vzr);
     }
 
-    // W is globally available after the first pass. Accumulating (a/W)^2
-    // instead of a^2 avoids squaring the dimensional macroparticle weight.
-    // The raw-second-moment (SINGLE_PASS) variant also needs this second
-    // traversal for its reliability correction; its moments are deposited once.
+    // W is globally available. Retain the small tail explicitly so the
+    // reliability correction remains accurate for a nearly single sample.
     if (pass == TemperatureDepositionPass::SECOND)
     {
         if (wx_arr(ixv[0], ixv[1], ixv[2], 0) > 0.) {
             const amrex::Real a = wpx_var / wx_arr(ixv[0], ixv[1], ixv[2], 0);
-            amrex::Gpu::Atomic::AddNoRet(&wsqx_arr(ixv[0], ixv[1], ixv[2], 0), a*a);
+            depositTemperatureReliability(a, wsqx_arr, ixv);
         }
         if (wy_arr(iyv[0], iyv[1], iyv[2], 0) > 0.) {
             const amrex::Real a = wpy_var / wy_arr(iyv[0], iyv[1], iyv[2], 0);
-            amrex::Gpu::Atomic::AddNoRet(&wsqy_arr(iyv[0], iyv[1], iyv[2], 0), a*a);
+            depositTemperatureReliability(a, wsqy_arr, iyv);
         }
         if (wz_arr(izv[0], izv[1], izv[2], 0) > 0.) {
             const amrex::Real a = wpz_var / wz_arr(izv[0], izv[1], izv[2], 0);
-            amrex::Gpu::Atomic::AddNoRet(&wsqz_arr(izv[0], izv[1], izv[2], 0), a*a);
+            depositTemperatureReliability(a, wsqz_arr, izv);
         }
     }
 
