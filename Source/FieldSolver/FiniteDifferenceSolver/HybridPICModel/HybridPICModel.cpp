@@ -10,6 +10,7 @@
  */
 
 #include "HybridPICModel.H"
+#include "BoundaryConditions/WarpX_PEC.H"
 #include "BraginskiiConductivity.H"
 #include "HybridSourceCheck.H"
 
@@ -20801,6 +20802,40 @@ void HybridPICModel::BfieldEvolve (
         "BfieldEvolve: exceeded max substep attempts;"
         "consider relaxing hybrid_pic_model.substep_rtol/substep_atol."
     );
+
+#if defined(WARPX_DIM_3D)
+    // The accepted RK combination is formed after the last stage's boundary
+    // fill. Refresh from that accepted state before the PC source/transport or
+    // final current solve samples curl(B). Physical guards at a box seam must
+    // be reflected AFTER exchanging the in-domain guards; otherwise copies of
+    // one cap node see different currents and acquire different Joule heating.
+    // Only reapply algebraic PEC/PMC images here: Silver-Mueller is an evolution
+    // update and must not be applied a second time.
+    auto& warpx = WarpX::GetInstance();
+    auto const& geom = warpx.Geom(lev);
+    for (int d = 0; d < 3; ++d) {
+        Bfield[lev][d]->OverrideSync(geom.periodicity());
+        Bfield[lev][d]->FillBoundary(geom.periodicity());
+    }
+    auto const ng_physical = Bfield[lev][0]->nGrowVect();
+    auto const has_boundary = [](FieldBoundaryType type) {
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            if (WarpX::field_boundary_lo[d] == type ||
+                WarpX::field_boundary_hi[d] == type) { return true; }
+        }
+        return false;
+    };
+    if (has_boundary(FieldBoundaryType::PEC)) {
+        PEC::ApplyPECtoBfield(Bfield[lev], WarpX::field_boundary_lo,
+            WarpX::field_boundary_hi, FieldBoundaryType::PEC,
+            ng_physical, geom, lev, PatchType::fine, warpx.refRatio());
+    }
+    if (has_boundary(FieldBoundaryType::PMC)) {
+        PEC::ApplyPECtoEfield(Bfield[lev], WarpX::field_boundary_lo,
+            WarpX::field_boundary_hi, FieldBoundaryType::PMC,
+            ng_physical, geom, lev, PatchType::fine, warpx.refRatio());
+    }
+#endif
 }
 
 bool HybridPICModel::MeasureSpongeCapSpeeds (
