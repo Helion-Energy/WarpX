@@ -9614,6 +9614,14 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
         "qdsmc_full_pedestal_transport currently requires explicit PC electron transport");
     auto const w_floor = (m_qdsmc_halo_unfreeze || use_ped) ? 0.0_rt : m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
+#if defined(WARPX_DIM_3D)
+    // The pedestal and conduction operator exclude EB-covered nodes. A marker
+    // shape can still deposit a tiny positive weight there; it is not a live
+    // electron reservoir and must not reconstruct a new temperature.
+    bool const has_eb = EB::enabled();
+    amrex::MultiFab const* const eb_dist =
+        has_eb ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
+#endif
     // Optional source taper of the transport update (member doc): the
     // withheld energy density is tallied on the valid nodes only.
     bool const taper_on = (m_qdsmc_source_taper_n > 0.0_rt);
@@ -9648,9 +9656,21 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
         amrex::Box const tbox = amrex::convert(mfi.tilebox(), Te.ixType().toIntVect());
         amrex::Box       box  = tbox;
         box.grow(Te.nGrowVect());
+#if defined(WARPX_DIM_3D)
+        auto const phi_arr =
+            has_eb ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::Box const phi_box = has_eb ? eb_dist->fabbox(mfi.index()) : box;
+#endif
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
+#if defined(WARPX_DIM_3D)
+            if (has_eb && phi_box.contains(amrex::IntVect(i, j, k))
+                && phi_arr(i, j, k) <= 0.0_rt)
+            {
+                return;
+            }
+#endif
             if (weights_arr(i,j,k) <= w_floor) { return; }
             amrex::Real const w = weights_arr(i,j,k) * cell_volume;
             // Floored density, mirroring QDSMCInitializeKe: below-floor

@@ -2177,3 +2177,18 @@ if(TARGET lib_3d AND Python_FOUND)
             LABELS "HYBRID;inertia;restart")
     endforeach()
 endif()
+
+# Native covered-node recovery counterexample, with a separate active-node oracle.
+if(TARGET lib_3d)
+    add_executable(test_covered_temperature_recovery_3d test_covered_temperature_recovery_3d.cpp)
+    target_link_libraries(test_covered_temperature_recovery_3d PRIVATE lib_3d)
+    target_include_directories(test_covered_temperature_recovery_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_covered_temperature_recovery_3d)
+    endif()
+    add_test(NAME test_3d_covered_recovery_regular
+        COMMAND test_covered_temperature_recovery_3d
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_electron_inertia_restart_3d
+            hybrid_pic_model.include_electron_inertia_elliptic=0)
+    set_tests_properties(test_3d_covered_recovery_regular PROPERTIES TIMEOUT 120)
+endif()
