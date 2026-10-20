@@ -187,6 +187,7 @@ void WarpX::HybridPICEvolveFields ()
         SubcyclingHalf::FirstHalf, guard_cells.ng_FieldSolver,
         WarpX::sync_nodal_points
     );
+    ExecutePythonCallback("hybrid_after_magnetic_first_half");
 
     if (add_external_fields) {
         // Match the midpoint response B before PC thermal transport.
@@ -208,6 +209,7 @@ void WarpX::HybridPICEvolveFields ()
         m_hybrid_pic_model->m_qdsmc_time_advance ==
             HybridPICModel::QdsmcTimeAdvance::PC) {
         m_hybrid_pic_model->AdvanceElectronEnergyQDSMC_PC(dt[0]);
+        ExecutePythonCallback("hybrid_after_electron_energy_pc");
     }
 
     // Average rho^{n} and rho^{n+1} to get rho^{n+1/2} in rho_fp_temp
@@ -245,6 +247,7 @@ void WarpX::HybridPICEvolveFields ()
         SubcyclingHalf::SecondHalf, guard_cells.ng_FieldSolver,
         WarpX::sync_nodal_points
     );
+    ExecutePythonCallback("hybrid_after_magnetic_second_half");
 
     // Extrapolate the ion current density to t=n+1 using
     // J_i^{n+1} = -1/2 * J_i^{n-1/2} + 3/2 * J_i^{n+1/2}, and recalling that

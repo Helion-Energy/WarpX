@@ -19696,6 +19696,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         auto const& rho_new = *warpx.m_fields.get(FieldType::rho_fp, lev);
         QDSMCInitializeUe(lev, QdsmcUeMode::JiNewRhoHalf);
         QdsmcPhaseMinTe(lev, "pc_enter");
+        ExecutePythonCallback("hybrid_pc_after_velocity");
 
         // Strang: C(dt/2) . [S(dt/2) A(dt) S(dt/2)] . C(dt/2). The
         // conduction halves pair T_e with the rho of their time level
@@ -19716,6 +19717,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         if (ebud) { ub0 = QDSMCClassEnergy(lev, &rho_old); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
         QdsmcPhaseMinTe(lev, "pc_conduction_half1");
+        ExecutePythonCallback("hybrid_pc_after_conduction_first");
         if (ebud) { ub1 = QDSMCClassEnergy(lev, &rho_old); }
         if (audit) { amrex::MultiFab::Copy(source_before, Te_state, 0, 0, 1, 0); }
         // Split the collision-deposited energy symmetrically around A: half
@@ -19732,6 +19734,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
                                  m_qdsmc_source_stage_density ? rho_old : rho_new);
         }
         QdsmcPhaseMinTe(lev, "pc_sources1");
+        ExecutePythonCallback("hybrid_pc_after_sources_first");
         if (ebud) { ub2 = QDSMCClassEnergy(lev, &rho_old); }
         // Pre-transport Te snapshot for the compression split of the
         // transport-stage dU (instrument only).
@@ -19744,6 +19747,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         }
         QdsmcTransportOnce(lev, dt, /*midpoint=*/true);
         QdsmcPhaseMinTe(lev, "pc_transport");
+        ExecutePythonCallback("hybrid_pc_after_transport");
         if (ebud) {
             ub3 = QDSMCClassEnergy(lev);
             auto const comp = QDSMCCompressionEnergy(lev, te_pre);
@@ -19758,9 +19762,11 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         }
         if (audit) { AuditQdsmcSourceStage(lev, 1, source_before, rho_new, rho_new); }
         QdsmcPhaseMinTe(lev, "pc_sources2");
+        ExecutePythonCallback("hybrid_pc_after_sources_second");
         if (ebud) { ub4 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
         QdsmcPhaseMinTe(lev, "pc_conduction_half2");
+        ExecutePythonCallback("hybrid_pc_after_conduction_second");
         if (ebud) {
             ub5 = QDSMCClassEnergy(lev);
             m_ebud_cond_bulk += (ub1[0] - ub0[0]) + (ub5[0] - ub4[0]);

@@ -34,7 +34,10 @@ Functions can be called at the following times:
 * ``poissonsolver``: In place of the computePhi call but only in an electrostatic simulation
 * ``afterEsolve``: after the solve for E fields (not called after init E solve, use afterInitEsolve to apply to first solve)
 * ``hybrid_after_deposition``: explicit hybrid charge/current deposition, before electron-energy evolution
-* ``hybrid_after_electron_energy``: explicit hybrid electron-energy update, before magnetic subcycling
+* ``hybrid_after_electron_energy``: preliminary Euler/leapfrog call; PC mode is a no-op here
+* ``hybrid_after_electron_energy_pc``: actual PC energy/pressure update between magnetic halves
+* ``hybrid_after_magnetic_first_half`` / ``hybrid_after_magnetic_second_half``: accepted magnetic half advances
+* ``hybrid_pc_after_*``: PC velocity, conduction, source and transport diagnostic stages
 * ``afterBpush``: after the B field advance for electromagnetic solvers
 * ``afterEpush``: after the E field advance for electromagnetic solvers
 * ``beforedeposition``: before the particle deposition (for charge and/or current)
@@ -310,6 +313,15 @@ callback_instances = {
     "afterEsolve": {},
     "hybrid_after_deposition": {},
     "hybrid_after_electron_energy": {},
+    "hybrid_after_magnetic_first_half": {},
+    "hybrid_after_electron_energy_pc": {},
+    "hybrid_after_magnetic_second_half": {},
+    "hybrid_pc_after_velocity": {},
+    "hybrid_pc_after_conduction_first": {},
+    "hybrid_pc_after_sources_first": {},
+    "hybrid_pc_after_transport": {},
+    "hybrid_pc_after_sources_second": {},
+    "hybrid_pc_after_conduction_second": {},
     "afterBpush": {},
     "afterEpush": {},
     "beforedeposition": {},
