@@ -16601,8 +16601,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
     }
     if (physical_conduction && warpx.getistep(lev) % m_cond_coefficient_interval == 0) {
         amrex::Real const huge = std::numeric_limits<amrex::Real>::max();
-        amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpSum, amrex::ReduceOpSum> op;
-        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real> data(op);
+        amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum> op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real, amrex::Real> data(op);
         using Tuple = typename decltype(data)::Type;
         for (MFIter mfi(T_cur, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             auto const t = T_cur.const_array(mfi);
@@ -16612,7 +16612,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                 [=] AMREX_GPU_DEVICE(int i, int j, int k) -> Tuple {
                     if (!own(i,j,k) || b(i,j,k,BNE::b_open) < 0.5_rt) {
                         return {huge,huge,huge,huge,huge,huge,
-                                -huge,-huge,-huge,-huge,-huge,-huge,0.0_rt,0.0_rt};
+                                -huge,-huge,-huge,-huge,-huge,-huge,0.0_rt,0.0_rt,0.0_rt};
                     }
                     auto const c = EvaluateBraginskiiConductivity(
                         b(i,j,k,BNE::b_nphys), t(i,j,k)*kb/qe,
@@ -16623,7 +16623,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
                     amrex::Real const pp = c.parallel_physical/(1.5_rt*nc*kb);
                     amrex::Real const pu = c.parallel_used/(1.5_rt*nc*kb);
                     return {np,nc,cp,pp,pu,c.hall,np,nc,cp,pp,pu,c.hall,
-                            1.0_rt,c.parallel_used < c.parallel_physical ? 1.0_rt : 0.0_rt};
+                            1.0_rt,c.parallel_used < c.parallel_physical ? 1.0_rt : 0.0_rt,
+                            c.hall == std::numeric_limits<amrex::Real>::infinity() ? 1.0_rt : 0.0_rt};
                 });
         }
         auto const v = data.value(op);
@@ -16631,10 +16632,17 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         report.coefficient_max = {amrex::get<6>(v), amrex::get<7>(v), amrex::get<8>(v), amrex::get<9>(v), amrex::get<10>(v), amrex::get<11>(v)};
         amrex::ParallelDescriptor::ReduceRealMin(report.coefficient_min.data(),6);
         amrex::ParallelDescriptor::ReduceRealMax(report.coefficient_max.data(),6);
-        report.coefficient_nodes = amrex::get<12>(v);
-        report.parallel_capped_nodes = amrex::get<13>(v);
-        amrex::ParallelDescriptor::ReduceRealSum(report.coefficient_nodes);
-        amrex::ParallelDescriptor::ReduceRealSum(report.parallel_capped_nodes);
+        amrex::Real counts[3] = {amrex::get<12>(v), amrex::get<13>(v), amrex::get<14>(v)};
+        amrex::ParallelDescriptor::ReduceRealSum(counts, 3);
+        report.coefficient_nodes = counts[0];
+        report.parallel_capped_nodes = counts[1];
+        // ReduceOpMin starts at max(), so an all-infinite Hall population
+        // otherwise loses its overflow on the minimum side. Count positive
+        // overflows in the existing diagnostic reduction to recover that case,
+        // including ranks with no owned open nodes, without changing transport.
+        if (counts[0] > 0.0_rt && counts[2] == counts[0]) {
+            report.coefficient_min[5] = std::numeric_limits<amrex::Real>::infinity();
+        }
         report.EncodeHallOverflow();
         report.physical_coefficients_sampled = true;
     }
