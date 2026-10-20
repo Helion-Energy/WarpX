@@ -6,6 +6,7 @@
 #include <AMReX_REAL.H>
 #include <array>
 #include <string>
+#include <limits>
 
 /** One FD conduction call. Energies are joules; physical heat is positive
  * outward. Domain channels are 2*dimension+side; channel 6 is the EB ring.
@@ -34,5 +35,18 @@ struct QdsmcConductionReport {
     bool physical_coefficients_sampled = false;
     std::array<amrex::Real, 6> coefficient_min{}, coefficient_max{};
     amrex::Real coefficient_nodes = 0.0, parallel_capped_nodes = 0.0;
+    // Positive Hall overflow is permitted by the inverse-Hall transport branch.
+    // Only its reported bound is saturated, with explicit metadata; this is
+    // neither a physical cap nor a finite measurement. Other nonfinite values
+    // remain invalid. Call once after the global coefficient reductions.
+    bool hall_min_overflow = false, hall_max_overflow = false;
+    void EncodeHallOverflow () {
+        auto encode = [] (amrex::Real& bound, bool& overflow) {
+            overflow = bound == std::numeric_limits<amrex::Real>::infinity();
+            if (overflow) { bound = std::numeric_limits<amrex::Real>::max(); }
+        };
+        encode(coefficient_min[5], hall_min_overflow);
+        encode(coefficient_max[5], hall_max_overflow);
+    }
 };
 #endif

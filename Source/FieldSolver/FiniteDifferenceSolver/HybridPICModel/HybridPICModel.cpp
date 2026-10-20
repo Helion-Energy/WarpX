@@ -16635,6 +16635,7 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         report.parallel_capped_nodes = amrex::get<13>(v);
         amrex::ParallelDescriptor::ReduceRealSum(report.coefficient_nodes);
         amrex::ParallelDescriptor::ReduceRealSum(report.parallel_capped_nodes);
+        report.EncodeHallOverflow();
         report.physical_coefficients_sampled = true;
     }
     // Commit Te and historical normalized, inward-positive tallies together.
@@ -16696,6 +16697,8 @@ HybridPICModel::TryQdsmcConductionOnceFDAtState (
         if (report.physical_coefficients_sampled) {
             array("coefficient_min", report.coefficient_min);
             array("coefficient_max", report.coefficient_max);
+            out << ",\"hall_min_overflow\":" << (report.hall_min_overflow ? "true" : "false")
+                << ",\"hall_max_overflow\":" << (report.hall_max_overflow ? "true" : "false");
             out << ",\"coefficient_nodes\":" << report.coefficient_nodes
                 << ",\"parallel_capped_nodes\":" << report.parallel_capped_nodes;
         }

@@ -110,10 +110,11 @@ main (int argc, char** argv) {
         auto owner = amrex::OwnerMask(te, geom.periodicity());
         amrex::GpuArray<int, 3> periodic{};
         amrex::ParmParse pp("physical_test");
-        int mode = 0;
+        int mode = 0, expect_hall_overflow = -1;
         bool evolve = false, guard_only = false, unfreeze = true;
         Real density = 3.e21, temperature = 1000, capfactor = 1, nped = 0;
         pp.query("mode", mode);
+        pp.query("expect_hall_overflow", expect_hall_overflow);
         pp.query("evolve", evolve);
         pp.query("guard_only", guard_only);
         pp.query("unfreeze", unfreeze);
@@ -232,6 +233,23 @@ main (int argc, char** argv) {
                                              report.failure);
             AMREX_ALWAYS_ASSERT(report.completed_time == interval &&
                                 te.is_finite());
+            if (expect_hall_overflow >= 0) {
+                AMREX_ALWAYS_ASSERT(report.physical_coefficients_sampled &&
+                                    report.coefficient_nodes > 0);
+                bool const overflow = expect_hall_overflow != 0;
+                AMREX_ALWAYS_ASSERT(report.hall_min_overflow == overflow &&
+                                    report.hall_max_overflow == overflow);
+                for (int n = 0; n < 6; ++n) {
+                    AMREX_ALWAYS_ASSERT(std::isfinite(report.coefficient_min[n]) &&
+                                        std::isfinite(report.coefficient_max[n]));
+                }
+                if (overflow) {
+                    AMREX_ALWAYS_ASSERT(report.coefficient_min[5] ==
+                                        std::numeric_limits<Real>::max() &&
+                                        report.coefficient_max[5] ==
+                                        std::numeric_limits<Real>::max());
+                }
+            }
             energy_error = std::max(energy_error, std::abs(energy() - e0) / e0);
             AMREX_ALWAYS_ASSERT(energy_error < 1.e-11);
         };

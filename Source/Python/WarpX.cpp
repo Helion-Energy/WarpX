@@ -420,12 +420,15 @@ void init_WarpX (py::module& m)
                 out["physical_coefficients_sampled"] = r.physical_coefficients_sampled;
                 out["coefficient_min"] = r.coefficient_min;
                 out["coefficient_max"] = r.coefficient_max;
+                out["hall_min_overflow"] = r.hall_min_overflow;
+                out["hall_max_overflow"] = r.hall_max_overflow;
                 out["coefficient_nodes"] = r.coefficient_nodes;
                 out["parallel_capped_nodes"] = r.parallel_capped_nodes;
                 return out;
             },
             "Last successful FD conduction call; heat in joules, physical heat "
-            "outward-positive. "
+            "outward-positive. Hall bounds with hall_min/max_overflow=true "
+            "represent positive overflow by the largest Real; transport is unchanged. "
             "Heat channels: x_lo,x_hi,y_lo,y_hi,z_lo,z_hi,EB in grid "
             "dimensions. "
             "Energy entries: "

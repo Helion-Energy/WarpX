@@ -1840,9 +1840,13 @@ if(TARGET lib_rz)
     endif()
 endif()
 
-if(TARGET lib_rz)
+if(TARGET lib_rz OR TARGET lib_3d)
     add_executable(test_braginskii_coefficients test_braginskii_coefficients.cpp)
-    target_link_libraries(test_braginskii_coefficients PRIVATE lib_rz)
+    if(TARGET lib_rz)
+        target_link_libraries(test_braginskii_coefficients PRIVATE lib_rz)
+    else()
+        target_link_libraries(test_braginskii_coefficients PRIVATE lib_3d)
+    endif()
     target_include_directories(test_braginskii_coefficients PRIVATE ${WarpX_SOURCE_DIR}/Source)
     if(WarpX_COMPUTE STREQUAL "CUDA")
         setup_target_for_cuda_compilation(test_braginskii_coefficients)
@@ -2096,4 +2100,23 @@ if(TARGET test_source_audit_3d AND Python_FOUND)
     set_tests_properties(test_source_audit_3d_finite_invariance PROPERTIES
         DEPENDS "test_source_audit_3d_finite_mode0;test_source_audit_3d_finite_mode1"
         TIMEOUT 30 LABELS "HYBRID;source_audit")
+endif()
+
+# Explicit Hall-overflow reporting contract, unchanged physical transport.
+if(TARGET test_braginskii_coefficients)
+    add_test(NAME test_hall_report_coefficients COMMAND $<TARGET_FILE:test_braginskii_coefficients>)
+    set_tests_properties(test_hall_report_coefficients PROPERTIES TIMEOUT 120)
+endif()
+if(TARGET test_braginskii_conduction_3d)
+    foreach(overflow IN ITEMS 0 1)
+        set(test_name test_hall_report_3d_${overflow})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+        add_test(NAME ${test_name} COMMAND ${Python_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/analysis_hall_report.py
+            --executable $<TARGET_FILE:test_braginskii_conduction_3d>
+            --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_3d_braginskii
+            --overflow ${overflow})
+        set_tests_properties(${test_name} PROPERTIES TIMEOUT 180
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+    endforeach()
 endif()

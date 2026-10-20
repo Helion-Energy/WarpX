@@ -7,6 +7,8 @@
 #include <AMReX_GpuLaunch.H>
 #include <AMReX_Print.H>
 #include <cmath>
+#include <limits>
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcConductionReport.H"
 int main(int argc,char** argv) {
     amrex::Initialize(argc,argv);
     {
@@ -47,6 +49,47 @@ int main(int argc,char** argv) {
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(got) && error<3.e-7,"Physical coefficient reference mismatch");
     }
     amrex::Print()<<"PHYSICAL_COEFFICIENTS cases=17 max_relative_error="<<worst<<" PASS\n";
+    amrex::Gpu::DeviceVector<amrex::Real> extreme(5);
+    auto* values = extreme.data();
+    amrex::ParallelFor(1, [=] AMREX_GPU_DEVICE(int) {
+        auto const c = EvaluateBraginskiiConductivity(1.e-280, 8000, 10, 1.e5, 10);
+        values[0] = c.perpendicular; values[1] = c.parallel_physical;
+        values[2] = c.parallel_used; values[3] = c.hall;
+        values[4] = c.coulomb_log;
+    });
+    amrex::Gpu::HostVector<amrex::Real> result(5);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, extreme.begin(), extreme.end(), result.begin());
+    long double const tau = 3.44e11L * 8000.L * std::sqrt(8000.L) / (1.e-280L * 10.L);
+    long double const hall = 1.602176634e-19L * 10.L * tau / 9.1093837015e-31L;
+    long double const base = 1.e-280L * 1.380649e-23L * 1.602176634e-19L * 8000.L * tau / 9.1093837015e-31L;
+    long double const inverse2 = (1.L / hall) * (1.L / hall);
+    long double const perpendicular = base * inverse2 * (4.664L + 11.92L * inverse2) /
+                                      (1.L + 14.79L * inverse2 + 3.7703L * inverse2 * inverse2);
+    AMREX_ALWAYS_ASSERT(hall > std::numeric_limits<amrex::Real>::max());
+    AMREX_ALWAYS_ASSERT(result[0] == static_cast<amrex::Real>(perpendicular));
+    AMREX_ALWAYS_ASSERT(result[2] == static_cast<amrex::Real>(1.e5L * perpendicular));
+    AMREX_ALWAYS_ASSERT(std::isfinite(result[1]) &&
+        std::abs(result[1] / static_cast<amrex::Real>(base * 11.92L / 3.7703L) - 1) < 3.e-7);
+    AMREX_ALWAYS_ASSERT(result[3] == std::numeric_limits<amrex::Real>::infinity() && result[4] == 10);
+    QdsmcConductionReport report;
+    report.coefficient_min = {1,2,3,4,5,result[3]};
+    report.coefficient_max = {6,7,8,9,10,result[3]};
+    report.EncodeHallOverflow();
+    AMREX_ALWAYS_ASSERT(report.hall_min_overflow && report.hall_max_overflow &&
+                        report.coefficient_min[5] == std::numeric_limits<amrex::Real>::max() &&
+                        report.coefficient_max[5] == std::numeric_limits<amrex::Real>::max());
+    for (int j=0; j<5; ++j) {
+        AMREX_ALWAYS_ASSERT(report.coefficient_min[j] == j+1 && report.coefficient_max[j] == j+6);
+    }
+    report.coefficient_min[5] = std::numeric_limits<amrex::Real>::quiet_NaN();
+    report.coefficient_max[5] = -std::numeric_limits<amrex::Real>::infinity();
+    report.coefficient_max[3] = std::numeric_limits<amrex::Real>::infinity();
+    report.EncodeHallOverflow();
+    AMREX_ALWAYS_ASSERT(!report.hall_min_overflow && !report.hall_max_overflow &&
+                        std::isnan(report.coefficient_min[5]) &&
+                        report.coefficient_max[5] == -std::numeric_limits<amrex::Real>::infinity() &&
+                        report.coefficient_max[3] == std::numeric_limits<amrex::Real>::infinity());
+    amrex::Print()<<"HALL_OVERFLOW coefficients-and-report PASS\n";
     }
     amrex::Finalize();
 }
