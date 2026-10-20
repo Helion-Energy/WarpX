@@ -594,116 +594,123 @@ void WarpX::HybridPICInitializeRhoJandB ()
     using warpx::fields::FieldType;
     using ablastr::fields::Direction;
 
-    // A fresh start deposits its initial moments from the loaded particles.
-    // After a nonperiodic advance, J includes trajectories of absorbed particles
-    // and the associated surface flux. Reconstructing it from survivors on a
-    // segmented Evolve() entry or restart would corrupt the inertial dJi/dt.
-#ifdef WARPX_DIM_RZ
-    if (UseRZBoundaryCurrent() && istep[0] > 0) {
-        for (int lev = 0; lev <= finest_level; ++lev) {
-            auto& rho = *m_fields.get(FieldType::rho_fp, lev);
-            MultiFab::Copy(rho, *m_fields.get(FieldType::hybrid_rho_fp_temp, lev),
-                0, 0, 1, rho.nGrowVect());
-            for (int c = 0; c < 3; ++c) {
-                auto& current = *m_fields.get(FieldType::current_fp, Direction{c}, lev);
-                MultiFab::Copy(current,
-                    *m_fields.get(FieldType::hybrid_current_fp_temp, Direction{c}, lev),
-                    0, 0, 1, current.nGrowVect());
-            }
-        }
-    } else
+    bool restore_carried_moments = false;
+#if defined(WARPX_DIM_3D)
+    restore_carried_moments = m_hybrid_pic_model->m_restart_moments_restored;
 #endif
-    {
-        HybridPICDepositRhoAndJ();
-    }
-
-    // Fill the electron pressure using the freshly deposited rho. On a fresh
-    // start this seeds Pe^0 for the first step's B-substep E-solves (the
-    // iteration-0 diagnostics were already written at the end of InitData,
-    // before this runs); on restart it restores Pe(rho^n), which is not
-    // checkpointed and would otherwise be zero for the whole first restarted
-    // step. From the first step onward, HybridPICEvolveFields refreshes Pe
-    // right after each deposition (via the closure, or via the QDSMC entropy
-    // transport when solve_electron_energy_equation is on).
-    //
-    // With the energy equation on, seed T_e itself on the floored adiabat
-    // (uniform K_e -- the transport's zero-gradient state, PR #7128) and
-    // emit Pe = n_e k_B T_e from it, with the same boundary treatment
-    // CalculateElectronPressure applies. Calling the algebraic closure here
-    // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
-    // divides by the floored density while the pressure uses the raw one),
-    // re-creating the absorbing edge on the first step. T_e itself is
-    // checkpointed when the energy equation is on (checkpoint_restart flag
-    // on hybrid_electron_temperature_fp): InitFromCheckpoint restores it
-    // and pre-sets m_qdsmc_te_seeded, so the seed below is skipped and the
-    // evolved thermal structure survives the restart. Restarting from an
-    // older checkpoint without the T_e file falls back to the adiabat
-    // re-seed (with a warning). The non-default leapfrog Pe extrapolation
-    // carries no checkpointed history either way: it re-self-starts after
-    // a restart with a dt/2 transient (pc and euler carry no such state).
-    //
-    // The adiabat seed runs ONCE per process: this entry point executes at
-    // step == step_begin of EVERY Evolve() entry (each segmented PICMI
-    // sim.step()), and an unconditional re-seed would wipe the evolved T_e
-    // mid-run — the same re-entry class as the closure Pe reset fixed
-    // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
-    // on every entry.
-    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
-        for (int lev = 0; lev <= finest_level; ++lev) {
-            if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
-                m_hybrid_pic_model->SeedTeAdiabat(lev);
+    if (!restore_carried_moments) {
+        // A fresh start deposits its initial moments from the loaded particles.
+        // After a nonperiodic advance, J includes trajectories of absorbed particles
+        // and the associated surface flux. Reconstructing it from survivors on a
+        // segmented Evolve() entry or restart would corrupt the inertial dJi/dt.
+#ifdef WARPX_DIM_RZ
+        if (UseRZBoundaryCurrent() && istep[0] > 0) {
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                auto& rho = *m_fields.get(FieldType::rho_fp, lev);
+                MultiFab::Copy(rho, *m_fields.get(FieldType::hybrid_rho_fp_temp, lev),
+                    0, 0, 1, rho.nGrowVect());
+                for (int c = 0; c < 3; ++c) {
+                    auto& current = *m_fields.get(FieldType::current_fp, Direction{c}, lev);
+                    MultiFab::Copy(current,
+                        *m_fields.get(FieldType::hybrid_current_fp_temp, Direction{c}, lev),
+                        0, 0, 1, current.nGrowVect());
+                }
             }
-            m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
-            ApplyElectronPressureBoundary(lev, PatchType::fine);
-            ablastr::utils::communication::FillBoundary(
-                *m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
-                do_single_precision_comms,
-                Geom(lev).periodicity(),
-                true);
+        } else
+#endif
+        {
+            HybridPICDepositRhoAndJ();
         }
-        m_hybrid_pic_model->m_qdsmc_te_seeded = true;
-    } else {
-        m_hybrid_pic_model->CalculateElectronPressure();
+
+        // Fill the electron pressure using the freshly deposited rho. On a fresh
+        // start this seeds Pe^0 for the first step's B-substep E-solves (the
+        // iteration-0 diagnostics were already written at the end of InitData,
+        // before this runs); on restart it restores Pe(rho^n), which is not
+        // checkpointed and would otherwise be zero for the whole first restarted
+        // step. From the first step onward, HybridPICEvolveFields refreshes Pe
+        // right after each deposition (via the closure, or via the QDSMC entropy
+        // transport when solve_electron_energy_equation is on).
+        //
+        // With the energy equation on, seed T_e itself on the floored adiabat
+        // (uniform K_e -- the transport's zero-gradient state, PR #7128) and
+        // emit Pe = n_e k_B T_e from it, with the same boundary treatment
+        // CalculateElectronPressure applies. Calling the algebraic closure here
+        // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
+        // divides by the floored density while the pressure uses the raw one),
+        // re-creating the absorbing edge on the first step. T_e itself is
+        // checkpointed when the energy equation is on (checkpoint_restart flag
+        // on hybrid_electron_temperature_fp): InitFromCheckpoint restores it
+        // and pre-sets m_qdsmc_te_seeded, so the seed below is skipped and the
+        // evolved thermal structure survives the restart. Restarting from an
+        // older checkpoint without the T_e file falls back to the adiabat
+        // re-seed (with a warning). The non-default leapfrog Pe extrapolation
+        // carries no checkpointed history either way: it re-self-starts after
+        // a restart with a dt/2 transient (pc and euler carry no such state).
+        //
+        // The adiabat seed runs ONCE per process: this entry point executes at
+        // step == step_begin of EVERY Evolve() entry (each segmented PICMI
+        // sim.step()), and an unconditional re-seed would wipe the evolved T_e
+        // mid-run — the same re-entry class as the closure Pe reset fixed
+        // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
+        // on every entry.
+        if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
+                    m_hybrid_pic_model->SeedTeAdiabat(lev);
+                }
+                m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
+                ApplyElectronPressureBoundary(lev, PatchType::fine);
+                ablastr::utils::communication::FillBoundary(
+                    *m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+                    do_single_precision_comms,
+                    Geom(lev).periodicity(),
+                    true);
+            }
+            m_hybrid_pic_model->m_qdsmc_te_seeded = true;
+        } else {
+            m_hybrid_pic_model->CalculateElectronPressure();
+        }
+
+        // Handle field splitting for the hybrid field push: stage the external
+        // fields and add their contribution to the total field once, at the
+        // true start of the run. This entry point executes at the first step
+        // of EVERY Evolve() call, and beyond the first entry Bfield_fp already
+        // carries the external contribution (segmented stepping through
+        // repeated sim.step() calls re-enters here mid-run) -- adding it again
+        // double-counts the external field on every re-entry. On restart the
+        // checkpointed fields likewise already contain it.
+        if (restart_chkfile.empty() && istep[0] == 0) {
+            // Form the total initial field: add the t=0 external B on top of the
+            // loaded initial condition, coil by coil, skipping coils whose flux
+            // the initial condition already contains
+            // (external_vector_potential.<name>.in_initial_field). The arrays
+            // are left holding the full t=0 external sum for the first push
+            // (t_new is what t_old will be when entering the solver since after
+            // initialization t_old is set to t_new, then t_new is incremented).
+            if (m_hybrid_pic_model->m_add_external_fields) {
+                m_hybrid_pic_model->m_external_vector_potential->AddInitialExternalBField();
+            }
+        }
+
+        // Copy the rho_fp values to rho_fp_temp and the current_fp values to
+        // current_fp_temp, since the "temp" multifabs are meant to store the
+        // particle and current densities from the previous step during the field
+        // solve routine and are needed when the first field solve is
+        // performed after pushing the particles.
+        ablastr::fields::MultiLevelScalarField rho_fp_temp = m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, finest_level);
+        ablastr::fields::MultiLevelVectorField current_fp_temp = m_fields.get_mr_levels_alldirs(FieldType::hybrid_current_fp_temp, finest_level);
+        for (int lev = 0; lev <= finest_level; ++lev)
+        {
+            // copy 1 component value starting at index 0 to index 0
+            MultiFab::Copy(*rho_fp_temp[lev], *m_fields.get(FieldType::rho_fp, lev),
+                            0, 0, 1, rho_fp_temp[lev]->nGrowVect());
+            for (int idim = 0; idim < 3; ++idim) {
+                MultiFab::Copy(*current_fp_temp[lev][idim], *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
+                            0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
+            }
+        }
     }
 
-    // Handle field splitting for the hybrid field push: stage the external
-    // fields and add their contribution to the total field once, at the
-    // true start of the run. This entry point executes at the first step
-    // of EVERY Evolve() call, and beyond the first entry Bfield_fp already
-    // carries the external contribution (segmented stepping through
-    // repeated sim.step() calls re-enters here mid-run) -- adding it again
-    // double-counts the external field on every re-entry. On restart the
-    // checkpointed fields likewise already contain it.
-    if (restart_chkfile.empty() && istep[0] == 0) {
-        // Form the total initial field: add the t=0 external B on top of the
-        // loaded initial condition, coil by coil, skipping coils whose flux
-        // the initial condition already contains
-        // (external_vector_potential.<name>.in_initial_field). The arrays
-        // are left holding the full t=0 external sum for the first push
-        // (t_new is what t_old will be when entering the solver since after
-        // initialization t_old is set to t_new, then t_new is incremented).
-        if (m_hybrid_pic_model->m_add_external_fields) {
-            m_hybrid_pic_model->m_external_vector_potential->AddInitialExternalBField();
-        }
-    }
-
-    // Copy the rho_fp values to rho_fp_temp and the current_fp values to
-    // current_fp_temp, since the "temp" multifabs are meant to store the
-    // particle and current densities from the previous step during the field
-    // solve routine and are needed when the first field solve is
-    // performed after pushing the particles.
-    ablastr::fields::MultiLevelScalarField rho_fp_temp = m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, finest_level);
-    ablastr::fields::MultiLevelVectorField current_fp_temp = m_fields.get_mr_levels_alldirs(FieldType::hybrid_current_fp_temp, finest_level);
-    for (int lev = 0; lev <= finest_level; ++lev)
-    {
-        // copy 1 component value starting at index 0 to index 0
-        MultiFab::Copy(*rho_fp_temp[lev], *m_fields.get(FieldType::rho_fp, lev),
-                        0, 0, 1, rho_fp_temp[lev]->nGrowVect());
-        for (int idim = 0; idim < 3; ++idim) {
-            MultiFab::Copy(*current_fp_temp[lev][idim], *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
-                        0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
-        }
-    }
     // Seed Ve_fp / Vs_fp (and the J_plasma they derive from) for the first
     // step: collisions run before the first HybridPICEvolveFields, so the
     // resistive drag would otherwise gather the alloc-init zeros. This

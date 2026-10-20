@@ -11,6 +11,7 @@
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "Utils/NativeRngState.H"
+#include "Utils/CartesianHybridHistory.H"
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
@@ -201,6 +202,9 @@ FlushFormatCheckpoint::WriteToFile (
     WriteReducedDiagsData(checkpointname);
 
     WriteHybridPICData(checkpointname);
+#if defined(WARPX_DIM_3D)
+    warpx::cartesian_history::Write(warpx, checkpointname);
+#endif
 
     if (warpx_rng::Enabled()) {
         std::ostringstream layout;

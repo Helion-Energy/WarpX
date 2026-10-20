@@ -1207,6 +1207,10 @@ public:
      *  Preserve the initialized state across repeated Evolve() calls, while
      *  allowing the first deposition on a newly constructed restart instance. */
     bool m_evolve_initialized = false;
+#if defined(WARPX_DIM_3D)
+    /** Native accepted moments survived checkpoint restoration. */
+    bool m_restart_moments_restored = false;
+#endif
 
     // Declare variables to hold hybrid-PIC model parameters
     /** Number of substeps to take when evolving B (also used as initial substep

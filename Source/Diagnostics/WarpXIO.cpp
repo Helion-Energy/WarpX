@@ -27,6 +27,7 @@
 #include "Particles/WarpXParticleContainer.H"
 #include "Python/callbacks.H"
 #include "Utils/TextMsg.H"
+#include "Utils/CartesianHybridHistory.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
@@ -488,6 +489,10 @@ WarpX::InitFromCheckpoint ()
         }
 
     }
+
+#if defined(WARPX_DIM_3D)
+    warpx::cartesian_history::Read(*this, restart_chkfile);
+#endif
 
     // With the electron energy equation on, T_e is evolved state restored
     // just above: latch the adiabat seed off so the first Evolve() entry
