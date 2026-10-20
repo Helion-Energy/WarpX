@@ -437,6 +437,7 @@ ElectronInertiaElliptic::Define (ablastr::fields::VectorField const& Efield, int
 
     m_defined = true;
     m_coefs_valid = false;
+    m_warm_start_valid = false;
 }
 
 void
@@ -907,13 +908,14 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
     // to E itself. Chasing it further would only iterate on round-off.
     if (bnorm <= m_rtol * e0norm || bnorm == 0._rt) {
         SetVal3(m_x, 0._rt);
+        m_warm_start_valid = true;
         ++m_n_solves;
         amrex::Gpu::streamSynchronize();
         m_solve_time += amrex::second() - t0;
         return;
     }
 
-    const bool cold = !m_warm_start || (m_n_solves == 0);
+    const bool cold = !m_warm_start || !m_warm_start_valid;
     if (cold) { SetVal3(m_x, 0._rt); }
 
     // r = b - A x
@@ -1021,6 +1023,7 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
         MultiFab::Add(*Efield[d], m_x[d], 0, 0, 1, 0);
     }
 
+    m_warm_start_valid = true;
     ++m_n_solves;
     m_n_iters += iter;
     m_max_iters_seen = std::max(m_max_iters_seen, iter);

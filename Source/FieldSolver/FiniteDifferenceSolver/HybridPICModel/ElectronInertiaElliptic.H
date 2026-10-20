@@ -52,10 +52,10 @@
  * i.e. bounded by the electron cyclotron frequency for every wavenumber the
  * grid can represent.
  *
- * The decisive property of this form is that it is ALGEBRAIC IN TIME. No
- * electron-current state is stored, nothing is lagged across a substep, and
- * nothing can go stale across a restart: each call solves a self-contained
- * elliptic problem for E given the stage right-hand side.
+ * The elliptic equation is ALGEBRAIC IN TIME: no electron-current history
+ * enters its right-hand side. The iterative algorithm does retain the previous
+ * correction as a warm start. At finite tolerance, that numerical history can
+ * affect the accepted solution and must be considered in restart comparisons.
  *
  * CONVECTION. HybridPICModel adds -(m_e/e)(u_e . grad)u_e to the RHS
  * from the current stage before calling this recovery. It needs no current
@@ -231,6 +231,8 @@ public:
 private:
     bool m_defined = false;
     bool m_coefs_valid = false;
+    /** Validity of the previous correction is independent of reporting counters. */
+    bool m_warm_start_valid = false;
 
     /** Update flags of the E field at the embedded boundary (0 = frozen row,
      *  not an unknown); nullptr when no EB is enabled. Not owned. */

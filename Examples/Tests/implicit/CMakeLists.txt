@@ -2131,3 +2131,25 @@ foreach(dim IN ITEMS 3d rz)
         endif()
     endif()
 endforeach()
+
+# Reporting is observational: it must not reset an elliptic warm start.
+if(TARGET lib_3d)
+    add_executable(test_electron_inertia_reporting_3d test_electron_inertia_reporting.cpp)
+    target_link_libraries(test_electron_inertia_reporting_3d PRIVATE lib_3d)
+    target_include_directories(test_electron_inertia_reporting_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_reporting_3d)
+    endif()
+    foreach(box_size IN ITEMS 8 16)
+        set(report_name test_3d_electron_inertia_reporting_grid${box_size})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${report_name})
+        add_test(NAME ${report_name}
+            COMMAND test_electron_inertia_reporting_3d
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_electron_inertia_reporting_3d
+                amr.max_grid_size=${box_size})
+        set_tests_properties(${report_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${report_name}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1"
+            LABELS "HYBRID;inertia;reporting")
+    endforeach()
+endif()
