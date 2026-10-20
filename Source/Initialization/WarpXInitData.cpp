@@ -10,6 +10,7 @@
  */
 #include "Utils/NativeRngState.H"
 #include "Utils/NativeParticleIdState.H"
+#include "Utils/HybridInertiaState.H"
 #include "WarpX.H"
 #include "Circuit/CircuitCoupling.H"
 
@@ -946,6 +947,9 @@ WarpX::InitData ()
             warpx_rng::ReadCheckpoint(restart_chkfile, layout.str());
             warpx_particle_ids::ReadCheckpoint(restart_chkfile, layout.str());
         }
+#if defined(WARPX_DIM_3D)
+        warpx::hybrid_inertia_state::Read(*this, restart_chkfile);
+#endif
         ExecutePythonCallback("afterInitatRestart");
     }
 

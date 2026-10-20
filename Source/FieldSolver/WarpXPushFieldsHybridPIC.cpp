@@ -71,6 +71,7 @@ void WarpX::HybridPICEvolveFields ()
     // The particles have now been pushed to their t_{n+1} positions.
     // Perform charge deposition at t_{n+1} and current deposition at t_{n+1/2}.
     HybridPICDepositRhoAndJ();
+    ExecutePythonCallback("hybrid_after_deposition");
 
     // Capture [J_i^(n+1/2)-J_i^(n-1/2)]/dt before the old deposit is
     // overwritten by J_i^n averaging. The same linear slope underlies the
@@ -93,6 +94,7 @@ void WarpX::HybridPICEvolveFields ()
     // the deposit just above has established.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         m_hybrid_pic_model->AdvanceElectronEnergyQDSMC(dt[0]);
+        ExecutePythonCallback("hybrid_after_electron_energy");
     }
 
     // Get the external current

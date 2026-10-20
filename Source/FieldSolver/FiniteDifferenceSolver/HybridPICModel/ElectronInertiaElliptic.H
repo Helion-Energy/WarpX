@@ -9,6 +9,7 @@
 
 #ifndef WARPX_ELECTRONINERTIAELLIPTIC_H_
 #define WARPX_ELECTRONINERTIAELLIPTIC_H_
+#include <string>
 
 #include <ablastr/fields/MultiFabRegister.H>
 
@@ -165,6 +166,12 @@ public:
      *  reported alongside the solve cost because per-substep cost cannot be
      *  recovered from a step wall time without it. */
     void ReportAndResetStats (int substeps);
+
+    /** Save/restore the numerical correction without changing it or its guards.
+     *  The destination directory must exist; Read requires Define first.
+     *  Coefficients are rebuilt by the next ordinary solve stage. */
+    void WriteWarmStart (std::string const& directory) const;
+    void ReadWarmStart (std::string const& directory);
 
     /** Abort path only: called by Solve when the right-hand-side norm or the
      *  E0 norm is non-finite (every comparison in the solve is false for

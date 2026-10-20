@@ -2153,3 +2153,27 @@ if(TARGET lib_3d)
             LABELS "HYBRID;inertia;reporting")
     endforeach()
 endif()
+
+# Native elliptic correction/state restart with explicit compatibility failures.
+if(TARGET lib_3d AND Python_FOUND)
+    add_executable(test_electron_inertia_restart_3d test_electron_inertia_restart.cpp)
+    target_link_libraries(test_electron_inertia_restart_3d PRIVATE lib_3d)
+    target_include_directories(test_electron_inertia_restart_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL "CUDA")
+        setup_target_for_cuda_compilation(test_electron_inertia_restart_3d)
+    endif()
+    foreach(state_case IN ITEMS warm cold zero uninitialized disabled missing component config layout payload)
+        set(state_name test_3d_electron_inertia_restart_${state_case})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${state_name})
+        add_test(NAME ${state_name}
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_electron_inertia_restart.py
+                $<TARGET_FILE:test_electron_inertia_restart_3d>
+                ${CMAKE_CURRENT_SOURCE_DIR}/inputs_electron_inertia_restart_3d
+                ${state_case})
+        set_tests_properties(${state_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${state_name}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1"
+            LABELS "HYBRID;inertia;restart")
+    endforeach()
+endif()

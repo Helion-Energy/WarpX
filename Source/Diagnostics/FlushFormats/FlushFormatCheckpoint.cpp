@@ -14,6 +14,7 @@
 #include "Utils/NativeParticleIdState.H"
 #include <AMReX_AsyncOut.H>
 #include "Utils/CartesianHybridHistory.H"
+#include "Utils/HybridInertiaState.H"
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
@@ -208,6 +209,7 @@ FlushFormatCheckpoint::WriteToFile (
     WriteHybridPICData(checkpointname);
 #if defined(WARPX_DIM_3D)
     warpx::cartesian_history::Write(warpx, checkpointname);
+    warpx::hybrid_inertia_state::Write(warpx, checkpointname);
 #endif
 
     if (warpx_rng::Enabled()) {

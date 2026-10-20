@@ -9,6 +9,12 @@
 
 #include "ElectronInertiaElliptic.H"
 
+#include <AMReX_VisMF.H>
+#include <AMReX_Utility.H>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/WarpX_PEC.H"
 #include "Fields.H"
@@ -1170,4 +1176,93 @@ ElectronInertiaElliptic::ReportNonFiniteRHS (
         "coefficients before the BiCGStab iteration started. See the "
         "[inertia-elliptic] NON-FINITE RHS lines above for the step, the "
         "cell and the floored-density range.");
+}
+
+namespace
+{
+    std::string InertiaWarmStartLayout (ElectronInertiaElliptic::EVec const& fields)
+    {
+        std::ostringstream output;
+        output << std::setprecision(std::numeric_limits<amrex::Real>::max_digits10)
+               << AMREX_SPACEDIM << ' ' << amrex::ParallelDescriptor::NProcs() << '\n';
+        auto const& geom = WarpX::GetInstance().Geom(0);
+        output << geom.Domain() << '\n';
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            output << geom.ProbLo(d) << ' ' << geom.ProbHi(d) << ' '
+                   << geom.isPeriodic(d) << ' '
+                   << static_cast<int>(WarpX::field_boundary_lo[d]) << ' '
+                   << static_cast<int>(WarpX::field_boundary_hi[d]) << '\n';
+        }
+        for (int d = 0; d < 3; ++d) {
+            output << fields[d].boxArray() << fields[d].nGrowVect()
+                   << ' ' << fields[d].nComp() << '\n';
+            for (int owner : fields[d].DistributionMap().ProcessorMap()) {
+                output << owner << ' ';
+            }
+            output << '\n';
+        }
+        return output.str();
+    }
+}
+
+void ElectronInertiaElliptic::WriteWarmStart (std::string const& directory) const
+{
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_defined,
+        "Cannot checkpoint an undefined elliptic inertia solver");
+    amrex::Gpu::streamSynchronize();
+    std::string const layout = InertiaWarmStartLayout(m_x);
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        std::ofstream output(directory + "/StateHeader");
+        output << std::setprecision(std::numeric_limits<amrex::Real>::max_digits10)
+               << "ElectronInertiaWarmStart 1\n" << m_rtol << ' ' << m_max_iter << ' '
+               << m_warm_start << ' ' << m_warm_start_valid << '\n'
+               << std::quoted(layout) << '\n';
+        output.close();
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(output.good(),
+            "Failed to write elliptic warm-start manifest");
+    }
+    amrex::ParallelDescriptor::Barrier();
+    for (int d = 0; d < 3; ++d) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!m_x[d].contains_nan() && !m_x[d].contains_inf(),
+            "Cannot checkpoint a non-finite elliptic correction");
+        amrex::VisMF::Write(m_x[d], directory + "/correction-" + std::to_string(d));
+    }
+}
+
+void ElectronInertiaElliptic::ReadWarmStart (std::string const& directory)
+{
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_defined,
+        "Define the elliptic inertia solver before restoring its correction");
+    std::ifstream input(directory + "/StateHeader");
+    std::string magic, layout;
+    int version = 0, max_iter = 0;
+    amrex::Real rtol = 0.0;
+    bool warm_start = false, valid = false;
+    input >> magic >> version >> rtol >> max_iter >> warm_start >> valid >> std::quoted(layout);
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(input && magic == "ElectronInertiaWarmStart"
+        && version == 1 && rtol == m_rtol && max_iter == m_max_iter
+        && warm_start == m_warm_start,
+        "Missing or incompatible elliptic warm-start configuration");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(layout == InertiaWarmStartLayout(m_x),
+        "Elliptic warm-start geometry or rank/box/guard layout mismatch");
+    std::string extra;
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!(input >> extra),
+        "Unexpected elliptic warm-start manifest content");
+    for (int d = 0; d < 3; ++d) {
+        std::string const path = directory + "/correction-" + std::to_string(d);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::FileExists(path + "_H"),
+            "Missing native elliptic correction component");
+        std::ifstream header_file(path + "_H");
+        amrex::VisMF::Header header;
+        header_file >> header;
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(header_file
+            && amrex::match(header.m_ba, m_x[d].boxArray())
+            && header.m_ncomp == m_x[d].nComp() && header.m_ngrow == m_x[d].nGrowVect(),
+            "Native elliptic correction payload layout mismatch");
+        amrex::VisMF::Read(m_x[d], path);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!m_x[d].contains_nan() && !m_x[d].contains_inf(),
+            "Non-finite native elliptic correction checkpoint");
+    }
+    m_warm_start_valid = valid;
+    m_coefs_valid = false;
 }

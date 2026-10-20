@@ -1599,8 +1599,9 @@ public:
      *  turns it into a spatial operator on E,
      *      E + d_e^2 curl(curl E) = E_inertialess + E_convection + E_moments,
      *  which is solved for E each time Ohm's law is imposed. Unlike the
-     *  Je-form this carries no electron-current history at all -- nothing to
-     *  lag, nothing to rotate, nothing to reconstruct on restart -- and it
+     *  Je-form this carries no electron-current history in the equation. The
+     *  iterative solver retains a numerical warm-start correction, restored
+     *  by native Cartesian checkpoints at finite solve tolerance. The closure
      *  bounds the whistler branch at Omega_ce for every wavenumber the grid
      *  can represent, instead of letting omega ~ k^2 run past Omega_ce at
      *  the grid scale and set the magnetic substep CFL. See
