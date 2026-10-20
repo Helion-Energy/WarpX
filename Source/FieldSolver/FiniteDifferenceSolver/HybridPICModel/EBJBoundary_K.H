@@ -153,6 +153,7 @@ namespace warpx::hybrid::detail
     constexpr int S_RESOLVED = 4;  //!< well-posed target written and locked during this call
     constexpr int S_JUSTDONE = 5;  //!< pending target written in the current cascade sweep
     constexpr int S_RESOLVED_P = 6; //!< pending target written and locked during this call
+    constexpr int S_OUTSIDE = 7; //!< nonperiodic physical guard: not an interpolation donor
 
     // A fill target is well-posed when at least this fraction of every
     // component's image-interpolation weight lies in the solution domain
@@ -295,6 +296,12 @@ namespace warpx::hybrid::detail
             st.status[c] = std::make_unique<amrex::iMultiFab>(
                 field[c]->boxArray(), field[c]->DistributionMap(), 1,
                 field[c]->nGrowVect());
+            // The classification below covers valid points. FillBoundary
+            // supplies internal and periodic guards, but leaves physical
+            // guards untouched. Mirror stencils at domain/EB intersections
+            // can reach those guards; never interpret allocator contents as
+            // a solution-domain or resolved interpolation donor.
+            st.status[c]->setVal(S_OUTSIDE);
         }
 
         // First pass: solution domain vs fill target vs deep interior
