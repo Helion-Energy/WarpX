@@ -13,15 +13,21 @@ int main (int argc, char** argv)
     {
         auto& sim = WarpX::GetInstance();
         sim.InitData();
-        auto const verify = [&] () {
+        auto const verify = [&] (bool only_temperature = false) {
             int index = 0;
+            int temperatures = 0;
+            AMREX_ALWAYS_ASSERT(sim.get_pointer_HybridPICModel()->m_t_deposited_once);
+            AMREX_ALWAYS_ASSERT(sim.get_pointer_HybridPICModel()->m_t_deposit_interval == 10);
             for (auto const& [name, field] : warpx::cartesian_history::Fields(sim, 0)) {
+                temperatures += name[0] == 'T';
                 amrex::Real const value = 1.25 * (++index);
+                if (only_temperature && name[0] != 'T') { continue; }
                 for (int c = 0; c < field->nComp(); ++c) {
                     AMREX_ALWAYS_ASSERT(field->min(c, field->nGrow()) == value);
                     AMREX_ALWAYS_ASSERT(field->max(c, field->nGrow()) == value);
                 }
             }
+            AMREX_ALWAYS_ASSERT(temperatures == 6);
         };
         if (sim.getistep(0) == 0) {
             InstallPythonCallback("afterstep", [&] () {
@@ -40,6 +46,10 @@ int main (int argc, char** argv)
             // accepted deposits, including their ghost cells and pressure.
             sim.HybridPICInitializeRhoJandB();
             verify();
+            // Step 1 is between deposits at 0 and 10. The first resumed
+            // charge/current update must retain the saved temperature cache.
+            sim.HybridPICDepositRhoAndJ();
+            verify(true);
             amrex::Print() << "CARTESIAN_CARRIED_HISTORY_RESTORE_EXACT\n";
         }
     }

@@ -1318,8 +1318,9 @@ public:
      *  for N steps changes those rates at the 1e-4-class level while
      *  removing (N-1)/N of the deposit cost. The T_<species> fields
      *  persist between deposits; the deposit always runs on the FIRST
-     *  call after boot or restart regardless of the interval (the fields
-     *  are otherwise unseeded — restart does not round-trip them).
+     *  call after boot or a legacy restart regardless of the interval.
+     *  Cartesian native history version 2 restores these fields and their
+     *  deposition latch, retaining the uninterrupted update schedule.
      *  Diagnostics requesting T_<species> read values up to N-1 steps
      *  stale. 1 = every step (bit-identical legacy path). Input:
      *  temperature_deposition_interval. */

@@ -149,3 +149,8 @@ algo.evolve_scheme = explicit
 hybrid_pic_model.joule_dropped_energy_print_interval = 1
 
 warpx.checkpoint_rng_state = 1
+
+# The native history regression must exercise cached directional temperatures.
+ions_D.do_temperature_deposition = 1
+ions_T.do_temperature_deposition = 1
+amrex.async_out = 0

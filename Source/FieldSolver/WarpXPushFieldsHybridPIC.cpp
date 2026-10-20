@@ -511,8 +511,8 @@ void WarpX::HybridPICDepositRhoAndJ ()
     // the m_t_deposit_interval member doc): the consumers are
     // collision-rate-class and tolerate a deposit held for N steps; the
     // T_<species> fields persist between deposits. Always deposits on
-    // the first call after boot or restart — the fields are otherwise
-    // unseeded (restart does not round-trip them).
+    // the first call after boot or a legacy restart. Native Cartesian history
+    // restores the cached fields and latch, preserving the original schedule.
     {
         auto & hybrid = *m_hybrid_pic_model;
         if (!hybrid.m_t_deposited_once
