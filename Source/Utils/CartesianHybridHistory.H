@@ -36,6 +36,15 @@ namespace warpx::cartesian_history
             result["Jold" + std::to_string(d)] =
                 sim.m_fields.get(FieldType::hybrid_current_fp_temp, Direction{d}, lev);
         }
+        // Stopping consumes the previous accepted electron velocity before
+        // the next field update. Recomputing from restarted particles would
+        // change its time centering; preserve the field and its guards instead.
+        if (sim.get_pointer_HybridPICModel()->m_need_fluid_velocities) {
+            for (int d = 0; d < 3; ++d) {
+                result["Ve" + std::to_string(d)] =
+                    sim.m_fields.get("Ve_fp", Direction{d}, lev);
+            }
+        }
         if (sim.get_pointer_HybridPICModel()->m_need_per_species_fields) {
             auto& particles = sim.GetPartContainer();
             for (auto const& species : particles.GetSpeciesNames()) {
@@ -74,7 +83,7 @@ namespace warpx::cartesian_history
         }
         amrex::ParallelDescriptor::Barrier();
         std::ostringstream metadata;
-        metadata << std::setprecision(17) << "CartesianHybridHistory 2\n"
+        metadata << std::setprecision(17) << "CartesianHybridHistory 3\n"
                  << sim.getistep(0) << ' ' << sim.gett_new(0) << ' '
                  << sim.finestLevel() + 1 << ' ' << model->m_evolve_initialized << ' '
                  << model->m_t_deposited_once << ' ' << model->m_t_deposit_interval << '\n';
@@ -117,11 +126,11 @@ namespace warpx::cartesian_history
         bool initialized = false;
         input >> magic >> version >> step >> time >> levels >> initialized;
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(input && magic == "CartesianHybridHistory"
-            && (version == 1 || version == 2) && step == sim.getistep(0) && time == sim.gett_new(0)
+            && (version >= 1 && version <= 3) && step == sim.getistep(0) && time == sim.gett_new(0)
             && levels == sim.finestLevel() + 1,
             "Invalid Cartesian hybrid moment-history manifest");
         bool temperatures_deposited = false;
-        if (version == 2) {
+        if (version >= 2) {
             int temperature_interval = 0;
             input >> temperatures_deposited >> temperature_interval;
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE(input &&
@@ -139,6 +148,9 @@ namespace warpx::cartesian_history
             // Its native record explicitly declares that moments need initialization.
             return;
         }
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(version >= 3 || !model->m_need_fluid_velocities,
+            "Initialized Cartesian hybrid restart requires accepted electron velocity "
+            "history (version 3); older checkpoints do not preserve Ve_fp");
         for (int lev = 0; lev < levels; ++lev) {
             auto const fields = Fields(sim, lev, version >= 2);
             int saved_level = -1;
