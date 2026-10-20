@@ -2019,3 +2019,19 @@ foreach(dim IN ITEMS 3d rz)
         endif()
     endif()
 endforeach()
+
+# Native helper target: add_warpx_test hardcodes app_${SD}, so use the same
+# add_test/Python pattern as the native history fixture above.
+if(TARGET test_external_conduction_3d AND Python_FOUND)
+    foreach(axis IN ITEMS 0 1 2)
+        add_test(NAME test_3d_external_total_E_sync_${axis}
+            COMMAND ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_external_total_sync.py
+                --executable $<TARGET_FILE:test_external_conduction_3d>
+                --inputs ${CMAKE_CURRENT_SOURCE_DIR}/inputs_external_conduction_3d
+                --axis ${axis}
+                --output-parent ${CMAKE_CURRENT_BINARY_DIR}/external_total_E_sync)
+        set_tests_properties(test_3d_external_total_E_sync_${axis} PROPERTIES
+            TIMEOUT 120 LABELS "HYBRID;external;native")
+    endforeach()
+endif()

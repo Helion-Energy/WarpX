@@ -291,7 +291,9 @@ void WarpX::HybridPICEvolveFields ()
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
         m_eb_update_E, false);
-    FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+    if (!add_external_fields) {
+        FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+    }
 
     // Update Ve_fp and per-species Vs_fp at t=n+1 for the next step's
     // particle-level drag operator and per-species resistive overlay.
@@ -336,6 +338,11 @@ void WarpX::HybridPICEvolveFields ()
                     m_fields.get(FieldType::Efield_fp, Direction{idim}, lev)->nGrowVect());
             }
         }
+        // Synchronize the physical total E, after restoring the imposed field.
+        // The response and external fields need not be separately periodic:
+        // synchronizing response E first leaves an uncancelled imposed-field
+        // jump at the duplicate periodic nodes used by particle gathers.
+        FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
     }
 
     m_hybrid_pic_model->m_explicit_B_is_response = false;

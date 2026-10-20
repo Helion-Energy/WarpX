@@ -51,6 +51,16 @@ int main(int argc,char**argv) {
    AMREX_ALWAYS_ASSERT(sim.getistep(0)==1);
   }
   AMREX_ALWAYS_ASSERT(initialized && !sim.get_pointer_HybridPICModel()->m_explicit_B_is_response);snapshot(sim,"final");
+  bool check_total_E_zero = false;
+  pp.query("check_total_E_zero", check_total_E_zero);
+  if (check_total_E_zero) {
+      for (int d = 0; d < 3; ++d) {
+          auto const& e = *sim.m_fields.get(FieldType::Efield_fp, Direction{d}, 0);
+          AMREX_ALWAYS_ASSERT_WITH_MESSAGE(e.norm0(0, e.nGrow()) <= 1.e-12,
+              "Restored total electric field is nonzero on valid or ghost nodes");
+      }
+      amrex::Print() << "RESTORED_TOTAL_E_ZERO_WITH_GHOSTS\n";
+  }
   auto const& hp=*sim.get_pointer_HybridPICModel();auto const& a=hp.m_cond_last_report;
   AMREX_ALWAYS_ASSERT(a.completed && a.completed_time==a.requested_time);
   if(amrex::ParallelDescriptor::IOProcessor()) {
