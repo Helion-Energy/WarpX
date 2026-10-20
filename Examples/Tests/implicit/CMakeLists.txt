@@ -2074,3 +2074,26 @@ foreach(audit_dim IN ITEMS 3d rz)
         endif()
     endif()
 endforeach()
+
+# Cold ions hide audit-dependent multiply/add contraction. Exercise nonzero
+# initial velocities and require the same raw particle arrays in both modes.
+if(TARGET test_source_audit_3d AND Python_FOUND)
+    foreach(audit_mode IN ITEMS 0 1)
+        set(audit_name test_source_audit_3d_finite_mode${audit_mode})
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${audit_name})
+        add_test(NAME ${audit_name} COMMAND test_source_audit_3d
+            ${CMAKE_CURRENT_SOURCE_DIR}/inputs_source_audit_3d
+            hybrid_pic_model.source_guard.audit_only=${audit_mode}
+            audit.nped=5.e18 audit.Ti_eV=100)
+        set_tests_properties(${audit_name} PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${audit_name}
+            TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "HYBRID;source_audit")
+    endforeach()
+    add_test(NAME test_source_audit_3d_finite_invariance
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/analysis_source_audit.py
+            --off ${CMAKE_CURRENT_BINARY_DIR}/test_source_audit_3d_finite_mode0
+            --on ${CMAKE_CURRENT_BINARY_DIR}/test_source_audit_3d_finite_mode1)
+    set_tests_properties(test_source_audit_3d_finite_invariance PROPERTIES
+        DEPENDS "test_source_audit_3d_finite_mode0;test_source_audit_3d_finite_mode1"
+        TIMEOUT 30 LABELS "HYBRID;source_audit")
+endif()

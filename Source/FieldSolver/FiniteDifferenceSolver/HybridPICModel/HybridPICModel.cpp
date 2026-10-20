@@ -12721,31 +12721,32 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
 #endif
                 amrex::ParticleReal const uiz = coef_arr(ii,jj,kk,3);
                 amrex::ParticleReal const sig = std::sqrt(amrex::max(0._prt, sig2));
+                // Both modes execute this single physical update. Keeping a
+                // second expression inside the audit branch permits different
+                // contraction; finite-temperature off/on tests detect rounding.
+                auto const oldx=uxp[ip], oldy=uyp[ip], oldz=uzp[ip];
+                auto const rx=amrex::RandomNormal(0._prt,1._prt,engine);
+                uxp[ip] += -drag*(uxp[ip]-uix) + sig*rx;
+                auto const ry=amrex::RandomNormal(0._prt,1._prt,engine);
+                uyp[ip] += -drag*(uyp[ip]-uiy) + sig*ry;
+                auto const rz=amrex::RandomNormal(0._prt,1._prt,engine);
+                uzp[ip] += -drag*(uzp[ip]-uiz) + sig*rz;
                 if (audit_exchange) {
-                    // Same three draws as the combined operator. The incremental
-                    // redirect attribution includes its cross term with thermal
-                    // noise; it is not an independently realized random kick.
-                    auto const rx=amrex::RandomNormal(0._prt,1._prt,engine);
-                    auto const ry=amrex::RandomNormal(0._prt,1._prt,engine);
-                    auto const rz=amrex::RandomNormal(0._prt,1._prt,engine);
-                    auto const before=Algorithms::KineticEnergy(uxp[ip],uyp[ip],uzp[ip],m_i);
+                    // Read the saved input and shared output; do not repeat or
+                    // modify the physical update or consume extra random draws.
+                    auto const before=Algorithms::KineticEnergy(oldx,oldy,oldz,m_i);
                     auto const thermal_sigma=std::sqrt(amrex::max(0._prt,
                         -kb*Te_K*std::expm1(-2._prt*nu_dt)/m_i));
-                    auto const meanx=uxp[ip]-drag*(uxp[ip]-uix);
-                    auto const meany=uyp[ip]-drag*(uyp[ip]-uiy);
-                    auto const meanz=uzp[ip]-drag*(uzp[ip]-uiz);
-                    auto const u2=uxp[ip]*uxp[ip]+uyp[ip]*uyp[ip]+uzp[ip]*uzp[ip];
-                    // Exact nonrelativistic OU expectation for this frozen state.
-                    // Realized tallies above/below retain relativistic lab-frame KE.
+                    auto const meanx=oldx-drag*(oldx-uix);
+                    auto const meany=oldy-drag*(oldy-uiy);
+                    auto const meanz=oldz-drag*(oldz-uiz);
+                    auto const u2=oldx*oldx+oldy*oldy+oldz*oldz;
                     auto const expected=0.5_prt*m_i*(meanx*meanx+meany*meany+meanz*meanz-u2+
                                                      3._prt*thermal_sigma*thermal_sigma);
-                    auto const tx=uxp[ip]-drag*(uxp[ip]-uix)+thermal_sigma*rx;
-                    auto const ty=uyp[ip]-drag*(uyp[ip]-uiy)+thermal_sigma*ry;
-                    auto const tz=uzp[ip]-drag*(uzp[ip]-uiz)+thermal_sigma*rz;
+                    auto const tx=oldx-drag*(oldx-uix)+thermal_sigma*rx;
+                    auto const ty=oldy-drag*(oldy-uiy)+thermal_sigma*ry;
+                    auto const tz=oldz-drag*(oldz-uiz)+thermal_sigma*rz;
                     auto const thermal=Algorithms::KineticEnergy(tx,ty,tz,m_i)-before;
-                    uxp[ip] += -drag*(uxp[ip]-uix)+sig*rx;
-                    uyp[ip] += -drag*(uyp[ip]-uiy)+sig*ry;
-                    uzp[ip] += -drag*(uzp[ip]-uiz)+sig*rz;
                     auto const total=Algorithms::KineticEnergy(uxp[ip],uyp[ip],uzp[ip],m_i)-before;
                     // AMReX ParallelForRNG is a scalar for-loop on CPU (not
                     // SIMD ParallelFor). HostDevice atomics also protect OMP tiles.
@@ -12754,10 +12755,6 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,2),weight[ip]*(total-thermal));
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,3),weight[ip]*expected);
                     amrex::HostDevice::Atomic::Add(&tally(ii,jj,kk,4),weight[ip]*1.5_prt*E_s);
-                } else {
-                uxp[ip] += -drag*(uxp[ip]-uix) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
-                uyp[ip] += -drag*(uyp[ip]-uiy) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
-                uzp[ip] += -drag*(uzp[ip]-uiz) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
                 }
             });
         }
