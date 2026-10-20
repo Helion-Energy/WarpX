@@ -733,17 +733,23 @@ void WarpX::HybridPICInitializeRhoJandB ()
         }
     }
 
-    // Seed Ve_fp / Vs_fp (and the J_plasma they derive from) for the first
-    // step: collisions run before the first HybridPICEvolveFields, so the
-    // resistive drag would otherwise gather the alloc-init zeros. This
-    // matters especially on restart, where the checkpointed E already
-    // contains the eta*J term while Ve/Vs are not checkpointed.
+    // Fresh and legacy starts need fluid velocities before the first
+    // collision. Native Cartesian history already restored accepted Ve;
+    // reseeding here would overwrite its time centering before stopping.
     if (m_hybrid_pic_model->m_need_fluid_velocities) {
-        m_hybrid_pic_model->GetCurrentExternal();
-        m_hybrid_pic_model->CalculatePlasmaCurrent(
-            m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
-            m_eb_update_E);
-        m_hybrid_pic_model->CalculateElectronFluidVelocity();
+        // EEE checkpoints also carry the delivered plasma current. Preserve
+        // it together with Ve; algebraic-closure runs do not checkpoint Jp.
+        if (!restore_carried_moments ||
+            !m_hybrid_pic_model->m_solve_electron_energy_equation) {
+            m_hybrid_pic_model->GetCurrentExternal();
+            m_hybrid_pic_model->CalculatePlasmaCurrent(
+                m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
+                m_eb_update_E);
+        }
+        if (!restore_carried_moments) {
+            m_hybrid_pic_model->CalculateElectronFluidVelocity();
+        }
+        // Vs is derived from the restored per-species moments.
         m_hybrid_pic_model->CalculateIonFluidVelocity();
     }
     if (m_hybrid_pic_model->m_has_resistive_drag) {
