@@ -383,8 +383,16 @@ web::MarkExtensionCells (
         for (amrex::MFIter mfi(*b_field[idim]); mfi.isValid(); ++mfi) {
             auto* face_areas_idim_max_lev = face_areas[idim];
 
-            const amrex::Box& box = mfi.tilebox(face_areas_idim_max_lev->ixType().toIntVect(),
-                                                face_areas_idim_max_lev->nGrowVect() );
+            // Geometry may have more guards than the extension outputs (e.g.
+            // hybrid external-field masks). Initialize the allocated output
+            // region, retaining the extension domain when geometry is wider.
+            const amrex::Box box = mfi.tilebox(area_mod[idim]->ixType().toIntVect(),
+                                               area_mod[idim]->nGrowVect());
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                (*face_areas_idim_max_lev)[mfi].box().contains(box)
+                && (*flag_info_face[idim])[mfi].box().contains(box)
+                && (*flag_ext_face[idim])[mfi].box().contains(box),
+                "ECT extension initialization requires geometry and flags covering its output");
 
             auto const& S = face_areas_idim_max_lev->array(mfi);
             auto const& flag_info_face_data = flag_info_face[idim]->array(mfi);
