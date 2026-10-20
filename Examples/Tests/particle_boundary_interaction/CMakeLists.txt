@@ -148,3 +148,22 @@ if(WarpX_EB)
         OFF  # dependency
     )
 endif()
+
+# A direct native lineage test: permute storage without changing physical parents.
+if("3" IN_LIST WarpX_DIMS)
+    add_executable(test_split_lineage_3d test_split_lineage_3d.cpp)
+    target_link_libraries(test_split_lineage_3d PRIVATE lib_3d)
+    target_include_directories(test_split_lineage_3d PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    if(WarpX_COMPUTE STREQUAL CUDA)
+        setup_target_for_cuda_compilation(test_split_lineage_3d)
+    endif()
+    foreach(grid IN ITEMS 8 16)
+        add_test(NAME test_3d_split_lineage_grid${grid}
+            COMMAND $<TARGET_FILE:test_split_lineage_3d>
+                ${CMAKE_CURRENT_SOURCE_DIR}/../implicit/inputs_electron_inertia_restart_3d
+                amr.max_grid_size=${grid} ions.hybrid_split_target_ppc=30
+                diagnostics.enable=0)
+        set_tests_properties(test_3d_split_lineage_grid${grid}
+            PROPERTIES TIMEOUT 120 LABELS "particle_boundary;restart")
+    endforeach()
+endif()

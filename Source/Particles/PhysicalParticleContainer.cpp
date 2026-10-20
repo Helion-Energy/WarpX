@@ -23,6 +23,9 @@
 #include "Particles/Gather/FieldGather.H"
 #include "Particles/Gather/GetExternalFields.H"
 #include "Particles/ParticleCreation/DefaultInitialization.H"
+#if defined(WARPX_DIM_3D)
+#   include "Particles/ParticleCreation/DeterministicSplitIDs.H"
+#endif
 #include "Particles/Pusher/CopyParticleAttribs.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/Pusher/PushSelector.H"
@@ -1319,6 +1322,15 @@ PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(first_id < LongParticleIds::NoSplitParticleID-child_count,
                                         "Particle IDs exhausted during density-band splitting");
         ParticleType::NextID(first_id+child_count);
+        // Particle redistribution/checkpoint loading may permute storage. Keep
+        // the physical output order, but attach child identities to parent IDs.
+        const auto selected_parents = parent_count.dataValue();
+        Gpu::DeviceVector<Long> identity_offsets(np);
+        auto* id_offsets = identity_offsets.data();
+        const auto identity_count = warpx::particles::SplitIdentityOffsets(
+            np, static_cast<int>(selected_parents), src.m_idcpu, factors, id_offsets);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(identity_count == child_count,
+                                        "Density-band split identity count mismatch");
         amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (int i) {
             const int factor = factors[i];
             if (factor == 0) { return; }
@@ -1372,12 +1384,12 @@ PhysicalParticleContainer::SplitDepletedBand (const amrex::MultiFab& a_rho,
                 dst.m_rdata[PIdx::z][j] = static_cast<ParticleReal>(znew);
                 dst.m_rdata[PIdx::y][j] = static_cast<ParticleReal>(ynew);
                 dst.m_rdata[PIdx::w][j] = src.m_rdata[PIdx::w][i]/factor;
-                dst.m_idcpu[j] = SetParticleIDandCPU(first_id+j, cpu);
+                dst.m_idcpu[j] = SetParticleIDandCPU(first_id+id_offsets[i]+child, cpu);
             }
             src.m_idcpu[i] = ParticleIdCpus::Invalid;
         });
         Gpu::streamSynchronize();
-        n_parents += parent_count.dataValue();
+        n_parents += selected_parents;
         n_children += child_count;
     }
     // Children stay in their parent's cell, so redistribution cannot create an
