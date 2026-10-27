@@ -30,3 +30,15 @@ add_warpx_test(
     "analysis_default_regression.py --path diags/diag1000008"  # checksum
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_3d_resampling_reflecting_picmi  # name
+    3  # dims
+    1  # nprocs
+    inputs_test_3d_resampling_reflecting_picmi.py  # inputs
+    OFF  # analysis
+    # No checksum: the script asserts that the total weight is conserved to
+    # round-off with reflecting faces, which is the contract under test.
+    OFF  # checksum
+    OFF  # dependency
+)
