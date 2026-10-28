@@ -57,8 +57,16 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
         else()
             set(shape 3)
         endif()
+        set(standoff_command $<TARGET_FILE:test_eb_standoff_3d>)
+        if(mode STREQUAL footprint)
+            # An exception raised inside an OpenMP region terminates the child;
+            # check the intended guard diagnostic from outside that process.
+            set(standoff_command ${Python_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis_eb_standoff_rejection.py
+                $<TARGET_FILE:test_eb_standoff_3d>)
+        endif()
         add_test(NAME test_3d_eb_standoff_${mode}
-            COMMAND test_eb_standoff_3d
+            COMMAND ${standoff_command}
             ${CMAKE_CURRENT_SOURCE_DIR}/../implicit/inputs_test_3d_motional_work
             "amr.n_cell=160 160 16" "amr.max_grid_size=80 40 16" "amr.blocking_factor=8"
             "geometry.prob_lo=-0.22222222222222222 -0.22222222222222222 -0.109375"

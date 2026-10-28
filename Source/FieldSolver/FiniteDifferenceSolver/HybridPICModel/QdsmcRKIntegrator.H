@@ -552,7 +552,8 @@ public:
                 // M(Y_{j-1}) (ghost refresh is the RHS functor's job),
                 // then one fused launch computes Y_j in the exact
                 // per-element accumulation order of the original
-                // LinComb + 3 Saxpy sequence (bit-identical), reading
+                // LinComb + 3 Saxpy sequence, except that an exactly
+                // stationary cell bypasses cancellation of its baseline, reading
                 // Y_{j-1} from y before overwriting and re-archiving it
                 // as the next stage's Y_{j-2}.
                 ++st.n_attempts;
@@ -584,10 +585,18 @@ public:
                         [=] AMREX_GPU_DEVICE (int i, int jj, int kk, int c)
                     {
                         amrex::Real const yv = y_arr(i,jj,kk,c);
-                        amrex::Real r = mu*yv + nu*yjm2_arr(i,jj,kk,c);
-                        r = r + w0*y0_arr(i,jj,kk,c);
-                        r = r + ct_m*mjm1_arr(i,jj,kk,c);
-                        r = r + ct_g*my0_arr(i,jj,kk,c);
+                        amrex::Real const entry = y0_arr(i,jj,kk,c);
+                        amrex::Real r = entry;
+                        // With a zero operator and unchanged prior stages, the
+                        // exact recurrence is the identity. Do not create heat
+                        // by cancelling large multiples of the same baseline.
+                        if (yv != entry || yjm2_arr(i,jj,kk,c) != entry ||
+                            mjm1_arr(i,jj,kk,c) != 0.0_rt || my0_arr(i,jj,kk,c) != 0.0_rt) {
+                            r = mu*yv + nu*yjm2_arr(i,jj,kk,c);
+                            r = r + w0*entry;
+                            r = r + ct_m*mjm1_arr(i,jj,kk,c);
+                            r = r + ct_g*my0_arr(i,jj,kk,c);
+                        }
                         yjm2_arr(i,jj,kk,c) = yv;
                         y_arr(i,jj,kk,c) = r;
                     });
@@ -595,9 +604,12 @@ public:
                 if (m_aux) {
                     for (int a = 0; a < m_aux->value.size(); ++a) {
                         amrex::Real const old = m_aux->value[a];
-                        m_aux->value[a] =
-                            mu * old + nu * m_auxjm2[a] + w0 * m_aux0[a] +
-                            ct_m * m_aux_k[1][a] + ct_g * m_aux_k[0][a];
+                        if (old != m_aux0[a] || m_auxjm2[a] != m_aux0[a] ||
+                            m_aux_k[1][a] != 0.0_rt || m_aux_k[0][a] != 0.0_rt) {
+                            m_aux->value[a] =
+                                mu * old + nu * m_auxjm2[a] + w0 * m_aux0[a] +
+                                ct_m * m_aux_k[1][a] + ct_g * m_aux_k[0][a];
+                        }
                         m_auxjm2[a] = old;
                     }
                 }

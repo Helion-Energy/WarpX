@@ -141,6 +141,34 @@ main (int argc, char** argv) {
         amrex::BoxArray ba(amrex::Box(amrex::IntVect(0), amrex::IntVect(7)));
         ba.maxSize(4);
         amrex::DistributionMapping dm(ba);
+        // Zero conductivity must preserve each cell and passive account exactly,
+        // including nonuniform temperatures at production-scale magnitudes.
+        for (int plan : {2, 8, 168}) {
+            amrex::MultiFab state(ba, dm, 1, 0), original(ba, dm, 1, 0);
+            for (amrex::MFIter mfi(state); mfi.isValid(); ++mfi) {
+                auto const t = state.array(mfi);
+                amrex::ParallelFor(mfi.validbox(),
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                        t(i,j,k) = 1.e8 * (1.0 + .01 * std::sin(Real(i + 3*j + 7*k)));
+                    });
+            }
+            amrex::MultiFab::Copy(original, state, 0, 0, 1, 0);
+            RK::Auxiliary heat{{1.23456789e20, -1.1e-12}, {0.0, 0.0}};
+            auto const initial_heat = heat.value;
+            auto rhs = [&] (amrex::MultiFab&, amrex::MultiFab& k) {
+                k.setVal(0.0);
+                heat.rate = {0.0, 0.0};
+            };
+            Real const ceiling = 4.0 / (0.9 * (Real(plan)*(plan+1)-2)) * 1.000001;
+            RK stationary(RK::Scheme::RKL2, rhs, [=] () { return ceiling; },
+                          1.e-7, 1.e-12, 0.9, 2.0, 1000, {}, nullptr, &heat, true, {}, plan);
+            auto const st = stationary.Advance(state, 1.0);
+            AMREX_ALWAYS_ASSERT(!st.failure && st.t_done == 1.0 && st.s_max == plan);
+            amrex::MultiFab::Subtract(state, original, 0, 0, 1, 0);
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(state.norminf() == 0.0 && heat.value == initial_heat,
+                "Zero RKL operator must preserve state and passive accounts exactly");
+        }
+        amrex::Print() << "RKL_STATIONARY_IDENTITY_PASS\n";
         auto const reference = run(ba, dm, 0, 100000, 1.e-5);
         for (int rejects : {0, 1, 3}) {
             auto const r = run(ba, dm, rejects, 100000);
