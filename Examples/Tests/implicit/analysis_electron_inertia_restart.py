@@ -1,4 +1,5 @@
 """Validate the native elliptic restart round trip and specific rejected states."""
+
 import subprocess
 import sys
 
@@ -24,7 +25,9 @@ if __name__ == "__main__":
     executable, inputs, case = sys.argv[1:]
     process = subprocess.run(
         [executable, inputs, "test.case=" + case],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     print(process.stdout)
     validate(process.returncode, process.stdout, case)

@@ -1,6 +1,7 @@
 # Native Cartesian thermal qualification, separate from the RZ metric oracles.
 if(TARGET lib_3d)
-    foreach(fixture IN ITEMS boundary_native cartesian_order qdsmc_rkl_retry)
+    foreach(fixture IN ITEMS boundary_native cartesian_order
+                             qdsmc_rkl_retry qdsmc_rkl_admissibility)
         if(fixture STREQUAL "boundary_native")
             set(test_target test_conduction_boundary_native_3d)
             set(test_source test_conduction_boundary_native_3d.cpp)
@@ -8,8 +9,8 @@ if(TARGET lib_3d)
             set(test_target test_conduction_cartesian_order_3d)
             set(test_source test_conduction_cartesian_order.cpp)
         else()
-            set(test_target test_qdsmc_rkl_retry_3d)
-            set(test_source test_qdsmc_rkl_retry.cpp)
+            set(test_target test_${fixture}_3d)
+            set(test_source test_${fixture}.cpp)
         endif()
         add_executable(${test_target} ${test_source})
         target_link_libraries(${test_target} PRIVATE lib_3d)
@@ -31,17 +32,19 @@ if(TARGET lib_3d)
             --output-parent ${CMAKE_CURRENT_BINARY_DIR}/conduction_cartesian_order)
     set_tests_properties(test_3d_conduction_boundary test_3d_conduction_cartesian_order PROPERTIES
         TIMEOUT 1200 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;3d;native")
-    add_test(NAME test_3d_qdsmc_rkl_retry COMMAND test_qdsmc_rkl_retry_3d)
-    set_tests_properties(test_3d_qdsmc_rkl_retry PROPERTIES
-        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;3d;native")
-    if(WarpX_MPI AND MPIEXEC_EXECUTABLE)
-        add_test(NAME test_3d_qdsmc_rkl_retry_mpi
-            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
-                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_qdsmc_rkl_retry_3d> ${MPIEXEC_POSTFLAGS})
-        set_tests_properties(test_3d_qdsmc_rkl_retry_mpi PROPERTIES
-            TIMEOUT 120 PROCESSORS 4 ENVIRONMENT "OMP_NUM_THREADS=1"
-            LABELS "conduction;3d;native;mpi")
-    endif()
+    foreach(fixture IN ITEMS qdsmc_rkl_retry qdsmc_rkl_admissibility)
+        add_test(NAME test_3d_${fixture} COMMAND test_${fixture}_3d)
+        set_tests_properties(test_3d_${fixture} PROPERTIES
+            TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "conduction;3d;native")
+        if(WarpX_MPI AND MPIEXEC_EXECUTABLE)
+            add_test(NAME test_3d_${fixture}_mpi
+                COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+                    ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_${fixture}_3d> ${MPIEXEC_POSTFLAGS})
+            set_tests_properties(test_3d_${fixture}_mpi PROPERTIES
+                TIMEOUT 120 PROCESSORS 4 ENVIRONMENT "OMP_NUM_THREADS=1"
+                LABELS "conduction;3d;native;mpi")
+        endif()
+    endforeach()
     foreach(fixture IN ITEMS qdsmc_source_stage_order qdsmc_source_stage_capacity
                              qdsmc_density_floor_sync braginskii_conduction)
         set(test_target test_${fixture}_3d)

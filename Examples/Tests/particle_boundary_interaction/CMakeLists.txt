@@ -7,6 +7,8 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
     if(WarpX_COMPUTE STREQUAL CUDA)
         setup_target_for_cuda_compilation(test_eb_standoff_3d)
     endif()
+    # Cubic particles plus one filter pass require four hybrid E/B geometry guards.
+    # eb_distance_guard_cells is a minimum request, not an exact factory size.
     foreach(padding IN ITEMS 2 4 8 12)
         add_test(NAME test_3d_eb_standoff_geometry_${padding}
             COMMAND test_eb_standoff_3d
@@ -19,7 +21,7 @@ if(WarpX_EB AND "3" IN_LIST WarpX_DIMS)
             "boundary.particle_hi=absorbing absorbing absorbing"
             "warpx.eb_implicit_function=sqrt(x*x+y*y)-0.2"
             boundary.eb_distance_guard_cells=${padding}
-            "standoff_test.expected_roof=(${padding}+1)*0.2/72"
+            "standoff_test.expected_roof=(max(${padding},4)+1)*0.2/72"
             algo.particle_shape=3 algo.current_deposition=esirkepov
             algo.field_gathering=momentum-conserving
             warpx.use_filter=1 "warpx.filter_npass_each_dir=1 1 1"
