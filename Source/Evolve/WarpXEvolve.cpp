@@ -236,11 +236,6 @@ WarpX::Evolve (int numsteps)
         // perform collisions and advance fields and particles by one time step
         OneStep(cur_time, dt[0], step, verbose_step);
 
-        // Resample particles
-        // +1 is necessary here because value of step seen by user (first step is 1) is different than
-        // value of step in code (first step is 0)
-        mypc->doResampling(Geom(), istep[0]+1, verbose_step);
-
         if (evolve_scheme == EvolveScheme::Explicit) {
             applyMirrors(cur_time);
             // E : guard cells are NOT up-to-date
@@ -276,6 +271,12 @@ WarpX::Evolve (int numsteps)
         }
 
         HandleParticlesAtBoundaries(step, cur_time, num_moved);
+
+        // Resample after the boundary conditions: resample() calls Redistribute(), which
+        // silently deletes particles still outside a non-periodic domain face, before they
+        // can be absorbed, reflected or recorded in the particle boundary buffer.
+        // istep[0] has been incremented above, so it is already the step seen by the user.
+        mypc->doResampling(Geom(), istep[0], verbose_step);
 
         // Apply particle thermalizer (no-op until implemented)
         if (m_particle_thermalizer.defined()) {
