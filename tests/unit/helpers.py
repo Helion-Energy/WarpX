@@ -83,6 +83,11 @@ def make_sim(
         warpx_current_deposition_algo=current_deposition_algo,
     )
 
+    # Turn on options to catch unexpected behavior
+    pywarpx.amrex.init_snan = 1
+    pywarpx.amrex.fpe_trap_invalid = 1
+    pywarpx.amrex.fpe_trap_overflow = 1
+    pywarpx.amrex.fpe_trap_zero = 1
     # AMReX runtime parameters, mirroring the ones ImpactX and pyAMReX use
     # in their pytest suites
     pywarpx.warpx.get_bucket("tiny_profiler").enabled = 0
@@ -93,6 +98,11 @@ def make_sim(
     #   allocate GPU memory on demand instead of pre-allocating 3/4th, so
     #   that tests can share a GPU
     pywarpx.amrex.the_arena_init_size = 0
+
+    # WarpX::electrostatic_solver_id is a static that outlives a simulation run
+    # earlier in this process, and is only overwritten when this parameter is
+    # set; a test that uses an electrostatic solver overrides it
+    pywarpx.warpx.do_electrostatic = "none"
 
     return sim
 
