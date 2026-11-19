@@ -104,7 +104,10 @@ namespace
                     ux, uy, uz, m_mass1, uax, uay, uaz, m_background_mass,
                     uA[0], uA[1], uA[2], m_product_mass1,
                     uB[0], uB[1], uB[2], m_product_mass2,
-                    E_release, ex.m_scattering_angle_model, engine, xi);
+                    E_release, ex.m_scattering_angle_model,
+                    // no Legendre table for background MCC (as the elastic path)
+                    ScatteringUtils::AnisotropicCoefficientTable{},
+                    /*energy_range_status=*/nullptr, engine, xi);
                 src.m_idcpu[i_src] = amrex::ParticleIdCpus::Invalid;
                 return;
             }
@@ -124,7 +127,10 @@ namespace
                 ux, uy, uz, m_mass1, uax, uay, uaz, m_background_mass,
                 u1[0], u1[1], u1[2], m_out1,
                 u2[0], u2[1], u2[2], m_out2,
-                E_release, ex.m_scattering_angle_model, engine, xi);
+                E_release, ex.m_scattering_angle_model,
+                    // no Legendre table for background MCC (as the elastic path)
+                    ScatteringUtils::AnisotropicCoefficientTable{},
+                    /*energy_range_status=*/nullptr, engine, xi);
             const amrex::ParticleReal* uf = (m_mode == 1) ? u2 : u1;
             if (m_mode == 1 && m_ejx != nullptr) {
                 // Share the projectile's energy after the cost with the
