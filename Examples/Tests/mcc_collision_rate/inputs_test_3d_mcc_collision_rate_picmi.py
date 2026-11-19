@@ -65,10 +65,8 @@ grid = picmi.Cartesian3DGrid(
     warpx_max_grid_size=8,
 )
 
-# PICMI requires a solver object; setting the method to "none" after
-# construction is what reaches algo.maxwell_solver, so fields never evolve.
-solver = picmi.ElectromagneticSolver(grid=grid, method=None)
-solver.method = "none"
+# No field solve: Simulation(solver=None, grid=grid) sets
+# algo.maxwell_solver = none, so fields never evolve.
 
 beams = []
 collisions = []
@@ -100,7 +98,8 @@ for label, energy in (("low", E_low), ("high", E_high)):
     )
 
 sim = picmi.Simulation(
-    solver=solver,
+    solver=None,
+    grid=grid,
     time_step_size=dt,
     max_steps=max_steps,
     warpx_collisions=collisions,
